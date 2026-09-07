@@ -2944,7 +2944,7 @@ on turn-start, and the reason phrase on turn-complete."
               ((symbol-function 'dsh-bridge--session-view) (lambda (_id) nil)))
       (dsh-bridge--notification-handle-events
        '(((kind . "turn-start") (sessionId . "s1") (time . 1))))
-      (should (string-match-p "is thinking…" msg))
+      (should (string-match-p "is running..." msg))
       (setq msg nil)
       (dsh-bridge--notification-handle-events
        '(((kind . "turn-complete") (sessionId . "s1") (reason . "completed"))))
