@@ -26,9 +26,17 @@ pursuing the Emacs-as-primary-client (ACP-style) model.
   - `POST /send { text, sessionId? }` → `Agent.followup()` (submit).
   - `POST /draft { text, sessionId? }` → push to the DSH composer via SSE
     (409 when no browser client is subscribed).
-  - `GET /output?sessionId=` → latest assistant text.
-  - `GET /prompts?sessionId=`, `GET /replies?sessionId=` → session history,
-    newest first.
+  - `GET /output?sessionId=` → latest assistant text.  Kept deliberately as
+    a single-shot "latest text" probe; the Emacs package no longer calls it.
+  - `GET /prompts?sessionId=` → user prompts, newest first.
+  - `GET /turns?sessionId=` → turn-aggregated assistant replies, newest
+    first.  Each turn record is `{ turn, startedAt, endedAt?, reason?,
+    segments: [{ text, time, step }] }` (segments oldest first), plus
+    `running` and an `epoch` (the session surface's `replaceGeneration`,
+    for cheap compaction detection).  The fold walks the session's own
+    surface (`Session.surface.nodes` + `events[seq]`), so compaction
+    shadowing behaves exactly as the reply list it replaced (see
+    `turn-aggregation-plan.md`).
   - `GET /sessions` → merged live + persisted sessions, with titles (via the
     optional `sessionProjectionCache`, falling back to folding `session/title`
     events from `inspect()`), workspace titles, and archived flags (via the
@@ -72,8 +80,12 @@ pursuing the Emacs-as-primary-client (ACP-style) model.
   session list (live + saved rows, archived-visibility toggle, default-target
   marker, open/set-target with on-demand resume, rename/archive/create/
   workspace-rename, peek/describe/copy-id).
-- `dsh-bridge-view-mode`: read-only reply buffer with GFM font-lock (when
-  markdown-mode is installed), `M-p`/`M-n` reply navigation, copy, refetch.
+- `dsh-bridge-view-mode`: read-only turn buffer with GFM font-lock (when
+  markdown-mode is installed).  A buffer shows one agent turn — its committed
+  segments separated by `(continuing…)` divider rules, closed by an
+  elapsed/reason divider when the turn ends — and `M-p`/`M-n` walk the
+  session's turns.  Copy, refetch, and follow mode (the follow refills
+  append each new segment as `replies-changed` frames arrive).
 - `dsh-bridge-prompt-mode`: markdown-derived composition buffer with prompt
   history (`M-p`/`M-n`), `C-c C-c` send / `C-c C-d` draft, and `C-c C-m`
   model selection (`completing-read` over the host catalog, with a second
@@ -162,13 +174,11 @@ In suggested order:
 1. **Turn-completion notifications (implemented).** The host subscribes
    `ctx.on('session/event')` and emits `{ kind: "turn-start" | "turn-complete",
    sessionId, reason? }` frames on the SSE stream (non-subagent sessions
-   only); `/output` and `/replies` now report `running`. Emacs tracks the live
-   status (`dsh-bridge--session-status`), re-renders the matching buffer header
-   and the sessions-list row, and on turn-complete refetches the shown reply
-   (non-popping) or echoes a reason-phrased line per
-   `dsh-bridge-turn-complete`. This also rewired the header lines
-   (`<status> <label>[ ↓ <time>] (k/n)`, the prompt's `(:eval)` header with
-   `✓ sent HH:MM`, and the sessions-list `…` column). See `dsh-turns-plan.md`.
+   only); `/output` and `/turns` report `running`. Emacs tracks
+   the live status (`dsh-bridge--session-status`), re-renders the matching
+   buffer header and the sessions-list row, and on turn-complete refetches
+   the shown reply (non-popping) or echoes a reason-phrased line per
+   `dsh-bridge-turn-complete`. See `dsh-turns-plan.md`.
 2. **Session handling: resume, rename, archive, create (fork excluded) (implemented).**
    Broadened from "resume saved sessions". Make saved (cold, persisted-only)
    sessions first-class: targeting or selecting one resumes it via
@@ -186,16 +196,31 @@ In suggested order:
    back to the most recent cold session when nothing is live — so the
    "saved" label is retired from the Emacs UI (internal-only). See
    `session-handling-plan.md`.
-3. **`/emacs edit` flow.** Host: register `/emacs` via
+3. **Turn-aggregated DSH-View buffers (implemented; phase 1 of
+   `turn-aggregation-plan.md`).** DSH-View shows one agent *turn* per buffer:
+   the session's committed assistant messages grouped by harness turn, their
+   segments separated by `(continuing…)` divider rules and closed by an
+   elapsed/reason divider, and `M-p`/`M-n` walk turns instead of replies.
+   `/replies` became `GET /turns`, whose records carry
+   `{ turn, startedAt, endedAt?, reason?, segments }` plus `running` and an
+   `epoch`; the pure `assistantTurns` fold walks `Session.surface.nodes` +
+   `events[seq]`, so compaction shadowing matches the old reply list. The
+   SSE turn frames (`turn-start`/`turn-complete`/`replies-changed`) now carry
+   the `turn` number. Follow mode appends each new segment in place
+   (preserving point) instead of jumping to the newest one-liner. Phase 2
+   (`?since=` incremental retrieval on the `epoch`) is deferred.
+4. **`/emacs edit` flow.** Host: register `/emacs` via
    `ctx.commands.register()` plus `POST /dsh-bridge/open { path, line? }`,
    both shelling out to `emacsclient` (spawn template:
    `packages/host/apiproxy/src/native-path-opener.ts`), respecting
    `server-name`. Emacs: optionally `dsh-bridge-open-file` for the reverse
    direction.
-4. **Ergonomics, as demand warrants:** per-session transcript buffer (the
-   `/prompts` + `/replies` material is already served); a
-   `dsh-bridge-minor-mode` for sending from any buffer (the transient menu
-   currently fills this role).
+5. **Ergonomics, as demand warrants:** a per-session transcript buffer
+   (each DSH-View buffer shows one turn, so a continuous read of a whole
+   session is not yet available; the `/prompts` + `/turns` material is
+   already served, and the turn records carry the boundary metadata a
+   transcript renderer needs); a `dsh-bridge-minor-mode` for sending
+   from any buffer (the transient menu currently fills this role).
 
 No additional DSH-interface (client plugin) features are planned for now —
 candidates (full-transcript export, a user-message action, bridge-status

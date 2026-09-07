@@ -67,31 +67,141 @@ export function userPrompts(messages: readonly MessageLike[]): string[] {
 }
 
 /**
- * The text of every assistant reply, oldest first. The mirror image of
- * `userPrompts`, and the reply-side counterpart to `latestAssistantText`:
- * keeps `assistant` role messages and joins their text blocks with no
- * separator — exactly how `latestAssistantText` renders a reply — so the
- * newest entry matches what `GET /output` shows. Used by the output buffer's
- * reply navigation (M-p/M-n).
+ * The text of one committed assistant message: its text blocks joined with no
+ * separator — exactly how `latestAssistantText` renders a reply, so a turn
+ * segment's `text` matches what `GET /output` shows for the same message.
  */
-export function assistantReplies(messages: readonly MessageLike[]): string[] {
-  const replies: string[] = []
-  for (const message of messages) {
-    if (message.role !== 'assistant') continue
-    const text = message.content
-      .filter(block => block.type === 'text')
-      .map(block => block.text ?? '')
-      .join('')
-    if (text.trim() !== '') replies.push(text)
-  }
-  return replies
+export function assistantMessageText(content: readonly MessageBlockLike[] | undefined): string {
+  if (content === undefined) return ''
+  return content
+    .filter(block => block.type === 'text')
+    .map(block => block.text ?? '')
+    .join('')
 }
 
 /**
- * Whether an assistant message carries non-empty text, i.e. whether it counts
- * as a reply in `assistantReplies`. A tool-call-only step (content without a
- * text block) does not. Used to gate the `replies-changed` SSE frame so it
- * fires only when the reply list actually grows.
+ * One committed, text-bearing assistant message inside an agent turn: the
+ * turn-grouped counterpart of a reply. Segments are chronological.
+ */
+export interface AssistantTurnSegment {
+  /** The joined text blocks of the step's assistant message. */
+  text: string
+  /** The `assistant/message` event's ms-epoch `time`. */
+  time: number
+  /** The step index (1-based on the harness) that committed the message. */
+  step: number
+}
+
+/**
+ * One agent turn that produced at least one text-bearing assistant message.
+ * A turn (user prompt → final reply → idle) may commit several such messages
+ * between tool calls; the DSH-View shows them as one unit.
+ */
+export interface AssistantTurn {
+  /** The harness turn number. NOT contiguous (an empty/rejected turn still
+   * consumes a number, and user messages carry no turn on the wire) — group
+   * by this value, never by index arithmetic. */
+  turn: number
+  /** Ms-epoch `time` of the turn's `turn/start` event; falls back to the
+   * first segment's time when the boundary event is absent. */
+  startedAt: number
+  /** Ms-epoch `time` of the turn's `turn/end` event; absent while open. */
+  endedAt?: number
+  /** The `turn/end` reason kind (`completed`/`aborted`/...); absent while open. */
+  reason?: string
+  /** The turn's text-bearing assistant messages, oldest first. */
+  segments: readonly AssistantTurnSegment[]
+}
+
+/** Structural face of one session log for the turn fold: the surface node
+ * seqs plus the log they index into (`Session.surface.nodes` +
+ * `Session.events`, where `events[seq]` is the event with that `seq`). */
+export interface SessionTurnLogLike {
+  nodes: readonly number[]
+  events: readonly SessionEventLike[]
+}
+
+/**
+ * Fold a session log into its text-bearing agent turns, oldest first.
+ *
+ * Walks the surface (`nodes`, the seqs of message-producing events in
+ * model-visible order) and projects each `assistant/message` event at
+ * `events[seq]` into a segment of `data.turn`, dropping events with no text
+ * (tool-call-only steps, empty content) exactly as the old reply list did.
+ * Because the walk is the same surface `Session.deriveMessages()` folds,
+ * compaction-replaced history stays hidden — shadowed turns simply vanish
+ * from the result, matching what `/replies` used to serve. Turn start/end
+ * boundary events are log-only (never surface nodes), so `startedAt`,
+ * `endedAt`, and `reason` are folded from a separate pass over the log.
+ */
+export function assistantTurns(log: SessionTurnLogLike): AssistantTurn[] {
+  const byTurn = new Map<number, AssistantTurnSegment[]>()
+  const order: number[] = []
+  for (const seq of log.nodes) {
+    const event = log.events[seq]
+    if (event === undefined || event.type !== 'assistant/message') continue
+    const data = event.data
+    if (typeof data !== 'object' || data === null) continue
+    const { turn, step } = data as { turn?: unknown; step?: unknown }
+    if (typeof turn !== 'number' || typeof step !== 'number') continue
+    const { message } = data as { message?: { content?: readonly MessageBlockLike[] } }
+    const text = assistantMessageText(message?.content)
+    if (text.trim() === '') continue
+    let segments = byTurn.get(turn)
+    if (segments === undefined) {
+      segments = []
+      byTurn.set(turn, segments)
+      order.push(turn)
+    }
+    segments.push({ text, time: event.time, step })
+  }
+
+  // Turn boundaries are log-only, so fold start/end facts for the turns that
+  // produced text from the events themselves. A turn has one `turn/start`
+  // (first wins for the start time) and at most one `turn/end` (last wins).
+  const starts = new Map<number, number>()
+  const ends = new Map<number, { time: number; reason?: string }>()
+  for (const event of log.events) {
+    if (event.type === 'turn/start') {
+      const data = event.data as { turn?: unknown } | undefined
+      const turn = data?.turn
+      if (typeof turn === 'number' && !starts.has(turn)) starts.set(turn, event.time)
+    } else if (event.type === 'turn/end') {
+      const data = event.data as { turn?: unknown; reason?: { kind?: unknown } } | undefined
+      const turn = data?.turn
+      if (typeof turn === 'number') {
+        const kind = data?.reason?.kind
+        ends.set(turn, {
+          time: event.time,
+          ...(typeof kind === 'string' ? { reason: kind } : {}),
+        })
+      }
+    }
+  }
+
+  const turns: AssistantTurn[] = []
+  for (const turn of order) {
+    const segments = byTurn.get(turn)!
+    const record: AssistantTurn = {
+      turn,
+      startedAt: starts.get(turn) ?? segments[0]!.time,
+      segments: [...segments],
+    }
+    const end = ends.get(turn)
+    if (end !== undefined) {
+      record.endedAt = end.time
+      if (end.reason !== undefined) record.reason = end.reason
+    }
+    turns.push(record)
+  }
+  return turns
+}
+
+/**
+ * Whether an assistant message carries non-empty text, i.e. whether it adds a
+ * segment to its turn in `assistantTurns`. A tool-call-only step (content
+ * without a text block) does not. Used to gate the `replies-changed` SSE
+ * frame so it fires only when a turn actually gains a text segment.
  */
 export function assistantMessageHasText(message: { content?: readonly MessageBlockLike[] } | undefined): boolean {
   return message?.content?.some(block => block.type === 'text' && (block.text ?? '').trim() !== '') ?? false
@@ -436,12 +546,18 @@ export function outboxMessage(): string {
 
 /**
  * One SSE `data:` frame announcing that a session's agent started a turn.
- * Carries the session id and the turn event's ms-epoch `time`, so Emacs can
- * update the `lastActive` recency of the session's row; the browser ignores the
- * non-`draft` kind.
+ * Carries the session id, the turn event's ms-epoch `time` (so Emacs can
+ * update the `lastActive` recency of the session's row), and the turn number
+ * (so the Emacs reply/turn cache knows which turn is opening); the browser
+ * ignores the non-`draft` kind.
  */
-export function turnStartMessage(sessionId: string, time: number): string {
-  return `data: ${JSON.stringify({ kind: 'turn-start', sessionId, time })}\n\n`
+export function turnStartMessage(sessionId: string, time: number, turn?: number): string {
+  return `data: ${JSON.stringify({
+    kind: 'turn-start',
+    sessionId,
+    time,
+    ...(turn === undefined ? {} : { turn }),
+  })}\n\n`
 }
 
 /**
@@ -450,23 +566,35 @@ export function turnStartMessage(sessionId: string, time: number): string {
  * `max-tokens`; `interrupted` is only written by persistence repair, never
  * emitted live), so the Emacs `message` variant can phrase a failed turn
  * without echoing "finished". `time` is the event's ms-epoch timestamp, used
- * to refresh the sessions-list recency; the glyph returns to idle regardless of
- * reason.
+ * to refresh the sessions-list recency; the glyph returns to idle regardless
+ * of reason. TURN names the ended turn, so Emacs can refill exactly the view
+ * whose closing divider it must draw.
  */
-export function turnCompleteMessage(sessionId: string, reason: string, time: number): string {
-  return `data: ${JSON.stringify({ kind: 'turn-complete', sessionId, reason, time })}\n\n`
+export function turnCompleteMessage(sessionId: string, reason: string, time: number, turn?: number): string {
+  return `data: ${JSON.stringify({
+    kind: 'turn-complete',
+    sessionId,
+    reason,
+    time,
+    ...(turn === undefined ? {} : { turn }),
+  })}\n\n`
 }
 
 /**
  * One SSE `data:` frame announcing that a session's assistant reply list grew
  * (an `assistant/message` surface event carrying non-empty text was committed
- * mid-turn). Unlike the turn-boundary frames, this fires once per reply a
- * multi-step turn produces, so Emacs can refresh its reply list — and the View
- * `(k/n)` counter — while the turn is still running. A bare nudge: the consumer
- * re-pulls `GET /replies`; the browser ignores the non-`draft` kind.
+ * mid-turn). Unlike the turn-boundary frames, this fires once per segment a
+ * multi-step turn produces, so Emacs can refresh its turn list — and the View
+ * `(k/n)` counter — while the turn is still running. TURN names the turn that
+ * grew (the dirty cache entry). A bare nudge: the consumer re-pulls
+ * `GET /turns`; the browser ignores the non-`draft` kind.
  */
-export function repliesChangedMessage(sessionId: string): string {
-  return `data: ${JSON.stringify({ kind: 'replies-changed', sessionId })}\n\n`
+export function repliesChangedMessage(sessionId: string, turn?: number): string {
+  return `data: ${JSON.stringify({
+    kind: 'replies-changed',
+    sessionId,
+    ...(turn === undefined ? {} : { turn }),
+  })}\n\n`
 }
 
 /**

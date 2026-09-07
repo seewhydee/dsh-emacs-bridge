@@ -157,22 +157,30 @@ are also available.
 
 ### DSH-View buffer
 
-This read-only buffer contains the model output for a DSH session.  It
-is fetched by `f` from the transient menu or the DSH-Sessions buffer,
-`C-c C-f` from the DSH-Prompt buffer, or pushed from the web UI's
-"Send to Emacs" button (see below).
+This read-only buffer contains the model output for a DSH session, one
+**agent turn** at a time: a turn is the whole run from a prompt to an
+idle reply, so a multi-step turn that committed several short
+mid-turn replies ("Let me look at the working-tree changes first.")
+reads as one unit, its segments separated by divider lines
+(`(continuing…)`) and closed, once the turn ends, by a divider showing
+the turn's elapsed time — and its end reason when the turn did not
+finish normally (interrupted / failed / blocked / stopped at the token
+limit).  The buffer is fetched by `f` from the transient menu or the
+DSH-Sessions buffer, `C-c C-f` from the DSH-Prompt buffer, or pushed
+from the web UI's "Send to Emacs" button (see below).
 
 The following commands are available:
 
-* `g` — re-fetch the current session's latest reply.
+* `g` — re-fetch the current session's newest turn.
 * `r` — open a DSH-Prompt buffer for the current session.
-* `w` — copy the reply (region, else the whole buffer) to the kill ring.
+* `w` — copy the reply (region, else the whole shown turn's raw
+  Markdown without the divider lines) to the kill ring.
 * `i` — receive the latest "Send to Emacs" message (see below).
-* `M-p`/`M-n` — cycle the current session's assistant replies.
+* `M-p`/`M-n` — cycle the current session's turns (older / newer).
 * `l` — open the DSH-Sessions buffer.
 * `q` — quit the window and bury the buffer.
 
-The header line shows the session status glyph, the reply position, the
+The header line shows the session status glyph, the turn position, the
 session label, a refresh timestamp, the live context occupancy (`· N%`),
 and, while the shown session is running, an elapsed turn clock
 (`⏱ MM:SS`).  The latter two are "live turn" signals (see
@@ -182,15 +190,17 @@ reason phrase on a turn end — for the session you are looking at; see
 `dsh-bridge-turn-boundary-echo`.
 
 A DSH-View buffer can **follow the latest turn**.  Pressing `M-n` at the
-newest reply turns on following (acting like "turn 0"): while the session
-runs, the buffer automatically refills to each newest committed reply and
-the header shows a small following marker.  Pressing `M-p` (or any manual
-reply navigation) leaves following and steps back through history.  A
-send-and-exit (`C-c C-c` in the DSH-Prompt buffer) pops to the DSH-View and
-turns on following for the sent session.
+newest turn turns on following (acting like "turn 0"): while the session
+runs, the buffer tracks the newest turn, appending each newly committed
+segment as it arrives instead of jumping from one-line reply to one-line
+reply, and the header shows a small following marker.  Pressing `M-p` (or
+any manual turn navigation) leaves following and steps back through
+history.  A send-and-exit (`C-c C-c` in the DSH-Prompt buffer) pops to
+the DSH-View and turns on following for the sent session.
 
 If markdown-mode is installed, and `dsh-bridge-view-gfm` is non-nil,
-the reply is font-locked as GitHub-Flavored Markdown.
+the reply is font-locked as GitHub-Flavored Markdown (the dividers use
+GFM horizontal-rule syntax, so they render cleanly).
 
 ### DSH-Prompt buffer
 

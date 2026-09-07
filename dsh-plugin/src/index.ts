@@ -23,9 +23,14 @@
 //   GET  /dsh-bridge/events?token=                  -> EventSource (composer-draft push)
 //   POST /dsh-bridge/send   { text, sessionId? } -> Agent.followup()
 //   GET  /dsh-bridge/output?sessionId=           -> latest assistant text
+//        (kept deliberately: a single-shot "latest text" probe; the Emacs
+//        package no longer calls it)
 //   GET  /dsh-bridge/sessions                     -> live + persisted sessions
 //   GET  /dsh-bridge/prompts?sessionId=           -> user prompts, newest first
-//   GET  /dsh-bridge/replies?sessionId=           -> assistant replies, newest first
+//   GET  /dsh-bridge/turns?sessionId=             -> turn-aggregated assistant
+//        replies, newest first (each turn: { turn, startedAt, endedAt?,
+//        reason?, segments: [{ text, time, step }] }) plus running, epoch,
+//        title and cwd
 //   POST /dsh-bridge/draft { text, sessionId? }   -> push a composer draft (SSE)
 //   GET  /dsh-bridge/outbox                       -> collect DSH->Emacs entries
 //   POST /dsh-bridge/outbox { text, sessionId, source? } -> deposit an entry
@@ -57,7 +62,7 @@ import {
   askUserMessage,
   askUserResolvedMessage,
   assistantMessageHasText,
-  assistantReplies,
+  assistantTurns,
   classifySessionId,
   contextMessage,
   contextUsedTokens,
@@ -341,6 +346,12 @@ export function apply(ctx: Context): void {
   /** The mux rpcId for a question frame, as a plain string, or undefined. */
   function rpcIdString(value: unknown): string | undefined {
     return typeof value === 'string' ? value : undefined
+  }
+
+  /** The turn number carried by a turn-boundary / assistant-message event payload, or undefined. */
+  function turnNumberOf(data: unknown): number | undefined {
+    const turn = (data as { turn?: unknown } | undefined)?.turn
+    return typeof turn === 'number' ? turn : undefined
   }
 
   /**
@@ -678,26 +689,35 @@ export function apply(ctx: Context): void {
   // Push turn lifecycle and title changes onto the SSE stream for the Emacs
   // status tracker and sessions-list auto-refresh. Emitted only for targetable
   // (non-subagent) sessions; the browser ignores any kind it does not
-  // recognise, so this is backward-compatible.
+  // recognise, so this is backward-compatible. The frames carry the event's
+  // `turn` number so Emacs can key its turn-level reply cache (mid-turn
+  // segments, the ending turn's closing divider).
   ctx.on('session/event', (session, event) => {
     if (isSubagentChild(session.header.origin, ownedByLiveParent(session))) return
     const id = String(session.id)
     if (event.type === 'turn/start') {
-      broadcast(turnStartMessage(id, event.time))
+      broadcast(turnStartMessage(id, event.time, turnNumberOf(event.data)))
       return
     }
     if (event.type === 'turn/end') {
       const data = event.data as { reason?: unknown } | undefined
       const reason = data?.reason as { kind?: unknown } | undefined
-      broadcast(turnCompleteMessage(id, typeof reason?.kind === 'string' ? reason.kind : 'unrecognized', event.time))
+      broadcast(turnCompleteMessage(
+        id,
+        typeof reason?.kind === 'string' ? reason.kind : 'unrecognized',
+        event.time,
+        turnNumberOf(event.data),
+      ))
       return
     }
     if (event.type === 'assistant/message') {
-      // A reply is committed mid-turn. Nudge Emacs to refresh its reply list
-      // (and the View (k/n) counter) while the turn is still running; gate on
-      // text so tool-call-only steps do not fire a spurious refresh.
+      // A reply segment is committed mid-turn. Nudge Emacs to refresh its turn
+      // list (and the View (k/n) counter) while the turn is still running; gate
+      // on text so tool-call-only steps do not fire a spurious refresh.
       const data = event.data as { message?: { content?: readonly MessageBlockLike[] } } | undefined
-      if (assistantMessageHasText(data?.message)) broadcast(repliesChangedMessage(id))
+      if (assistantMessageHasText(data?.message)) {
+        broadcast(repliesChangedMessage(id, turnNumberOf(event.data)))
+      }
       return
     }
     if (event.type === 'session/title') {
@@ -1088,15 +1108,27 @@ export function apply(ctx: Context): void {
         return
       }
 
-      // The output buffer's reply navigation: the session's assistant
-      // replies, newest first (the mirror of /prompts).
-      if (req.method === 'GET' && pathname === '/dsh-bridge/replies') {
+      // The output buffer's turn navigation: the session's turn-aggregated
+      // assistant replies, newest first (the mirror of /prompts, grouped by
+      // harness turn).  Each turn carries its committed text segments plus the
+      // turn's start/end facts, so Emacs can render a whole turn with divider
+      // lines and walk M-p/M-n turn-by-turn.  The fold walks the session's own
+      // surface (`Session.surface.nodes` + `Session.events[seq]` — the same
+      // surface `deriveMessages()` folds), so compaction-replaced history stays
+      // hidden exactly as the reply list it replaces did.  EPOCH is the
+      // surface's `replaceGeneration` (the harness's monotonic replacement
+      // count), which lets Emacs detect a compacted history cheaply.
+      if (req.method === 'GET' && pathname === '/dsh-bridge/turns') {
         try {
           const target = await resolveTarget(url.searchParams.get('sessionId') ?? undefined)
+          const session = target.session
           sendJson(res, 200, {
-            sessionId: String(target.session.id),
-            replies: assistantReplies(target.agent.session.deriveMessages()).reverse(),
-            running: ctx.agents.get(String(target.session.id))?.status === 'running',
+            sessionId: String(session.id),
+            title: sessionTitle(session.events),
+            cwd: session.header.cwd ?? null,
+            turns: assistantTurns({ nodes: session.surface.nodes, events: session.events }).reverse(),
+            running: ctx.agents.get(String(session.id))?.status === 'running',
+            epoch: session.surface.replaceGeneration,
           })
         } catch (error: unknown) {
           sendJson(res, bridgeErrorStatus(error), { error: error instanceof Error ? error.message : String(error) })

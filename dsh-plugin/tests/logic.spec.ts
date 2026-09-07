@@ -3,7 +3,8 @@ import {
   askUserMessage,
   askUserResolvedMessage,
   assistantMessageHasText,
-  assistantReplies,
+  assistantMessageText,
+  assistantTurns,
   classifySessionId,
   contextMessage,
   contextUsedTokens,
@@ -40,6 +41,7 @@ import {
   type MessageLike,
   type SessionEventLike,
   type SessionHeaderLike,
+  type SessionTurnLogLike,
   type WorkspaceLike,
 } from '../src/logic.ts'
 
@@ -124,30 +126,6 @@ describe('userPrompts', () => {
   })
 })
 
-describe('assistantReplies', () => {
-  it('returns assistant text in order, skipping other roles and text-less turns', () => {
-    const messages = [
-      message('user', [{ type: 'text', text: 'hi' }]),
-      message('assistant', [{ type: 'text', text: 'first' }]),
-      message('assistant', [{ type: 'tool-call' }]),
-      message('assistant', [{ type: 'text', text: 'second' }]),
-    ]
-    expect(assistantReplies(messages)).toEqual(['first', 'second'])
-  })
-
-  it('joins multiple text blocks with no separator, matching the output buffer', () => {
-    const messages = [
-      message('assistant', [{ type: 'text', text: 'a' }, { type: 'text', text: 'b' }]),
-    ]
-    expect(assistantReplies(messages)).toEqual(['ab'])
-  })
-
-  it('drops whitespace-only replies and returns an empty list with no messages', () => {
-    expect(assistantReplies([message('assistant', [{ type: 'text', text: '   ' }])])).toEqual([])
-    expect(assistantReplies([])).toEqual([])
-  })
-})
-
 describe('assistantMessageHasText', () => {
   it('is true only for a message with a non-whitespace text block', () => {
     expect(assistantMessageHasText({ content: [{ type: 'text', text: 'hello' }] })).toBe(true)
@@ -155,6 +133,216 @@ describe('assistantMessageHasText', () => {
     expect(assistantMessageHasText({ content: [{ type: 'tool-call' }] })).toBe(false)
     expect(assistantMessageHasText({ content: [] })).toBe(false)
     expect(assistantMessageHasText(undefined)).toBe(false)
+  })
+})
+
+describe('assistantMessageText', () => {
+  it('joins text blocks with no separator and skips non-text blocks', () => {
+    expect(assistantMessageText([{ type: 'text', text: 'a' }, { type: 'text', text: 'b' }])).toBe('ab')
+    expect(assistantMessageText([{ type: 'tool-call' }, { type: 'text', text: 'x' }])).toBe('x')
+  })
+
+  it('returns the empty string for an undefined, empty, or text-less content', () => {
+    expect(assistantMessageText(undefined)).toBe('')
+    expect(assistantMessageText([])).toBe('')
+    expect(assistantMessageText([{ type: 'tool-call' }])).toBe('')
+  })
+})
+
+// -- assistantTurns fixtures -------------------------------------------------
+// The turn fold consumes the session's surface + log as (seq-indexed) event
+// tuples.  These builders mirror the harness shapes the wiring passes in.
+
+function turnStart(turn: number, time: number): SessionEventLike {
+  return { time, type: 'turn/start', data: { turn } }
+}
+
+function turnEnd(turn: number, time: number, reason = 'completed'): SessionEventLike {
+  return { time, type: 'turn/end', data: { turn, reason: { kind: reason } } }
+}
+
+function userMessage(time: number): SessionEventLike {
+  return {
+    time,
+    type: 'user/message',
+    data: { role: 'user', content: [{ type: 'text', text: 'prompt' }] },
+  }
+}
+
+function assistantMessage(
+  turn: number,
+  step: number,
+  time: number,
+  content: Array<{ type: string; text?: string }>,
+  opts: { interrupted?: boolean } = {},
+): SessionEventLike {
+  return {
+    time,
+    type: 'assistant/message',
+    data: { turn, step, message: { content }, ...(opts.interrupted ? { interrupted: true } : {}) },
+  }
+}
+
+function toolResult(time: number): SessionEventLike {
+  return {
+    time,
+    type: 'tool/result',
+    data: { turn: 0, step: 0, message: { role: 'tool', content: [{ type: 'text', text: 'ok' }] } },
+  }
+}
+
+const SURFACE_TYPES = new Set(['user/message', 'assistant/message', 'tool/result'])
+
+function turnLog(events: readonly SessionEventLike[]): SessionTurnLogLike {
+  // Nodes are the seqs of message-producing events, index-aligned with events
+  // (the harness log invariant: events[seq] is the event with that seq).
+  return { events: [...events], nodes: events.flatMap((e, i) => (e.type && SURFACE_TYPES.has(e.type) ? [i] : [])) }
+}
+
+function text(...parts: string[]): Array<{ type: string; text?: string }> {
+  return parts.map(part => ({ type: 'text', text: part }))
+}
+
+describe('assistantTurns', () => {
+  it('groups a multi-step turn and carries its boundary facts', () => {
+    const log = turnLog([
+      turnStart(7, 1000),
+      userMessage(1010),
+      assistantMessage(7, 1, 1100, text('Let me look at the files.')),
+      toolResult(1150),
+      assistantMessage(7, 2, 1300, text('I see the change; applying it.')),
+      toolResult(1350),
+      assistantMessage(7, 3, 2000, text('Done.')),
+      turnEnd(7, 2500),
+    ])
+    expect(assistantTurns(log)).toEqual([
+      {
+        turn: 7,
+        startedAt: 1000,
+        endedAt: 2500,
+        reason: 'completed',
+        segments: [
+          { text: 'Let me look at the files.', time: 1100, step: 1 },
+          { text: 'I see the change; applying it.', time: 1300, step: 2 },
+          { text: 'Done.', time: 2000, step: 3 },
+        ],
+      },
+    ])
+  })
+
+  it('returns several turns oldest first, mirroring surface order', () => {
+    const log = turnLog([
+      turnStart(1, 1000), userMessage(1010),
+      assistantMessage(1, 1, 1100, text('first answer')),
+      turnEnd(1, 1500),
+      turnStart(2, 2000), userMessage(2010),
+      assistantMessage(2, 1, 2100, text('second answer')),
+      turnEnd(2, 2500),
+    ])
+    expect(assistantTurns(log).map(turn => turn.turn)).toEqual([1, 2])
+    expect(assistantTurns(log)[1]!.segments[0]!.text).toBe('second answer')
+  })
+
+  it('skips assistant messages without text (tool-call-only or empty steps)', () => {
+    const log = turnLog([
+      turnStart(3, 1000), userMessage(1010),
+      assistantMessage(3, 1, 1100, text('   ')), // whitespace-only: not a reply
+      assistantMessage(3, 2, 1200, [{ type: 'tool-call' }]), // no text block
+      assistantMessage(3, 3, 1300, []), // empty content
+      assistantMessage(3, 4, 1400, text('real answer')),
+      turnEnd(3, 1500),
+    ])
+    expect(assistantTurns(log)).toEqual([
+      {
+        turn: 3,
+        startedAt: 1000,
+        endedAt: 1500,
+        reason: 'completed',
+        segments: [{ text: 'real answer', time: 1400, step: 4 }],
+      },
+    ])
+  })
+
+  it('keeps non-contiguous turn numbers: an empty turn consumes its number', () => {
+    // Turn 9 produces no text (rejected/empty input) — turn 10's segments must
+    // be reported under 10, never shifted to 9.
+    const log = turnLog([
+      turnStart(9, 1000), userMessage(1010), turnEnd(9, 1100),
+      turnStart(10, 2000), userMessage(2010),
+      assistantMessage(10, 1, 2100, text('recovery')),
+      turnEnd(10, 2500),
+    ])
+    expect(assistantTurns(log).map(turn => turn.turn)).toEqual([10])
+    expect(assistantTurns(log)[0]!.startedAt).toBe(2000)
+  })
+
+  it('reports an open turn without endedAt or reason', () => {
+    const log = turnLog([
+      turnStart(5, 1000), userMessage(1010),
+      assistantMessage(5, 1, 1100, text('still working')),
+      assistantMessage(5, 2, 1300, text('another segment')),
+      // No turn/end: the turn is still running.
+    ])
+    const turns = assistantTurns(log)
+    expect(turns).toHaveLength(1)
+    expect(turns[0]).toMatchObject({ turn: 5, startedAt: 1000 })
+    expect(turns[0]!.endedAt).toBeUndefined()
+    expect(turns[0]!.reason).toBeUndefined()
+    expect(turns[0]!.segments).toHaveLength(2)
+  })
+
+  it('marks an interrupted (aborted) turn with its reason and partial segment', () => {
+    const log = turnLog([
+      turnStart(6, 1000), userMessage(1010),
+      assistantMessage(6, 1, 1100, text('partial reply'), { interrupted: true }),
+      turnEnd(6, 1200, 'aborted'),
+    ])
+    expect(assistantTurns(log)).toEqual([
+      {
+        turn: 6,
+        startedAt: 1000,
+        endedAt: 1200,
+        reason: 'aborted',
+        segments: [{ text: 'partial reply', time: 1100, step: 1 }],
+      },
+    ])
+  })
+
+  it('falls back to the first segment time when the turn/start event is absent', () => {
+    const log = turnLog([
+      userMessage(1010),
+      assistantMessage(4, 1, 1100, text('orphan')),
+    ])
+    expect(assistantTurns(log)[0]!.startedAt).toBe(1100)
+  })
+
+  it('hides compaction-shadowed turns, exactly like the derived reply list', () => {
+    const events = [
+      turnStart(1, 1000), userMessage(1010),
+      assistantMessage(1, 1, 1100, text('shadowed old turn')),
+      turnEnd(1, 1500),
+      turnStart(2, 2000), userMessage(2010),
+      assistantMessage(2, 1, 2100, text('the compacted turn')),
+      turnEnd(2, 2500),
+    ]
+    // A replace wiped turn 1's message-producing nodes from the surface; the
+    // boundary events remain in the log but no node references turn 1's
+    // message any more.
+    const log: SessionTurnLogLike = {
+      events,
+      nodes: [6], // only the seq of turn 2's assistant message survives
+    }
+    expect(assistantTurns(log).map(turn => turn.turn)).toEqual([2])
+  })
+
+  it('tolerates a node seq beyond the log (defensive) and never mis-indexes', () => {
+    const events = [
+      turnStart(1, 1000),
+      assistantMessage(1, 1, 1100, text('kept')),
+      turnEnd(1, 1500),
+    ]
+    const log: SessionTurnLogLike = { events, nodes: [1, 99] }
+    expect(assistantTurns(log).map(turn => turn.turn)).toEqual([1])
   })
 })
 
@@ -482,7 +670,13 @@ describe('outboxMessage', () => {
 })
 
 describe('turnStartMessage', () => {
-  it('emits one SSE data frame carrying the session id and event time', () => {
+  it('emits one SSE data frame carrying the session id, event time, and turn', () => {
+    expect(turnStartMessage('session-1', 1234, 7)).toBe(
+      'data: {"kind":"turn-start","sessionId":"session-1","time":1234,"turn":7}\n\n',
+    )
+  })
+
+  it('omits the turn when the event payload lacks one (defensive)', () => {
     expect(turnStartMessage('session-1', 1234)).toBe(
       'data: {"kind":"turn-start","sessionId":"session-1","time":1234}\n\n',
     )
@@ -490,15 +684,27 @@ describe('turnStartMessage', () => {
 })
 
 describe('turnCompleteMessage', () => {
-  it('emits one SSE data frame carrying the turn-end reason kind and event time', () => {
-    expect(turnCompleteMessage('session-1', 'completed', 1234)).toBe(
-      'data: {"kind":"turn-complete","sessionId":"session-1","reason":"completed","time":1234}\n\n',
+  it('emits one SSE data frame carrying the reason kind, event time, and turn', () => {
+    expect(turnCompleteMessage('session-1', 'completed', 1234, 7)).toBe(
+      'data: {"kind":"turn-complete","sessionId":"session-1","reason":"completed","time":1234,"turn":7}\n\n',
+    )
+  })
+
+  it('omits the turn when the event payload lacks one (defensive)', () => {
+    expect(turnCompleteMessage('session-1', 'aborted', 1234)).toBe(
+      'data: {"kind":"turn-complete","sessionId":"session-1","reason":"aborted","time":1234}\n\n',
     )
   })
 })
 
 describe('repliesChangedMessage', () => {
-  it('emits one SSE data frame carrying the session id', () => {
+  it('emits one SSE data frame carrying the session id and the turn that grew', () => {
+    expect(repliesChangedMessage('session-1', 7)).toBe(
+      'data: {"kind":"replies-changed","sessionId":"session-1","turn":7}\n\n',
+    )
+  })
+
+  it('omits the turn when the event payload lacks one (defensive)', () => {
     expect(repliesChangedMessage('session-1')).toBe(
       'data: {"kind":"replies-changed","sessionId":"session-1"}\n\n',
     )
