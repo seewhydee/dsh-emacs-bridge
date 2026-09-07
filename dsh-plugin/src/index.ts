@@ -30,7 +30,10 @@
 //   GET  /dsh-bridge/turns?sessionId=             -> turn-aggregated assistant
 //        replies, newest first (each turn: { turn, startedAt, endedAt?,
 //        reason?, segments: [{ text, time, step }] }) plus running, epoch,
-//        title and cwd
+//        title and cwd.  Optional since=<turn>&epoch=<n> request the
+//        incremental suffix: turns with turn >= since when the epoch matches
+//        the surface's replaceGeneration, else the full list
+//        (incremental: true|false)
 //   POST /dsh-bridge/draft { text, sessionId? }   -> push a composer draft (SSE)
 //   GET  /dsh-bridge/outbox                       -> collect DSH->Emacs entries
 //   POST /dsh-bridge/outbox { text, sessionId, source? } -> deposit an entry
@@ -89,6 +92,7 @@ import {
   tokensEqual,
   turnCompleteMessage,
   turnStartMessage,
+  turnsSince,
   userPrompts,
   workspaceRefsBySession,
   workspaceTitleConflict,
@@ -1118,17 +1122,31 @@ export function apply(ctx: Context): void {
       // hidden exactly as the reply list it replaces did.  EPOCH is the
       // surface's `replaceGeneration` (the harness's monotonic replacement
       // count), which lets Emacs detect a compacted history cheaply.
+      //
+      // Optional `since` (a turn number) + `epoch` query params request the
+      // incremental suffix: when the client's epoch matches the current
+      // `replaceGeneration` and `since` names a visible turn, the response
+      // carries only the turns with `turn >= since` (inclusive) and
+      // `incremental: true`; otherwise it is the full list with
+      // `incremental: false` (see `turnsSince` in logic.ts).
       if (req.method === 'GET' && pathname === '/dsh-bridge/turns') {
         try {
           const target = await resolveTarget(url.searchParams.get('sessionId') ?? undefined)
           const session = target.session
+          const epoch = session.surface.replaceGeneration
+          const { incremental, turns } = turnsSince(
+            assistantTurns({ nodes: session.surface.nodes, events: session.events }).reverse(),
+            epoch,
+            { since: url.searchParams.get('since') ?? undefined, epoch: url.searchParams.get('epoch') ?? undefined },
+          )
           sendJson(res, 200, {
             sessionId: String(session.id),
             title: sessionTitle(session.events),
             cwd: session.header.cwd ?? null,
-            turns: assistantTurns({ nodes: session.surface.nodes, events: session.events }).reverse(),
+            turns,
+            incremental,
             running: ctx.agents.get(String(session.id))?.status === 'running',
-            epoch: session.surface.replaceGeneration,
+            epoch,
           })
         } catch (error: unknown) {
           sendJson(res, bridgeErrorStatus(error), { error: error instanceof Error ? error.message : String(error) })

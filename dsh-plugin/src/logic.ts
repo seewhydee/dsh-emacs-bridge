@@ -198,6 +198,68 @@ export function assistantTurns(log: SessionTurnLogLike): AssistantTurn[] {
 }
 
 /**
+ * One `/turns` incremental-fetch request, as raw query params.
+ * `since` is inclusive: the response names every visible turn with
+ * `turn >= since`, and `epoch` is the replacement generation the client's
+ * list was folded under.
+ */
+export interface TurnsSinceRequest {
+  since?: string
+  epoch?: string
+}
+
+/** One `/turns` response plan: whether it is the incremental suffix, and the turns to serve. */
+export interface TurnsSinceResult {
+  incremental: boolean
+  turns: readonly AssistantTurn[]
+}
+
+/** Parse a non-negative decimal integer query param, or undefined when absent or malformed. */
+function nonNegativeIntParam(value: string | undefined): number | undefined {
+  if (value === undefined) return undefined
+  if (!/^\d+$/.test(value)) return undefined
+  const number = Number(value)
+  return Number.isSafeInteger(number) ? number : undefined
+}
+
+/**
+ * Decide the `/turns` response for an incremental-fetch request.
+ *
+ * TURNS is the session's full visible turn list (newest first) and
+ * CURRENT_EPOCH its `surface.replaceGeneration`.  An incremental response is
+ * served only when the request is well-formed (both `since` and `epoch`
+ * present as non-negative integers), the client's EPOCH equals CURRENT_EPOCH,
+ * and `since` names a visible turn; otherwise the response is the full list.
+ *
+ * Epoch equality is the whole safety argument: `replaceGeneration`
+ * increments only on surface replaces, so an equal epoch means the client's
+ * older snapshot can only have grown (segments appended to existing turns,
+ * new turns at the newest end) — never shrunk or been reordered — so keeping
+ * the client's turns below `since` is sound.  `since` is inclusive because
+ * the boundary turn is exactly the one that changes mid-turn: segments
+ * append to it, and a `turn/end` sets its `endedAt`/`reason`.
+ */
+export function turnsSince(
+  turns: readonly AssistantTurn[],
+  currentEpoch: number,
+  request: TurnsSinceRequest,
+): TurnsSinceResult {
+  const since = nonNegativeIntParam(request.since)
+  const epoch = nonNegativeIntParam(request.epoch)
+  if (since === undefined || epoch === undefined) return { incremental: false, turns }
+  if (epoch !== currentEpoch) return { incremental: false, turns }
+  if (!turns.some(turn => turn.turn === since)) return { incremental: false, turns }
+  // Visible turn numbers only grow over time, so the `turn >= since` suffix
+  // is a head prefix of the newest-first list.
+  const suffix: AssistantTurn[] = []
+  for (const turn of turns) {
+    if (turn.turn >= since) suffix.push(turn)
+    else break
+  }
+  return { incremental: true, turns: suffix }
+}
+
+/**
  * Whether an assistant message carries non-empty text, i.e. whether it adds a
  * segment to its turn in `assistantTurns`. A tool-call-only step (content
  * without a text block) does not. Used to gate the `replies-changed` SSE

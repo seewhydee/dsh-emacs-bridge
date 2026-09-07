@@ -1757,10 +1757,11 @@ This is set via a \"Send to Emacs\" push; if the contents were fetched
 by an Emacs command, the value is nil.")
 
 (defvar dsh-bridge--turns-cache nil
-  "Alist of cached DSH-View turns, in the form (SESSION-ID . TURNS).
-For each entry, SESSION-ID is a session id string and TURNS is a list of turn
-records, newest first, as served by `GET /dsh-bridge/turns'.  Each turn record
-is an alist:
+  "Alist of cached DSH-View turns, in the form (SESSION-ID EPOCH . TURNS).
+For each entry, SESSION-ID is a session id string, EPOCH is the session's
+history epoch — the surface `replaceGeneration` the list was folded under, as
+served by `GET /dsh-bridge/turns' — and TURNS is a list of turn records,
+newest first.  Each turn record is an alist:
 
   (turn . NUMBER)
   (startedAt . MS-EPOCH)
@@ -1772,7 +1773,14 @@ TURNS holds the session's text-bearing turns (oldest segment first within
 each), newest first — the same fold the old reply list projected, grouped by
 harness turn number, so a turn with several short mid-turn replies between
 tool calls reads as one unit.  Turn numbers are non-contiguous, so TURNS is
-never indexed by arithmetic on them.")
+never indexed by arithmetic on them.
+
+An entry whose TURNS is empty is a *known-empty* snapshot (a session folded
+to no turns, e.g. after a full compaction): the session is cached at EPOCH
+with no turns, distinct from having no entry at all.  Access the parts via
+`dsh-bridge--turns-cache-entry' (the (EPOCH . TURNS) value or nil),
+`dsh-bridge--turns-cache-turns', and `dsh-bridge--turns-cache-epoch';
+`dsh-bridge--turns-cache-store' is the single writer for both halves.")
 
 (defvar-local dsh-bridge--view-turn nil
   "Turn number of the turn the DSH-View buffer shows, or nil.
@@ -1886,8 +1894,8 @@ state, the segment reads `(latest/n)' instead.
 
 This function uses the turns cache only, and does no synchronous I/O."
   (let ((session dsh-bridge--view-content-session))
-	(if (and session (cdr (assoc session dsh-bridge--turns-cache)))
-		(let* ((turns (cdr (assoc session dsh-bridge--turns-cache)))
+    (if (and session (dsh-bridge--turns-cache-turns session))
+        (let* ((turns (dsh-bridge--turns-cache-turns session))
 			   (n (length turns)))
 		  (cond
 		   (dsh-bridge--view-follow (format " (latest/%d)" n))
@@ -1995,7 +2003,7 @@ started, the view flips to it.  The refill passes no CWD, so
                     (with-current-buffer buf
                       (bound-and-true-p dsh-bridge--view-follow)))
                   (dsh-bridge--session-views session-id))
-    (let* ((turns (cdr (assoc session-id dsh-bridge--turns-cache)))
+    (let* ((turns (dsh-bridge--turns-cache-turns session-id))
            (newest (car-safe turns)))
       (when newest
         (dolist (buf (dsh-bridge--session-views session-id))
@@ -2175,51 +2183,135 @@ is applied."
 ;; never disambiguates by text equality (identical one-line segments used to
 ;; be ambiguous to the old reply-index lookup).
 
-(defun dsh-bridge--turns-cache-store (session-id turns)
-  "Replace SESSION-ID's cached turn list with TURNS (newest first)."
-  (setq dsh-bridge--turns-cache
-		(assoc-delete-all session-id dsh-bridge--turns-cache))
-  (push (cons session-id turns) dsh-bridge--turns-cache))
+(defun dsh-bridge--turns-cache-entry (session-id)
+  "The cached entry value for SESSION-ID — (EPOCH . TURNS) — or nil.
+A nil return means the session has no entry (never fetched).  An entry whose
+TURNS is nil is a *known-empty* snapshot (see `dsh-bridge--turns-cache')."
+  (and session-id
+       (cdr (assoc session-id dsh-bridge--turns-cache))))
+
+(defun dsh-bridge--turns-cache-turns (session-id)
+  "SESSION-ID's cached turn list (newest first), or nil.
+A nil return covers both a session with no entry and a known-empty entry;
+distinguish via `dsh-bridge--turns-cache-entry'."
+  (let ((entry (dsh-bridge--turns-cache-entry session-id)))
+    (and entry (cdr entry))))
+
+(defun dsh-bridge--turns-cache-epoch (session-id)
+  "SESSION-ID's cached history epoch, or nil when no entry exists."
+  (car (dsh-bridge--turns-cache-entry session-id)))
+
+(defun dsh-bridge--turns-cache-store (session-id turns epoch)
+  "Replace SESSION-ID's cache entry with TURNS (newest first) at EPOCH.
+The single writer for both halves of an entry — the turn list and the epoch
+always travel together, so nothing can observe an epoch without its list (or
+vice versa).  EPOCH may be nil for a response that carried no `epoch' field;
+such an entry can never serve an incremental request (see
+`dsh-bridge--turns-cache-fetch')."
+  (when session-id
+    (setq dsh-bridge--turns-cache
+          (assoc-delete-all session-id dsh-bridge--turns-cache))
+    (push (cons session-id (cons epoch turns)) dsh-bridge--turns-cache)))
+
+(defun dsh-bridge--turns-query-path (session-id &optional since epoch)
+  "The `/turns' request path for SESSION-ID, with optional SINCE/EPOCH params.
+SINCE and EPOCH are numbers; absent ones are omitted."
+  (concat (dsh-bridge--path "/turns" session-id)
+          (and (numberp since) (format "&since=%d" since))
+          (and (numberp epoch) (format "&epoch=%d" epoch))))
+
+(defun dsh-bridge--turns-cache-merge (session-id cached since response epoch)
+  "Merge an incremental `/turns' RESPONSE into SESSION-ID's CACHED list.
+RESPONSE (newest first) holds every visible turn with `turn >= SINCE' —
+inclusive, because the boundary turn is exactly the one that changes mid-turn
+(segments append to it, a `turn/end' sets its end facts), so it is resent in
+full.  Cached turns with `turn >= SINCE' (normally just the head, since SINCE
+names the newest cached turn) are dropped, the response is prepended, and the
+entry is stored at EPOCH.  Storing through `dsh-bridge--turns-cache-store'
+keeps the merge and the epoch atomic."
+  (dsh-bridge--turns-cache-store
+   session-id
+   (append response
+           (seq-drop-while (lambda (record)
+                             (>= (or (alist-get 'turn record) 0) since))
+                           cached))
+   epoch))
 
 (defun dsh-bridge--turns-cache-fetch (session-id)
   "Fetch SESSION-ID's turn list into `dsh-bridge--turns-cache'.
-Performs the `GET /dsh-bridge/turns' round-trip.  When the response carries a
-`turns' field, the cached entry is replaced with it (newest first) — field
-presence, not truthiness: an explicit empty list means the session genuinely
-has no turns (e.g. after a full compaction) and must evict the stale cache,
-while a response without the field (an error or malformed body) leaves the
-cache alone.  Returns the `turns' field as a cons (turns . LIST) — non-nil
-even when LIST is empty — or nil when SESSION-ID is nil or the response has
-no `turns' field.  The cache is shared by every DSH-View buffer, so one
-fetch serves them all — multi-view refills call this once and skip the
-per-view refresh in `dsh-bridge--view-fill'."
+Performs the `GET /dsh-bridge/turns' round-trip, requesting only the
+incremental suffix (`since` = the newest cached turn number, plus the stored
+`epoch`) when the session already has an entry with a numeric epoch and at
+least one cached turn.  When
+the response's `incremental' field is true the suffix is merged into the
+cached list (`dsh-bridge--turns-cache-merge'); any other response replaces
+the entry wholesale.  Field presence, not truthiness: an explicit empty
+`turns' list means the session genuinely has no turns (e.g. after a full
+compaction) and replaces the stale cache with a known-empty entry, while a
+response without the field (an error or malformed body) leaves the cache
+alone.  Returns a `(turns . FINAL-LIST)' cons — non-nil even when FINAL-LIST
+is empty — of the list the cache holds after the fetch, or nil when
+SESSION-ID is nil or the response has no `turns' field.  The cache is shared
+by every DSH-View buffer, so one fetch serves them all — multi-view refills
+call this once and skip the per-view refresh in `dsh-bridge--view-fill'."
   (when session-id
-    (let* ((result (dsh-bridge--request "GET"
-                                        (dsh-bridge--path "/turns" session-id)
-                                        nil))
+    (let* ((cached (dsh-bridge--turns-cache-entry session-id))
+           (cached-turns (and cached (cdr cached)))
+           (cached-epoch (and cached (car cached)))
+           (newest (car-safe cached-turns))
+           (since (and newest (alist-get 'turn newest)))
+           (result (dsh-bridge--request
+                    "GET"
+                    (dsh-bridge--turns-query-path
+                     session-id
+                     ;; Incremental needs both params: `since' without a
+                     ;; numeric `epoch' — or `epoch' without a `since' (a
+                     ;; known-empty entry has no newest turn to anchor it) —
+                     ;; could never be served incrementally, so send neither
+                     ;; rather than imply it.
+                     (and (numberp since) (numberp cached-epoch) since)
+                     (and (numberp since) (numberp cached-epoch) cached-epoch))
+                    nil))
            (alist (cdr result))
-           (pair (and alist (assoc 'turns alist))))
-      (when pair
-        (dsh-bridge--turns-cache-store session-id (cdr pair)))
-      pair)))
+           (turns-pair (and alist (assoc 'turns alist))))
+      (when turns-pair
+        (let ((turns (cdr turns-pair))
+              ;; An epoch-less response must not downgrade a numeric epoch.
+              (epoch (or (alist-get 'epoch alist) cached-epoch)))
+          (if (and (eq (alist-get 'incremental alist) t)
+                   cached-turns
+                   (numberp since)
+                   ;; The incremental response must end at the `since' turn;
+                   ;; anything else is a stale-since corner (an entry evicted
+                   ;; and refilled by another path): replace fully instead.
+                   (equal since (alist-get 'turn (car (last turns)))))
+              (dsh-bridge--turns-cache-merge session-id cached-turns
+                                             since turns epoch)
+            (dsh-bridge--turns-cache-store session-id turns epoch))))
+      ;; A pair of the list the cache now holds (post-merge or post-replace),
+      ;; or nil when the response carried no `turns' field (cache untouched).
+      (and turns-pair
+           (cons 'turns (dsh-bridge--turns-cache-turns session-id))))))
 
 (defun dsh-bridge--view-turns-refresh (&optional force)
   "Return the cached turn list (newest first) for the current view's session.
 Fetches `GET /dsh-bridge/turns' (via `dsh-bridge--turns-cache-fetch') when
-FORCE is non-nil or the session's list is not cached.  FORCE keeps the
-position count current after a fill or a turn-complete refetch."
+FORCE is non-nil or the session has no cache entry.  FORCE keeps the position
+count current after a fill or a turn-complete refetch; a known-empty entry is
+authoritative until such a forced refresh."
   (let ((session dsh-bridge--view-content-session))
     (when (and session
                (or force
-                   (null (cdr (assoc session dsh-bridge--turns-cache)))))
+                   (null (dsh-bridge--turns-cache-entry session))))
       (dsh-bridge--turns-cache-fetch session))
     (and session
-         (cdr (assoc session dsh-bridge--turns-cache)))))
+         (dsh-bridge--turns-cache-turns session))))
 
 (defun dsh-bridge--view-turns-cache-refresh (session-id)
   "Force-refresh the cached turn list for the DSH bridge's SESSION-ID.
 This function fetches the turns for SESSION-ID (via
-`dsh-bridge--turns-cache-fetch'), then updates `dsh-bridge--turns-cache'.
+`dsh-bridge--turns-cache-fetch', which merges an incremental response into
+the cached list or replaces the entry on a full one).
 
 For any DSH-View buffer showing SESSION-ID, recompute a mid-browse
 `dsh-bridge--view-turn-index' from the shown turn's number: the index
@@ -2401,9 +2493,12 @@ already showing another session's view is not forcibly replaced."
 		  ;; Transport failure: say so, since the user lands on a blank view.
 		  (message "dsh-bridge: could not load the latest turn"))
 		;; Field presence, not truthiness: an explicit empty list (no turns,
-		;; e.g. after a full compaction) replaces the stale cache entry.
+		;; e.g. after a full compaction) replaces the stale cache entry.  This
+		;; full response also records the session's `epoch', so later
+		;; incremental fetches validate against the fresh generation.
 		(when turns-pair
-		  (dsh-bridge--turns-cache-store sent-session-id turns))
+		  (dsh-bridge--turns-cache-store sent-session-id turns
+										 (alist-get 'epoch alist)))
 		(dsh-bridge--view-open sent-session-id (car-safe turns)
 							   (alist-get 'cwd alist))))))
 
@@ -2462,10 +2557,12 @@ buffer re-fetches the shown session's newest turn."
 												'running 'idle))))
 				;; Field presence, not truthiness: an explicit empty
 				;; `turns' list (no turns, e.g. after a full compaction)
-				;; replaces the stale cache entry.
+				;; replaces the stale cache entry, and the response's
+				;; `epoch' is recorded for later incremental fetches.
 				(let ((turns-pair (assoc 'turns alist)))
 				  (when turns-pair
-					(dsh-bridge--turns-cache-store shown-id (cdr turns-pair))))
+					(dsh-bridge--turns-cache-store
+					 shown-id (cdr turns-pair) (alist-get 'epoch alist))))
 				(dsh-bridge--view-open shown-id (car-safe turns)
 									   (alist-get 'cwd alist) t)
 				(message "dsh-bridge: turn fetched from session \"%s\""
@@ -3279,7 +3376,7 @@ cached (e.g. after a compaction)."
   (let* ((session dsh-bridge--view-content-session)
 		 (turn dsh-bridge--view-turn)
 		 (turns (and session turn
-					 (cdr (assoc session dsh-bridge--turns-cache))))
+					 (dsh-bridge--turns-cache-turns session)))
 		 (record (and turns
 					  (seq-find (lambda (r) (equal (alist-get 'turn r) turn))
 								turns))))
@@ -4076,9 +4173,11 @@ is known (point is preserved when the content merely grew)."
 				 (views (dsh-bridge--session-views shown-id)))
 			;; Field presence, not truthiness: an explicit empty `turns'
 			;; list (no turns, e.g. after a full compaction) replaces the
-			;; stale cache entry; a missing field leaves it alone.
+			;; stale cache entry, and the response's `epoch' is recorded
+			;; for later incremental fetches.
 			(when turns-pair
-			  (dsh-bridge--turns-cache-store shown-id turns))
+			  (dsh-bridge--turns-cache-store shown-id turns
+											 (alist-get 'epoch alist)))
 			;; Only refill if a view still shows this session and the user
 			;; has not started turn-cycling since the event (the cycling
 			;; check at event time does not cover the timer delay).

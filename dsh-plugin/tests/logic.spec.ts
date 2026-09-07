@@ -34,10 +34,12 @@ import {
   tokensEqual,
   turnCompleteMessage,
   turnStartMessage,
+  turnsSince,
   userPrompts,
   workspaceRefsBySession,
   workspaceTitleConflict,
   type LiveSessionLike,
+  type AssistantTurn,
   type MessageLike,
   type SessionEventLike,
   type SessionHeaderLike,
@@ -343,6 +345,77 @@ describe('assistantTurns', () => {
     ]
     const log: SessionTurnLogLike = { events, nodes: [1, 99] }
     expect(assistantTurns(log).map(turn => turn.turn)).toEqual([1])
+  })
+})
+
+// -- turnsSince fixtures ----------------------------------------------------
+// Newest-first visible turn lists as `/turns` serves them (turn numbers
+// strictly grow over time, so newest-first is descending by turn number, but
+// the numbers are NOT contiguous).
+
+function openTurn(turn: number, startedAt = turn * 1000): AssistantTurn {
+  return { turn, startedAt, segments: [{ text: `turn ${turn}`, time: startedAt + 100, step: 1 }] }
+}
+
+describe('turnsSince', () => {
+  // Newest first: 40 (open), 30 completed, 20 completed.  Turn 35 was empty
+  // (consumed a number, no segments) and does not appear.
+  const turns = [
+    openTurn(40, 40000),
+    { turn: 30, startedAt: 30000, endedAt: 30100, reason: 'completed',
+      segments: [{ text: 'a', time: 30010, step: 1 }, { text: 'b', time: 30050, step: 2 }] },
+    openTurn(20, 20000),
+  ] satisfies AssistantTurn[]
+
+  it('serves the full list when the request is absent or malformed', () => {
+    expect(turnsSince(turns, 7, {})).toEqual({ incremental: false, turns })
+    expect(turnsSince(turns, 7, { since: '30' })).toEqual({ incremental: false, turns })
+    expect(turnsSince(turns, 7, { epoch: '7' })).toEqual({ incremental: false, turns })
+    expect(turnsSince(turns, 7, { since: '', epoch: '7' })).toEqual({ incremental: false, turns })
+    expect(turnsSince(turns, 7, { since: 'abc', epoch: '7' })).toEqual({ incremental: false, turns })
+    expect(turnsSince(turns, 7, { since: '-1', epoch: '7' })).toEqual({ incremental: false, turns })
+    expect(turnsSince(turns, 7, { since: '1.5', epoch: '7' })).toEqual({ incremental: false, turns })
+    expect(turnsSince(turns, 7, { since: '20', epoch: 'x' })).toEqual({ incremental: false, turns })
+    expect(turnsSince(turns, 7, { since: '20', epoch: '-1' })).toEqual({ incremental: false, turns })
+    expect(turnsSince(turns, 7, { since: '20', epoch: '' })).toEqual({ incremental: false, turns })
+    expect(turnsSince(turns, 7, { since: '99999999999999999999', epoch: '7' }))
+      .toEqual({ incremental: false, turns })
+  })
+
+  it('serves the full list when the client epoch is stale (a replace happened)', () => {
+    expect(turnsSince(turns, 7, { since: '20', epoch: '6' })).toEqual({ incremental: false, turns })
+  })
+
+  it('serves the full list when `since` names no visible turn', () => {
+    // 35 was consumed by an empty turn: not visible, so no incremental answer.
+    expect(turnsSince(turns, 7, { since: '35', epoch: '7' })).toEqual({ incremental: false, turns })
+    // A since above the newest visible turn is likewise unknown.
+    expect(turnsSince(turns, 7, { since: '41', epoch: '7' })).toEqual({ incremental: false, turns })
+  })
+
+  it('serves the full list for an empty (fully compacted) session', () => {
+    // The known-empty shape: no params, and a `since` that can name no
+    // visible turn, both fall back to the full (empty) list.
+    expect(turnsSince([], 1, {})).toEqual({ incremental: false, turns: [] })
+    expect(turnsSince([], 1, { since: '5', epoch: '1' })).toEqual({ incremental: false, turns: [] })
+  })
+
+  it('is inclusive at the boundary turn and includes every newer turn', () => {
+    // since = newest: just the boundary turn (resent in full — it is the one
+    // that grows mid-turn).
+    expect(turnsSince(turns, 7, { since: '40', epoch: '7' })).toEqual({
+      incremental: true,
+      turns: [turns[0]!],
+    })
+    // since = a middle turn: the boundary plus every newer visible turn.
+    expect(turnsSince(turns, 7, { since: '30', epoch: '7' })).toEqual({
+      incremental: true,
+      turns: [turns[0]!, turns[1]!],
+    })
+    expect(turnsSince(turns, 7, { since: '20', epoch: '7' })).toEqual({
+      incremental: true,
+      turns,
+    })
   })
 })
 

@@ -33,7 +33,9 @@ pursuing the Emacs-as-primary-client (ACP-style) model.
     first.  Each turn record is `{ turn, startedAt, endedAt?, reason?,
     segments: [{ text, time, step }] }` (segments oldest first), plus
     `running` and an `epoch` (the session surface's `replaceGeneration`,
-    for cheap compaction detection).  The fold walks the session's own
+    for cheap compaction detection).  Optional `since=<turn>&epoch=<n>`
+    request the incremental suffix: turns with `turn >= since` when the
+    epoch matches, else the full list.  The fold walks the session's own
     surface (`Session.surface.nodes` + `events[seq]`), so compaction
     shadowing behaves exactly as the reply list it replaced (see
     `turn-aggregation-plan.md`).
@@ -178,7 +180,7 @@ In suggested order:
    the live status (`dsh-bridge--session-status`), re-renders the matching
    buffer header and the sessions-list row, and on turn-complete refetches
    the shown reply (non-popping) or echoes a reason-phrased line per
-   `dsh-bridge-turn-complete`. See `dsh-turns-plan.md`.
+   `dsh-bridge-turn-complete`.
 2. **Session handling: resume, rename, archive, create (fork excluded) (implemented).**
    Broadened from "resume saved sessions". Make saved (cold, persisted-only)
    sessions first-class: targeting or selecting one resumes it via
@@ -194,10 +196,9 @@ In suggested order:
    with no service seam to reuse. Resume is implicit, web-UI style: an
    explicit cold target resumes on demand, and an untargeted request falls
    back to the most recent cold session when nothing is live — so the
-   "saved" label is retired from the Emacs UI (internal-only). See
-   `session-handling-plan.md`.
-3. **Turn-aggregated DSH-View buffers (implemented; phase 1 of
-   `turn-aggregation-plan.md`).** DSH-View shows one agent *turn* per buffer:
+   "saved" label is retired from the Emacs UI (internal-only).
+3. **Turn-aggregated DSH-View buffers (implemented;
+   `turn-aggregation-plan.md`, phases 1–2).** DSH-View shows one agent *turn* per buffer:
    the session's committed assistant messages grouped by harness turn, their
    segments separated by `(continuing…)` divider rules and closed by an
    elapsed/reason divider, and `M-p`/`M-n` walk turns instead of replies.
@@ -207,8 +208,16 @@ In suggested order:
    `events[seq]`, so compaction shadowing matches the old reply list. The
    SSE turn frames (`turn-start`/`turn-complete`/`replies-changed`) now carry
    the `turn` number. Follow mode appends each new segment in place
-   (preserving point) instead of jumping to the newest one-liner. Phase 2
-   (`?since=` incremental retrieval on the `epoch`) is deferred.
+   (preserving point) instead of jumping to the newest one-liner.
+   Phase 2 (implemented): `GET /dsh-bridge/turns` accepts optional
+   `since=<turn>` + `epoch=<n>`; when the client's epoch matches the surface
+   `replaceGeneration` and `since` names a visible turn the host serves only
+   the turns `>= since` (`incremental: true`), else the full list
+   (`incremental: false`).  The Emacs cache entry carries the epoch as
+   `(EPOCH . TURNS)`; `dsh-bridge--turns-cache-fetch` asks for the suffix and
+   merges incremental responses (boundary turn replaced in full, newer turns
+   prepended, idempotent), falling back to the existing full-replace path on
+   any mismatch — see `turn-aggregation-plan.md`.
 4. **`/emacs edit` flow.** Host: register `/emacs` via
    `ctx.commands.register()` plus `POST /dsh-bridge/open { path, line? }`,
    both shelling out to `emacsclient` (spawn template:
