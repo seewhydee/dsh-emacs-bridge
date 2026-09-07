@@ -2455,13 +2455,16 @@ declining aborts, and edited text sends without asking."
 (ert-deftest dsh-bridge-send-exit-pops-view ()
   "The send-and-exit success branch shows the output buffer in turn-following
 state (rather than burying): the user lands on the live view after sending.
-The prompt buffer is cleared and the sent text stays in the prompt history."
+The just-sent prompt has not committed any content yet, so the view is erased
+to the `(running...)' placeholder and remembers the abandoned (previous
+newest) turn, so only a genuinely newer turn's content replaces it."
   (when (buffer-live-p (get-buffer "*dsh-bridge-output*"))
     (kill-buffer "*dsh-bridge-output*"))
   (with-temp-buffer
     (dsh-bridge-prompt-mode)
     (setq-local dsh-bridge--prompt-session "s1")
     (let ((shown nil)
+          (dsh-bridge--turns-cache nil)
           (dsh-bridge--session-status nil))
       (cl-letf (((symbol-function 'pop-to-buffer) (lambda (&rest _) (setq shown t)))
                 ((symbol-function 'dsh-bridge--request)
@@ -2476,8 +2479,100 @@ The prompt buffer is cleared and the sent text stays in the prompt history."
       (with-current-buffer (get-buffer "*dsh-bridge-output*")
         (should (equal dsh-bridge--view-content-session "s1"))
         (should (eq dsh-bridge--view-follow t))
+        (should (equal dsh-bridge--view-waiting 2))
+        (should (null dsh-bridge--view-turn))
+        (should (equal (buffer-string) (dsh-bridge--view-running-placeholder))))))
+  (when (buffer-live-p (get-buffer "*dsh-bridge-output*"))
+    (kill-buffer "*dsh-bridge-output*")))
+
+(ert-deftest dsh-bridge-send-exit-shows-already-running-turn ()
+  "When the session was already running at send time (a queued second send),
+prompt-exit shows the open turn live instead of erasing to the placeholder:
+its committed content is what the user should be watching."
+  (when (buffer-live-p (get-buffer "*dsh-bridge-output*"))
+    (kill-buffer "*dsh-bridge-output*"))
+  (with-temp-buffer
+    (dsh-bridge-prompt-mode)
+    (setq-local dsh-bridge--prompt-session "s1")
+    (let* ((running (dsh-bridge-test--view-turn
+                     2 1000
+                     (list (dsh-bridge-test--view-segment "streaming"))))
+           (shown nil)
+           (dsh-bridge--turns-cache nil)
+           (dsh-bridge--session-status nil))
+      (cl-letf (((symbol-function 'pop-to-buffer) (lambda (&rest _) (setq shown t)))
+                ((symbol-function 'dsh-bridge--request)
+                 (lambda (_m _p _pl)
+                   (cons 200 (list (cons 'sessionId "s1")
+                                   (cons 'turns (list running)))))))
+        (dsh-bridge--prompt-exit "s1"))
+      (should shown)
+      (with-current-buffer (get-buffer "*dsh-bridge-output*")
+        (should (equal dsh-bridge--view-content-session "s1"))
+        (should (eq dsh-bridge--view-follow t))
+        (should (null dsh-bridge--view-waiting))
         (should (equal dsh-bridge--view-turn 2))
-        (should (equal (buffer-string) "latest")))))
+        (should (equal (buffer-string)
+                       (dsh-bridge--view-turn-render running))))))
+  (when (buffer-live-p (get-buffer "*dsh-bridge-output*"))
+    (kill-buffer "*dsh-bridge-output*")))
+
+(ert-deftest dsh-bridge-view-waiting-state ()
+  "The waiting state shows the `(running...)' placeholder, has no `(k/n)'
+position (it is not a turn), and accepts only content from a turn newer than
+the abandoned one; a fresh session (nothing abandoned) accepts any turn."
+  (let ((dsh-bridge--session-status nil)
+        (dsh-bridge--pending-questions nil)
+        (dsh-bridge--turns-cache (dsh-bridge-test--view-cache
+                                  (list (dsh-bridge-test--view-turn 2 1000 nil 2000)))))
+    (with-temp-buffer
+      (dsh-bridge-view-mode)
+      (setq-local dsh-bridge--view-content-session "s1")
+      (dsh-bridge--view-waiting-fill "s1" 2)
+      ;; The placeholder is propertized furniture.
+      (should (equal (buffer-string) (dsh-bridge--view-running-placeholder)))
+      (should (text-property-any (point-min) (point-max)
+                                 'dsh-bridge-running t))
+      (should (eq dsh-bridge--view-waiting 2))
+      (should (eq dsh-bridge--view-follow t))
+      ;; Not a turn, so no position segment.
+      (should (equal (dsh-bridge--view-turn-position) ""))
+      (should-not (string-match-p "(latest/" (format "%s" header-line-format)))
+      ;; Newer content is accepted; the abandoned turn's own is not.
+      (should (dsh-bridge--view-waiting-accept-p 3))
+      (should-not (dsh-bridge--view-waiting-accept-p 2))
+      (should-not (dsh-bridge--view-waiting-accept-p nil)))
+    ;; A fresh session (nothing abandoned) accepts any turn.
+    (with-temp-buffer
+      (dsh-bridge-view-mode)
+      (setq-local dsh-bridge--view-content-session "s1")
+      (dsh-bridge--view-waiting-fill "s1" nil)
+      (should (eq dsh-bridge--view-waiting t))
+      (should (dsh-bridge--view-waiting-accept-p 1)))))
+
+(ert-deftest dsh-bridge-view-waiting-awaiting-note ()
+  "A waiting view with a pending ask-user question shows the awaiting note
+instead of the `(running...)' placeholder: the fresh turn may ask before it
+commits any text.  Resolving the question restores the placeholder."
+  (when (buffer-live-p (get-buffer "*dsh-bridge-output*"))
+    (kill-buffer "*dsh-bridge-output*"))
+  (let ((dsh-bridge--session-status nil)
+        (dsh-bridge--pending-questions
+         (dsh-bridge-test--pending-ask "s1" "Approve this plan?")))
+    (with-current-buffer (get-buffer-create "*dsh-bridge-output*")
+      (dsh-bridge-view-mode)
+      (setq-local dsh-bridge--view-content-session "s1")
+      (dsh-bridge--view-waiting-fill "s1" 2)
+      (should (string-match-p "Awaiting your response:" (buffer-string)))
+      (should-not (string-match-p "(running\\.\\.\\.)" (buffer-string)))
+      (should (text-property-any (point-min) (point-max)
+                                 'dsh-bridge-awaiting t)))
+    ;; No pending question: back to the plain placeholder.
+    (let ((dsh-bridge--pending-questions nil))
+      (dsh-bridge--view-await-refresh "s1"))
+    (with-current-buffer "*dsh-bridge-output*"
+      (should (string-match-p "(running\\.\\.\\.)" (buffer-string)))
+      (should-not (string-match-p "Awaiting your response:" (buffer-string)))))
   (when (buffer-live-p (get-buffer "*dsh-bridge-output*"))
     (kill-buffer "*dsh-bridge-output*")))
 
@@ -3345,6 +3440,104 @@ once for all of them."
     (dolist (b '("*dsh-bridge-output*" "*dsh-bridge-output-2*"))
       (when (buffer-live-p (get-buffer b))
         (kill-buffer b)))))
+
+(ert-deftest dsh-bridge-turn-complete-refetch-waiting-newer ()
+  "A view waiting on a just-sent prompt accepts the completion refetch's
+content when the completed turn is genuinely newer than the abandoned one:
+the reply replaces the `(running...)' placeholder and the waiting state ends."
+  (let ((dsh-bridge--session-status nil)
+        (dsh-bridge--turns-cache nil)
+        (calls 0))
+    (with-current-buffer (get-buffer-create "*dsh-bridge-output*")
+      (dsh-bridge-view-mode)
+      (setq-local dsh-bridge--view-content-session "s1")
+      (dsh-bridge--view-waiting-fill "s1" 2)
+      (should (equal (buffer-string) (dsh-bridge--view-running-placeholder))))
+    (cl-letf (((symbol-function 'dsh-bridge--call)
+               (lambda (_method _path _payload callback)
+                 (setq calls (1+ calls))
+                 (funcall callback nil
+                          (concat "{\"sessionId\":\"s1\",\"turns\":["
+                                  "{\"turn\":3,\"startedAt\":3000000,"
+                                  "\"endedAt\":3009000,\"reason\":\"completed\","
+                                  "\"segments\":[{\"text\":\"the reply\","
+                                  "\"time\":3001000,\"step\":1}]}]}")
+                          200)))
+              ((symbol-function 'dsh-bridge--status-set) #'ignore)
+              ((symbol-function 'dsh-bridge--apply-session-directory) #'ignore))
+      (dsh-bridge--turn-complete-refetch "s1")
+      (should (= calls 1))
+      (with-current-buffer "*dsh-bridge-output*"
+        ;; Turn 3 is newer than the abandoned turn 2: accepted.
+        (should (equal (buffer-string) "the reply"))
+        (should (equal dsh-bridge--view-turn 3))
+        (should (null dsh-bridge--view-waiting))))
+    (when (buffer-live-p (get-buffer "*dsh-bridge-output*"))
+      (kill-buffer "*dsh-bridge-output*"))))
+
+(ert-deftest dsh-bridge-turn-complete-refetch-waiting-textless-blanks ()
+  "When the sent turn completes without producing any newer content, the
+completion refetch clears the waiting view to blank (idle) rather than
+resurrecting the abandoned turn: `(running...)' gives way to nothing."
+  (let ((dsh-bridge--session-status nil)
+        (dsh-bridge--turns-cache nil))
+    (with-current-buffer (get-buffer-create "*dsh-bridge-output*")
+      (dsh-bridge-view-mode)
+      (setq-local dsh-bridge--view-content-session "s1")
+      (dsh-bridge--view-waiting-fill "s1" 2))
+    ;; The response still names turn 2 as newest: no newer content was ever
+    ;; committed, so the turn was textless.
+    (cl-letf (((symbol-function 'dsh-bridge--call)
+               (lambda (_method _path _payload callback)
+                 (funcall callback nil
+                          (concat "{\"sessionId\":\"s1\",\"turns\":["
+                                  "{\"turn\":2,\"startedAt\":2000000,"
+                                  "\"endedAt\":2009000,\"reason\":\"completed\","
+                                  "\"segments\":[{\"text\":\"old\","
+                                  "\"time\":2001000,\"step\":1}]}]}")
+                          200)))
+              ((symbol-function 'dsh-bridge--status-set) #'ignore)
+              ((symbol-function 'dsh-bridge--apply-session-directory) #'ignore))
+      (dsh-bridge--turn-complete-refetch "s1"))
+    (with-current-buffer "*dsh-bridge-output*"
+      (should (equal (buffer-string) ""))
+      (should (null dsh-bridge--view-turn))
+      (should (null dsh-bridge--view-waiting)))
+    (when (buffer-live-p (get-buffer "*dsh-bridge-output*"))
+      (kill-buffer "*dsh-bridge-output*"))))
+
+(ert-deftest dsh-bridge-view-follow-refill-waiting-gate ()
+  "A waiting view is refilled by `replies-changed' only with a turn newer than
+the abandoned one: a still-running abandoned turn (or nothing newer) keeps the
+`(running...)' placeholder and the waiting state; a newer turn replaces it."
+  (let ((dsh-bridge--session-status nil)
+        (dsh-bridge--turns-cache nil))
+    ;; Case 1: the cache's newest is still the abandoned turn 2 (open, no new
+    ;; content committed): the placeholder survives the refill.
+    (with-current-buffer (get-buffer-create "*dsh-bridge-output*")
+      (dsh-bridge-view-mode)
+      (setq-local dsh-bridge--view-content-session "s1")
+      (dsh-bridge--view-waiting-fill "s1" 2))
+    (let ((dsh-bridge--turns-cache
+           (dsh-bridge-test--view-cache
+            (list (dsh-bridge-test--view-turn 2 2000000
+                    (list (dsh-bridge-test--view-segment "old" 2001000 1)))))))
+      (dsh-bridge--view-follow-refill "s1"))
+    (with-current-buffer "*dsh-bridge-output*"
+      (should (equal (buffer-string) (dsh-bridge--view-running-placeholder)))
+      (should (equal dsh-bridge--view-waiting 2)))
+    ;; Case 2: a newer turn (3) has started producing: it replaces the
+    ;; placeholder and clears the waiting state.
+    (let ((dsh-bridge--turns-cache
+           (dsh-bridge-test--view-cache
+            (list (dsh-bridge-test--view-turn 3 3000000
+                    (list (dsh-bridge-test--view-segment "fresh" 3001000 1)))))))
+      (dsh-bridge--view-follow-refill "s1"))
+    (with-current-buffer "*dsh-bridge-output*"
+      (should (equal (buffer-string) "fresh\n\n(continuing...)"))
+      (should (null dsh-bridge--view-waiting)))
+    (when (buffer-live-p (get-buffer "*dsh-bridge-output*"))
+      (kill-buffer "*dsh-bridge-output*"))))
 
 (ert-deftest dsh-bridge-view-ticker-survives-view-kill ()
   "Killing one ticking DSH-View keeps the shared elapsed ticker running for
