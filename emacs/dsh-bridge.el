@@ -2602,6 +2602,39 @@ Used to prepare the DSH-prompt buffer for a fresh prompt composition."
 	(setq-local dsh-bridge--prompt-draft nil)
 	(set-buffer-modified-p nil)))
 
+(defun dsh-bridge--after-prompt-view (session-id)
+  "Return a DSH-View buffer for SESSION-ID after a prompt.
+This sets up a DSH-VIEW buffer for the session in following state,
+initializing its header line and other necessary variables."
+  ;; Fetch the session's turn list and record the epoch (for later
+  ;; incremental fetches, and to know if a turn is already running).
+  (let* ((path (dsh-bridge--path "/turns" session-id))
+		 (result (dsh-bridge--request "GET" path nil))
+		 (alist (cdr-safe result))
+		 (turns-pair (assoc 'turns alist))
+		 (turns (cdr-safe turns-pair)))
+	(when turns-pair
+	  (dsh-bridge--turns-cache-store session-id turns
+									 (alist-get 'epoch alist)))
+	(let* ((buf (or (dsh-bridge--session-view session-id)
+					(get-buffer-create "*dsh-bridge-output*")))
+		   (newest (car-safe turns)))
+	  (with-current-buffer buf
+		(if (and newest (dsh-bridge--view-turn-open-p newest))
+			;; If a turn was already running, show it as usual.
+			(progn
+			  (dsh-bridge--view-fill session-id newest nil
+									 (alist-get 'cwd alist) t)
+			  (setq-local dsh-bridge--view-waiting nil))
+		  ;; Otherwise, populate with a "running..." message.
+		  (dsh-bridge--view-waiting-fill
+		   session-id (and newest (alist-get 'turn newest))
+		   (alist-get 'cwd alist)))
+		(setq-local dsh-bridge--view-follow t)
+		(setq header-line-format (dsh-bridge--view-header-line))
+		(dsh-bridge--view-ticker-ensure))
+	  buf)))
+
 (defun dsh-bridge--prompt-exit (sent-session-id)
   "Clean up after a successful `dsh-bridge-send-and-exit'.
 Called from `dsh-bridge-send-and-exit' after the prompt has been
@@ -2611,53 +2644,22 @@ host-reported session id to which the prompt was delivered.
 Bury the DSH-Prompt buffer, keeping its contents (the sent text also
 stays in the prompt history; the next composition erases it, asking
 first only if it was edited further).
+
 If SENT-SESSION-ID is non-nil, pop to a DSH-View buffer showing that
-session in turn-following state.  Uses `pop-to-buffer' so a window
-already showing another session's view is not forcibly replaced."
+session in turn-following state."
   (when (eq major-mode 'dsh-bridge-prompt-mode)
 	(set-buffer-modified-p nil)
-	(bury-buffer)
-	(when sent-session-id
-	  ;; Fetch the session's turn list: it records the epoch for later
-	  ;; incremental fetches and tells us whether a turn is already running.
-	  (let* ((result (dsh-bridge--request "GET"
-										  (dsh-bridge--path "/turns" sent-session-id)
-										  nil))
-			 (alist (cdr-safe result))
-			 (turns-pair (and alist (assoc 'turns alist)))
-			 (turns (cdr turns-pair)))
-		(unless (or alist (car result))
-		  ;; Transport failure: say so, since the user lands on a blank view.
-		  (message "dsh-bridge: could not load the latest turn"))
-		;; Field presence, not truthiness: an explicit empty list (no turns,
-		;; e.g. after a full compaction) replaces the stale cache entry.  This
-		;; full response also records the session's `epoch', so later
-		;; incremental fetches validate against the fresh generation.
-		(when turns-pair
-		  (dsh-bridge--turns-cache-store sent-session-id turns
-										 (alist-get 'epoch alist)))
-		;; The sent prompt's turn has not committed anything yet: showing the
-		;; abandoned turn (the previous newest) would read as "that old turn is
-		;; running" while the glyph is yellow.  Erase to the running placeholder
-		;; instead, and let the first committed segment of the new turn refill
-		;; it.  If a turn was *already* running with content (a queued second
-		;; send), show it live as usual.
-		(let* ((buf (or (dsh-bridge--session-view sent-session-id)
-						(get-buffer-create "*dsh-bridge-output*")))
-			   (newest (car-safe turns)))
-		  (with-current-buffer buf
-			(if (and newest (dsh-bridge--view-turn-open-p newest))
-				(progn
-				  (dsh-bridge--view-fill sent-session-id newest nil
-										 (alist-get 'cwd alist) t)
-				  (setq-local dsh-bridge--view-waiting nil))
-			  (dsh-bridge--view-waiting-fill
-			   sent-session-id (and newest (alist-get 'turn newest))
-			   (alist-get 'cwd alist)))
-			(setq-local dsh-bridge--view-follow t)
-			(setq header-line-format (dsh-bridge--view-header-line))
-			(dsh-bridge--view-ticker-ensure))
-		  (pop-to-buffer buf))))))
+	(if (null sent-session-id)
+		(bury-buffer)
+	  (let ((buf (dsh-bridge--after-prompt-view sent-session-id)))
+		;; If the view buffer is already being shown, quit this window
+		;; (deleting it); otherwise, just bury the buffer.  This
+		;; avoids a situation where the view buffer appears twice.
+		(if (and (get-buffer-window buf)
+				 (eq (window-buffer) (current-buffer)))
+			(quit-window)
+		  (bury-buffer (current-buffer)))
+		(pop-to-buffer buf)))))
 
 ;;;###autoload
 (defun dsh-bridge-draft (&optional session-id)
@@ -4471,24 +4473,22 @@ effective session, `f' fetches the latest turn, `t' sets the default target,
 (defvar dsh-bridge-menu
   (easy-menu-create-menu
    "DSH Bridge"
-   '(["DSH Bridge Dispatcher…" dsh-bridge
+   '(["DSH Bridge Dispatcher" dsh-bridge
 	  :help "Open the DSH bridge dispatcher"]
+	 ["List Sessions" dsh-bridge-list-sessions
+	  :help "Browse DSH sessions in a tabulated list"]
 	 "---"
 	 ["Edit Prompt Buffer" dsh-bridge-prompt
-	  :help "Pop to the persistent prompt buffer"]
+	  :help "Pop to the DSH prompt buffer"]
 	 ["Send Region or Buffer" dsh-bridge-send
 	  :help "Send the region (or whole buffer) to DSH as a prompt"]
-	 ["Send as Draft" dsh-bridge-draft
-	  :help "Send the region (or whole buffer) to the DSH composer as a draft"]
+	 "---"
 	 ["Fetch Latest Turn" dsh-bridge-fetch
 	  :help "Fetch the latest assistant turn into a DSH-View buffer"]
 	 ["Receive Message…" dsh-bridge-receive
-	  :help "Receive the latest message DSH sent to Emacs"]
-	 "---"
-	 ["Set Default Target…" dsh-bridge-set-default-target
-	  :help "Set the bridge-wide default target (or choose last-active to clear)"]
-	 ["List Sessions" dsh-bridge-list-sessions
-	  :help "Browse DSH sessions in a tabulated list"]))
+	  :help "Receive the latest message sent from DSH to Emacs"]
+	 ["Set Default Target Session" dsh-bridge-set-default-target
+	  :help "Set or clear the default DSH target session"]))
   "DSH Bridge menu, installed under Tools.")
 
 (easy-menu-add-item nil '("Tools") dsh-bridge-menu)
