@@ -3443,6 +3443,115 @@ copy silently instead of duplicating the registry entry."
     (when (buffer-live-p (get-buffer "*dsh-bridge-question: T*"))
       (kill-buffer "*dsh-bridge-question: T*"))))
 
+(defun dsh-bridge-test--pending-ask (session question)
+  "A `dsh-bridge--pending-questions' registry with one QUESTION for SESSION."
+  (list (cons session
+              (list (cons "q1"
+                          (list (list (cons 'id "q1") (cons 'question question))))))))
+
+(ert-deftest dsh-bridge-view-awaiting-tail ()
+  "While SESSION-ID has a pending ask-user question, a running turn's tail
+reads as the awaiting note instead of `(continuing...)', quoting the question
+and naming the live `dsh-bridge-answer' binding; completion drops the tail."
+  (let* ((open (dsh-bridge-test--view-turn 7 7000000
+                (list (dsh-bridge-test--view-segment "progress" 7001000 1))))
+         (done (dsh-bridge-test--view-turn 7 7000000
+                (list (dsh-bridge-test--view-segment "progress" 7001000 1))
+                8000000 "completed")))
+    (with-temp-buffer
+      (dsh-bridge-view-mode)
+      (setq-local dsh-bridge--view-content-session "s1")
+      (let ((dsh-bridge--pending-questions
+             (dsh-bridge-test--pending-ask "s1" "Approve this plan?")))
+        (let ((rendered (dsh-bridge--view-turn-render open "s1")))
+          (should (string-prefix-p "progress\n\n" rendered))
+          (should (string-match-p "Awaiting your response:" rendered))
+          (should (string-match-p (regexp-quote "Approve this plan?") rendered))
+          (should (string-match-p
+                   (concat "press " (regexp-quote (dsh-bridge--view-answer-key)))
+                   rendered))
+          (should-not (string-match-p "(continuing\\.\\.\\.)" rendered))
+          (should (text-property-any 0 (length rendered)
+                                     'dsh-bridge-awaiting t rendered)))
+        ;; The same turn without a pending ask keeps the continuing marker.
+        (let ((dsh-bridge--pending-questions nil))
+          (should (string-match-p "(continuing\\.\\.\\.)"
+                                  (dsh-bridge--view-turn-render open "s1")))))
+      ;; A completed turn shows no tail even while a question is pending.
+      (let ((dsh-bridge--pending-questions
+             (dsh-bridge-test--pending-ask "s1" "Approve this plan?")))
+        (should (equal (dsh-bridge--view-turn-render done "s1") "progress"))))))
+
+(ert-deftest dsh-bridge-view-awaiting-note-variants ()
+  "The awaiting note leads with the question text, its count, or a fallback,
+and quotes the answer key from the real `dsh-bridge-answer' binding."
+  (with-temp-buffer
+    (dsh-bridge-view-mode)
+    (setq-local dsh-bridge--view-content-session "s1")
+    ;; Single question: quoted text plus the action.
+    (let ((dsh-bridge--pending-questions
+           (dsh-bridge-test--pending-ask "s1" "Approve this plan?")))
+      (should (equal (dsh-bridge--view-awaiting-note "s1")
+                     (concat "(Awaiting your response: “Approve this plan?” — "
+                             "press " (dsh-bridge--view-answer-key)
+                             " to view and answer)"))))
+    ;; Several questions under one ask: the count tells the user what to expect.
+    (let ((dsh-bridge--pending-questions
+           (list (cons "s1"
+                       (list (cons "q1"
+                                   (list (list (cons 'id "q1") (cons 'question "One?"))
+                                         (list (cons 'id "q2") (cons 'question "Two?")))))))))
+      (should (string-match-p "Awaiting your response: 2 questions"
+                              (dsh-bridge--view-awaiting-note "s1"))))
+    ;; Whitespace-only question text: a plain invitation.
+    (let ((dsh-bridge--pending-questions
+           (dsh-bridge-test--pending-ask "s1" "   ")))
+      (should (string-match-p "view the question"
+                              (dsh-bridge--view-awaiting-note "s1"))))))
+
+(ert-deftest dsh-bridge-view-await-question-text-normalizes ()
+  "Question text for the note is single-line, free of double quotes, and
+truncated to about 72 columns."
+  (should (equal (dsh-bridge--view-await-question-text "say \"hi\"\nthere")
+                 "say hi there"))
+  (should (equal (dsh-bridge--view-await-question-text
+                  (make-string 200 ?x))
+                 (concat (make-string 69 ?x) "..."))))
+
+(ert-deftest dsh-bridge-view-awaiting-ask-frames-refresh-tail ()
+  "An ask-user frame flips a following view's running marker to the awaiting
+note; its resolution flips it back to `(continuing...)'."
+  (when (get-buffer "*dsh-bridge-sessions*")
+    (kill-buffer "*dsh-bridge-sessions*"))
+  (when (get-buffer "*dsh-bridge-output*")
+    (kill-buffer "*dsh-bridge-output*"))
+  (let* ((open (dsh-bridge-test--view-turn 7 7000000
+                (list (dsh-bridge-test--view-segment "progress" 7001000 1))))
+         (dsh-bridge--turns-cache (dsh-bridge-test--view-cache (list open)))
+         (dsh-bridge--pending-questions nil)
+         (dsh-bridge--session-status nil))
+    (with-current-buffer (get-buffer-create "*dsh-bridge-output*")
+      (dsh-bridge-view-mode)
+      (setq-local dsh-bridge--view-content-session "s1")
+      (setq-local dsh-bridge--view-follow t)
+      (dsh-bridge--view-fill "s1" open nil nil t)
+      (should (string-match-p "(continuing\\.\\.\\.)" (buffer-string))))
+    (cl-letf (((symbol-function 'message) (lambda (&rest _) nil)))
+      (dsh-bridge--notification-handle-events
+       '(((kind . "ask-user") (sessionId . "s1") (questionId . "q1")
+          (questions . (((id . "q1") (question . "Approve this plan?")))))))
+      (with-current-buffer "*dsh-bridge-output*"
+        (should (string-match-p "Awaiting your response:" (buffer-string)))
+        (should-not (string-match-p "(continuing\\.\\.\\.)" (buffer-string))))
+      (dsh-bridge--notification-handle-events
+       '(((kind . "ask-user-resolved") (sessionId . "s1") (questionId . "q1")
+          (outcome . "answered"))))
+      (with-current-buffer "*dsh-bridge-output*"
+        (should (string-match-p "(continuing\\.\\.\\.)" (buffer-string)))))
+    (kill-buffer "*dsh-bridge-output*")
+    (when (buffer-live-p (get-buffer "*dsh-bridge-question: s1*"))
+      (kill-buffer "*dsh-bridge-question: s1*"))))
+
 (ert-deftest dsh-bridge-question-toggle-radio ()
   "Option marking is radio behavior for single-select questions, and reopening
 the buffer for the same question keeps the marks (bury-then-return flow)."

@@ -163,8 +163,10 @@ idle reply, so a multi-step turn that committed several short
 mid-turn replies ("Let me look at the working-tree changes first.")
 reads as one unit, its segments separated by `---` horizontal-rule
 dividers.  A turn that is still running ends with a quiet `(continuing...)`
-marker (dimmed, so it never reads as model text); once the turn finishes
-the marker disappears and the content ends cleanly — the turn's elapsed
+marker (dimmed, so it never reads as model text) — or, while the agent is
+parked waiting for you to answer an ask-user question, an `Awaiting your
+response` note; once the turn finishes the marker disappears and the content
+ends cleanly — the turn's elapsed
 time and end reason are signalled by the header and the echo area instead
 of cluttering the buffer.  The buffer is fetched by `f` from the
 transient menu or the DSH-Sessions buffer, `C-c C-f` from the DSH-Prompt
@@ -251,9 +253,12 @@ run `M-x dsh-bridge-receive`) to pull the last message pushed.
 When the model pauses to ask you something (`ask_user_question`), the
 bridge surfaces it in Emacs.  The session's status glyph becomes an
 awaiting marker (`⏳`), the DSH-View header spells out "awaiting your
-answer", and the echo area announces the question.  The session stays
-`running` host-side (its turn is parked inside the tool call), so you
-must answer before it continues.
+answer", the echo area announces the question, and a DSH-View buffer
+following the session ends with an `Awaiting your response: "…" — press
+<key> to view and answer` note (the key is whatever `dsh-bridge-answer`
+is bound to) instead of the usual `(continuing...)` marker.  The session
+stays `running` host-side (its turn is parked inside the tool call), so
+you must answer before it continues.
 
 * `a` — in the DSH-View or DSH-Sessions buffer, open the pending
   question buffer for the shown / point session.

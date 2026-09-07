@@ -1808,10 +1808,12 @@ nil by any history-walking command or manual buffer navigation.")
 ;; The DSH-View shows one *turn*: every text-bearing assistant message a turn
 ;; committed, in order, separated by GFM horizontal-rule dividers (a `---'
 ;; line between two blanks, so it never reads as a setext heading).  A turn
-;; that is still running ends with a terminal `(continuing...)' marker line —
-;; propertized so it reads as bridge furniture rather than model text — which
-;; disappears once the turn completes, or becomes the next segment's leading
-;; `---' when another segment is committed (the marker is always terminal).
+;; that is still running ends with a terminal marker line — propertized so it
+;; reads as bridge furniture rather than model text — which reads
+;; `(continuing...)' while the agent streams, or an "awaiting your response"
+;; note while the agent is parked on an ask-user question, and disappears
+;; once the turn completes (or becomes the next segment's leading `---' when
+;; another segment is committed: the marker is always terminal).
 
 (defconst dsh-bridge--view-segment-divider "\n\n---\n\n"
   "Buffer text between two segments of the same turn: a GFM horizontal rule
@@ -1833,12 +1835,82 @@ identify the marker regardless of model text that happens to read the same."
               'face 'dsh-bridge-view-marker-face
               'dsh-bridge-turn-marker t))
 
-(defun dsh-bridge--view-turn-render (turn)
+(defun dsh-bridge--view-answer-key ()
+  "The key sequence bound to `dsh-bridge-answer', as display text.
+Searches the current buffer's local keymap (honoring a user rebinding), the
+global map, and the DSH-View / DSH-Sessions maps, in that order; a command
+bound nowhere reads as \"M-x dsh-bridge-answer\"."
+  (let ((key nil)
+        (maps (delq nil (list (and (current-local-map) (current-local-map))
+                              (and (current-global-map) (current-global-map))
+                              (and (boundp 'dsh-bridge-view-mode-map)
+                                   dsh-bridge-view-mode-map)
+                              (and (boundp 'dsh-bridge-sessions-mode-map)
+                                   dsh-bridge-sessions-mode-map)))))
+    (while (and (null key) maps)
+      (setq key (where-is-internal 'dsh-bridge-answer (car maps) t)
+            maps (cdr maps)))
+    (if key (key-description key) "M-x dsh-bridge-answer")))
+
+(defun dsh-bridge--view-await-question-text (text)
+  "TEXT normalized for the awaiting note: one line, no double quotes,
+truncated to about 72 columns with an ASCII ellipsis."
+  (let* ((one-line (string-replace "\"" ""
+				   (string-replace "\n" " " (or text ""))))
+	 (one-line (replace-regexp-in-string "[ \t]+" " " one-line))
+	 (one-line (string-trim one-line)))
+    (if (> (length one-line) 72)
+	(concat (substring one-line 0 69) "...")
+      one-line)))
+
+(defun dsh-bridge--view-awaiting-note (session-id)
+  "The terminal note shown in place of `(continuing...)' while SESSION-ID is
+parked on an ask-user question, as a propertized string.
+
+The user has not seen the question yet, so the note leads with the pending
+question's text (or its count) and says what to do next — the binding of
+`dsh-bridge-answer', resolved live (`dsh-bridge--view-answer-key'), which
+opens the question buffer.  Carries the same `dsh-bridge-turn-marker'
+property as the running marker, so fill preservation and copy handling treat
+the two interchangeably, plus `dsh-bridge-awaiting' to tell them apart."
+  (let* ((entry (dsh-bridge--pending-question session-id))
+	 (questions (and entry (cdr entry)))
+	 (count (length questions))
+	 (first (car questions))
+	 (raw (and (listp first) (alist-get 'question first)))
+	 (text (dsh-bridge--view-await-question-text
+		(and (stringp raw) (not (string-empty-p raw)) raw)))
+	 (key (dsh-bridge--view-answer-key))
+	 (body
+	  (cond
+	   ((and text (not (string-empty-p text)) (= count 1))
+	    (format "Awaiting your response: “%s” — press %s to view and answer"
+		    text key))
+	   ((> count 1)
+	    (format "Awaiting your response: %d questions — press %s to view and answer"
+		    count key))
+	   (t
+	    (format "Awaiting your response — press %s to view the question" key)))))
+    (propertize (concat "(" body ")")
+		'face 'dsh-bridge-view-awaiting-face
+		'dsh-bridge-turn-marker t
+		'dsh-bridge-awaiting t)))
+
+(defun dsh-bridge--view-turn-tail (session-id)
+  "The terminal marker of a running turn shown in SESSION-ID's view.
+`(continuing...)' while the agent streams; the awaiting note
+(`dsh-bridge--view-awaiting-note') while the session is parked on an
+ask-user question, so the buffer itself says the user must act."
+  (if (and session-id (dsh-bridge--session-awaiting-p session-id))
+      (dsh-bridge--view-awaiting-note session-id)
+    (dsh-bridge--view-running-marker)))
+
+(defun dsh-bridge--view-turn-render (turn &optional session-id)
   "Buffer text for the whole TURN record, or \"\" for nil.
 TURN's segments (oldest first) are joined by GFM horizontal-rule dividers; a
-turn that is still running ends with the `(continuing...)' marker
-(`dsh-bridge--view-running-marker'), and a completed turn ends cleanly after
-its last segment."
+turn that is still running ends with the marker for SESSION-ID's view
+(`dsh-bridge--view-turn-tail' — `(continuing...)' or the awaiting note), and
+a completed turn ends cleanly after its last segment."
   (if (null turn)
       ""
     (let* ((texts (mapcar (lambda (seg) (or (alist-get 'text seg) ""))
@@ -1847,8 +1919,8 @@ its last segment."
       (concat body
               (and (dsh-bridge--view-turn-open-p turn)
                    (if (string-empty-p body)
-                       (dsh-bridge--view-running-marker)
-                     (concat "\n\n" (dsh-bridge--view-running-marker))))))))
+                       (dsh-bridge--view-turn-tail session-id)
+                     (concat "\n\n" (dsh-bridge--view-turn-tail session-id))))))))
 
 (defun dsh-bridge--view-turn-text (turn)
   "The raw Markdown of TURN's segments, blank-line separated (no dividers).
@@ -2639,7 +2711,8 @@ refilling the same session and dropped when the shown session changes."
          ;; content without its terminal marker.
          (old-core (and preserve-point
                         (dsh-bridge--view-strip-running-marker old-text)))
-         (new-text (if (stringp turn) turn (dsh-bridge--view-turn-render turn))))
+         (new-text (if (stringp turn) turn
+                     (dsh-bridge--view-turn-render turn session-id))))
     (let ((inhibit-read-only t))
       (erase-buffer)
       (insert new-text)
@@ -2667,6 +2740,24 @@ best-effort)."
 	(with-current-buffer buf
 	  (dsh-bridge--view-fill session-id text (alist-get 'ts entry)))
 	buf))
+
+(defun dsh-bridge--view-await-refresh (session-id)
+  "Re-render the running-turn tail of every DSH-View buffer showing SESSION-ID.
+Called when SESSION-ID's ask-user question arrives or is resolved: the turn
+content is unchanged, only the terminal marker flips between `(continuing...)'
+and the awaiting note (see `dsh-bridge--view-awaiting-note'), so the refill
+reuses the cached turn record and preserves point.  A no-op for sessions no
+view shows as an open cached turn."
+  (dolist (buf (dsh-bridge--session-views session-id))
+    (with-current-buffer buf
+      (let* ((turns (dsh-bridge--turns-cache-turns session-id))
+             (record (and dsh-bridge--view-turn
+                          (seq-find (lambda (r)
+                                      (equal (alist-get 'turn r)
+                                             dsh-bridge--view-turn))
+                                    turns))))
+        (when (and record (dsh-bridge--view-turn-open-p record))
+          (dsh-bridge--view-fill session-id record nil nil t t))))))
 
 ;;; Ask-user questions (the DSH `ask_user_question` tool)
 
@@ -2751,10 +2842,13 @@ stored copy, silently, without re-messaging or touching the question buffer."
 			  dsh-bridge--pending-questions))
 	  (let* ((first (car questions))
 			 (q (and (listp first) (alist-get 'question first))))
-		(message "dsh-bridge: session \"%s\" asks: %s ('a' to answer)"
+		(message "dsh-bridge: session \"%s\" asks: %s (press %s to answer)"
 				 (dsh-bridge--session-label session-id)
-				 (or (and (stringp q) (substring q 0 (min 60 (length q)))) "")))
+				 (or (and (stringp q) (substring q 0 (min 60 (length q)))) "")
+				 (dsh-bridge--view-answer-key)))
 	  (dsh-bridge--status-event-render session-id)
+	  ;; The DSH-View body must say the session is parked, not "(continuing...)".
+	  (dsh-bridge--view-await-refresh session-id)
 	  (let ((buffer (dsh-bridge--question-buffer session-id question-id questions)))
 		(when dsh-bridge-question-auto-pop
 		  (pop-to-buffer buffer))))))
@@ -2768,6 +2862,7 @@ stored copy, silently, without re-messaging or touching the question buffer."
 		(setq dsh-bridge--pending-questions
 			  (assoc-delete-all session-id dsh-bridge--pending-questions)))))
   (dsh-bridge--status-event-render session-id)
+  (dsh-bridge--view-await-refresh session-id)
   (dsh-bridge--question-mark-resolved session-id question-id outcome))
 
 ;; The question buffer -------------------------------------------------------
@@ -3628,6 +3723,13 @@ pin to write, and clearing has no host round-trip."
   "Face for the `(continuing...)' marker at the end of a running turn.
 The marker is bridge furniture, not model text; this face keeps it visually
 quiet so it never reads as part of the reply."
+  :group 'dsh-bridge)
+
+(defface dsh-bridge-view-awaiting-face
+  '((t :inherit bold :foreground "orange"))
+  "Face for the \"Awaiting your response…\" note at the end of a running turn.
+Shown while the session is parked on an ask-user question, so the note stands
+out from the quiet `(continuing...)' marker it replaces."
   :group 'dsh-bridge)
 
 (defun dsh-bridge--default-target-marker (session)
