@@ -84,10 +84,11 @@ pursuing the Emacs-as-primary-client (ACP-style) model.
   workspace-rename, peek/describe/copy-id).
 - `dsh-bridge-view-mode`: read-only turn buffer with GFM font-lock (when
   markdown-mode is installed).  A buffer shows one agent turn — its committed
-  segments separated by `(continuing…)` divider rules, closed by an
-  elapsed/reason divider when the turn ends — and `M-p`/`M-n` walk the
-  session's turns.  Copy, refetch, and follow mode (the follow refills
-  append each new segment as `replies-changed` frames arrive).
+  segments separated by `---` horizontal-rule dividers; a running turn ends
+  with a dimmed `(continuing...)` marker that disappears on completion — and
+  `M-p`/`M-n` walk the session's turns.  Copy, refetch, and follow mode (the
+  follow refills append each new segment as `replies-changed` frames
+  arrive).
 - `dsh-bridge-prompt-mode`: markdown-derived composition buffer with prompt
   history (`M-p`/`M-n`), `C-c C-c` send / `C-c C-d` draft, and `C-c C-m`
   model selection (`completing-read` over the host catalog, with a second
@@ -200,8 +201,9 @@ In suggested order:
 3. **Turn-aggregated DSH-View buffers (implemented;
    `turn-aggregation-plan.md`, phases 1–2).** DSH-View shows one agent *turn* per buffer:
    the session's committed assistant messages grouped by harness turn, their
-   segments separated by `(continuing…)` divider rules and closed by an
-   elapsed/reason divider, and `M-p`/`M-n` walk turns instead of replies.
+   segments separated by `---` horizontal-rule dividers (a running turn ends
+   with a dimmed `(continuing...)` marker that disappears on completion),
+   and `M-p`/`M-n` walk turns instead of replies.
    `/replies` became `GET /turns`, whose records carry
    `{ turn, startedAt, endedAt?, reason?, segments }` plus `running` and an
    `epoch`; the pure `assistantTurns` fold walks `Session.surface.nodes` +

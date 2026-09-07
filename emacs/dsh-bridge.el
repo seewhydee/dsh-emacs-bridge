@@ -1806,69 +1806,49 @@ nil by any history-walking command or manual buffer navigation.")
 ;;; Turn rendering and the position counter
 
 ;; The DSH-View shows one *turn*: every text-bearing assistant message a turn
-;; committed, in order, separated by GFM divider blocks.  A divider is a `---'
-;; horizontal rule with an info line below it; it needs a preceding blank line
-;; so a `---' directly after reply text is never parsed as a setext heading.
+;; committed, in order, separated by GFM horizontal-rule dividers (a `---'
+;; line between two blanks, so it never reads as a setext heading).  A turn
+;; that is still running ends with a terminal `(continuing...)' marker line —
+;; propertized so it reads as bridge furniture rather than model text — which
+;; disappears once the turn completes, or becomes the next segment's leading
+;; `---' when another segment is committed (the marker is always terminal).
 
-(defconst dsh-bridge--view-continuing-divider "\n\n---\n\n(continuing…)\n\n"
-  "Buffer text between two segments of the same turn: a GFM rule plus a
-`(continuing…)' info line saying the turn is not over.")
+(defconst dsh-bridge--view-segment-divider "\n\n---\n\n"
+  "Buffer text between two segments of the same turn: a GFM horizontal rule
+between two blank lines.")
 
-(defun dsh-bridge--format-elapsed (ms)
-  "Format MS (milliseconds) as a compact duration, e.g. \"8s\" or \"5m02s\"."
-  (let* ((secs (max 0 (round (/ ms 1000.0))))
-		 (mins (/ secs 60))
-		 (hours (/ mins 60)))
-	(cond
-	 ((< secs 60) (format "%ds" secs))
-	 ((< mins 60) (format "%dm%02ds" mins (% secs 60)))
-	 (t (format "%dh%02dm" hours (% mins 60))))))
+(defun dsh-bridge--view-turn-open-p (turn)
+  "Whether TURN is still open (running): no end facts recorded yet.
+A completed turn carries `endedAt' (and a `reason'), so an open turn is
+recognized by their absence."
+  (not (or (alist-get 'endedAt turn)
+           (alist-get 'reason turn))))
 
-(defun dsh-bridge--turn-reason-label (reason)
-  "A short human label for a turn-end REASON kind string, or nil for `completed'.
-`completed' is the normal end and is never spelled out; an unrecognized kind
-keeps its own string, so a future harness reason still reads sensibly."
-  (pcase reason
-	("completed" nil)
-	("aborted" "interrupted")
-	("error" "failed")
-	("max-tokens" "stopped at the token limit")
-	("blocked" "blocked")
-	("interrupted" "interrupted")
-	(_ reason)))
-
-(defun dsh-bridge--view-turn-closing-divider (turn)
-  "The GFM divider closing a completed TURN, or \"\" for an open turn.
-Rendered below the turn's last segment once the turn has ended: a `---' rule
-plus an info line carrying the turn's elapsed time (`endedAt' - `startedAt')
-and, when the end reason is not `completed', its label.  An open (running)
-turn gets no closing divider — its elapsed is the header's live ticker."
-  (let* ((started (alist-get 'startedAt turn))
-		 (ended (alist-get 'endedAt turn))
-		 (reason (alist-get 'reason turn))
-		 (label (dsh-bridge--turn-reason-label reason)))
-	(if (and (not (numberp ended)) (not reason))
-		""
-	  (let* ((elapsed (and (numberp started) (numberp ended)
-						   (dsh-bridge--format-elapsed (- ended started))))
-			 (info (cond
-					((and elapsed label) (format "(%s elapsed · %s)" elapsed label))
-					(elapsed (format "(%s elapsed)" elapsed))
-					(label (format "(%s)" label))
-					(t nil))))
-		(if info (concat "\n\n---\n\n" info) "")))))
+(defun dsh-bridge--view-running-marker ()
+  "The terminal marker line of a running turn, as a propertized string.
+`(continuing...)' reads as \"this turn is not finished yet\".  The
+`dsh-bridge-turn-marker' text property lets code (fill preservation, tests)
+identify the marker regardless of model text that happens to read the same."
+  (propertize "(continuing...)"
+              'face 'dsh-bridge-view-marker-face
+              'dsh-bridge-turn-marker t))
 
 (defun dsh-bridge--view-turn-render (turn)
   "Buffer text for the whole TURN record, or \"\" for nil.
-TURN's segments (oldest first) are joined by `(continuing…)' divider blocks;
-once the turn has ended, `dsh-bridge--view-turn-closing-divider' is appended."
+TURN's segments (oldest first) are joined by GFM horizontal-rule dividers; a
+turn that is still running ends with the `(continuing...)' marker
+(`dsh-bridge--view-running-marker'), and a completed turn ends cleanly after
+its last segment."
   (if (null turn)
-	  ""
-	(concat
-	 (mapconcat (lambda (seg) (or (alist-get 'text seg) ""))
-				(alist-get 'segments turn)
-				dsh-bridge--view-continuing-divider)
-	 (dsh-bridge--view-turn-closing-divider turn))))
+      ""
+    (let* ((texts (mapcar (lambda (seg) (or (alist-get 'text seg) ""))
+                          (alist-get 'segments turn)))
+           (body (mapconcat #'identity texts dsh-bridge--view-segment-divider)))
+      (concat body
+              (and (dsh-bridge--view-turn-open-p turn)
+                   (if (string-empty-p body)
+                       (dsh-bridge--view-running-marker)
+                     (concat "\n\n" (dsh-bridge--view-running-marker))))))))
 
 (defun dsh-bridge--view-turn-text (turn)
   "The raw Markdown of TURN's segments, blank-line separated (no dividers).
@@ -2608,6 +2588,14 @@ yourself; the SSE listener calls it automatically unless
 			  (message "dsh-bridge: %d messages received from DSH"
 					   (length entries))))))))))
 
+(defun dsh-bridge--view-strip-running-marker (string)
+  "STRING without a trailing running-turn marker, if one is present.
+The marker is identified by its `dsh-bridge-turn-marker' text property, so
+model text that happens to read \"(continuing...)\" is never stripped."
+  (let ((start (text-property-any 0 (length string)
+                                 'dsh-bridge-turn-marker t string)))
+    (if start (substring string 0 start) string)))
+
 (defun dsh-bridge--view-fill (session-id turn received-at &optional cwd no-turns-refresh preserve-point)
   "Fill the current buffer with TURN as the shown content of SESSION-ID.
 TURN is a turn record (alist), a raw text string (a pushed message with no
@@ -2623,9 +2611,10 @@ refreshed the shared cache once already (see
 `dsh-bridge--turns-cache-fetch').  A raw string fill (a pushed message
 with no turn identity) never refreshes: it has no position to display.
 With PRESERVE-POINT, point survives when the new content merely extends
-the old (the mid-turn append case); otherwise point goes to the top.
-Turn-following state is preserved when refilling the same session and
-dropped when the shown session changes."
+the old (the mid-turn append case, where the old terminal
+`(continuing...)' marker gives way to the next segment's leading `---');
+otherwise point goes to the top.  Turn-following state is preserved when
+refilling the same session and dropped when the shown session changes."
   (unless (eq major-mode 'dsh-bridge-view-mode)
     (dsh-bridge-view-mode))
   (add-hook 'kill-buffer-hook #'dsh-bridge--view-ticker-ensure-later nil t)
@@ -2644,12 +2633,18 @@ dropped when the shown session changes."
     (dsh-bridge--view-turns-refresh t))
   (let* ((old-text (buffer-string))
          (old-point (point))
+         ;; The old buffer may end with the running-turn marker; when the new
+         ;; content turns that boundary into the next segment's `---', the
+         ;; old marker is replaced mid-string, so compare against the old
+         ;; content without its terminal marker.
+         (old-core (and preserve-point
+                        (dsh-bridge--view-strip-running-marker old-text)))
          (new-text (if (stringp turn) turn (dsh-bridge--view-turn-render turn))))
     (let ((inhibit-read-only t))
       (erase-buffer)
       (insert new-text)
-      (if (and preserve-point (string-prefix-p old-text new-text))
-          (goto-char (min old-point (point-max)))
+      (if (and preserve-point (string-prefix-p old-core new-text))
+          (goto-char (min old-point (1+ (length old-core))))
         (goto-char (point-min)))))
   (setq header-line-format (dsh-bridge--view-header-line))
   (dsh-bridge--view-ticker-ensure))
@@ -3628,6 +3623,13 @@ pin to write, and clearing has no host round-trip."
   "Face for a session whose turn is paused on an ask-user question."
   :group 'dsh-bridge)
 
+(defface dsh-bridge-view-marker-face
+  '((t :inherit shadow :italic t))
+  "Face for the `(continuing...)' marker at the end of a running turn.
+The marker is bridge furniture, not model text; this face keeps it visually
+quiet so it never reads as part of the reply."
+  :group 'dsh-bridge)
+
 (defun dsh-bridge--default-target-marker (session)
   "Return the leftmost marker cell for SESSION: \"*\" when it is the default
 target, else a space."
@@ -4156,8 +4158,9 @@ then emits a message if `dsh-bridge-turn-boundary-echo' is non-nil."
 A non-popping fill (the user may be editing elsewhere); drops the session's
 status entry on a 404 (the session died).  Fetches `GET /dsh-bridge/turns'
 once, stores the fresh list, and re-renders each shown, non-cycling view from
-its newest turn — which appends the turn's closing divider now that `endedAt'
-is known (point is preserved when the content merely grew)."
+its newest turn — the `(continuing...)' marker disappears now that `endedAt'
+is known, so the completed turn ends cleanly (point is preserved when the
+content merely changed in place)."
   (dsh-bridge--call "GET" (dsh-bridge--path "/turns" session-id) nil
 	(lambda (status body http-status)
 	  (let* ((alist (dsh-bridge--parse-json-body body))

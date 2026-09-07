@@ -161,13 +161,14 @@ This read-only buffer contains the model output for a DSH session, one
 **agent turn** at a time: a turn is the whole run from a prompt to an
 idle reply, so a multi-step turn that committed several short
 mid-turn replies ("Let me look at the working-tree changes first.")
-reads as one unit, its segments separated by divider lines
-(`(continuing…)`) and closed, once the turn ends, by a divider showing
-the turn's elapsed time — and its end reason when the turn did not
-finish normally (interrupted / failed / blocked / stopped at the token
-limit).  The buffer is fetched by `f` from the transient menu or the
-DSH-Sessions buffer, `C-c C-f` from the DSH-Prompt buffer, or pushed
-from the web UI's "Send to Emacs" button (see below).
+reads as one unit, its segments separated by `---` horizontal-rule
+dividers.  A turn that is still running ends with a quiet `(continuing...)`
+marker (dimmed, so it never reads as model text); once the turn finishes
+the marker disappears and the content ends cleanly — the turn's elapsed
+time and end reason are signalled by the header and the echo area instead
+of cluttering the buffer.  The buffer is fetched by `f` from the
+transient menu or the DSH-Sessions buffer, `C-c C-f` from the DSH-Prompt
+buffer, or pushed from the web UI's "Send to Emacs" button (see below).
 
 The following commands are available:
 

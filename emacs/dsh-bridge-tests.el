@@ -449,7 +449,7 @@ current buffer has no session of its own."
                (lambda (_method _path _payload callback)
                  (funcall callback nil
                           (concat "{\"sessionId\":\"s1\",\"turns\":["
-                                  "{\"turn\":2,\"startedAt\":1000,\"segments\":["
+                                  "{\"turn\":2,\"startedAt\":1000,\"endedAt\":2000,\"reason\":\"completed\",\"segments\":["
                                   "{\"text\":\"reply text\",\"time\":1000000,\"step\":1}]}]}")
                           200)))
               ((symbol-function 'dsh-bridge--request)
@@ -475,7 +475,7 @@ not the default target."
                (lambda (_method _path _payload callback)
                  (funcall callback nil
                           (concat "{\"sessionId\":\"s2\",\"turns\":["
-                                  "{\"turn\":3,\"startedAt\":1000,\"segments\":["
+                                  "{\"turn\":3,\"startedAt\":1000,\"endedAt\":2000,\"reason\":\"completed\",\"segments\":["
                                   "{\"text\":\"other reply\",\"time\":1000000,\"step\":1}]}]}")
                           200)))
               ((symbol-function 'dsh-bridge--request)
@@ -532,7 +532,7 @@ so the check must compare against t, not truthiness (a regression: a
                (lambda (_method _path _payload callback)
                  (funcall callback nil
                           (concat "{\"sessionId\":\"s1\",\"cwd\":\"/w/sess1\","
-                                  "\"turns\":[{\"turn\":2,\"startedAt\":1000,"
+                                  "\"turns\":[{\"turn\":2,\"startedAt\":1000,\"endedAt\":2000,\"reason\":\"completed\","
                                   "\"segments\":[{\"text\":\"reply\",\"time\":1000000,\"step\":1}]}]}")
                           200)))
               ((symbol-function 'dsh-bridge--request)
@@ -1103,9 +1103,9 @@ at EPOCH (default 0)."
 
 (ert-deftest dsh-bridge-view-turn-navigation ()
   "M-p/M-n cycle the output buffer through the session's turns, newest first.
-A turn renders as the whole run from a prompt to a reply — every segment it
-committed, separated by `(continuing…)' divider blocks and closed by an
-elapsed-time divider."
+A turn renders as the whole run from a prompt to a reply — its committed
+segments joined by `---' horizontal rules, the finished turn ending cleanly
+after its last segment."
   (let ((dsh-bridge--turns-cache (dsh-bridge-test--view-cache dsh-bridge-test--view-turns))
         (newest (nth 0 dsh-bridge-test--view-turns)))
     (with-temp-buffer
@@ -1169,7 +1169,7 @@ and the view is bound to the fetched turn's number."
                (lambda (_method _path _payload callback)
                  (funcall callback nil
                           (concat "{\"sessionId\":\"s1\",\"turns\":["
-                                  "{\"turn\":2,\"startedAt\":1000,\"segments\":["
+                                  "{\"turn\":2,\"startedAt\":1000,\"endedAt\":2000,\"reason\":\"completed\",\"segments\":["
                                   "{\"text\":\"fresh\",\"time\":1000000,\"step\":1}]}]}")
                           200)))
               ((symbol-function 'dsh-bridge--request)
@@ -1185,32 +1185,44 @@ and the view is bound to the fetched turn's number."
       (kill-buffer "*dsh-bridge-output*"))))
 
 (ert-deftest dsh-bridge-view-turn-render-dividers ()
-  "A turn renders its segments joined by GFM-safe `(continuing…)' dividers, and
-a completed turn closes with an elapsed-time divider (spelled reason when not
-`completed')."
+  "A turn renders its segments joined by GFM horizontal-rule dividers.  A
+running turn ends with the propertized `(continuing...)' marker; a completed
+turn ends cleanly after its last segment."
   (let ((multi (dsh-bridge-test--view-turn 30 3000000
                 (list (dsh-bridge-test--view-segment "a" 3000500 1)
                       (dsh-bridge-test--view-segment "b" 3001000 2))
                 3002000))
         (open (dsh-bridge-test--view-turn 40 4000000
                (list (dsh-bridge-test--view-segment "growing" 4001000 1))))
+        (open-multi (dsh-bridge-test--view-turn 41 4100000
+                     (list (dsh-bridge-test--view-segment "a" 4100500 1)
+                           (dsh-bridge-test--view-segment "b" 4101000 2))))
         (aborted (dsh-bridge-test--view-turn 50 5000000
                   (list (dsh-bridge-test--view-segment "partial" 5001000 1))
-                  5001000 "aborted")))
-    ;; Two segments, closed after 2s.
-    (should (equal (dsh-bridge--view-turn-render multi)
-                   "a\n\n---\n\n(continuing…)\n\nb\n\n---\n\n(2s elapsed)"))
-    ;; An open (running) turn has no closing divider.
-    (should (equal (dsh-bridge--view-turn-render open) "growing"))
-    ;; A non-completed end reason is spelled out alongside the elapsed time.
-    (should (equal (dsh-bridge--view-turn-render aborted)
-                   "partial\n\n---\n\n(1s elapsed · interrupted)"))
+                  5001000 "aborted"))
+        (marker (dsh-bridge--view-running-marker)))
+    ;; Two segments, completed: rule-only boundary, no label, no footer.
+    (should (equal (dsh-bridge--view-turn-render multi) "a\n\n---\n\nb"))
+    ;; A running turn ends with the marker after its last segment.
+    (should (equal (dsh-bridge--view-turn-render open)
+                   (concat "growing\n\n" marker)))
+    (should (equal (dsh-bridge--view-turn-render open-multi)
+                   (concat "a\n\n---\n\nb\n\n" marker)))
+    ;; The marker is propertized, so it reads as furniture, never model text.
+    (let ((rendered (dsh-bridge--view-turn-render open)))
+      (should (text-property-any 0 (length rendered)
+                                 'dsh-bridge-turn-marker t rendered))
+      (should (eq (get-text-property 0 'face marker)
+                  'dsh-bridge-view-marker-face)))
+    ;; A completed turn — even an abnormal one — ends cleanly.
+    (should (equal (dsh-bridge--view-turn-render aborted) "partial"))
     ;; nil renders empty.
     (should (equal (dsh-bridge--view-turn-render nil) ""))))
 
 (ert-deftest dsh-bridge-view-fill-append-preserves-point ()
-  "Refilling a growing turn preserves point when the old content is a strict
-prefix of the new (a segment was appended); replacing the turn resets point."
+  "Refilling a growing turn preserves point: the running-turn marker at the
+end gives way to the next segment's `---', and point inside the earlier
+content survives.  Replacing the shown turn resets point."
   (let ((one (dsh-bridge-test--view-turn 7 7000000
               (list (dsh-bridge-test--view-segment "first" 7001000 1))))
         (two (dsh-bridge-test--view-turn 7 7000000
@@ -1225,9 +1237,14 @@ prefix of the new (a segment was appended); replacing the turn resets point."
       (goto-char 3)
       (dsh-bridge--view-fill "s1" two nil nil t t)
       (should (equal (point) 3))
-      (should (equal (buffer-string)
-                     (concat (dsh-bridge--view-turn-render one)
-                             "\n\n---\n\n(continuing…)\n\nsecond")))
+      (should (equal (buffer-string) (dsh-bridge--view-turn-render two)))
+      ;; Point parked at the very end (behind the marker) clamps to the end
+      ;; of the older content rather than jumping into the appended segment.
+      (goto-char (point-max))
+      (let ((core-end (1+ (length (dsh-bridge--view-strip-running-marker
+                                   (dsh-bridge--view-turn-render two))))))
+        (dsh-bridge--view-fill "s1" two nil nil t t)
+        (should (equal (point) core-end)))
       ;; A different turn is a swap, not an append: point goes to the top.
       (dsh-bridge--view-fill "s1" other nil nil t)
       (should (equal (point) (point-min))))))
@@ -2450,8 +2467,10 @@ The prompt buffer is cleared and the sent text stays in the prompt history."
                 ((symbol-function 'dsh-bridge--request)
                  (lambda (_m _p _pl)
                    (cons 200 (list (cons 'sessionId "s1")
-                                   (cons 'turns (list (dsh-bridge-test--view-turn 2 1000
-                                                      (list (dsh-bridge-test--view-segment "latest"))))))))))
+                                   (cons 'turns (list (dsh-bridge-test--view-turn
+                                                       2 1000
+                                                       (list (dsh-bridge-test--view-segment "latest"))
+                                                       2000))))))))
         (dsh-bridge--prompt-exit "s1"))
       (should shown)
       (with-current-buffer (get-buffer "*dsh-bridge-output*")
@@ -3322,7 +3341,7 @@ once for all of them."
       (dolist (b '("*dsh-bridge-output*" "*dsh-bridge-output-2*"))
         (with-current-buffer b
           ;; The completed turn renders with its closing elapsed divider.
-          (should (equal (buffer-string) "new\n\n---\n\n(3s elapsed)")))))
+          (should (equal (buffer-string) "new")))))
     (dolist (b '("*dsh-bridge-output*" "*dsh-bridge-output-2*"))
       (when (buffer-live-p (get-buffer b))
         (kill-buffer b)))))
