@@ -16,7 +16,9 @@ nothing boots the **real plugin against a real host**. This framework does:
 - routes every session at the mock provider via `agent-default-model`, so no
   real LLM call happens;
 - drives the plugin over real HTTP/SSE and asserts the frames and routes;
-- reproduces the ask-user bug end-to-end (the load-bearing regression) and
+- covers the ask-user seam end-to-end (the model calls `ask_user_question`
+  mid-turn; the bridge's `user-questions/request` waterfall answerer must
+  surface an `ask-user` SSE frame and settle the turn from `/answer`) and
   grows via the coverage checklist in `../integration-testing-plan.md`.
 
 The mock, the launcher, and the vitest suites are the automated layer; the
@@ -45,11 +47,6 @@ make integration-test   # build + vitest seam specs + batch ERT
 
 `make test` stays unit-only and fast. Run a single suite with
 `node dsh-plugin/node_modules/vitest/vitest.mjs run --config integration/vitest.config.ts`.
-
-The ask-user regression is **expected to fail** against the current plugin — it
-asserts an `ask-user` SSE frame surfaces, and the reported bug is that the
-in-process mux subscription never rebroadcasts it. Ship the framework failing,
-then fix the plugin and flip it to passing in the same change.
 
 ## Layout
 

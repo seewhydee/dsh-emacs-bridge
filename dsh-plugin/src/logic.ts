@@ -296,6 +296,30 @@ export interface SessionHeaderLike {
   createdAt: number
   origin?: string
   title?: string | null
+  /** The preset the session was created with (creation fact, deep-frozen). */
+  agentPreset?: string
+}
+
+/**
+ * The preset a session actually runs, newest selection winning. The header
+ * supplies the creation-time value; every later switch is a logged
+ * `agent-preset/selected` event, so the last one is the answer. This is the
+ * in-repo replica of the harness's `agentPreset` session-projection fold
+ * (init from `header.agentPreset`, last selection event wins) — the harness
+ * removed its standalone `resolveSessionPreset` helper in favor of that
+ * projection, and the bridge reads cold logs, not live projections.
+ */
+export function sessionPreset(
+  header: { agentPreset?: string },
+  events: readonly SessionEventLike[],
+): string | undefined {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index]
+    if (event?.type !== 'agent-preset/selected') continue
+    const preset = (event.data as { agentPreset?: unknown } | undefined)?.agentPreset
+    if (typeof preset === 'string') return preset
+  }
+  return header.agentPreset
 }
 
 /** One entry in the merged session inventory handed to Emacs. */
@@ -743,7 +767,8 @@ export function contextMessage(sessionId: string, usedTokens: number, contextWin
 /**
  * Minimal structural face of one `ask_user_question` item, enough to rebroadcast
  * it to Emacs. Mirrors `@deepseek-ai/dsh-user-questions`'s wire type, which the
- * mux carries verbatim; `intent` is only present for a plan-review decision.
+ * `user-questions/request` waterfall carries verbatim; `intent` is only present
+ * for a plan-review decision.
  */
 export interface AskUserQuestionOptionLike {
   label: string
@@ -763,50 +788,33 @@ export interface AskUserQuestionItemLike {
 /** One answer the human returns for a question. */
 export interface AskUserAnswerItemLike {
   id: string
-  selected: readonly string[]
+  selected: string[]
   custom?: string
 }
 
-/** The payload of a mux `question/requested` frame. */
-export interface AskUserPayload {
-  sessionId: string
-  questions: readonly AskUserQuestionItemLike[]
-}
-
-/** The payload of a mux `question/resolved` frame. */
-export interface AskUserResolvedPayload {
-  sessionId: string
-  questionRpcId: string
-  outcome: 'answered' | 'cancelled'
-}
-
-/** Narrow a mux frame payload to `question/requested`, or null. */
-export function questionRequestedPayload(payload: unknown): AskUserPayload | null {
-  if (typeof payload !== 'object' || payload === null) return null
-  const value = payload as { type?: unknown; sessionId?: unknown; questions?: unknown }
-  if (value.type !== 'question/requested') return null
-  if (typeof value.sessionId !== 'string') return null
-  if (!Array.isArray(value.questions) || value.questions.length === 0) return null
-  for (const q of value.questions) {
-    if (typeof q !== 'object' || q === null) return null
-    const item = q as { id?: unknown; question?: unknown }
-    if (typeof item.id !== 'string' || typeof item.question !== 'string') return null
+/**
+ * Whether ANSWERS is a well-formed answer set for QUESTIONS: every entry names
+ * a pending question by id and carries a string-array `selected`. The old
+ * gateway validated this inside `apiProxy.respond`; the waterfall hands the
+ * listener's return value straight to the asker, so the bridge validates at
+ * its own `/answer` boundary instead. The asserted type is mutable-array
+ * (`AskUserQuestionAnswer.answers` is `AskUserQuestionAnswerItem[]` on the
+ * harness side).
+ */
+export function answerMatchesQuestions(
+  questions: readonly AskUserQuestionItemLike[],
+  answers: unknown,
+): answers is AskUserAnswerItemLike[] {
+  if (!Array.isArray(answers) || answers.length === 0) return false
+  const ids = new Set(questions.map(q => q.id))
+  for (const entry of answers) {
+    if (typeof entry !== 'object' || entry === null) return false
+    const answer = entry as { id?: unknown; selected?: unknown; custom?: unknown }
+    if (typeof answer.id !== 'string' || !ids.has(answer.id)) return false
+    if (!Array.isArray(answer.selected) || answer.selected.some(s => typeof s !== 'string')) return false
+    if (answer.custom !== undefined && typeof answer.custom !== 'string') return false
   }
-  return {
-    sessionId: value.sessionId,
-    questions: value.questions as readonly AskUserQuestionItemLike[],
-  }
-}
-
-/** Narrow a mux frame payload to `question/resolved`, or null. */
-export function questionResolvedPayload(payload: unknown): AskUserResolvedPayload | null {
-  if (typeof payload !== 'object' || payload === null) return null
-  const value = payload as { type?: unknown; sessionId?: unknown; questionRpcId?: unknown; outcome?: unknown }
-  if (value.type !== 'question/resolved') return null
-  if (typeof value.sessionId !== 'string') return null
-  if (typeof value.questionRpcId !== 'string') return null
-  if (value.outcome !== 'answered' && value.outcome !== 'cancelled') return null
-  return { sessionId: value.sessionId, questionRpcId: value.questionRpcId, outcome: value.outcome }
+  return true
 }
 
 /** One SSE `data:` frame announcing a pending question to Emacs. */
@@ -827,30 +835,48 @@ export function askUserResolvedMessage(
   return `data: ${JSON.stringify({ kind: 'ask-user-resolved', sessionId, questionId, outcome })}\n\n`
 }
 
-/** The wire envelope `apiProxy.respond` consumes to settle a pending question. */
-export interface QuestionAnswerEnvelope {
-  rpcId: string
-  result:
-    | { ok: true; value: { sessionId: string; answer: { answers: readonly AskUserAnswerItemLike[] } } }
-    | { ok: false; error: { code: 'cancelled'; message: string } }
+/**
+ * The visible text of one durable assistant message, addressed by its message
+ * id: the `assistant/message` event whose `message.id` matches, with its text
+ * blocks concatenated. Returns undefined when no logged message carries that
+ * id. This is the host-side replacement for the browser's chat-node walk the
+ * "Send to Emacs" action used before the chat tree left `SessionSnapshot`.
+ */
+export function assistantTextForMessage(
+  events: readonly SessionEventLike[],
+  messageId: string,
+): string | undefined {
+  for (const event of events) {
+    if (event?.type !== 'assistant/message') continue
+    const message = (event.data as { message?: unknown } | undefined)?.message as
+      { id?: unknown; content?: readonly MessageBlockLike[] } | undefined
+    if (message?.id !== messageId) continue
+    return (message.content ?? [])
+      .filter(block => block.type === 'text')
+      .map(block => block.text ?? '')
+      .join('')
+  }
+  return undefined
 }
 
-/** Build the respond envelope that resolves a pending question with ANSWERS. */
-export function questionAnswerEnvelope(
-  questionId: string,
-  sessionId: string,
-  answers: readonly AskUserAnswerItemLike[],
-): QuestionAnswerEnvelope {
-  return {
-    rpcId: questionId,
-    result: { ok: true, value: { sessionId, answer: { answers } } },
-  }
+/**
+ * The session's current model selection for the `/models` response: the
+ * `modelSelection` projection's wire view (`next` already falls back to
+ * `lastUsed`), else the catalog's deployment default — the same fold the web
+ * UI's model directory computes (`projected.next ?? catalog.default`).
+ */
+export function currentModelSelection(
+  catalogDefault: unknown,
+  view: { lastUsed?: unknown; next?: unknown } | undefined,
+): unknown {
+  return view?.next ?? view?.lastUsed ?? catalogDefault
 }
 
-/** Build the respond envelope that cancels a pending question. */
-export function questionCancelEnvelope(questionId: string): QuestionAnswerEnvelope {
-  return {
-    rpcId: questionId,
-    result: { ok: false, error: { code: 'cancelled', message: 'the user cancelled ask_user_question' } },
-  }
+/**
+ * Wrap named RPC arguments into the `{ args }` payload the Typert gateway
+ * requires: a Remote endpoint consumes exactly one plain-object `args` field
+ * keyed by parameter name (e.g. `{ request: {...} }` for `session/selectModel`).
+ */
+export function rpcArgsPayload(args: Record<string, unknown>): { args: Record<string, unknown> } {
+  return { args }
 }

@@ -4,7 +4,10 @@
 // artifact contract for this package alone. Keep the banner/footer/intro
 // wrapper, the externals, the purity gate, and the define substitutions in sync
 // with that preset (the contract is pre-release and the most likely thing to
-// drift on a dsh version bump).
+// drift on a dsh version bump). Two preset pieces are deliberately not
+// replicated: the CSS virtual-module plugins (this package has no stylesheets)
+// and the tsc-sourcemap chaining/browserSourcePath (this build consumes src/
+// directly, not the harness's lib/types layout).
 import { readFileSync } from 'node:fs'
 import type { UserConfig } from 'tsdown'
 
@@ -17,12 +20,14 @@ const PLATFORM_MODULES = [
   'react-dom',
   'react-dom/client',
   '@deepseek-ai/cordis',
+  '@deepseek-ai/dsh-client-store',
   '@deepseek-ai/dsh-client-ui-slots',
   '@deepseek-ai/dsh-client-ui-primitives',
+  '@deepseek-ai/dsh-client-ui-dockkit',
 ] as const
 
 /** Dynamic rows the parser preloads before shell boot, from the same file. */
-const PRELOADED_CLIENT_EXTERNALS = ['@deepseek-ai/dsh-client-runtime/client'] as const
+const PRELOADED_CLIENT_EXTERNALS = [] as const
 
 /** The package's own non-baseline module-table requests (`dsh.client.external`). */
 function requestedExternal(): ReadonlySet<string> {
@@ -44,18 +49,28 @@ function isExternal(specifier: string): boolean {
 
 /** Inline-safe wire layers and vendored libraries a client bundle may carry privately. */
 const INLINE_SAFE =
-  /^@deepseek-ai\/dsh-(host-apiproxy|file-reference|session|llm|tools|brand)(\/|$)/
+  /^(?:@deepseek-ai\/dsh-(?:file-reference|session|llm|tools|brand|deque|output-retention|typert-protocol|util-crypto|util-values|util-workspace-path)(?:\/|$)|@deepseek-ai\/dsh-token-meter\/client$|@deepseek-ai\/dsh-host-open-in-app\/shared$|@deepseek-ai\/dsh-agent-presets\/display$|@deepseek-ai\/dsh-spill-policy\/notice$)/
 const VENDORED_LIBRARY = /^@deepseek-ai\/(cosmokit|schemastery)(\/|$)/
 const GENERATED_REMOTE = /^@deepseek-ai\/dsh-[a-z0-9]+(?:-[a-z0-9]+)*\/remote$/
 
-/** Build a node-idiom substitution set matching the shared preset's define. */
+/**
+ * Build a node-idiom substitution set matching the shared preset's define:
+ * the NODE_ENV/MODE triple plus `process.env` and the sorted passthrough of
+ * public `DSH_CLIENT_*` build variables (clientBuildEnvironmentDefines,
+ * without the repo-locked git/version resolution).
+ */
 function buildDefines(): Record<string, string> {
   const mode = JSON.stringify(process.env.NODE_ENV ?? 'production')
-  return {
+  const defines: Record<string, string> = {
+    'process.env': '{}',
     'process.env.NODE_ENV': mode,
     'import.meta.env.MODE': mode,
     'import.meta.env': JSON.stringify({ MODE: process.env.NODE_ENV ?? 'production' }),
   }
+  for (const name of Object.keys(process.env).filter(k => k.startsWith('DSH_CLIENT_')).sort()) {
+    defines[`process.env.${name}`] = JSON.stringify(process.env[name])
+  }
+  return defines
 }
 
 const config: UserConfig = {
@@ -73,6 +88,16 @@ const config: UserConfig = {
     // require() the table cannot answer throws at runtime.
     neverBundle: isExternal,
     alwaysBundle: (specifier: string) => !isExternal(specifier),
+  },
+  // Dual-mode libraries resolve their static flavor matching the NODE_ENV the
+  // defines bake in (a CJS bundle cannot carry a top-level await).
+  inputOptions: {
+    resolve: {
+      conditionNames: [
+        (process.env.NODE_ENV ?? 'production') === 'development' ? 'development' : 'production',
+        'browser', 'import', 'module', 'default',
+      ],
+    },
   },
   define: buildDefines(),
   plugins: [{

@@ -2688,6 +2688,10 @@ uncached sessions alone.  `run-at-time' is stubbed to run immediately."
               ((symbol-function 'dsh-bridge--fetch-models)
                (lambda (id force) (push (cons id force) refetched)))
               ((symbol-function 'dsh-bridge--status-event-render) #'ignore)
+              ;; The deferred turn-cache refresh would issue a real request
+              ;; for any session an earlier test left in the global turns
+              ;; cache; stub it like the sibling turn-start test does.
+              ((symbol-function 'dsh-bridge--view-turns-cache-refresh) #'ignore)
               ((symbol-function 'dsh-bridge--turn-complete-act) #'ignore))
       (dsh-bridge--notification-handle-events
        '(((kind . "turn-start") (sessionId . "s1"))

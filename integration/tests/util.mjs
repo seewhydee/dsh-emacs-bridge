@@ -54,6 +54,17 @@ export async function mockRequests(fixture) {
   return body.requests ?? []
 }
 
+/** Poll PREDICATE until it returns truthy, or throw after timeoutMs. */
+export async function poll(predicate, timeoutMs = 15000, intervalMs = 250) {
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    const value = await predicate()
+    if (value) return value
+    if (Date.now() >= deadline) throw new Error(`poll: predicate still false after ${timeoutMs}ms`)
+    await new Promise((resolve) => setTimeout(resolve, intervalMs))
+  }
+}
+
 /** Create a session in a workspace by path; the session id is returned. */
 export async function createSession(fixture, path = REPO_ROOT) {
   const { status, body } = await post(fixture, '/dsh-bridge/sessions/create', { path })
@@ -66,9 +77,11 @@ export async function createSession(fixture, path = REPO_ROOT) {
 /**
  * Open an SSE stream to `/dsh-bridge/events` and collect parsed frames.
  * `waitFor(kind)` resolves with the first frame of that kind seen after the
- * call, or rejects on timeout. `close()` aborts the stream.
+ * call, or rejects on timeout. `close()` aborts the stream. `purpose`
+ * ('draft') marks the connection as the browser's draft stream, the way the
+ * browser plugin's EventSource identifies itself.
  */
-export function openSse(fixture, { timeoutMs = 15000 } = {}) {
+export function openSse(fixture, { timeoutMs = 15000, purpose } = {}) {
   const controller = new AbortController()
   const frames = []
   const waiters = new Map() // kind -> [{resolve, reject, timer}]
@@ -94,7 +107,8 @@ export function openSse(fixture, { timeoutMs = 15000 } = {}) {
   }
 
   const run = (async () => {
-    const res = await fetch(`${fixture.url}/dsh-bridge/events?token=${fixture.token}`, {
+    const query = `token=${fixture.token}${purpose === undefined ? '' : `&purpose=${purpose}`}`
+    const res = await fetch(`${fixture.url}/dsh-bridge/events?${query}`, {
       signal: controller.signal,
       headers: { accept: 'text/event-stream' },
     })

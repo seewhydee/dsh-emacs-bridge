@@ -1,13 +1,16 @@
 import { describe, expect, it } from 'vitest'
 import {
+  answerMatchesQuestions,
   askUserMessage,
   askUserResolvedMessage,
   assistantMessageHasText,
   assistantMessageText,
+  assistantTextForMessage,
   assistantTurns,
   classifySessionId,
   contextMessage,
   contextUsedTokens,
+  currentModelSelection,
   draftMessage,
   hostnameOf,
   isLoopbackAddress,
@@ -20,14 +23,12 @@ import {
   outboxMessage,
   outboxSessionId,
   parseBearerAuthorization,
-  questionAnswerEnvelope,
-  questionCancelEnvelope,
-  questionRequestedPayload,
-  questionResolvedPayload,
   repliesChangedMessage,
   resolveTargetId,
+  rpcArgsPayload,
   rpcRequestFrame,
   rpcUnwrapResponse,
+  sessionPreset,
   sessionTitle,
   sessionsChangedMessage,
   tokenRequestsSameOrigin,
@@ -843,7 +844,7 @@ describe('contextMessage', () => {
   })
 })
 
-describe('ask-user frame construction and mux narrowing', () => {
+describe('ask-user frame construction and answer validation', () => {
   it('askUserMessage emits one SSE data frame with the question id and payload', () => {
     expect(askUserMessage('rpc-1', 'session-1', [{ id: 'q1', question: 'Go?', options: [{ label: 'Yes' }] }]))
       .toBe('data: {"kind":"ask-user","questionId":"rpc-1","sessionId":"session-1","questions":[{"id":"q1","question":"Go?","options":[{"label":"Yes"}]}]}\n\n')
@@ -856,33 +857,82 @@ describe('ask-user frame construction and mux narrowing', () => {
       'data: {"kind":"ask-user-resolved","sessionId":"session-1","questionId":"rpc-1","outcome":"cancelled"}\n\n')
   })
 
-  it('narrows a mux question/requested payload', () => {
-    expect(questionRequestedPayload({
-      type: 'question/requested', sessionId: 's1', questions: [{ id: 'q1', question: 'go?' }],
-    })).toEqual({ sessionId: 's1', questions: [{ id: 'q1', question: 'go?' }] })
+  it('answerMatchesQuestions accepts answers naming pending question ids', () => {
+    const questions = [{ id: 'q1', question: 'go?' }, { id: 'q2', question: 'really?' }]
+    expect(answerMatchesQuestions(questions, [{ id: 'q1', selected: ['Yes'] }])).toBe(true)
+    expect(answerMatchesQuestions(questions, [
+      { id: 'q1', selected: ['Yes'] },
+      { id: 'q2', selected: ['No'], custom: 'maybe' },
+    ])).toBe(true)
   })
 
-  it('rejects a malformed or non-question payload', () => {
-    expect(questionRequestedPayload(null)).toBeNull()
-    expect(questionRequestedPayload({ type: 'nope' })).toBeNull()
-    expect(questionRequestedPayload({ type: 'question/requested', sessionId: 's1', questions: [] })).toBeNull()
-    expect(questionRequestedPayload({ type: 'question/requested', sessionId: 's1', questions: [{ question: 'no id' }] })).toBeNull()
+  it('answerMatchesQuestions rejects unknown ids and malformed entries', () => {
+    const questions = [{ id: 'q1', question: 'go?' }]
+    expect(answerMatchesQuestions(questions, [])).toBe(false)
+    expect(answerMatchesQuestions(questions, 'yes')).toBe(false)
+    expect(answerMatchesQuestions(questions, [{ id: 'q9', selected: ['Yes'] }])).toBe(false)
+    expect(answerMatchesQuestions(questions, [{ id: 'q1' }])).toBe(false)
+    expect(answerMatchesQuestions(questions, [{ id: 'q1', selected: 'Yes' }])).toBe(false)
+    expect(answerMatchesQuestions(questions, [{ id: 'q1', selected: ['Yes'], custom: 3 }])).toBe(false)
+  })
+})
+
+describe('sessionPreset', () => {
+  it('returns the header preset when no selection event exists', () => {
+    expect(sessionPreset({ agentPreset: 'default' }, [])).toBe('default')
   })
 
-  it('narrows a mux question/resolved payload', () => {
-    expect(questionResolvedPayload({ type: 'question/resolved', sessionId: 's1', questionRpcId: 'rpc-1', outcome: 'answered' }))
-      .toEqual({ sessionId: 's1', questionRpcId: 'rpc-1', outcome: 'answered' })
-    expect(questionResolvedPayload({ type: 'question/resolved', sessionId: 's1', questionRpcId: 'rpc-1', outcome: 'bad' })).toBeNull()
+  it('lets the newest agent-preset/selected event win', () => {
+    const events: SessionEventLike[] = [
+      { time: 1, type: 'agent-preset/selected', data: { agentPreset: 'minimal' } },
+      { time: 2, type: 'user/message', data: {} },
+      { time: 3, type: 'agent-preset/selected', data: { agentPreset: 'cordis' } },
+    ]
+    expect(sessionPreset({ agentPreset: 'default' }, events)).toBe('cordis')
   })
 
-  it('builds the respond envelope that resolves and the one that cancels', () => {
-    expect(questionAnswerEnvelope('rpc-1', 's1', [{ id: 'q1', selected: ['Yes'] }])).toEqual({
-      rpcId: 'rpc-1',
-      result: { ok: true, value: { sessionId: 's1', answer: { answers: [{ id: 'q1', selected: ['Yes'] }] } } },
-    })
-    expect(questionCancelEnvelope('rpc-1')).toEqual({
-      rpcId: 'rpc-1',
-      result: { ok: false, error: { code: 'cancelled', message: 'the user cancelled ask_user_question' } },
-    })
+  it('returns undefined when neither header nor events name a preset', () => {
+    expect(sessionPreset({}, [])).toBeUndefined()
+    expect(sessionPreset({}, [{ time: 1, type: 'agent-preset/selected', data: {} }])).toBeUndefined()
+  })
+})
+
+describe('assistantTextForMessage', () => {
+  const events: SessionEventLike[] = [
+    {
+      time: 1,
+      type: 'assistant/message',
+      data: { message: { id: 'm1', content: [{ type: 'text', text: 'hello ' }, { type: 'tool-call' }, { type: 'text', text: 'world' }] } },
+    },
+    { time: 2, type: 'user/message', data: { message: { id: 'm2', content: [{ type: 'text', text: 'hi' }] } } },
+  ]
+
+  it('joins the text blocks of the addressed assistant message', () => {
+    expect(assistantTextForMessage(events, 'm1')).toBe('hello world')
+  })
+
+  it('returns undefined for an unknown id or a non-assistant event', () => {
+    expect(assistantTextForMessage(events, 'm9')).toBeUndefined()
+    expect(assistantTextForMessage(events, 'm2')).toBeUndefined()
+  })
+})
+
+describe('currentModelSelection', () => {
+  const fallback = { provider: 'deepseek', model: 'deepseek-chat' }
+
+  it('prefers the projection next, then lastUsed, then the catalog default', () => {
+    expect(currentModelSelection(fallback, { next: { provider: 'p', model: 'm' }, lastUsed: { provider: 'a', model: 'b' } }))
+      .toEqual({ provider: 'p', model: 'm' })
+    expect(currentModelSelection(fallback, { next: null, lastUsed: { provider: 'a', model: 'b' } }))
+      .toEqual({ provider: 'a', model: 'b' })
+    expect(currentModelSelection(fallback, { next: null, lastUsed: null })).toBe(fallback)
+    expect(currentModelSelection(fallback, undefined)).toBe(fallback)
+  })
+})
+
+describe('rpcArgsPayload', () => {
+  it('wraps named args into the gateway payload', () => {
+    expect(rpcArgsPayload({ request: { sessionId: 's1' } })).toEqual({ args: { request: { sessionId: 's1' } } })
+    expect(rpcArgsPayload({})).toEqual({ args: {} })
   })
 })

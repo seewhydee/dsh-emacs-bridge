@@ -10,7 +10,7 @@
 
 import { describe, it, expect, inject } from 'vitest'
 import {
-  post, get, scriptMock, mockRequests, createSession, openSse,
+  post, get, scriptMock, mockRequests, createSession, openSse, poll,
 } from './util.mjs'
 import { launch } from '../host/launch.mjs'
 
@@ -62,28 +62,31 @@ describe('plugin surface against a live fixture', () => {
     await post(fixture, '/mock-llm/reset', {})
     const sessionId = await createSession(fixture)
 
-    // The catalog is proxied through the host's genuine `session.models` RPC, so
-    // the mock's advertised catalog flows through. The current selection is the
-    // mock default from agent-default-model.
+    // The catalog comes from the host's genuine `session/modelCatalog` Remote,
+    // so the mock's advertised catalog flows through. The current selection is
+    // the mock default from agent-default-model, read off the durable
+    // `modelSelection` projection.
     const cat = await get(fixture, `/dsh-bridge/models?sessionId=${sessionId}`)
     expect(cat.status).toBe(200)
-    expect(cat.body.routable).toBe(true)
+    expect(cat.body.routableProviders).toContain('mock')
     expect(cat.body.current.provider).toBe('mock')
 
-    // Selecting via `/model` proxies `session.selectModel`; the RPC succeeds.
+    // Selecting via `/model` proxies `session/selectModel`; the RPC succeeds.
     const sel = await post(fixture, '/dsh-bridge/model', {
       sessionId, provider: 'mock', model: 'mock-model-pro',
     })
     expect(sel.status).toBe(200)
     expect(sel.body.selected.model).toBe('mock-model-pro')
 
-    // NOTE: this exposes a parity gap worth investigating. A bridge-composed
-    // agent is built from `agentDefaultModel.currentSelection()` (the default
-    // tier), so a mid-session `/model` pick does NOT change the *running*
-    // agent's next-call model (observed: the next main-turn call still uses
-    // `mock-model` even after `selected: mock-model-pro`). The web UI's own
-    // compose path reads the richer per-session getter. Flagged as a live-fixture
-    // finding; the catalog + selection proxy seam above is what is asserted.
+    // The switch is durable and the bridge's live selection ref follows it:
+    // the next main-turn call runs on the picked model.
+    await scriptMock(fixture, [{ kind: 'text', text: 'switched' }])
+    const sent = await post(fixture, '/dsh-bridge/send', { text: 'after switch', sessionId })
+    expect(sent.status).toBe(200)
+    await poll(async () => {
+      const requests = await mockRequests(fixture)
+      return requests.some((r) => r.purpose === undefined && r.model === 'mock-model-pro')
+    })
   }, 90000)
 
   it('round-trips an outbox entry through deposit, collect, and ack', async () => {

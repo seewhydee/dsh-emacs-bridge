@@ -41,21 +41,25 @@ pursuing the Emacs-as-primary-client (ACP-style) model.
     `turn-aggregation-plan.md`).
   - `GET /sessions` → merged live + persisted sessions, with titles (via the
     optional `sessionProjectionCache`, falling back to folding `session/title`
-    events from `inspect()`), workspace titles, and archived flags (via the
+    events from a read handle), workspace titles, and archived flags (via the
     optional `workspaceRegistry`).
   - `GET /outbox`, `POST /outbox`, `POST /outbox/ack` → bounded, acked
     DSH→Emacs inbox; every entry is session-scoped; deposits fan an SSE
-    notice out to all subscribers.
+    notice out to all subscribers. A deposit may carry a durable `messageId`
+    instead of literal text (the "Send to Emacs" action); the host resolves
+    the text from the session log.
   - `GET /token` → vends the shared token (fenced to loopback peer + origin).
   - `GET /status` → `{ name, version }` (loopback-fenced), the probe/identity
     route: Emacs distinguishes "not running" / "not loaded" / "stale" and can
     compare the running version against the bundled one after an upgrade.
   - `GET /events?token=` → SSE stream (composer-draft push + outbox notices).
   - `GET /models?sessionId=` / `POST /model { sessionId, provider, model,
-    reasoningEffort? }` → thin REST↔RPC adapters that self-call the host's own
-    `session.models` / `session.selectModel` over loopback HTTP (the genuine
-    handlers own the private per-session selection ref, so parity with the web
-    UI is exact by construction).
+    reasoningEffort? }` → the catalog comes from the host's own
+    `session/modelCatalog` Remote, the current pick from the `modelSelection`
+    projection (`next ?? lastUsed ?? catalog.default`, mirroring the web
+    directory), and changes proxy `session/selectModel` over loopback HTTP
+    (slash-form endpoints, `{args}` named-argument payloads), so parity with
+    the web UI is exact by construction.
   - `GET /context?sessionId=` → the latest `{ usedTokens, contextWindow }`
     from the token-meter `contextPressure` projection (204 when unknown), and
     a `{ kind:"context", sessionId, usedTokens, contextWindow }` SSE frame
@@ -185,8 +189,8 @@ In suggested order:
 2. **Session handling: resume, rename, archive, create (fork excluded) (implemented).**
    Broadened from "resume saved sessions". Make saved (cold, persisted-only)
    sessions first-class: targeting or selecting one resumes it via
-   `ctx.agents.resume()` (pattern: `ensureSession` in
-   `packages/host/apiproxy/src/api-proxy.ts`), after which fetch/prompt
+   `ctx.agents.resume()` (pattern: `resumeObserved` in
+   `packages/api/session-controller/src/agent.ts`), after which fetch/prompt
    buffers work on it. Plus the web-UI session/workspace operations that have
    clean service seams: rename session (`ctx.sessionTitle.rename`), archive
    session (`ctx.workspaceRegistry.archiveSession` — one-way: no unarchive
@@ -284,9 +288,16 @@ DSH (in `../deepseek-harness/`):
 - `packages/client/ui-message-feedback/` — template client plugin.
 - `packages/client/tsdown.client.ts` + `packages/client/web/src/platform.ts` —
   client-bundle artifact contract.
-- `packages/host/apiproxy/src/native-path-opener.ts` — spawn template for
-  `emacsclient`.
-- `packages/host/apiproxy/src/api-proxy.ts` (`ensureSession`) — resume pattern.
+- `packages/host/open-in-app/` — spawn template for `emacsclient`.
+- `packages/api/session-controller/src/agent.ts` (`resumeObserved`) — resume
+  pattern, including preset resolution via the `agentPreset` projection.
+- `packages/interaction/user-questions/` — the ask-user waterfall seam the
+  bridge answers (`user-questions/request`).
+
+Deferred: an Emacs "cancel" on an ask-user question currently fails the ask
+(the old cancel-envelope semantics). It could instead delegate to the web UI
+by calling the waterfall's `next()` — a deliberate UX decision, since the
+browser would only then present the question.
 
 Emacs (in `../emacs-30.2/`):
 

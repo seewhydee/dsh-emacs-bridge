@@ -164,7 +164,7 @@
 
 ;; (The repo's Emacs package is loaded near the top, before the helpers.)
 
-(ert-deftest dsh-bridge-it-ask-user ()  "Flagship: the live-Emacs seat of the ask-user bug."
+(ert-deftest dsh-bridge-it-ask-user ()  "Flagship: the live-Emacs seat of the ask-user path."
   (unwind-protect
       (let* ((facts (dsh-bridge-it--boot-fixture)))
         (setq dsh-bridge-it--fixture facts)
@@ -186,7 +186,7 @@
                            (expand-file-name "../" dsh-bridge-it--directory))))
           (dsh-bridge-notifications-start)
           (dsh-bridge-send-text "Pick a color for me." session-id)
-          ;; The ask surfaces via the in-process mux subscription → SSE → Emacs.
+          ;; The ask surfaces via the waterfall answerer → SSE → Emacs.
           ;; With the current bug this never populates, so the wait fails and the
           ;; test reproduces the report.
           (should (dsh-bridge-it--wait

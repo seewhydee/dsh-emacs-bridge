@@ -21,6 +21,8 @@
 //   GET  /dsh-bridge/token                          -> vend the token (loopback-fenced)
 //   GET  /dsh-bridge/status                         -> { name, version } (loopback-fenced)
 //   GET  /dsh-bridge/events?token=                  -> EventSource (composer-draft push)
+//        (?purpose=draft marks the browser's own draft stream; an unmarked
+//        connection is Emacs and may own ask-user questions)
 //   POST /dsh-bridge/send   { text, sessionId? } -> Agent.followup()
 //   GET  /dsh-bridge/output?sessionId=           -> latest assistant text
 //        (kept deliberately: a single-shot "latest text" probe; the Emacs
@@ -36,11 +38,12 @@
 //        (incremental: true|false)
 //   POST /dsh-bridge/draft { text, sessionId? }   -> push a composer draft (SSE)
 //   GET  /dsh-bridge/outbox                       -> collect DSH->Emacs entries
-//   POST /dsh-bridge/outbox { text, sessionId, source? } -> deposit an entry
-//        (sessionId required: every entry is session-scoped)
+//   POST /dsh-bridge/outbox { text | messageId, sessionId, source? }
+//        -> deposit an entry (sessionId required: every entry is session-scoped;
+//        a messageId deposit resolves the assistant message's text host-side)
 //   POST /dsh-bridge/outbox/ack { ids }           -> clear collected entries
 //   POST /dsh-bridge/answer { questionId, sessionId, answers? | cancelled? }
-//        -> settle a pending ask-user question (proxied to api-proxy respond)
+//        -> settle the bridge's pending ask-user waterfall answerer
 //   POST /dsh-bridge/sessions/resume { sessionId }        -> resume a cold session
 //   POST /dsh-bridge/sessions/rename { sessionId, title } -> rename (resumes cold)
 //   POST /dsh-bridge/sessions/archive { sessionId }       -> archive (one-way)
@@ -56,19 +59,28 @@ import { dirname, join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent, AgentOptions, ModelSelection, ModelSelectionRef } from '@deepseek-ai/dsh-agent'
 import { installModelSelection } from '@deepseek-ai/dsh-agent'
-import { resolveSessionPreset } from '@deepseek-ai/dsh-agent-presets'
 import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { Session, SessionHeader, SessionId } from '@deepseek-ai/dsh-session'
+// Type-only: pulls the `user-questions/request` waterfall declaration (the
+// ask-user seam the bridge answers) into the cordis Events merge. Erased at
+// build; never a runtime import.
+import type {} from '@deepseek-ai/dsh-user-questions'
+import type { AskUserQuestionAnswer } from '@deepseek-ai/dsh-user-questions'
+// The request-event type itself is exported only from the ./types subpath.
+import type { AskUserQuestionRequestEvent } from '@deepseek-ai/dsh-user-questions/types'
 import { Outbox } from './outbox.ts'
 import {
+  answerMatchesQuestions,
   askUserMessage,
   askUserResolvedMessage,
   assistantMessageHasText,
+  assistantTextForMessage,
   assistantTurns,
   classifySessionId,
   contextMessage,
   contextUsedTokens,
+  currentModelSelection,
   draftMessage,
   isLoopbackAddress,
   isSubagentChild,
@@ -78,14 +90,12 @@ import {
   outboxMessage,
   outboxSessionId,
   parseBearerAuthorization,
-  questionAnswerEnvelope,
-  questionCancelEnvelope,
-  questionRequestedPayload,
-  questionResolvedPayload,
   repliesChangedMessage,
   resolveTargetId,
+  rpcArgsPayload,
   rpcRequestFrame,
   rpcUnwrapResponse,
+  sessionPreset,
   sessionTitle,
   sessionsChangedMessage,
   tokenRequestsSameOrigin,
@@ -97,9 +107,9 @@ import {
   workspaceRefsBySession,
   workspaceTitleConflict,
   type LiveSessionLike,
+  type AskUserAnswerItemLike,
   type AskUserQuestionItemLike,
   type MessageBlockLike,
-  type QuestionAnswerEnvelope,
   type ResolveTargetResult,
   type SessionEventLike,
   type SessionHeaderLike,
@@ -127,27 +137,23 @@ interface SessionService {
   list(): Session[]
 }
 
-/** Minimal face of the `sessionPersistence` service: list + inspect materialized sessions. */
-interface SessionPersistenceService {
-  list(signal?: AbortSignal): Promise<SessionHeader[]>
-  inspect(id: string, signal?: AbortSignal): Promise<{ meta: SessionHeader; events: readonly SessionEventLike[] }>
-}
-
-/** One mux stream frame: the rpcId that answers it plus its discriminated payload. */
-interface MuxFrameLike {
-  rpcId: unknown
-  payload: unknown
-}
-
 /**
- * Minimal face of the optional `apiProxy` service (read via `ctx.get`). The
- * bridge subscribes to the same all-session mux stream the web UI uses and
- * answers pending questions through `respond`, so a profile without the
- * gateway simply yields undefined and the ask-user path degrades to a no-op.
+ * Minimal face of the `sessionPersistence` service. `list` returns
+ * header-carrying snapshots (the revision token is opaque to the bridge);
+ * `stat` is the cheap existence/header read; `open(id, 'read')` is the full
+ * header + event-log read (the removed `inspect`'s replacement).
  */
-interface ApiProxyLike {
-  events: { mux(request: unknown, signal: AbortSignal): AsyncIterable<MuxFrameLike> }
-  respond(envelope: QuestionAnswerEnvelope): Promise<{ accepted: boolean; reason?: string }>
+interface SessionPersistenceService {
+  list(options?: { signal?: AbortSignal }): Promise<readonly { header: SessionHeader }[]>
+  stat(id: string, options?: { signal?: AbortSignal }): Promise<{ header: SessionHeader } | undefined>
+  open(id: string, access: 'read'): Promise<SessionReadHandleLike>
+}
+
+/** Minimal face of one open read handle on a stored session. */
+interface SessionReadHandleLike {
+  readonly header: SessionHeader
+  read(): Promise<{ events: readonly SessionEventLike[] }>
+  close(): Promise<void>
 }
 
 /** Minimal face of one persisted projection-cache snapshot. */
@@ -159,7 +165,7 @@ interface ProjectionSnapshotLike {
 /**
  * Minimal face of the optional `sessionProjectionCache` service. Read via
  * `ctx.get` — a profile without the cache simply yields undefined and the
- * bridge falls back to `inspect` for cold titles.
+ * bridge falls back to a read-handle log fold for cold titles.
  */
 interface ProjectionCacheService {
   cachedSnapshot(meta: SessionHeader): ProjectionSnapshotLike | undefined
@@ -173,6 +179,7 @@ interface ProjectionCacheService {
 interface SessionProjectionRegistryService {
   onChanged(listener: (session: Session, key: string, value: unknown, seq: number) => void): () => void
   snapshot(session: Session): ProjectionSnapshotLike
+  stateOf(session: Session, key: string): unknown
 }
 
 /**
@@ -334,22 +341,53 @@ export function apply(ctx: Context): void {
   /** DSH→Emacs inbox, bounded and acked by Emacs after a successful insert. */
   const outbox = new Outbox()
 
-  /** Browser EventSource clients subscribed to the composer-draft push. */
-  const sseClients = new Set<ServerResponse>()
+  /**
+   * The browser's draft-push EventSource clients: `/events` connections that
+   * identified themselves with `?purpose=draft` (the browser plugin's own
+   * stream, which exists whenever the web UI is open). They receive every
+   * broadcast frame and ignore the kinds they do not recognise, but they
+   * never answer ask-user questions.
+   */
+  const browserSseClients = new Set<ServerResponse>()
 
-  /** Pending ask-user questions offered to Emacs, keyed by the mux rpcId. */
-  const pendingQuestions = new Map<string, { sessionId: string; questions: readonly AskUserQuestionItemLike[] }>()
+  /**
+   * Emacs's SSE clients: unmarked `/events` connections (Emacs's notification
+   * stream). These alone may own an ask-user question — counting the
+   * browser's always-on draft stream would strand questions no UI can see.
+   */
+  const emacsSseClients = new Set<ServerResponse>()
+
+  /** The settlement one pending question waits on: an answer set, or a cancel. */
+  type QuestionSettlement =
+    | { ok: true; answers: AskUserAnswerItemLike[] }
+    | { ok: false }
+
+  /**
+   * One pending ask-user question offered to Emacs, keyed by the
+   * bridge-minted question id. `settle` is first-call-wins: it resolves the
+   * waterfall listener's wait and removes the entry, so a late `/answer`
+   * (after an abort or a duplicate POST) reads `not-pending`.
+   */
+  interface PendingQuestion {
+    sessionId: string
+    questions: readonly AskUserQuestionItemLike[]
+    settle(result: QuestionSettlement): void
+  }
+
+  /** Pending ask-user questions offered to Emacs, keyed by question id. */
+  const pendingQuestions = new Map<string, PendingQuestion>()
 
   /** Write one SSE frame to every subscribed client, dropping dead ones. */
   function broadcast(frame: string): void {
-    for (const client of [...sseClients]) {
-      try { client.write(frame) } catch { sseClients.delete(client) }
+    for (const client of [...browserSseClients, ...emacsSseClients]) {
+      try { client.write(frame) } catch { dropSseClient(client) }
     }
   }
 
-  /** The mux rpcId for a question frame, as a plain string, or undefined. */
-  function rpcIdString(value: unknown): string | undefined {
-    return typeof value === 'string' ? value : undefined
+  /** Forget one SSE client, whichever set holds it. */
+  function dropSseClient(client: ServerResponse): void {
+    browserSseClients.delete(client)
+    emacsSseClients.delete(client)
   }
 
   /** The turn number carried by a turn-boundary / assistant-message event payload, or undefined. */
@@ -359,66 +397,55 @@ export function apply(ctx: Context): void {
   }
 
   /**
-   * Fold one mux stream frame into the pending-question registry and the
-   * Emacs SSE stream. A `question/requested` frame is stored (so a reconnect
-   * can replay it) and rebroadcast to Emacs; a `question/resolved` frame
-   * removes the entry and reports the outcome. Subagent-owned sessions are
-   * never surfaced (the asker blocks for a human answerer only at a root).
+   * The bridge's `user-questions/request` answerer: surface the pending
+   * question to Emacs over SSE and settle the waterfall from `/answer`.
+   *
+   * Registered with `prepend` so it runs OUTSIDE the api-remotes browser
+   * forwarder: while an Emacs SSE client is connected, Emacs owns the
+   * question (the browser never sees it). The browser's own draft-push
+   * connection (marked `purpose=draft`) does not count — it exists whenever
+   * the web UI is open and never answers, so claiming on its behalf would
+   * strand the question. With no Emacs client the listener delegates via
+   * `next()` and the browser flow is untouched. An agent-less request
+   * likewise delegates. Cancel rejects the wait, which the asker surfaces as
+   * the tool-call failure (the old cancel-envelope semantics); delegating to
+   * the browser on cancel is a deferred idea.
    */
-  function handleMuxFrame(frame: MuxFrameLike): void {
-    const payload = frame.payload
-    const questionRequested = questionRequestedPayload(payload)
-    if (questionRequested !== null) {
-      const questionId = rpcIdString(frame.rpcId)
-      if (questionId === undefined) return
-      const session = sessions.list().find(s => String(s.id) === questionRequested.sessionId)
-      if (session === undefined) return
-      if (isSubagentChild(session.header.origin, ownedByLiveParent(session))) return
-      pendingQuestions.set(questionId, questionRequested)
-      broadcast(askUserMessage(questionId, questionRequested.sessionId, questionRequested.questions))
-      return
+  async function onUserQuestionsRequest(
+    request: AskUserQuestionRequestEvent,
+    next: () => Promise<AskUserQuestionAnswer>,
+  ): Promise<AskUserQuestionAnswer> {
+    const sessionId = request.agent === undefined ? undefined : String(request.agent.id)
+    if (sessionId === undefined || emacsSseClients.size === 0) return next()
+    const questions = request.questions
+    const questionId = randomUUID()
+    let settled = false
+    let outcome: 'answered' | 'cancelled' = 'cancelled'
+    let resolveWait!: (result: QuestionSettlement) => void
+    const wait = new Promise<QuestionSettlement>((resolve) => { resolveWait = resolve })
+    pendingQuestions.set(questionId, {
+      sessionId,
+      questions,
+      settle: (result) => {
+        if (settled) return
+        settled = true
+        pendingQuestions.delete(questionId)
+        resolveWait(result)
+      },
+    })
+    broadcast(askUserMessage(questionId, sessionId, questions))
+    const onAbort = (): void => pendingQuestions.get(questionId)?.settle({ ok: false })
+    request.signal?.addEventListener('abort', onAbort, { once: true })
+    try {
+      const result = await wait
+      if (!result.ok) throw new Error('the user cancelled ask_user_question')
+      outcome = 'answered'
+      return { answers: result.answers }
+    } finally {
+      request.signal?.removeEventListener('abort', onAbort)
+      pendingQuestions.delete(questionId)
+      broadcast(askUserResolvedMessage(sessionId, questionId, outcome))
     }
-    const questionResolved = questionResolvedPayload(payload)
-    if (questionResolved !== null) {
-      pendingQuestions.delete(questionResolved.questionRpcId)
-      broadcast(askUserResolvedMessage(
-        questionResolved.sessionId, questionResolved.questionRpcId, questionResolved.outcome))
-    }
-  }
-
-  /**
-   * Subscribe to the api-proxy mux stream in-process (the same stream the web
-   * UI's WebSocket downlinks read), so the bridge needs no loopback WebSocket
-   * client. Returns a disposer that aborts the subscription; a profile without
-   * the `apiProxy` service returns undefined and the ask-user path degrades.
-   */
-  function startMuxSubscription(): (() => void) | undefined {
-    const apiProxy = ctx.get('apiProxy') as ApiProxyLike | undefined
-    if (apiProxy === undefined) return undefined
-    const abort = new AbortController()
-    const task = (async () => {
-      while (!abort.signal.aborted) {
-        try {
-          for await (const frame of apiProxy.events.mux({}, abort.signal)) {
-            handleMuxFrame(frame)
-          }
-        } catch (error: unknown) {
-          // A live stream ending without an abort (gateway reset) warrants a
-          // reconnect; teardown aborts the signal and must stay quiet.
-          if (abort.signal.aborted) break
-          console.error(`dsh-bridge: mux stream errored: ${error instanceof Error ? error.message : String(error)}`)
-        }
-        if (abort.signal.aborted) break
-        // The stream ended (or errored) without a teardown: reopen after a short
-        // pause. Reconnect re-subscribes to the mux, which replays still-pending
-        // questions, so Emacs re-learns any ask it may have missed.
-        await new Promise<void>((resolve) => {
-          const timer = setTimeout(resolve, 2000)
-          abort.signal.addEventListener('abort', () => { clearTimeout(timer); resolve() }, { once: true })
-        })
-      }
-    })()
-    return () => { abort.abort() }
   }
 
   /** Loopback base URL of the web server the plugin is mounted on (the /api RPC carrier). */
@@ -428,20 +455,81 @@ export function apply(ctx: Context): void {
   type RpcResult = { ok: true; value: unknown } | { ok: false; error: { code: string; message: string } }
 
   /**
-   * Self-call one host RPC over loopback HTTP and unwrap its result. The
-   * bridge proxies `session.models`/`session.selectModel` through the genuine
-   * handlers, so the per-session selection ref (private to the gateway) stays
-   * the single source of truth and parity with the web UI is exact. Returns an
-   * error branch for carrier/unreachable failures, and null only for a
-   * well-formed HTTP response whose body is not a valid server-response.
+   * Minimal face of the optional `connection` service: mint the launch-token
+   * URL whose 303 response carries the signed browser cookie. The /api
+   * channel is browser-authenticated (Host/Origin fence + authority-bound
+   * cookie), so an in-process caller must mint the same cookie a browser
+   * would; a profile without the service degrades RPC proxying to an error.
    */
-  async function rpcCall(method: string, payload: unknown): Promise<RpcResult | null> {
+  interface ConnectionService {
+    authenticatedUrl(baseUrl: string): string
+  }
+
+  /** The minted browser cookie for /api self-calls, cached per plugin instance. */
+  let rpcCookie: string | undefined
+
+  /**
+   * Mint (once) the browser-auth cookie for /api self-calls: fetch the
+   * launch-token URL without following its redirect and lift the authority-bound
+   * cookie pair out of the `set-cookie` header — the same exchange a browser
+   * performs on first load. Returns undefined when the exchange succeeds but
+   * carries no cookie; a transport failure propagates to the caller.
+   */
+  async function ensureRpcCookie(connection: ConnectionService): Promise<string | undefined> {
+    if (rpcCookie !== undefined) return rpcCookie
+    const response = await fetch(connection.authenticatedUrl(webBaseUrl), { redirect: 'manual' })
+    const cookies = typeof response.headers.getSetCookie === 'function'
+      ? response.headers.getSetCookie()
+      : [response.headers.get('set-cookie') ?? '']
+    const pair = cookies[0]?.split(';', 1)[0]
+    if (pair === undefined || pair === '') return undefined
+    rpcCookie = pair
+    return pair
+  }
+
+  /**
+   * Self-call one host RPC over loopback HTTP and unwrap its result. The
+   * bridge proxies `session/modelCatalog`/`session/selectModel` through the
+   * genuine Typert Remote handlers, so selection state and validation stay
+   * host-owned and parity with the web UI is exact. METHOD is the slash-form
+   * endpoint (`namespace/method`); PAYLOAD must already be the `{ args }`
+   * named-argument wrapper (see rpcArgsPayload). Returns an error branch for
+   * carrier/unreachable failures, and null only for a well-formed HTTP
+   * response whose body is not a valid server-response. A 401 means the
+   * minted cookie went stale (secret rotation): re-mint once.
+   */
+  async function rpcCall(method: string, payload: unknown, allowRefresh = true): Promise<RpcResult | null> {
     const rpcId = randomUUID()
+    const connection = ctx.get('connection') as ConnectionService | undefined
+    if (connection === undefined) {
+      return {
+        ok: false,
+        error: { code: 'internal', message: `RPC ${method} unavailable: profile lacks the connection service` },
+      }
+    }
+    let cookie: string | undefined
+    try {
+      cookie = await ensureRpcCookie(connection)
+    } catch (error: unknown) {
+      return {
+        ok: false,
+        error: {
+          code: 'internal',
+          message: `RPC ${method} unavailable: browser-auth cookie mint failed: ${error instanceof Error ? error.message : String(error)}`,
+        },
+      }
+    }
+    if (cookie === undefined) {
+      return {
+        ok: false,
+        error: { code: 'internal', message: `RPC ${method} unavailable: browser-auth cookie exchange carried no cookie` },
+      }
+    }
     let response: Response
     try {
       response = await fetch(`${webBaseUrl}/api/${method}`, {
         method: 'POST',
-        headers: { 'content-type': 'application/json' },
+        headers: { 'content-type': 'application/json', cookie },
         body: rpcRequestFrame(method, rpcId, payload),
       })
     } catch (error: unknown) {
@@ -455,6 +543,10 @@ export function apply(ctx: Context): void {
     }
     const text = await response.text()
     if (!response.ok) {
+      if (response.status === 401 && allowRefresh) {
+        rpcCookie = undefined
+        return rpcCall(method, payload, false)
+      }
       return {
         ok: false,
         error: { code: 'internal', message: `RPC ${method} failed: HTTP ${response.status}` },
@@ -466,14 +558,9 @@ export function apply(ctx: Context): void {
   /** Map a host RPC error code onto the bridge's HTTP status conventions. */
   function rpcErrorStatus(code: string): number {
     switch (code) {
-      case 'model-unavailable': return 400
-      case 'session-not-found': return 404
-      case 'agent-busy':
-      case 'subagent-unauthorized':
-      case 'subagent-parent-unavailable':
-      case 'subagent-not-found':
-      case 'subagent-not-resumable':
-      case 'subagent-delivery-unavailable': return 409
+      case 'session/model-unavailable': return 400
+      case 'session/not-found': return 404
+      case 'session/agent-busy': return 409
       default: return 502
     }
   }
@@ -510,7 +597,7 @@ export function apply(ctx: Context): void {
       .map((session): LiveSessionLike => ({
         id: String(session.id),
         header: { cwd: session.header.cwd, createdAt: session.header.createdAt },
-        events: session.events,
+        events: session.snapshotEvents(),
         running: ctx.agents.get(session.id)?.status === 'running',
       }))
   }
@@ -537,8 +624,8 @@ export function apply(ctx: Context): void {
    */
   async function persistedHeaders(): Promise<SessionHeaderLike[]> {
     try {
-      const headers = await sessionPersistence.list()
-      return headers.map(header => ({
+      const snapshots = await sessionPersistence.list()
+      return snapshots.map(({ header }) => ({
         id: String(header.id),
         cwd: header.cwd,
         createdAt: header.createdAt,
@@ -550,9 +637,30 @@ export function apply(ctx: Context): void {
   }
 
   /**
-   * Compose an agent for resume/create: the static model-selection snapshot
-   * (the gateway re-reads a three-tier getter; the bridge accepts the simpler
-   * snapshot), then selection-install-then-preset-mount, matching the gateway's
+   * The selection ref installed into a bridge-composed agent. The tiers mirror
+   * the session controller's own ref, read LIVE from the durable
+   * `modelSelection` projection state so a mid-session switch (the
+   * `model/selection` event `session/selectModel` appends) takes effect on the
+   * agent's next step: the pending pick, else the last used route, else the
+   * install-time default. A profile without the projection registry serves the
+   * static default snapshot.
+   */
+  function bridgeSelectionRef(agent: Agent, fallback: ModelSelection): ModelSelectionRef {
+    return {
+      get current(): ModelSelection | undefined {
+        const registry = ctx.get('sessionProjections') as SessionProjectionRegistryService | undefined
+        const state = registry?.stateOf(agent.session, 'modelSelection') as
+          { pending?: ModelSelection | null; lastUsed?: ModelSelection | null } | undefined
+        return state?.pending ?? state?.lastUsed ?? fallback
+      },
+      assembled: undefined,
+    }
+  }
+
+  /**
+   * Compose an agent for resume/create: the install-time default selection as
+   * the ref's fallback tier (the live tiers ride the durable projection), then
+   * selection-install-then-preset-mount, matching the gateway's
    * `composeAgent` ordering. For a resumed cold session the preset is resolved
    * from its log; for a created session it is the deployment default.
    */
@@ -565,14 +673,15 @@ export function apply(ctx: Context): void {
     if (selection === undefined) {
       throw new BridgeError(501, 'profile lacks an agent default model; cannot compose an agent')
     }
-    const ref: ModelSelectionRef = { current: selection, assembled: undefined }
     const agentOptions: AgentOptions = { provider: selection.provider, model: selection.model }
     const presets = ctx.get('agentPresets') as AgentPresetsService | undefined
     if (presets === undefined) {
       return {
         agentOptions,
         setup: (agentCtx: Context) => {
-          installModelSelection(agentCtx, ref)
+          const agent = agentCtx.agent
+          if (agent === undefined) throw new Error('dsh-bridge: agent setup has no scoped agent')
+          installModelSelection(agentCtx, bridgeSelectionRef(agent, selection))
           return Promise.resolve()
         },
       }
@@ -582,7 +691,9 @@ export function apply(ctx: Context): void {
       agentOptions,
       agentPreset: resolvedId,
       setup: async (agentCtx: Context) => {
-        installModelSelection(agentCtx, ref)
+        const agent = agentCtx.agent
+        if (agent === undefined) throw new Error('dsh-bridge: agent setup has no scoped agent')
+        installModelSelection(agentCtx, bridgeSelectionRef(agent, selection))
         await presets.mount(agentCtx, resolvedId)
       },
     }
@@ -618,16 +729,24 @@ export function apply(ctx: Context): void {
           }
           return live
         }
-        const header = (await sessionPersistence.list()).find(h => String(h.id) === id)
-        if (header === undefined) throw new BridgeError(404, `session ${id} is not live`)
-        if (subagentOwnedHeader(header)) {
+        const snapshot = await sessionPersistence.stat(id)
+        if (snapshot === undefined) throw new BridgeError(404, `session ${id} is not live`)
+        if (subagentOwnedHeader(snapshot.header)) {
           throw new BridgeError(409, `session ${id} is owned by a subagent`)
         }
-        const inspected = await sessionPersistence.inspect(id)
-        if (subagentOwnedHeader(inspected.meta)) {
-          throw new BridgeError(409, `session ${id} is owned by a subagent`)
+        // The preset a cold session runs is a log fact: read the full log once
+        // through a read handle (the removed `inspect`'s replacement) and fold
+        // it with the in-repo replica of the `agentPreset` projection.
+        const readHandle = await sessionPersistence.open(id, 'read')
+        let presetId: string | undefined
+        try {
+          if (subagentOwnedHeader(readHandle.header)) {
+            throw new BridgeError(409, `session ${id} is owned by a subagent`)
+          }
+          presetId = sessionPreset(readHandle.header, (await readHandle.read()).events)
+        } finally {
+          await readHandle.close()
         }
-        const presetId = resolveSessionPreset({ header: inspected.meta, events: inspected.events })
         const composition = await composeBridgeAgent(presetId)
         const handle = await ctx.agents.resume({
           resumeSessionId: id as SessionId,
@@ -771,13 +890,37 @@ export function apply(ctx: Context): void {
   })
 
   /**
+   * The durable text of one assistant message, addressed by its message id,
+   * WITHOUT resuming anything: a live session serves its event snapshot, and
+   * a cold (persisted-only) session is read once through a read handle — a
+   * deposit is a read, not a targeting operation, so it must not spawn an
+   * agent. Returns undefined when the session is unknown or no logged
+   * assistant message carries the id.
+   */
+  async function resolveMessageText(sessionId: string, messageId: string): Promise<string | undefined> {
+    const live = sessions.list().find(s => String(s.id) === sessionId)
+    if (live !== undefined) {
+      return assistantTextForMessage(live.snapshotEvents() as readonly SessionEventLike[], messageId)
+    }
+    try {
+      const handle = await sessionPersistence.open(sessionId, 'read')
+      try {
+        return assistantTextForMessage((await handle.read()).events, messageId)
+      } finally {
+        await handle.close()
+      }
+    } catch {
+      return undefined
+    }
+  }
+
+  /**
    * Fold a cold session's title. The persisted projection cache serves the
    * title with zero log reads (mirroring the harness's own session list); when
-   * the cache is absent, or its row lacks the title key, inspect the log and
-   * fold `session/title` events directly. Fail-soft: a title is a display
-   * nicety and must never hide the session row.
-   */
-  async function coldSessionTitle(
+   * the cache is absent, or its row lacks the title key, read the log through
+   * a read handle and fold `session/title` events directly. Fail-soft: a
+   * title is a display nicety and must never hide the session row.
+   */  async function coldSessionTitle(
     cache: ProjectionCacheService | undefined,
     persistence: SessionPersistenceService,
     header: SessionHeader,
@@ -787,12 +930,16 @@ export function apply(ctx: Context): void {
       const title = snapshot.values.title
       if (typeof title === 'string' && title !== '') return title
       // The title key is present with a null value: the session has no title
-      // yet, and a cold log is immutable, so it cannot acquire one. No inspect.
+      // yet, and a cold log is immutable, so it cannot acquire one. No read.
       if (Object.hasOwn(snapshot.values, 'title')) return null
     }
     try {
-      const inspection = await persistence.inspect(header.id)
-      return sessionTitle(inspection.events)
+      const handle = await persistence.open(String(header.id), 'read')
+      try {
+        return sessionTitle((await handle.read()).events)
+      } finally {
+        await handle.close()
+      }
     } catch {
       return null
     }
@@ -803,8 +950,8 @@ export function apply(ctx: Context): void {
     const cache = ctx.get('sessionProjectionCache') as ProjectionCacheService | undefined
     let persisted: SessionHeaderLike[] = []
     try {
-      const headers = await sessionPersistence.list()
-      persisted = await Promise.all(headers.map(async (header): Promise<SessionHeaderLike> => ({
+      const snapshots = await sessionPersistence.list()
+      persisted = await Promise.all(snapshots.map(async ({ header }): Promise<SessionHeaderLike> => ({
         id: String(header.id),
         cwd: header.cwd,
         createdAt: header.createdAt,
@@ -833,10 +980,16 @@ export function apply(ctx: Context): void {
     return provided !== undefined && tokensEqual(token, provided)
   }
 
-  // Subscribe to the api-proxy mux stream (the ask-user feed). Wrapped in an
-  // effect so teardown aborts the subscription; a profile without `apiProxy`
-  // degrades the ask-user path to a no-op. Reconnect-on-emit keeps it live.
-  ctx.effect(() => startMuxSubscription() ?? (() => {}), 'dsh-bridge: mux subscription')
+  // Answer ask-user requests from Emacs. Prepended so the bridge runs outside
+  // the api-remotes browser forwarder regardless of plugin load order; the
+  // listener delegates via next() whenever no Emacs SSE client is connected.
+  // A profile without the user-questions capability simply never dispatches
+  // the event, so the ask-user path degrades to a no-op there.
+  ctx.effect(
+    () => ctx.on('user-questions/request', (request, next) =>
+      onUserQuestionsRequest(request, next), { prepend: true }),
+    'dsh-bridge: ask-user answerer',
+  )
 
   // Registered inside an effect so a config hot-reload disposes the route
   // before re-applying — a duplicate (kind, path) registration throws.
@@ -877,6 +1030,9 @@ export function apply(ctx: Context): void {
 
       // Browser-facing SSE for the composer-draft push. EventSource cannot set
       // headers, so it authenticates with the vended token as a query param.
+      // The browser's own draft stream identifies itself with `purpose=draft`
+      // (so it never owns an ask-user question); an unmarked connection is
+      // Emacs.
       if (req.method === 'GET' && pathname === '/dsh-bridge/events') {
         const queryToken = url.searchParams.get('token')
         if (!(queryToken !== null && tokensEqual(token, queryToken))) {
@@ -889,15 +1045,19 @@ export function apply(ctx: Context): void {
           connection: 'keep-alive',
         })
         res.write('retry: 5000\n\n')
-        sseClients.add(res)
-        // Replay still-pending questions so a reconnecting Emacs re-learns an
-        // ask it may have missed (mirrors the mux's own replay to its clients).
-        for (const [questionId, pending] of pendingQuestions) {
-          try {
-            res.write(askUserMessage(questionId, pending.sessionId, pending.questions))
-          } catch { sseClients.delete(res); break }
+        const isBrowser = url.searchParams.get('purpose') === 'draft'
+        ;(isBrowser ? browserSseClients : emacsSseClients).add(res)
+        if (!isBrowser) {
+          // Replay still-pending questions so a reconnecting Emacs re-learns
+          // an ask it may have missed. The browser never answers questions,
+          // so it needs no replay.
+          for (const [questionId, pending] of pendingQuestions) {
+            try {
+              res.write(askUserMessage(questionId, pending.sessionId, pending.questions))
+            } catch { dropSseClient(res); break }
+          }
         }
-        req.on('close', () => { sseClients.delete(res) })
+        req.on('close', () => { dropSseClient(res) })
         return
       }
 
@@ -916,16 +1076,12 @@ export function apply(ctx: Context): void {
       }
 
       // Answer (or decline) a pending ask-user question the bridge surfaced to
-      // Emacs. Proxied to the api-proxy's `respond` so the awaiting tool call
-      // settles exactly as if the web UI had answered; first answer wins (a
-      // late/duplicate answer gets `accepted: false`).
+      // Emacs. Settles the waterfall listener's wait directly: an answer set
+      // becomes the listener's return value, a cancel rejects it (the old
+      // cancel-envelope semantics — the asker sees the tool call fail). First
+      // settlement wins; a late/duplicate POST reads 404 `not-pending`.
       if (req.method === 'POST' && pathname === '/dsh-bridge/answer') {
         try {
-          const apiProxy = ctx.get('apiProxy') as ApiProxyLike | undefined
-          if (apiProxy === undefined) {
-            sendJson(res, 409, { accepted: false, reason: 'no api proxy' })
-            return
-          }
           const body = (await readJson(req)) as {
             questionId?: unknown; sessionId?: unknown; answers?: unknown; cancelled?: unknown
           } | undefined
@@ -940,22 +1096,19 @@ export function apply(ctx: Context): void {
             sendJson(res, 404, { accepted: false, reason: 'not-pending' })
             return
           }
-          const isCancel = body.cancelled === true || body.cancelled === 'true'
-          const envelope = isCancel
-            ? questionCancelEnvelope(questionId)
-            : Array.isArray(body?.answers)
-              ? questionAnswerEnvelope(questionId, sessionId, body.answers)
-              : undefined
-          if (envelope === undefined) {
+          const isCancel = body?.cancelled === true || body?.cancelled === 'true'
+          if (isCancel) {
+            pending.settle({ ok: false })
+            sendJson(res, 200, { accepted: true })
+            return
+          }
+          const answers = body?.answers
+          if (!answerMatchesQuestions(pending.questions, answers)) {
             sendJson(res, 400, { accepted: false, reason: 'bad-response' })
             return
           }
-          const receipt = await apiProxy.respond(envelope)
-          if (receipt.accepted) {
-            pendingQuestions.delete(questionId)
-            broadcast(askUserResolvedMessage(sessionId, questionId, isCancel ? 'cancelled' : 'answered'))
-          }
-          sendJson(res, receipt.accepted ? 200 : 409, { accepted: receipt.accepted, reason: receipt.reason })
+          pending.settle({ ok: true, answers })
+          sendJson(res, 200, { accepted: true })
         } catch (error: unknown) {
           sendJson(res, bridgeErrorStatus(error), { error: error instanceof Error ? error.message : String(error) })
         }
@@ -978,8 +1131,11 @@ export function apply(ctx: Context): void {
             }
             explicitId = body.sessionId
           }
-          if (sseClients.size === 0) {
-            sendJson(res, 409, { error: 'no client connected' })
+          // The draft push targets the browser's composer, so it needs a
+          // browser draft stream subscribed (an Emacs-only connection cannot
+          // consume drafts).
+          if (browserSseClients.size === 0) {
+            sendJson(res, 409, { error: 'no browser client connected' })
             return
           }
           const target = await resolveTarget(explicitId)
@@ -987,7 +1143,7 @@ export function apply(ctx: Context): void {
           sendJson(res, 200, {
             ok: true,
             sessionId: String(target.session.id),
-            title: sessionTitle(target.session.events),
+            title: sessionTitle(target.session.snapshotEvents()),
             cwd: target.session.header.cwd ?? null,
           })
         } catch (error: unknown) {
@@ -1004,17 +1160,32 @@ export function apply(ctx: Context): void {
 
       if (req.method === 'POST' && pathname === '/dsh-bridge/outbox') {
         try {
-          const body = (await readJson(req)) as { sessionId?: unknown; source?: unknown; text?: unknown } | undefined
-          const text = typeof body?.text === 'string' ? body.text : ''
-          if (text.trim() === '') {
-            sendJson(res, 400, { error: 'text is required' })
-            return
-          }
+          const body = (await readJson(req)) as
+            { sessionId?: unknown; source?: unknown; text?: unknown; messageId?: unknown } | undefined
           // Every entry is session-scoped (UX plan 2, Section 1.4): a deposit
           // without a sessionId is a contract violation, not a bridge message.
           const sessionId = outboxSessionId(body)
           if (sessionId === null) {
             sendJson(res, 400, { error: 'sessionId is required' })
+            return
+          }
+          // Two deposit shapes: a literal `text`, or a durable `messageId` the
+          // host resolves against the session log (the "Send to Emacs" action —
+          // the chat node tree no longer rides the client session snapshot, so
+          // the browser addresses the message and the host owns its text).
+          // Resolution is a pure read: a cold session's log is read through a
+          // persistence handle, never resumed.
+          let text = typeof body?.text === 'string' ? body.text : ''
+          if (typeof body?.messageId === 'string' && body.messageId !== '') {
+            const resolved = await resolveMessageText(sessionId, body.messageId)
+            if (resolved === undefined) {
+              sendJson(res, 404, { error: `no assistant message ${body.messageId}` })
+              return
+            }
+            text = resolved
+          }
+          if (text.trim() === '') {
+            sendJson(res, 400, { error: 'text is required' })
             return
           }
           const evicted = outbox.deposit({
@@ -1073,7 +1244,7 @@ export function apply(ctx: Context): void {
           sendJson(res, 200, {
             ok: true,
             sessionId: String(target.session.id),
-            title: sessionTitle(target.session.events),
+            title: sessionTitle(target.session.snapshotEvents()),
             cwd: target.session.header.cwd ?? null,
           })
         } catch (error: unknown) {
@@ -1087,7 +1258,7 @@ export function apply(ctx: Context): void {
           const target = await resolveTarget(url.searchParams.get('sessionId') ?? undefined)
           sendJson(res, 200, {
             sessionId: String(target.session.id),
-            title: sessionTitle(target.session.events),
+            title: sessionTitle(target.session.snapshotEvents()),
             cwd: target.session.header.cwd ?? null,
             text: latestAssistantText(target.agent.session.deriveMessages()),
             running: ctx.agents.get(String(target.session.id))?.status === 'running',
@@ -1117,7 +1288,7 @@ export function apply(ctx: Context): void {
       // harness turn).  Each turn carries its committed text segments plus the
       // turn's start/end facts, so Emacs can render a whole turn with divider
       // lines and walk M-p/M-n turn-by-turn.  The fold walks the session's own
-      // surface (`Session.surface.nodes` + `Session.events[seq]` — the same
+      // surface (`Session.surface.nodes` + `Session.snapshotEvents()[seq]` — the same
       // surface `deriveMessages()` folds), so compaction-replaced history stays
       // hidden exactly as the reply list it replaces did.  EPOCH is the
       // surface's `replaceGeneration` (the harness's monotonic replacement
@@ -1135,13 +1306,13 @@ export function apply(ctx: Context): void {
           const session = target.session
           const epoch = session.surface.replaceGeneration
           const { incremental, turns } = turnsSince(
-            assistantTurns({ nodes: session.surface.nodes, events: session.events }).reverse(),
+            assistantTurns({ nodes: session.surface.nodes, events: session.snapshotEvents() }).reverse(),
             epoch,
             { since: url.searchParams.get('since') ?? undefined, epoch: url.searchParams.get('epoch') ?? undefined },
           )
           sendJson(res, 200, {
             sessionId: String(session.id),
-            title: sessionTitle(session.events),
+            title: sessionTitle(session.snapshotEvents()),
             cwd: session.header.cwd ?? null,
             turns,
             incremental,
@@ -1154,14 +1325,16 @@ export function apply(ctx: Context): void {
         return
       }
 
-      // The prompt buffer's model catalog: proxy the host's genuine
-      // `session.models` RPC so the private per-session selection ref (the
-      // process-local `picked` tier) is the source of truth — parity with the
-      // web UI is exact by construction. The catalog is forwarded verbatim.
+      // The prompt buffer's model catalog: the host's genuine
+      // `session/modelCatalog` Remote for the groups, plus the session's
+      // durable `modelSelection` projection for the current pick (the same
+      // `next ?? lastUsed ?? catalog.default` fold the web UI's model
+      // directory computes). The catalog is forwarded verbatim, with `current`
+      // added.
       if (req.method === 'GET' && pathname === '/dsh-bridge/models') {
         try {
           const target = await resolveTarget(url.searchParams.get('sessionId') ?? undefined)
-          const result = await rpcCall('session.models', { sessionId: String(target.session.id) })
+          const result = await rpcCall('session/modelCatalog', rpcArgsPayload({}))
           if (result === null) {
             sendJson(res, 502, { error: 'model catalog RPC returned a malformed response' })
             return
@@ -1170,14 +1343,18 @@ export function apply(ctx: Context): void {
             sendJson(res, rpcErrorStatus(result.error.code), { error: result.error.message })
             return
           }
-          sendJson(res, 200, result.value)
+          const catalog = result.value as { default?: unknown } & Record<string, unknown>
+          const registry = ctx.get('sessionProjections') as SessionProjectionRegistryService | undefined
+          const view = registry?.snapshot(target.session).values.modelSelection as
+            { lastUsed?: unknown; next?: unknown } | undefined
+          sendJson(res, 200, { ...catalog, current: currentModelSelection(catalog.default, view) })
         } catch (error: unknown) {
           sendJson(res, bridgeErrorStatus(error), { error: error instanceof Error ? error.message : String(error) })
         }
         return
       }
 
-      // Change the target session's model: proxy `session.selectModel` (which
+      // Change the target session's model: proxy `session/selectModel` (which
       // validates, sets the session-local pick, and persists the default).
       if (req.method === 'POST' && pathname === '/dsh-bridge/model') {
         try {
@@ -1206,7 +1383,7 @@ export function apply(ctx: Context): void {
               ? { reasoningEffort: body.reasoningEffort }
               : {}),
           }
-          const result = await rpcCall('session.selectModel', payload)
+          const result = await rpcCall('session/selectModel', rpcArgsPayload({ request: payload }))
           if (result === null) {
             sendJson(res, 502, { error: 'select-model RPC returned a malformed response' })
             return
@@ -1252,7 +1429,7 @@ export function apply(ctx: Context): void {
           sendJson(res, 200, {
             ok: true,
             sessionId: String(target.session.id),
-            title: sessionTitle(target.session.events),
+            title: sessionTitle(target.session.snapshotEvents()),
             cwd: target.session.header.cwd ?? null,
           })
           broadcastSessionsChanged(String(target.session.id))

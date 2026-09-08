@@ -15,10 +15,15 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
-// Type-only: pulls the conversation SlotMap merge so the assistant-actions
+import type { Context as ClientContext } from '@deepseek-ai/cordis'
+import type { ISessions } from '@deepseek-ai/dsh-api-session-controller/client'
+// Type-only: pulls the ui-chat SlotMap merge so the assistant-actions
 // seat is known to the slot registry.
-import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
+import type {} from '@deepseek-ai/dsh-client-ui-chat/client'
+// Type-only: pulls the locale plugin's Context merge (ctx.locale).
+import type {} from '@deepseek-ai/dsh-client-locale/client'
+// Type-only: pulls the SlotRegistry service merge (ctx.slots).
+import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 import { en, zh } from './locales.ts'
 import { SendToEmacs } from './SendToEmacs.tsx'
 
@@ -30,11 +35,6 @@ export const inject = ['slots', 'locale', 'sessions']
 /** Minimal face of the session-scoped context, enough to reach the conversation service. */
 interface SessionScopeCtx {
   get(name: string): unknown
-}
-
-/** Minimal face of the client sessions service used to reach a session's scope. */
-interface SessionsService {
-  scope(sessionId: string): SessionScopeCtx | undefined
 }
 
 /** Minimal face of the scoped conversation service, enough to set a composer draft. */
@@ -83,15 +83,17 @@ async function postAuthorized(path: string, payload: unknown, token: string): Pr
 }
 
 /**
- * Deposit one assistant message into the host outbox. A 401 means the
- * cached/stored token is stale (the host regenerated the token file), so it is
- * dropped and a fresh one vended — exactly once; a second 401 is an error.
+ * Deposit one assistant message into the host outbox, addressed by durable
+ * message id (the host resolves the text from the session log). A 401 means
+ * the cached/stored token is stale (the host regenerated the token file), so
+ * it is dropped and a fresh one vended — exactly once; a second 401 is an
+ * error.
  */
-async function depositOutbox(sessionId: string, text: string): Promise<void> {
+async function depositOutbox(sessionId: string, messageId: string): Promise<void> {
   for (let attempt = 0; attempt < 2; attempt += 1) {
     const response = await postAuthorized(
       '/dsh-bridge/outbox',
-      { text, sessionId, source: 'message-action' },
+      { sessionId, messageId, source: 'message-action' },
       await getToken(),
     )
     if (response.ok) return
@@ -109,7 +111,7 @@ let draftSource: EventSource | null = null
 
 /** Push one draft onto a session's composer, if that session is loaded in the browser. */
 function applyDraft(ctx: ClientContext, sessionId: string, text: string): void {
-  const actx = (ctx.get('sessions') as SessionsService).scope(sessionId)
+  const actx = (ctx.get('sessions') as ISessions).scope(sessionId)
   if (actx === undefined) return
   const conversation = actx.get('conversation') as ConversationService | undefined
   if (conversation === undefined) return
@@ -129,7 +131,11 @@ async function connectDraftStream(ctx: ClientContext): Promise<void> {
     return
   }
   draftSource?.close()
-  const source = new EventSource(`${location.origin}/dsh-bridge/events?token=${encodeURIComponent(token)}`)
+  // `purpose=draft` identifies this connection as the browser's draft stream:
+  // the host's ask-user answerer must not count it as an Emacs client (this
+  // stream exists whenever the web UI is open and never answers questions).
+  const source = new EventSource(
+    `${location.origin}/dsh-bridge/events?token=${encodeURIComponent(token)}&purpose=draft`)
   draftSource = source
   source.addEventListener('message', (event: MessageEvent<string>) => {
     let payload: { kind?: unknown; sessionId?: unknown; text?: unknown }
@@ -156,7 +162,7 @@ export function apply(ctx: ClientContext): void {
       order: 9,
       locale: LOCALE_NS,
       inject: (sessionId: string) => ({
-        deposit: (text: string) => depositOutbox(sessionId, text),
+        deposit: (messageId: string) => depositOutbox(sessionId, messageId),
       }),
     }, SendToEmacs)
     return () => {

@@ -16,7 +16,7 @@
 ;; along with this program.	 If not, see <https://www.gnu.org/licenses/>.
 
 ;; Author: Chong Yidong <cyd@stupidchicken.com>
-;; Version: 0.6.0
+;; Version: 0.7.0
 ;; Package-Requires: ((emacs "29.1"))
 ;; Keywords: tools, convenience
 
@@ -74,7 +74,7 @@
 (require 'transient)
 (require 'cl-lib)
 
-(defconst dsh-bridge-version "0.6.0"
+(defconst dsh-bridge-version "0.7.0"
   "Version string for the DSH-Bridge package.
 This should match the version reported by the running DSH plugin.")
 
@@ -2902,7 +2902,7 @@ auto-pop the question buffer on arrival (most users find that intrusive)."
 (declare-function dsh-bridge-question-mode "dsh-bridge")
 
 (defvar-local dsh-bridge--question-id nil
-  "The question id (mux rpcId) this question buffer answers.")
+  "The question id (bridge-minted) this question buffer answers.")
 (defvar-local dsh-bridge--question-session nil
   "The session id this question buffer asks about.")
 (defvar-local dsh-bridge--question-questions nil

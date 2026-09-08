@@ -299,12 +299,17 @@ Every `/dsh-bridge` route requires a shared bearer token stored at
 reads this file directly, while the browser plugin fetches it from the
 loopback-only `GET /dsh-bridge/token` route (peer- and origin-fenced).
 
-The ask-user path also subscribes to the host's in-process `apiProxy`
-mux stream (`apiProxy.events.mux`) and settles questions via
-`apiProxy.respond` — both loopback/in-process, no third-party contact,
-and the Emacs answer arrives over the bearer-authed `POST
-/dsh-bridge/answer` route.  A late or duplicate answer gets
-`accepted: false` (benign), the web UI and Emacs answer first-wins.
+The ask-user path registers an in-process answerer on the host's
+`user-questions/request` waterfall (ahead of the browser forwarder, so
+while an Emacs SSE client is connected, Emacs owns the question; with no
+Emacs client connected the request delegates to the web UI untouched).
+The browser plugin's own draft-push SSE connection is marked and never
+counts as Emacs — it exists whenever the web UI is open and never
+answers questions.  No loopback wire and no third-party contact is
+involved, and the Emacs answer arrives over the bearer-authed `POST
+/dsh-bridge/answer` route.
+A late or duplicate answer gets a 404 `not-pending` (benign); cancelling
+from Emacs fails the asking tool call.
 
 HTTP request bodies are capped at 1 MiB; larger bodies get a 413
 error.  DSH-to-Emacs messages are held in a bounded outbox (100
