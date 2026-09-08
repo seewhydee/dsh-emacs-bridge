@@ -1,0 +1,33 @@
+# dsh-emacs-bridge — integration-testing fixture overlay template.
+# Copyright (C) 2026  Chong Yidong <cyd@stupidchicken.com>
+#
+# Rendered by integration/host/launch.mjs into the per-instance temp DSH_HOME.
+# This is a patch overlay applied after the web profile's own layer, in argv
+# order: it mounts the freshly built bridge plugin and the mock-LLM plugin by
+# absolute path, points every new session at the mock provider, and pins the
+# webserver to loopback + a per-instance free port.
+#
+# {{DSH_HOME}}, {{BRIDGE_ENTRY}}, {{MOCK_LLM_ENTRY}}, {{PORT}} are placeholders
+# the launcher substitutes with concrete values.
+
+- insert:
+    - id: dsh-bridge
+      name: '{{BRIDGE_ENTRY}}'
+    - id: dsh-bridge-mock-llm
+      name: '{{MOCK_LLM_ENTRY}}'
+
+# Route every new session at the mock provider (the base bundle's agent-default-
+# model row has no explicit provider/model, so this override is what reaches the
+# mock's adapter; auxiliary title calls fall back to the session's own route,
+# which is the mock too).
+- id: agent-default-model
+  config:
+    provider: mock
+    model: mock-model
+
+# Pin the web surface to loopback + the launcher-chosen free port so instances
+# can run in parallel.
+- id: webserver
+  config:
+    host: 127.0.0.1
+    port: {{PORT}}

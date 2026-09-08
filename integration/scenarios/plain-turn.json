@@ -1,0 +1,14 @@
+{
+  "name": "plain-turn",
+  "description": "A plain two-segment reply streamed across a live turn.",
+  "mockScript": [
+    { "kind": "text", "text": "First part of the reply.", "delayMs": 80 },
+    { "kind": "text", "text": "Second part of the reply.", "delayMs": 80 }
+  ],
+  "steps": [
+    { "action": "send", "text": "Tell me two things." },
+    { "observe": "The DSH-View streams the reply in place, then the (latest/N) counter tracks the turn." },
+    { "observe": "The elapsed ticker and (continuing...) marker appear while the delivery is in flight." },
+    { "observe": "The view refills with both segments after turn-complete, with a closing divider." }
+  ]
+}

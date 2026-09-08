@@ -48,6 +48,7 @@ These names appear across README, Makefile, `package.json`, `cordis.patch.yml`, 
 make build     # install deps if needed, build the plugin → dsh-plugin/lib/index.js + lib/client.js
 make package   # build, then stage dsh-bridge-<version>.tar (Emacs package bundling the built plugin)
 make test      # pnpm test in dsh-plugin/ + ERT via emacs --batch
+make integration-test   # seam harness (integration/): boot a live DSH host with a mock LLM, run vitest + batch ERT
 make clean     # remove .package/ and dsh-bridge-*.tar
 ```
 
@@ -102,6 +103,7 @@ Bump all three at once.
 - Elisp helpers are covered by ERT, run in batch via `make test`.
 - Tests describe behavior: when a change alters observable behavior, update its test in the same change.
 - A change is complete when `make build && make test` passes.
+- The seam harness in `integration/` (`make integration-test`) is the version-bump gate for the harness seams AGENTS.md lists ("re-verify the Cordis service seams, the client-bundle artifact contract, and the ask-user host coupling"). It boots the real plugin against a live host with a mock LLM; the ask-user regression is expected to fail until the plugin fix lands.
 
 ## Security and failure bounds
 

@@ -1,0 +1,26 @@
+{
+  "name": "ask-user",
+  "description": "Model asks a question mid-turn; the user answers from Emacs.",
+  "mockScript": [
+    {
+      "kind": "tool-call",
+      "name": "ask_user_question",
+      "arguments": {
+        "questions": [
+          {
+            "id": "q1",
+            "question": "Pick a color",
+            "options": [{"label": "Red"}, {"label": "Blue"}]
+          }
+        ]
+      }
+    },
+    { "kind": "text", "text": "Proceeding with your choice." }
+  ],
+  "steps": [
+    { "action": "send", "text": "Pick a color for me." },
+    { "observe": "The DSH-View ends with an \"Awaiting your response\" note, not \"(continuing...)\"." },
+    { "observe": "Press `a` — the question buffer opens with Red/Blue options." },
+    { "observe": "Answer, then the view refills with \"Proceeding with your choice.\" and no marker." }
+  ]
+}

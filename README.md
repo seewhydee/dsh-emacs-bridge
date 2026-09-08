@@ -280,6 +280,14 @@ would rather have questions pop automatically, set
 `dsh-bridge-question-auto-pop` (default nil, since auto-popping is
 intrusive).
 
+## Development testing
+
+`make test` runs the fast unit suites (plugin logic via Vitest, elisp via ERT
+in batch). The seam harness under `integration/` (`make integration-test`)
+boots the real plugin against a live DeepSeek Harness host with a mock LLM and
+exercises the route/SSE surface end-to-end; it is the version-bump gate for the
+harness seams. See `integration/README.md`.
+
 ## Permissions, authentication, and failure bounds
 
 The DSH plugin registers its routes on the DSH web server's loopback

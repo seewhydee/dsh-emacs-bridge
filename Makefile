@@ -66,5 +66,17 @@ test:
 	emacs --batch -L emacs -l emacs/dsh-bridge-tests.el \
 	      -f ert-run-tests-batch-and-exit
 
+# Integration-testing framework (integration/): boots a live DSH host with the
+# freshly built plugin and a mock LLM, then runs the Vitest seam specs and the
+# batch Emacs end-to-end layer. Separate from `make test`, which stays
+# unit-only and fast. The framework needs a working `dsh` (on PATH, or via
+# DSH_BRIDGE_DSH_COMMAND) and, for a checkout dsh, DSH_BRIDGE_FIXTURE_CWD —
+# see integration/README.md.
+integration-test: build
+	cd integration && { test -d node_modules || pnpm install; }
+	cd integration && pnpm test
+	emacs --batch -L emacs -L integration -l integration/dsh-bridge-it.el \
+	      -f ert-run-tests-batch-and-exit
+
 clean:
 	rm -rf .package dsh-bridge-*.tar
