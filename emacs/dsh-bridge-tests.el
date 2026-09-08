@@ -1202,12 +1202,12 @@ turn ends cleanly after its last segment."
                   5001000 "aborted"))
         (marker (dsh-bridge--view-running-marker)))
     ;; Two segments, completed: rule-only boundary, no label, no footer.
-    (should (equal (dsh-bridge--view-turn-render multi) "a\n\n---\n\nb"))
+    (should (equal (dsh-bridge--view-turn-render multi) "a\n\n---\nb"))
     ;; A running turn ends with the marker after its last segment.
     (should (equal (dsh-bridge--view-turn-render open)
                    (concat "growing\n\n" marker)))
     (should (equal (dsh-bridge--view-turn-render open-multi)
-                   (concat "a\n\n---\n\nb\n\n" marker)))
+                   (concat "a\n\n---\nb\n\n" marker)))
     ;; The marker is propertized, so it reads as furniture, never model text.
     (let ((rendered (dsh-bridge--view-turn-render open)))
       (should (text-property-any 0 (length rendered)

@@ -1815,19 +1815,19 @@ turn completes without text.")
 
 ;;; Turn rendering and the position counter
 
-;; The DSH-View shows one *turn*: every text-bearing assistant message a turn
-;; committed, in order, separated by GFM horizontal-rule dividers (a `---'
-;; line between two blanks, so it never reads as a setext heading).  A turn
-;; that is still running ends with a terminal marker line — propertized so it
-;; reads as bridge furniture rather than model text — which reads
-;; `(continuing...)' while the agent streams, or an "awaiting your response"
-;; note while the agent is parked on an ask-user question, and disappears
-;; once the turn completes (or becomes the next segment's leading `---' when
-;; another segment is committed: the marker is always terminal).
+;; The DSH-View shows one *turn*, consisting of text-bearing assistant
+;; messages ("segments") separated by GFM horizontal-rule dividers.
+;; For a still-running turn, the latest segment ends with a terminal
+;; marker line "(continuing...)", or an "awaiting your response" note
+;; if the agent is parked on an ask-user question.  Once the turn
+;; completes, the final segment has no marker at the end.
 
-(defconst dsh-bridge--view-segment-divider "\n\n---\n\n"
-  "Buffer text between two segments of the same turn: a GFM horizontal rule
-between two blank lines.")
+(defvar dsh-bridge--view-segment-divider "\n\n---\n"
+  "Text between two segments of the same turn in DSH-View buffers.
+The default consists of (i) two newlines, (ii) a Markdown divider
+\"---\", and (iii) one newline.  In `gfm-view-mode', (ii) is rendered as
+a full-width line followed by a newline, so the divider appears as a
+full-width line separated by single blank lines above and below.")
 
 (defun dsh-bridge--view-turn-open-p (turn)
   "Whether TURN is still open (running): no end facts recorded yet.
