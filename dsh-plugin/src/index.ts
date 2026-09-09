@@ -29,6 +29,10 @@
 //        (kept deliberately: a single-shot "latest text" probe; the Emacs
 //        package no longer calls it)
 //   GET  /dsh-bridge/sessions                     -> live + persisted sessions
+//   GET  /dsh-bridge/session?sessionId=           -> one read-only session report
+//        (identity + lineage + sessionStats/tokenUsage/contextPressure/
+//        contextBreakdown/modelSelection/permissions/title; observes live and
+//        cold sessions without resuming, 404 unknown, 409 subagent-owned)
 //   GET  /dsh-bridge/prompts?sessionId=           -> user prompts, newest first
 //   GET  /dsh-bridge/turns?sessionId=             -> turn-aggregated assistant
 //        replies, newest first (each turn: { turn, startedAt, endedAt?,
@@ -82,6 +86,7 @@ import {
   assistantMessageHasText,
   assistantTextForMessage,
   assistantTurns,
+  catalogModelName,
   classifySessionId,
   contextMessage,
   contextUsedTokens,
@@ -97,11 +102,13 @@ import {
   outboxSessionId,
   parseBearerAuthorization,
   repliesChangedMessage,
+  resolveReadTargetId,
   resolveTargetId,
   rpcArgsPayload,
   rpcRequestFrame,
   rpcUnwrapResponse,
   sessionPreset,
+  sessionReport,
   sessionTitle,
   sessionsChangedMessage,
   tokenRequestsSameOrigin,
@@ -116,9 +123,13 @@ import {
   type AskUserAnswerItemLike,
   type AskUserQuestionItemLike,
   type MessageBlockLike,
+  type ReadTargetResult,
   type ResolveTargetResult,
   type SessionEventLike,
   type SessionHeaderLike,
+  type SessionObservationLike,
+  type SessionReport,
+  type SessionReportExtras,
   type SessionRow,
   type WorkspaceLike,
 } from './logic.ts'
@@ -186,6 +197,25 @@ interface SessionProjectionRegistryService {
   onChanged(listener: (session: Session, key: string, value: unknown, seq: number) => void): () => void
   snapshot(session: Session): ProjectionSnapshotLike
   stateOf(session: Session, key: string): unknown
+}
+
+/** Minimal face of one `sessionQuery.observeSession` lease. */
+interface SessionObservationLease extends SessionObservationLike {
+  [Symbol.dispose](): void
+}
+
+/**
+ * Minimal face of the optional `sessionQuery` service: one atomic, live-
+ * preferred, never-publishing observation of a session (cold ids are restored
+ * in memory and folded, never resumed). Read via `ctx.get`; a profile without
+ * the service degrades to live projection-registry reads or a header-only
+ * report.
+ */
+interface SessionQueryService {
+  observeSession(
+    id: string,
+    options?: { signal?: AbortSignal; projectionMode?: 'all' | 'none' },
+  ): Promise<SessionObservationLease>
 }
 
 /**
@@ -1011,6 +1041,123 @@ export function apply(ctx: Context): void {
     }))
   }
 
+  /** Whether an observation error is the session-query "not found" taxonomy. */
+  function isSessionQueryNotFound(error: unknown): boolean {
+    return error instanceof Error
+      && (error as { code?: unknown }).code === 'SESSION_QUERY_SESSION_NOT_FOUND'
+  }
+
+  /**
+   * Resolve the id a read-only report should observe. An explicit id is used
+   * as given (the observation reports 404/409); a missing one follows the
+   * read-target precedence. Never resumes.
+   */
+  async function resolveReadId(explicitId: string | undefined): Promise<string> {
+    if (explicitId !== undefined) return explicitId
+    const result: ReadTargetResult = resolveReadTargetId(
+      undefined,
+      targetableSessions(),
+      await persistedHeaders(),
+    )
+    if (result.kind === 'error') throw new BridgeError(result.status, result.message)
+    return result.id
+  }
+
+  /** The non-observation facts a session report needs: run state and workspace. */
+  function sessionReportExtras(id: string): SessionReportExtras {
+    const live = sessions.list().find(session => String(session.id) === id)
+    const registry = ctx.get('workspaceRegistry') as WorkspaceRegistryService | undefined
+    const workspaceBySession = workspaceRefsBySession(registry?.list() ?? [])
+    const archivedIds = new Set((registry?.archivedSessionIds ?? []).map(value => String(value)))
+    const workspace = workspaceBySession.get(id)
+    return {
+      running: live !== undefined && ctx.agents.get(live.id)?.status === 'running',
+      workspace: workspace?.title ?? null,
+      workspaceId: workspace?.id ?? null,
+      archived: archivedIds.has(id),
+    }
+  }
+
+  /**
+   * The degraded report used when `sessionQuery` is absent: live sessions read
+   * the projection registry directly, cold ones contribute header facts only.
+   * Still read-only — `stat` never resumes.
+   */
+  async function fallbackSessionReport(
+    id: string,
+    extras: SessionReportExtras,
+  ): Promise<SessionReport> {
+    const live = sessions.list().find(session => String(session.id) === id)
+    if (live !== undefined) {
+      if (live.header.origin === 'subagent') {
+        throw new BridgeError(409, `session ${id} is owned by a subagent`)
+      }
+      const registry = ctx.get('sessionProjections') as SessionProjectionRegistryService | undefined
+      const values = registry?.snapshot(live).values
+      const observation: SessionObservationLike = {
+        source: 'live',
+        header: live.header,
+        events: live.snapshotEvents() as readonly SessionEventLike[],
+        ...values === undefined ? {} : { projections: { values } },
+      }
+      return sessionReport(observation, extras)
+    }
+    const snapshot = await sessionPersistence.stat(id)
+    if (snapshot === undefined || snapshot.header.cwd === undefined) {
+      throw new BridgeError(404, `session ${id} is not live`)
+    }
+    if (snapshot.header.origin === 'subagent') {
+      throw new BridgeError(409, `session ${id} is owned by a subagent`)
+    }
+    return sessionReport({ source: 'prepared', header: snapshot.header }, extras)
+  }
+
+  /** Resolve the catalog display name for a selection, best-effort. */
+  async function resolveModelName(provider: string, model: string): Promise<string | null> {
+    const result = await rpcCall('session/modelCatalog', rpcArgsPayload({}))
+    if (result === null || !result.ok) return null
+    return catalogModelName(result.value, provider, model)
+  }
+
+  /**
+   * Build one read-only session report. Never resumes: the id is observed
+   * through the optional `sessionQuery` service (live or prepared/cold), with
+   * the projection-registry and persistence-header fallbacks when it is
+   * absent. 404 unknown, 409 subagent-owned.
+   */
+  async function readSessionReport(explicitId: string | undefined): Promise<SessionReport> {
+    const id = await resolveReadId(explicitId)
+    const extras = sessionReportExtras(id)
+    const sessionQuery = ctx.get('sessionQuery') as SessionQueryService | undefined
+    let report: SessionReport
+    if (sessionQuery === undefined) {
+      report = await fallbackSessionReport(id, extras)
+    } else {
+      let observation: SessionObservationLease
+      try {
+        observation = await sessionQuery.observeSession(id, { projectionMode: 'all' })
+      } catch (error: unknown) {
+        if (isSessionQueryNotFound(error)) throw new BridgeError(404, `session ${id} is not live`)
+        throw error
+      }
+      try {
+        if (observation.header.cwd === undefined) {
+          throw new BridgeError(404, `session ${id} is not live`)
+        }
+        if (observation.header.origin === 'subagent') {
+          throw new BridgeError(409, `session ${id} is owned by a subagent`)
+        }
+        report = sessionReport(observation, extras)
+      } finally {
+        observation[Symbol.dispose]()
+      }
+    }
+    if (report.model !== null) {
+      report.modelName = await resolveModelName(report.model.provider, report.model.model)
+    }
+    return report
+  }
+
   /** Whether a request carries the shared token as a bearer credential. */
   function authorized(req: IncomingMessage): boolean {
     const provided = parseBearerAuthorization(req.headers.authorization)
@@ -1109,6 +1256,26 @@ export function apply(ctx: Context): void {
           sendJson(res, 200, { sessions: await listSessions() })
         } catch (error: unknown) {
           sendJson(res, 500, { error: error instanceof Error ? error.message : String(error) })
+        }
+        return
+      }
+
+      // One read-only session report. The id is optional (last-active live,
+      // else the most recent cold session); a cold id is observed through
+      // `sessionQuery`, never resumed. A repeated or empty `sessionId` is a
+      // malformed request, not a target.
+      if (req.method === 'GET' && pathname === '/dsh-bridge/session') {
+        try {
+          const ids = url.searchParams.getAll('sessionId')
+          if (ids.length > 1 || (ids.length === 1 && ids[0] === '')) {
+            sendJson(res, 400, { error: 'sessionId must be a single non-empty string' })
+            return
+          }
+          sendJson(res, 200, await readSessionReport(ids[0]))
+        } catch (error: unknown) {
+          sendJson(res, bridgeErrorStatus(error), {
+            error: error instanceof Error ? error.message : String(error),
+          })
         }
         return
       }

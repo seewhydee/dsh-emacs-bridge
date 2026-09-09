@@ -125,6 +125,8 @@ The following commands are available from the transient menu:
 * `d` — send the region or buffer as a draft (can
         still edit in DSH composer before submitting).
 * `f` — fetch the session's latest reply into the DSH-View buffer.
+* `D` — show the session's read-only report (see
+        [Session report buffer](#session-report-buffer)).
 * `t` — set the default target session.
 * `u` — clear the default target session.
 * `l` — open the DSH-Sessions buffer.
@@ -150,6 +152,8 @@ The following commands are available from the DSH-Sessions buffer:
 * `d` — archive the session at point.
 * `+` — create a new session, optionally in a new workspace.
 * `W` — rename the workspace of the session at point.
+* `D` — show the session's read-only report (see
+  [Session report buffer](#session-report-buffer)).
 * `g` — refresh the DSH-Sessions buffer.
 
 For a full list, see the menu bar.  Other `tabulated-list-mode` keys
@@ -172,6 +176,8 @@ The following commands are available in a DSH-View buffer:
 * `w` — copy the reply (region, else the whole shown turn's raw
   Markdown without the divider lines) to the kill ring.
 * `i` — receive the latest "Send to Emacs" message (see below).
+* `D` — show the session's read-only report (see
+  [Session report buffer](#session-report-buffer)).
 * `M-p`/`M-n` — cycle the current session's turns (older / newer).
 * `l` — open the DSH-Sessions buffer.
 * `q` — quit the window and bury the buffer.
@@ -222,6 +228,44 @@ The following commands are available from the DSH-Prompt buffer:
 
 When `markdown-mode` is installed, this buffer derives from it, so
 most markdown editing commands are also available.
+
+### Session report buffer
+
+`M-x dsh-bridge-describe-session` (or `D` from the DSH-Sessions and
+DSH-View buffers, or `D` from the transient menu) opens a read-only
+report for a session: its identity and lineage (id, state, directory,
+workspace, preset, model, permissions, fork parent), whole-log
+statistics (turns, steps, LLM and tool time, first-token latency,
+decode throughput), token usage with cache-hit percentage, and context
+occupancy.  A cold (persisted-only) session is read from its log and is
+**not** resumed.
+
+The buffer is an Emacs Help mode buffer, so the standard help keys
+apply:
+
+* `q` — quit the window.
+* `g` — re-fetch the report.
+* `l` / `r` — go back / forward through the describe history.  These
+  are Help mode's keys here, not the bridge's list-sessions/reply.
+* `n` / `p` — move to the next / previous section.
+* `TAB` / `S-TAB` — move between buttons; `RET` or `mouse-2` follows
+  the button at point.
+* `?` — describe the mode.
+
+Bridge commands in the report buffer: `w` copies the session id, `f`
+opens the DSH-View for the session's latest turn, and `o` opens the
+DSH-Prompt buffer.  The report also has buttons for the session id
+(copy), the directory (Dired), the model (open the prompt buffer, where
+`C-c C-m` changes it), and the parent session (describe it, which
+pushes onto the `l`/`r` history).  The report refreshes automatically
+when the session's turn completes if the buffer is visible; set
+`dsh-bridge-describe-auto-refresh` to nil to make it a snapshot.
+
+The session label in the DSH-View and DSH-Prompt header lines is also
+clickable: `mouse-1` on it opens the same report.
+
+Bookmarks on the report buffer are not supported: `help-mode`'s
+bookmark support hardcodes popping to `*Help*`.
 
 ### Sending text from DSH to Emacs
 
@@ -278,7 +322,9 @@ unacknowledged entries); overflow evicts the oldest entries and is
 reported to the collector.  Naming a cold (persisted-only) session
 from Emacs resumes it on demand, matching the web UI; an id neither
 live nor persisted is 404, a subagent-owned session is 409, and a
-draft push fails with 409 when no browser client is subscribed.
+draft push fails with 409 when no browser client is subscribed.  The
+read-only session report is the one exception: it observes a cold
+session's persisted log without resuming it.
 
 ## License
 

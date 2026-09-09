@@ -862,6 +862,8 @@ compose/fetch/targeting verbs."
               #'dsh-bridge-receive))
   (should (eq (lookup-key dsh-bridge-view-mode-map (kbd "l"))
               #'dsh-bridge-list-sessions))
+  (should (eq (lookup-key dsh-bridge-view-mode-map (kbd "D"))
+              #'dsh-bridge-describe-session))
   (should (eq (lookup-key dsh-bridge-view-mode-map (kbd "M-p"))
               #'dsh-bridge-view-previous-reply))
   (should (eq (lookup-key dsh-bridge-view-mode-map (kbd "M-n"))
@@ -4238,6 +4240,334 @@ option and how to submit — instead of leaving that to the mode docstring."
       (should (string-match-p "C-c C-k declines" (buffer-string))))
     (when (dsh-bridge--question-find-buffer "q1")
       (kill-buffer (dsh-bridge--question-find-buffer "q1")))))
+
+;;; Session report (DSH-Describe)
+
+(defun dsh-bridge-test--describe-report (id &optional extra)
+  "A canned `/session' report alist for ID, with EXTRA taking precedence."
+  (append
+   extra
+   (list (cons 'sessionId id)
+         (cons 'live t)
+         (cons 'running nil)
+         (cons 'basis "observation")
+         (cons 'missing nil)
+         (cons 'title (format "Title %s" id))
+         (cons 'cwd "/tmp")
+         (cons 'workspace "tmp")
+         (cons 'createdAt 1700000000000)
+         (cons 'lastActive 1700000100000)
+         (cons 'lastPromptAt 1700000050000)
+         (cons 'isSeeded nil)
+         (cons 'agentPreset "default")
+         (cons 'model (list (cons 'provider "p") (cons 'model "m")))
+         (cons 'modelName "Model M")
+         (cons 'permissions
+               (list (cons 'currentValue "workspace-write")
+                     (cons 'options
+                           (list (list (cons 'value "workspace-write")
+                                       (cons 'name "Workspace write")
+                                       (cons 'description "Can edit."))))))
+         (cons 'stats
+               (list (cons 'turns 12) (cons 'steps 48)
+                     (cons 'llmMs 133400) (cons 'toolMs 18200)
+                     (cons 'ttftMs 35728) (cons 'ttftSteps 44)
+                     (cons 'decodeMs 104000) (cons 'decodeTokens 12345)))
+         (cons 'tokens
+               (list (cons 'uncachedInputTokens 45678) (cons 'outputTokens 12345)
+                     (cons 'cacheReadTokens 1234567) (cons 'cacheWriteTokens 23456)))
+         (cons 'context
+               (list (cons 'pressureTokens 120000) (cons 'projectedTokens 123456)
+                     (cons 'contextWindow 200000)))
+         (cons 'breakdown
+               (list (cons 'systemTokens 3000) (cons 'toolsTokens 12000)
+                     (cons 'messageTokens 108000))))))
+
+(defmacro dsh-bridge-test--with-describe (extra &rest body)
+  "Run BODY with `dsh-bridge--request' returning a canned report plus EXTRA.
+The report echoes the id named in the request path, so following a
+parent-session link describes the parent."
+  (declare (indent 1))
+  `(let ((dsh-bridge--sessions-cache '(((id . "s1") (title . "cached") (live . t)
+                                        (cwd . "/tmp")))))
+     (unwind-protect
+         (cl-letf (((symbol-function 'dsh-bridge--request)
+                    (lambda (_method path &rest _)
+                      (let ((id (if (string-match "sessionId=\\([^&]+\\)" path)
+                                    (match-string 1 path)
+                                  "s1")))
+                        (cons 200 (dsh-bridge-test--describe-report id ,extra))))))
+           ,@body)
+       (when (get-buffer dsh-bridge-describe-buffer-name)
+         (kill-buffer dsh-bridge-describe-buffer-name)))))
+
+(ert-deftest dsh-bridge-describe-mode-basics ()
+  "DSH-Describe is a read-only help-mode buffer with the bridge keys."
+  (with-temp-buffer
+    (dsh-bridge-describe-mode)
+    (should buffer-read-only)
+    (should (derived-mode-p 'help-mode))
+    (should (eq major-mode 'dsh-bridge-describe-mode)))
+  (should (eq (lookup-key dsh-bridge-describe-mode-map (kbd "w"))
+              #'dsh-bridge--describe-copy-id))
+  (should (eq (lookup-key dsh-bridge-describe-mode-map (kbd "f"))
+              #'dsh-bridge--describe-open-view))
+  (should (eq (lookup-key dsh-bridge-describe-mode-map (kbd "o"))
+              #'dsh-bridge--describe-open-prompt))
+  (should (eq (lookup-key dsh-bridge-describe-mode-map (kbd "D")) #'revert-buffer))
+  ;; Help mode's own keys remain reachable.
+  (should (eq (lookup-key dsh-bridge-describe-mode-map (kbd "l")) #'help-go-back))
+  (should (eq (lookup-key dsh-bridge-describe-mode-map (kbd "r")) #'help-go-forward)))
+
+(ert-deftest dsh-bridge-describe-session-renders-report ()
+  "The report renders the identity, stats, tokens, and context sections."
+  (dsh-bridge-test--with-describe nil
+    (dsh-bridge-describe-session "s1")
+    (with-current-buffer dsh-bridge-describe-buffer-name
+      (should (derived-mode-p 'help-mode))
+      (should buffer-read-only)
+      (should (equal dsh-bridge--describe-session "s1"))
+      (let ((text (buffer-string)))
+        (should (string-match-p "DSH session Title s1" text))
+        (should (string-match-p "Turns / steps\\s-+12 / 48" text))
+        (should (string-match-p "2m 13\\.4s" text))
+        (should (string-match-p "Cache hit\\s-+96\\.4%" text))
+        (should (string-match-p "118\\.7 tok/s" text))
+        (should (string-match-p "Next request\\s-+123,456 / 200,000 (61\\.7%)" text))
+        (should (string-match-p "Workspace write" text))
+        (should (string-match-p "Model M" text)))
+      ;; Sections are help-mode pages.
+      (should (string-match-p "\f" (buffer-string)))
+      (should (next-button (point-min))))))
+
+(ert-deftest dsh-bridge-describe-session-buffer-session ()
+  "The describe buffer's affinity is the described session."
+  (dsh-bridge-test--with-describe nil
+    (dsh-bridge-describe-session "s1")
+    (with-current-buffer dsh-bridge-describe-buffer-name
+      (should (equal (dsh-bridge--buffer-session) "s1"))
+      (should (equal (dsh-bridge--effective-session) "s1")))))
+
+(ert-deftest dsh-bridge-describe-session-id-button-copies ()
+  "The Id row's button copies the raw session id."
+  (dsh-bridge-test--with-describe nil
+    (dsh-bridge-describe-session "s1")
+    (with-current-buffer dsh-bridge-describe-buffer-name
+      (goto-char (point-min))
+      (search-forward "Id")
+      (search-forward "s1")
+      (let ((button (button-at (match-beginning 0))))
+        (should button)
+        (push-button (match-beginning 0))
+        (should (equal (car kill-ring) "s1"))))))
+
+(ert-deftest dsh-bridge-describe-session-parent-xref-navigates ()
+  "A parent-session xref describes the parent, and `l' returns."
+  (dsh-bridge-test--with-describe '((parentSession . "parent"))
+    (dsh-bridge-describe-session "s1")
+    (with-current-buffer dsh-bridge-describe-buffer-name
+      (goto-char (point-min))
+      (search-forward "parent")
+      (push-button (match-beginning 0))
+      (should (equal dsh-bridge--describe-session "parent"))
+      (help-go-back)
+      (should (equal dsh-bridge--describe-session "s1")))))
+
+(ert-deftest dsh-bridge-describe-session-leaves-help-buffer-alone ()
+  "Rendering from a non-help buffer does not touch *Help*."
+  (let ((help (get-buffer "*Help*"))
+		(before (and (get-buffer "*Help*")
+					 (with-current-buffer "*Help*" (buffer-string)))))
+	(dsh-bridge-test--with-describe nil
+	  (with-temp-buffer
+		(dsh-bridge-describe-session "s1"))
+	  (if help
+		  (should (equal (with-current-buffer "*Help*" (buffer-string)) before))
+		(should (not (get-buffer "*Help*")))))))
+
+(ert-deftest dsh-bridge-describe-session-action-buttons-push-no-history ()
+  "Action buttons act without entering the help xref history."
+  (dsh-bridge-test--with-describe nil
+	(dsh-bridge-describe-session "s1")
+	(with-current-buffer dsh-bridge-describe-buffer-name
+	  (let ((stack help-xref-stack)
+			(item help-xref-stack-item))
+		(goto-char (point-min))
+		(search-forward "[Copy id]")
+		(push-button (match-beginning 0))
+		(should (equal (car kill-ring) "s1"))
+		(should (eq help-xref-stack-item item))
+		(should (equal help-xref-stack stack))))))
+
+(ert-deftest dsh-bridge-describe-session-transport-failure-degrades ()
+  "A transport failure names its own reason, not a duplicated label."
+  (let ((dsh-bridge--sessions-cache '(((id . "s1") (title . "cached title") (live . t)))))
+	(unwind-protect
+		(cl-letf (((symbol-function 'dsh-bridge--request)
+				   (lambda (&rest _) (cons nil nil))))
+		  (dsh-bridge-describe-session "s1")
+		  (with-current-buffer dsh-bridge-describe-buffer-name
+			(let ((text (buffer-string)))
+			  (should (string-match-p
+					   "Report unavailable: request failed or timed out" text))
+			  (should (string-match-p "DSH session cached title" text)))))
+	  (when (get-buffer dsh-bridge-describe-buffer-name)
+		(kill-buffer dsh-bridge-describe-buffer-name)))))
+
+(ert-deftest dsh-bridge-describe-session-failure-resolves-id-safely ()
+  "The failure path unwraps the last-active cons and tolerates no id at all."
+  (let ((dsh-bridge--sessions-cache nil)
+		(dsh-bridge--last-resolved-active '("s9" . "last active")))
+	(unwind-protect
+		(cl-letf (((symbol-function 'dsh-bridge--request)
+				   (lambda (&rest _) (cons nil nil))))
+		  (dsh-bridge-describe-session)
+		  (with-current-buffer dsh-bridge-describe-buffer-name
+			(should (equal dsh-bridge--describe-session "s9"))
+			(goto-char (point-min))
+			(search-forward "Id")
+			(search-forward "s9")
+			(should (button-at (match-beginning 0)))))
+	  (when (get-buffer dsh-bridge-describe-buffer-name)
+		(kill-buffer dsh-bridge-describe-buffer-name))))
+  (let ((dsh-bridge--sessions-cache nil)
+		(dsh-bridge--last-resolved-active nil))
+	(unwind-protect
+		(cl-letf (((symbol-function 'dsh-bridge--request)
+				   (lambda (&rest _) (cons nil nil))))
+		  (dsh-bridge-describe-session)
+		  (with-current-buffer dsh-bridge-describe-buffer-name
+			(should (not dsh-bridge--describe-session))
+			(should (string-match-p "\\((unknown)\\)" (buffer-string)))))
+	  (when (get-buffer dsh-bridge-describe-buffer-name)
+		(kill-buffer dsh-bridge-describe-buffer-name)))))
+
+(ert-deftest dsh-bridge-describe-session-revert-refetches ()
+  "`g' re-fetches the report and preserves point."
+  (let ((dsh-bridge--sessions-cache nil)
+        (titles '("first" "second")))
+    (unwind-protect
+        (cl-letf (((symbol-function 'dsh-bridge--request)
+                   (lambda (&rest _)
+                     (cons 200
+                           (dsh-bridge-test--describe-report
+                            "s1" (list (cons 'title (pop titles))))))))
+          (dsh-bridge-describe-session "s1")
+          (with-current-buffer dsh-bridge-describe-buffer-name
+            (should (string-match-p "DSH session first" (buffer-string)))
+            (goto-char (point-min))
+            (forward-line 3)
+            (let ((point (point)))
+              (revert-buffer)
+              (should (string-match-p "DSH session second" (buffer-string)))
+              (should (= (point) point)))))
+      (when (get-buffer dsh-bridge-describe-buffer-name)
+        (kill-buffer dsh-bridge-describe-buffer-name)))))
+
+(ert-deftest dsh-bridge-describe-session-failure-degrades ()
+  "A failed request still opens the report with the cached facts and reason."
+  (let ((dsh-bridge--sessions-cache '(((id . "s1") (title . "cached title") (live . t)))))
+    (unwind-protect
+        (cl-letf (((symbol-function 'dsh-bridge--request)
+                   (lambda (&rest _) (cons 500 '((error . "boom"))))))
+          (dsh-bridge-describe-session "s1")
+          (with-current-buffer dsh-bridge-describe-buffer-name
+            (let ((text (buffer-string)))
+              (should (string-match-p "Report unavailable: HTTP 500: boom" text))
+              (should (string-match-p "DSH session cached title" text))
+              (should (string-match-p "(unavailable)" text)))))
+      (when (get-buffer dsh-bridge-describe-buffer-name)
+        (kill-buffer dsh-bridge-describe-buffer-name)))))
+
+(ert-deftest dsh-bridge-describe-session-uses-effective-session ()
+  "Called from a DSH-View buffer, the report targets that buffer's session."
+  (let ((dsh-bridge--sessions-cache '(((id . "s9") (title . "view session") (live . t))))
+        (path nil))
+    (unwind-protect
+        (progn
+          (cl-letf (((symbol-function 'dsh-bridge--request)
+                     (lambda (_method p &rest _)
+                       (setq path p)
+                       (cons 200 (dsh-bridge-test--describe-report "s9")))))
+            (with-temp-buffer
+              (dsh-bridge-view-mode)
+              (setq-local dsh-bridge--view-content-session "s9")
+              (call-interactively #'dsh-bridge-describe-session)))
+          (should (equal path "/session?sessionId=s9")))
+      (when (get-buffer dsh-bridge-describe-buffer-name)
+        (kill-buffer dsh-bridge-describe-buffer-name)))))
+
+(ert-deftest dsh-bridge-describe-session-link-properties ()
+  "A header-line session label is a clickable describe link."
+  (let ((label (dsh-bridge--session-link "Title" "s1")))
+    (should (equal (get-text-property 0 'mouse-face label) 'highlight))
+    (should (equal (get-text-property 0 'help-echo label)
+                   "mouse-1: describe this session"))
+    (should (equal (get-text-property 0 'dsh-bridge-session-id label) "s1"))
+    (should (eq (lookup-key (get-text-property 0 'keymap label) [header-line mouse-1])
+                #'dsh-bridge-describe-session-at-mouse)))
+  ;; A nil session or empty label is left alone.
+  (should (equal (dsh-bridge--session-link "Title" nil) "Title"))
+  (should (equal (dsh-bridge--session-link "" "s1") "")))
+
+(ert-deftest dsh-bridge-describe-session-at-mouse-describes ()
+  "The header-line mouse handler reads the id and describes it."
+  (let ((label (dsh-bridge--session-link "Title" "s1"))
+		(got nil))
+	(cl-letf (((symbol-function 'dsh-bridge-describe-session)
+			   (lambda (id) (setq got id))))
+	  ;; A real header-line click's position names no buffer point; the id
+	  ;; travels on the clicked string, as (STRING . STR-POS).
+	  (dsh-bridge-describe-session-at-mouse
+	   (list 'mouse-1
+			 (list (selected-window) 'header-line '(0 . 0) 0 (cons label 0))))
+	  (should (equal got "s1")))))
+
+(ert-deftest dsh-bridge-format-helpers ()
+  "The report's number, duration, percent, and time formatters."
+  (should (equal (dsh-bridge--format-number 1234567) "1,234,567"))
+  (should (equal (dsh-bridge--format-number 0) "0"))
+  (should (equal (dsh-bridge--format-number -1234) "-1,234"))
+  (should (equal (dsh-bridge--format-number nil) "—"))
+  (should (equal (dsh-bridge--format-duration 450) "450 ms"))
+  (should (equal (dsh-bridge--format-duration 12300) "12.3 s"))
+  (should (equal (dsh-bridge--format-duration 133400) "2m 13.4s"))
+  (should (equal (dsh-bridge--format-duration nil) "—"))
+  (should (equal (dsh-bridge--format-percent 1 4) "25.0%"))
+  (should-not (dsh-bridge--format-percent 1 0))
+  (should (equal (dsh-bridge--format-time nil) "—")))
+
+(ert-deftest dsh-bridge-describe-entry-points ()
+  "The report is reachable from the transient and the view/sessions maps."
+  (should (eq (lookup-key dsh-bridge-view-mode-map (kbd "D"))
+              #'dsh-bridge-describe-session))
+  (should (eq (lookup-key dsh-bridge-sessions-mode-map (kbd "D"))
+              #'dsh-bridge-describe-session))
+  (should (eq (cadr (dsh-bridge--layout-verb "D")) #'dsh-bridge-describe-session))
+  (should-not (eq (lookup-key dsh-bridge-prompt-mode-map (kbd "D"))
+                  #'dsh-bridge-describe-session)))
+
+(ert-deftest dsh-bridge-describe-auto-refresh-schedules ()
+  "A visible report for the completed turn's session schedules a refresh.
+Another session, an invisible report, or the option off does not."
+  (dsh-bridge-test--with-describe nil
+    (dsh-bridge-describe-session "s1")
+    (let ((scheduled nil))
+      (cl-letf (((symbol-function 'get-buffer-window) (lambda (&rest _) t))
+                ((symbol-function 'run-at-time)
+                 (lambda (_secs _repeat function &rest args)
+                   (setq scheduled (cons function args)))))
+        (dsh-bridge--describe-maybe-refresh "s1")
+        (should scheduled))
+      (cl-letf (((symbol-function 'get-buffer-window) (lambda (&rest _) t))
+                ((symbol-function 'run-at-time)
+                 (lambda (&rest _) (ert-fail "scheduled for another session"))))
+        (dsh-bridge--describe-maybe-refresh "other"))
+      (let ((dsh-bridge-describe-auto-refresh nil))
+        (cl-letf (((symbol-function 'get-buffer-window) (lambda (&rest _) t))
+                  ((symbol-function 'run-at-time)
+                   (lambda (&rest _) (ert-fail "scheduled with the option off"))))
+          (dsh-bridge--describe-maybe-refresh "s1"))))))
 
 (provide 'dsh-bridge-tests)
 ;;; dsh-bridge-tests.el ends here

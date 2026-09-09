@@ -36,6 +36,12 @@ for the Elisp) plus the `integration/` seam harness.
   per-turn DSH-View with `M-p`/`M-n`, follow mode and GFM rendering; DSH-Prompt
   composer with prompt history and model selection; SSE consumer with
   reconnect; plugin install/diagnosis.
+- **Session report** (candidate 1, [describe-session-plan.md](describe-session-plan.md)):
+  `GET /dsh-bridge/session` reads one session through `ctx.sessionQuery`
+  (live or cold, never resuming) and returns identity/lineage plus
+  `sessionStats`/`tokenUsage`/`contextPressure`/`contextBreakdown`/
+  `modelSelection`/`permissions`/`title`; DSH-Describe renders it as a
+  `help-mode` buffer with hyperlinks and back/forward history.
 
 Usage is documented in [README.md](README.md); the architecture rules and the
 harness seams the plugin depends on are in [AGENTS.md](AGENTS.md). This file
@@ -82,8 +88,9 @@ Ordered by recommended sequence. Harness seams were verified against DSH
 
 - `/turns` turn records gain the closing assistant message's `messageId`
   (ratings) and the turn's end `seq` as `endSeq` (fork targeting).
-- The plugin's optional-service list gains `sessionQuery` (stats),
-  `messageFeedback` (ratings), `goals` (goal mutations), `sessionController`
+- The plugin's optional-service list gains `sessionQuery` (stats — **wired**:
+  candidate 1 landed it), `messageFeedback` (ratings), `goals` (goal
+  mutations), `sessionController`
   (fork), `commands` (slash-command catalog, `/emacs`),
   `permissionPresets`/`sandboxPolicy`/`approval` (permission display — none
   of the three is a Typert Remote; the wire surface is the `permissions`
@@ -91,6 +98,10 @@ Ordered by recommended sequence. Harness seams were verified against DSH
   mode). All are read with `ctx.get` and must tolerate `undefined`.
 
 ### 1. Session stats in `describe-session` (read-only)
+
+**Implemented** — see [describe-session-plan.md](describe-session-plan.md) and
+the Status list above; the section below is retained as the original design
+record.
 
 Turn the current `D`/sessions-list details buffer into a real session report,
 and make it reachable without going through the sessions list.

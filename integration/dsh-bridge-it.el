@@ -164,6 +164,44 @@
 
 ;; (The repo's Emacs package is loaded near the top, before the helpers.)
 
+(defun dsh-bridge-it--wait-for-turns (session-id timeout-ms)
+  "Wait until SESSION-ID has at least one folded turn, up to TIMEOUT-MS."
+  (dsh-bridge-it--wait
+   (lambda ()
+     (let* ((result (dsh-bridge--request "GET" (dsh-bridge--path "/turns" session-id) nil))
+            (turns (alist-get 'turns (cdr result))))
+       (and (listp turns) turns)))
+   timeout-ms))
+
+(ert-deftest dsh-bridge-it-describe-session ()
+  "The real session report renders live host statistics in a help-mode buffer."
+  (unwind-protect
+      (let* ((facts (dsh-bridge-it--boot-fixture)))
+        (setq dsh-bridge-it--fixture facts)
+        (setq dsh-bridge-url (concat (dsh-bridge-it--url) "/dsh-bridge"))
+        (setq dsh-bridge-token-file
+              (expand-file-name "dsh-bridge-token" (alist-get 'dshHome facts)))
+        (dsh-bridge-it--script-mock
+         (vector (list :kind "text" :text "Report me.")))
+        (let ((session-id (dsh-bridge-it--create-session
+                           (expand-file-name "../" dsh-bridge-it--directory))))
+          (dsh-bridge-send-text "Please report." session-id)
+          (should (dsh-bridge-it--wait-for-turns session-id 30000))
+          (dsh-bridge-describe-session session-id)
+          (with-current-buffer dsh-bridge-describe-buffer-name
+            (should (derived-mode-p 'help-mode))
+            (let ((text (buffer-string)))
+              (should (string-match-p "DSH session" text))
+              ;; The real turn count, not just the label: exactly one turn
+              ;; completed (steps are left loose — an async auto-title may
+              ;; fold in extra ones).
+              (should (string-match-p "Turns / steps\\s-+1 / " text))
+              (should (string-match-p "Tokens" text))
+              (should (string-match-p "Cache hit" text))))))
+    (when (get-buffer dsh-bridge-describe-buffer-name)
+      (kill-buffer dsh-bridge-describe-buffer-name))
+    (dsh-bridge-it--kill-fixture)))
+
 (ert-deftest dsh-bridge-it-ask-user ()  "Flagship: the live-Emacs seat of the ask-user path."
   (unwind-protect
       (let* ((facts (dsh-bridge-it--boot-fixture)))

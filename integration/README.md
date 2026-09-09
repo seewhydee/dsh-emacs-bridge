@@ -77,7 +77,13 @@ integration/
 | `tests/turns.spec.ts` | turn fold into `/turns`, auxiliary title/compaction calls, model catalog + selection parity, outbox round trip, 404/oversize bounds, degraded-profile boot |
 | `tests/ask-user.spec.ts` | the ask-user waterfall end to end (SSE frame, `/answer` settlement, pending-question replay) and the browser-draft stream never owning a question |
 | `tests/sessions.spec.ts` | create by `path` (new and already-known workspace), create by `workspaceId`, create-argument bounds, workspace rename/conflict/blank/unknown, session rename/archive/unknown |
-| `dsh-bridge-it.el` | the live-Emacs seat of the ask-user path |
+| `tests/session.spec.ts` | the read-only session report over the `sessionQuery` seam: live stats/token usage/model selection, 404 unknown (never created or resumed), 400 repeated `sessionId`, default target |
+| `dsh-bridge-it.el` | the live-Emacs seat of the ask-user path, and DSH-Describe rendering live host statistics |
+
+Known gap: no spec observes a **cold** (persisted-only) session, because the
+launcher always starts a fresh `DSH_HOME`; that needs a second host booted
+against the same home (the launcher's `dshHome` option is the hook). The
+describe route's cold arm is therefore covered by unit tests only.
 
 ## Mock LLM
 

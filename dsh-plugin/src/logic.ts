@@ -515,6 +515,57 @@ export function resolveTargetId(
   return { kind: 'error', status: 409, message: 'no active session' }
 }
 
+/** The read-only target selection for the session report. */
+export type ReadTargetResult =
+  | { kind: 'target'; id: string; live: boolean }
+  | { kind: 'error'; status: 404 | 409; message: string }
+
+/**
+ * Resolve the session id a read-only report should observe. Same precedence as
+ * `resolveTargetId` — an explicit id, then last-active live, then the most
+ * recent cold session (skipping subagent origin) — but deliberately WITHOUT
+ * the live-agent requirement: describing a live session whose agent is not
+ * attached is still a read, so it must not 409 the way a write target does.
+ * Nothing is resumed here; the caller only observes the returned id.
+ */
+export function resolveReadTargetId(
+  explicitId: string | undefined,
+  live: readonly LiveSessionLike[],
+  persisted: readonly SessionHeaderLike[],
+): ReadTargetResult {
+  if (explicitId !== undefined) {
+    const cls = classifySessionId(
+      explicitId,
+      new Set(live.map(session => session.id)),
+      new Set(persisted.map(header => header.id)),
+    )
+    if (cls === 'live') return { kind: 'target', id: explicitId, live: true }
+    if (cls === 'cold') return { kind: 'target', id: explicitId, live: false }
+    return { kind: 'error', status: 404, message: `session ${explicitId} is not live` }
+  }
+  let best: string | undefined
+  let bestTime = -Infinity
+  for (const session of live) {
+    const time = session.events.at(-1)?.time ?? session.header.createdAt
+    if (time > bestTime) {
+      bestTime = time
+      best = session.id
+    }
+  }
+  if (best !== undefined) return { kind: 'target', id: best, live: true }
+  let bestCold: string | undefined
+  let bestCreated = -Infinity
+  for (const header of persisted) {
+    if (header.origin === 'subagent') continue
+    if (header.createdAt > bestCreated) {
+      bestCreated = header.createdAt
+      bestCold = header.id
+    }
+  }
+  if (bestCold !== undefined) return { kind: 'target', id: bestCold, live: false }
+  return { kind: 'error', status: 409, message: 'no active session' }
+}
+
 /** The bearer token carried by an Authorization header, or undefined. */
 export function parseBearerAuthorization(header: string | undefined): string | undefined {
   if (header === undefined) return undefined
@@ -888,6 +939,322 @@ export function currentModelSelection(
   view: { lastUsed?: unknown; next?: unknown } | undefined,
 ): unknown {
   return view?.next ?? view?.lastUsed ?? catalogDefault
+}
+
+/** One projection wire-value map, as read from an observation snapshot. */
+export interface ProjectionValuesLike {
+  readonly [key: string]: unknown
+}
+
+/** Header facts the report needs beyond the list-row subset. */
+export interface SessionReportHeaderLike extends SessionHeaderLike {
+  parentSession?: string
+  isSeeded?: boolean
+  delegationDepth?: number
+}
+
+/**
+ * Structural face of one observed session, live or prepared (cold). `events`
+ * is read only by the title/preset fallback folds, so a caller whose
+ * projections already carry those keys never materializes the log.
+ */
+export interface SessionObservationLike {
+  readonly source: 'live' | 'prepared'
+  readonly header: SessionReportHeaderLike
+  readonly events?: readonly SessionEventLike[]
+  readonly projections?: { readonly values: ProjectionValuesLike } | undefined
+}
+
+/** Caller-supplied facts the report cannot read from the observation alone. */
+export interface SessionReportExtras {
+  running?: boolean
+  workspace?: string | null
+  workspaceId?: string | null
+  archived?: boolean
+}
+
+/** The durable model selection the session will use next. */
+export interface SessionReportModel {
+  provider: string
+  model: string
+  reasoningEffort?: string
+}
+
+/** One switchable permission preset as the wire view advertises it. */
+export interface SessionReportPermissionOption {
+  value: string
+  name: string
+  description?: string
+}
+
+/** The session's permission select (current value + options). */
+export interface SessionReportPermissions {
+  currentValue: string
+  options: SessionReportPermissionOption[]
+}
+
+/** Whole-log turn/step counts and wall times (`sessionStats` wire view). */
+export interface SessionReportStats {
+  turns: number
+  steps: number
+  llmMs: number
+  toolMs: number
+  ttftMs: number
+  ttftSteps: number
+  decodeMs: number
+  decodeTokens: number
+}
+
+/** Cumulative provider usage (`tokenUsage` wire view). */
+export interface SessionReportTokens {
+  uncachedInputTokens: number
+  outputTokens: number
+  cacheReadTokens: number
+  cacheWriteTokens: number
+}
+
+/** Context occupancy (`contextPressure` wire view); every field optional. */
+export interface SessionReportContext {
+  pressureTokens?: number
+  projectedTokens?: number
+  contextWindow?: number
+}
+
+/** Heuristic context composition (`contextBreakdown` wire view). */
+export interface SessionReportBreakdown {
+  systemTokens: number
+  toolsTokens: number
+  messageTokens: number
+}
+
+/**
+ * One session's read-only report, the `GET /dsh-bridge/session` body. Every
+ * numeric/derived section is null when its projection was unavailable, and
+ * `missing` names those keys so the Emacs side can say why rather than showing
+ * a fake zero. `modelName` is filled by the wiring (catalog RPC), not here.
+ */
+export interface SessionReport {
+  sessionId: string
+  live: boolean
+  running: boolean
+  basis: 'observation' | 'header'
+  missing: string[]
+  title: string | null
+  cwd: string | null
+  workspace: string | null
+  workspaceId: string | null
+  archived: boolean
+  createdAt: number
+  lastActive: number | null
+  lastPromptAt: number | null
+  parentSession: string | null
+  isSeeded: boolean
+  origin: string | null
+  delegationDepth: number | null
+  agentPreset: string | null
+  model: SessionReportModel | null
+  modelName: string | null
+  permissions: SessionReportPermissions | null
+  stats: SessionReportStats | null
+  tokens: SessionReportTokens | null
+  context: SessionReportContext | null
+  breakdown: SessionReportBreakdown | null
+}
+
+function asObject(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined
+}
+
+function asNumber(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null
+}
+
+function reportStats(value: unknown): SessionReportStats | null {
+  const source = asObject(value)
+  if (source === undefined) return null
+  const keys = ['turns', 'steps', 'llmMs', 'toolMs', 'ttftMs', 'ttftSteps', 'decodeMs', 'decodeTokens'] as const
+  const stats = {} as Record<(typeof keys)[number], number>
+  for (const key of keys) {
+    const number = asNumber(source[key])
+    if (number === null) return null
+    stats[key] = number
+  }
+  return stats as SessionReportStats
+}
+
+function reportTokens(value: unknown): SessionReportTokens | null {
+  const source = asObject(value)
+  if (source === undefined) return null
+  const keys = ['uncachedInputTokens', 'outputTokens', 'cacheReadTokens', 'cacheWriteTokens'] as const
+  const tokens = {} as Record<(typeof keys)[number], number>
+  for (const key of keys) {
+    const number = asNumber(source[key])
+    if (number === null) return null
+    tokens[key] = number
+  }
+  return tokens as SessionReportTokens
+}
+
+function reportBreakdown(value: unknown): SessionReportBreakdown | null {
+  const source = asObject(value)
+  if (source === undefined) return null
+  const keys = ['systemTokens', 'toolsTokens', 'messageTokens'] as const
+  const breakdown = {} as Record<(typeof keys)[number], number>
+  for (const key of keys) {
+    const number = asNumber(source[key])
+    if (number === null) return null
+    breakdown[key] = number
+  }
+  return breakdown as SessionReportBreakdown
+}
+
+function reportContext(value: unknown): SessionReportContext | null {
+  const source = asObject(value)
+  if (source === undefined) return null
+  const context: SessionReportContext = {}
+  const pressure = asNumber(source.pressureTokens)
+  const projected = asNumber(source.projectedTokens)
+  const window = asNumber(source.contextWindow)
+  if (pressure !== null) context.pressureTokens = pressure
+  if (projected !== null) context.projectedTokens = projected
+  if (window !== null) context.contextWindow = window
+  return context.pressureTokens === undefined
+    && context.projectedTokens === undefined
+    && context.contextWindow === undefined
+    ? null
+    : context
+}
+
+function reportModel(value: unknown): SessionReportModel | null {
+  const view = asObject(value)
+  const selection = asObject(view?.next) ?? asObject(view?.lastUsed)
+  if (selection === undefined) return null
+  const provider = selection.provider
+  const model = selection.model
+  if (typeof provider !== 'string' || typeof model !== 'string') return null
+  const effort = selection.reasoningEffort
+  return typeof effort === 'string' && effort !== ''
+    ? { provider, model, reasoningEffort: effort }
+    : { provider, model }
+}
+
+function reportPermissions(value: unknown): SessionReportPermissions | null {
+  const view = asObject(value)
+  if (view === undefined) return null
+  const currentValue = view.currentValue
+  const options = view.options
+  if (typeof currentValue !== 'string' || !Array.isArray(options)) return null
+  const parsed: SessionReportPermissionOption[] = []
+  for (const raw of options) {
+    const option = asObject(raw)
+    if (option === undefined) continue
+    const optionValue = option.value
+    const name = option.name
+    if (typeof optionValue !== 'string' || typeof name !== 'string') continue
+    parsed.push(typeof option.description === 'string'
+      ? { value: optionValue, name, description: option.description }
+      : { value: optionValue, name })
+  }
+  return { currentValue, options: parsed }
+}
+
+/**
+ * Build one session report from an observation (or a header-only stand-in)
+ * and caller-supplied extras. Pure: every projection value is narrowed with
+ * local guards, an unexpected shape degrades to null plus a `missing` entry,
+ * and the only fallback folds (title, preset) read the log the caller already
+ * materialized when it has no projection value to prefer.
+ */
+export function sessionReport(
+  observation: SessionObservationLike,
+  extras: SessionReportExtras = {},
+): SessionReport {
+  const values = observation.projections?.values
+  const has = (key: string): boolean => values !== undefined && Object.hasOwn(values, key)
+  const missing: string[] = []
+  for (const [key, label] of [
+    ['title', 'title'],
+    ['agentPreset', 'preset'],
+    ['modelSelection', 'model'],
+    ['permissions', 'permissions'],
+    ['sessionStats', 'stats'],
+    ['tokenUsage', 'tokens'],
+    ['contextPressure', 'context'],
+    ['contextBreakdown', 'breakdown'],
+    ['sessionListMetadata', 'lastPromptAt'],
+  ] as const) {
+    if (!has(key)) missing.push(label)
+  }
+
+  const rawTitle = values?.title
+  const title = has('title')
+    ? typeof rawTitle === 'string' && rawTitle !== '' ? rawTitle : null
+    : observation.events === undefined ? null : sessionTitle(observation.events)
+
+  const rawPreset = values?.agentPreset
+  const agentPreset = has('agentPreset')
+    ? typeof rawPreset === 'string' && rawPreset !== '' ? rawPreset : null
+    : sessionPreset(observation.header, observation.events ?? []) ?? null
+
+  const metadata = asObject(values?.sessionListMetadata)
+
+  return {
+    sessionId: observation.header.id,
+    live: observation.source === 'live',
+    running: extras.running === true,
+    basis: observation.projections === undefined ? 'header' : 'observation',
+    missing,
+    title,
+    cwd: observation.header.cwd ?? null,
+    workspace: extras.workspace ?? null,
+    workspaceId: extras.workspaceId ?? null,
+    archived: extras.archived === true,
+    createdAt: observation.header.createdAt,
+    lastActive: observation.events?.at(-1)?.time ?? null,
+    lastPromptAt: asNumber(metadata?.lastPromptAt),
+    parentSession: observation.header.parentSession ?? null,
+    isSeeded: observation.header.isSeeded === true,
+    origin: observation.header.origin ?? null,
+    delegationDepth: asNumber(observation.header.delegationDepth),
+    agentPreset,
+    model: reportModel(values?.modelSelection),
+    modelName: null,
+    permissions: reportPermissions(values?.permissions),
+    stats: reportStats(values?.sessionStats),
+    tokens: reportTokens(values?.tokenUsage),
+    context: reportContext(values?.contextPressure),
+    breakdown: reportBreakdown(values?.contextBreakdown),
+  }
+}
+
+/**
+ * The catalog display name of PROVIDER/MODEL, or null. The pure half of the
+ * host's `modelName` enrichment for the session report; mirrors the elisp
+ * `dsh-bridge--model-display-name` walk of `groups[].models[]`.
+ */
+export function catalogModelName(
+  catalog: unknown,
+  provider: string,
+  model: string,
+): string | null {
+  const groups = asObject(catalog)?.groups
+  if (!Array.isArray(groups)) return null
+  for (const rawGroup of groups) {
+    const group = asObject(rawGroup)
+    if (group?.id !== provider) continue
+    const models = group.models
+    if (!Array.isArray(models)) return null
+    for (const rawModel of models) {
+      const entry = asObject(rawModel)
+      if (entry?.id !== model) continue
+      const name = entry.name
+      return typeof name === 'string' && name !== '' ? name : null
+    }
+    return null
+  }
+  return null
 }
 
 /**

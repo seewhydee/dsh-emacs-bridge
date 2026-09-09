@@ -16,7 +16,7 @@
 ;; along with this program.	 If not, see <https://www.gnu.org/licenses/>.
 
 ;; Author: Chong Yidong <cyd@stupidchicken.com>
-;; Version: 0.7.0
+;; Version: 0.8.0
 ;; Package-Requires: ((emacs "29.1"))
 ;; Keywords: tools, convenience
 
@@ -73,8 +73,10 @@
 (require 'json)
 (require 'transient)
 (require 'cl-lib)
+(require 'button)
+(require 'help-mode)
 
-(defconst dsh-bridge-version "0.7.0"
+(defconst dsh-bridge-version "0.8.0"
   "Version string for the DSH-Bridge package.
 This should match the version reported by the running DSH plugin.")
 
@@ -245,6 +247,20 @@ This option does not affect `\\[dsh-bridge-draft]'."
   :type 'boolean
   :group 'dsh-bridge)
 
+(defcustom dsh-bridge-describe-timeout 15
+  "Seconds to wait for the session report request.
+The report reads a cold session's whole persisted log and folds its
+projections, which can outlast the general `dsh-bridge-timeout'."
+  :type 'number
+  :group 'dsh-bridge)
+
+(defcustom dsh-bridge-describe-auto-refresh t
+  "Whether a visible session report refreshes when its turn completes.
+The refresh re-fetches the report and preserves point; it is deferred so
+the synchronous request never runs inside the SSE process filter."
+  :type 'boolean
+  :group 'dsh-bridge)
+
 ;;; Session tracking
 
 (defvar dsh-bridge-default-session nil
@@ -267,6 +283,11 @@ LABEL is the session display label; see `dsh-bridge--session-label'.
 Its value may be nil if the request is still incomplete.")
 
 (defvar dsh-bridge--view-content-session) ; forward declaration
+
+(defvar dsh-bridge--describe-session) ; forward declaration
+
+(defconst dsh-bridge-describe-buffer-name "*dsh-bridge-describe*"
+  "Buffer name of the read-only DSH session report.")
 
 (defvar dsh-bridge--sessions-cache nil
   "Cache of DeepSeek Harness session data.
@@ -870,6 +891,25 @@ decoded from UTF-8, and REST stores the trailing bytes."
 			  (when json (push json events)))))))
 	(cons (nreverse events) rest)))
 
+(defun dsh-bridge--describe-maybe-refresh (session-id)
+  "Re-fetch the visible session report when it describes SESSION-ID.
+Deferred: the report fetch is synchronous, so it must not run inside the
+SSE process filter."
+  (when (and dsh-bridge-describe-auto-refresh session-id)
+	(let ((buffer (get-buffer dsh-bridge-describe-buffer-name)))
+	  (when (and (buffer-live-p buffer)
+				 (get-buffer-window buffer 'visible)
+				 (with-current-buffer buffer
+				   (equal dsh-bridge--describe-session session-id)))
+		(run-at-time
+		 0 nil
+		 (lambda (buf)
+		   (when (buffer-live-p buf)
+			 (with-current-buffer buf
+			   (when (equal dsh-bridge--describe-session session-id)
+				 (revert-buffer)))))
+		 buffer)))))
+
 (defun dsh-bridge--notification-handle-events (events)
   "Dispatch decoded notification EVENTS received over the DSH bridge.
 Currently supported events are:
@@ -913,6 +953,7 @@ Currently supported events are:
 		  (dsh-bridge--ask-user-session-clear id)
 		  (dsh-bridge--status-event-render id)
 		  (dsh-bridge--models-event-refresh id)
+		  (dsh-bridge--describe-maybe-refresh id)
 		  (dsh-bridge--turn-complete-act id (alist-get 'reason event))))
 	   ((equal kind "replies-changed")
 		(when id
@@ -1266,6 +1307,24 @@ which case return nil.  If ADD-FALLBACK-FACE is non-nil, apply
 					 (propertize fallback 'face 'dsh-bridge-untitled-face)))
 		  fallback))))
 
+(defvar dsh-bridge--session-link-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map [header-line mouse-1] #'dsh-bridge-describe-session-at-mouse)
+    map)
+  "Local keymap for clickable session labels in header lines.")
+
+(defun dsh-bridge--session-link (string session-id)
+  "Return STRING propertized as a clickable describe link for SESSION-ID.
+A nil or empty STRING, or a nil SESSION-ID, is returned unchanged, so a
+header line without a bound session stays plain text."
+  (if (or (null session-id) (not (stringp string)) (string-empty-p string))
+	  string
+	(propertize string
+				'mouse-face 'highlight
+				'help-echo "mouse-1: describe this session"
+				'dsh-bridge-session-id session-id
+				'keymap dsh-bridge--session-link-map)))
+
 (defun dsh-bridge--relative-age (ts &optional now)
   "Return a compact relative age string for ms-epoch timestamp TS.
 Matches DSH conventions (\"now\", \"5min\", \"3h\", \"2d\", \"4mo\", \"1y\").
@@ -1297,10 +1356,12 @@ basename, raw cwd, or an empty string."
 
 (defun dsh-bridge--buffer-session (&optional buffer)
   "Buffer-local session affinity of BUFFER (default: the current buffer).
-The prompt buffer's binding, else the output buffer's shown session, else nil."
+The prompt buffer's binding, else the output buffer's shown session, else
+the session report's described session, else nil."
   (with-current-buffer (or buffer (current-buffer))
 	(cond ((eq major-mode 'dsh-bridge-prompt-mode) dsh-bridge--prompt-session)
 		  ((eq major-mode 'dsh-bridge-view-mode) dsh-bridge--view-content-session)
+		  ((eq major-mode 'dsh-bridge-describe-mode) dsh-bridge--describe-session)
 		  (t nil))))
 
 (defun dsh-bridge--effective-session (&optional buffer)
@@ -1722,6 +1783,7 @@ SESSION-ID overrides the effective session for this call only."
 	'(("s" dsh-bridge-send :description "send region/buffer (prompt)")
 	  ("d" dsh-bridge-draft :description "send region/buffer (draft)")
 	  ("f" dsh-bridge-fetch :description "fetch latest turn")
+	  ("D" dsh-bridge-describe-session :description "describe session")
 	  ("t" dsh-bridge-set-default-target :description "set default target")
 	  ("u" dsh-bridge-clear-default-target :description "clear default target")
 	  ("l" dsh-bridge-list-sessions :description "list sessions"))
@@ -1741,7 +1803,8 @@ these letters; this table serves the dispatcher's layout alone.")
 							(dsh-bridge--layout-verb "s")
 							(dsh-bridge--layout-verb "d")))
 			 (vconcat (list "Read"
-							(dsh-bridge--layout-verb "f")))
+							(dsh-bridge--layout-verb "f")
+							(dsh-bridge--layout-verb "D")))
 			 (vconcat (list "Sessions"
 							(dsh-bridge--layout-verb "t")
 							(dsh-bridge--layout-verb "u")
@@ -2223,7 +2286,7 @@ turn-following marker appear while the shown session runs."
   (let* ((id dsh-bridge--view-content-session)
 		 (status (dsh-bridge--status-glyph id))
 		 (pos (dsh-bridge--view-turn-position))
-		 (label (dsh-bridge--session-label id))
+		 (label (dsh-bridge--session-link (dsh-bridge--session-label id) id))
 		 (context (and id (dsh-bridge--prompt-context-label id)))
 		 (elapsed (and id (dsh-bridge--view-elapsed-label id)))
 		 (await (and id (dsh-bridge--session-awaiting-p id) " · awaiting your answer"))
@@ -2283,6 +2346,7 @@ is applied."
 (define-key dsh-bridge-view-mode-map (kbd "w") #'dsh-bridge-copy-reply)
 (define-key dsh-bridge-view-mode-map (kbd "i") #'dsh-bridge-receive)
 (define-key dsh-bridge-view-mode-map (kbd "a") #'dsh-bridge-answer)
+(define-key dsh-bridge-view-mode-map (kbd "D") #'dsh-bridge-describe-session)
 (define-key dsh-bridge-view-mode-map (kbd "l") #'dsh-bridge-list-sessions)
 (define-key dsh-bridge-view-mode-map (kbd "M-p")
 			#'dsh-bridge-view-previous-reply)
@@ -2298,6 +2362,8 @@ is applied."
 	 :help "Copy the reply (region, else the whole shown turn)"]
 	["Receive Message…" dsh-bridge-receive
 	 :help "Receive the latest message DSH sent to Emacs"]
+	["Describe Session" dsh-bridge-describe-session
+	 :help "Show the session's read-only report"]
 	"---"
 	["List Sessions" dsh-bridge-list-sessions
 	 :help "Browse DSH sessions"]
@@ -3678,7 +3744,9 @@ fetch.  Editing the text clears the sent marker.  The `(k/n)' segment
 appears when walking the prompt history."
   (let* ((session (dsh-bridge--prompt-status-session))
 		 (status (dsh-bridge--status-glyph session))
-		 (label (if session (dsh-bridge--session-label session) ""))
+		 (label (if session
+					(dsh-bridge--session-link (dsh-bridge--session-label session) session)
+				  ""))
 		 (model (dsh-bridge--prompt-model-label session))
 		 (context (dsh-bridge--prompt-context-label session))
 		 (sent (dsh-bridge--prompt-sent-marker session))
@@ -3762,6 +3830,8 @@ C-c C-f, C-c C-l); the markdown commands stay reachable via the menu."
 	"---"
 	["Fetch Latest Turn" dsh-bridge-fetch
 	 :help "Fetch the effective session's latest turn"]
+	["Describe Session" dsh-bridge-describe-session
+	 :help "Show the effective session's read-only report"]
 	["Select Model…" dsh-bridge-select-model
 	 :help "Change the session's model and reasoning effort"]
 	["Set Prompt Session…" dsh-bridge-set-prompt-session
@@ -4006,7 +4076,7 @@ notifications."
 	["Copy Session Id" dsh-bridge-copy-session-id
 	 :help "Copy the session id under point"]
 	["Describe Session" dsh-bridge-describe-session
-	 :help "Show the session's details, including its id"]
+	 :help "Show the session's read-only report"]
 	"---"
 	["Refresh" revert-buffer
 	 :help "Re-fetch the session list"]
@@ -4243,35 +4313,430 @@ The row's workspace id comes from the cached session; prompts for the new title
 		  (message "dsh-bridge: copied session id %s" id))
 	  (message "dsh-bridge: no session under point"))))
 
-(defun dsh-bridge-describe-session ()
-  "Show details of the session under point, including its raw id."
+;;; Session report (DSH-Describe)
+
+(defface dsh-bridge-describe-heading-face
+  '((t :inherit bold))
+  "Face for section headings in the DSH session report."
+  :group 'dsh-bridge)
+
+(defface dsh-bridge-describe-label-face
+  '((t :inherit shadow))
+  "Face for field labels in the DSH session report."
+  :group 'dsh-bridge)
+
+(defvar-local dsh-bridge--describe-session nil
+  "The session id this DSH-Describe buffer reports, or nil.")
+
+(define-derived-mode dsh-bridge-describe-mode help-mode "DSH-Describe"
+  "Major mode for the read-only DSH session report.
+
+The buffer is a `help-mode' buffer, so `q' quits, `g' re-fetches the
+report, `l'/`r' walk the describe history (back/forward — Help mode's
+keys, not the bridge's list-sessions/reply), `n'/`p' move between
+sections, `TAB'/`S-TAB' move between buttons, and `RET'/`mouse-2'
+follow the button at point.  Bridge commands: `w' copies the session
+id, `f' opens the DSH-View for the session's latest turn, `o' opens the
+DSH-Prompt buffer, `D' re-describes the session.")
+
+(defvar dsh-bridge-describe-mode-map)
+(define-key dsh-bridge-describe-mode-map (kbd "w") #'dsh-bridge--describe-copy-id)
+(define-key dsh-bridge-describe-mode-map (kbd "f") #'dsh-bridge--describe-open-view)
+(define-key dsh-bridge-describe-mode-map (kbd "o") #'dsh-bridge--describe-open-prompt)
+(define-key dsh-bridge-describe-mode-map (kbd "D") #'revert-buffer)
+
+(easy-menu-define dsh-bridge-describe-menu dsh-bridge-describe-mode-map
+  "Menu bar menu for the `*dsh-bridge-describe*' buffer."
+  '("DSH Bridge"
+	["Copy Session Id" dsh-bridge--describe-copy-id
+	 :help "Copy the described session's raw id"]
+	["Open Prompt Buffer" dsh-bridge--describe-open-prompt
+	 :help "Open a DSH-Prompt buffer for the described session"]
+	["Latest Turn" dsh-bridge--describe-open-view
+	 :help "Fetch the described session's latest turn into DSH-View"]
+	"---"
+	["Refresh Report" revert-buffer
+	 :help "Re-fetch the session report"]
+	["List Sessions" dsh-bridge-list-sessions
+	 :help "Browse DSH sessions"]
+	"---"
+	["Quit Window" quit-window
+	 :help "Dismiss this buffer"]))
+
+(define-button-type 'dsh-bridge-describe-session-xref
+  :supertype 'help-xref
+  'help-function #'dsh-bridge-describe-session
+  'help-echo "mouse-1/RET: describe this session")
+
+(defun dsh-bridge--describe-string (value)
+  "Return VALUE when it is a non-empty string, else nil."
+  (and (stringp value) (not (string-empty-p value)) value))
+
+(defun dsh-bridge--format-number (n)
+  "Format number N with comma thousands separators; non-numbers -> \"—\"."
+  (if (not (numberp n)) "—"
+	(let* ((negative (< n 0))
+		   (digits (number-to-string (abs (truncate n))))
+		   (length (length digits))
+		   (result ""))
+	  (dotimes (index length)
+		(setq result (concat (substring digits (- length index 1) (- length index))
+							 (if (and (> index 0) (= 0 (% index 3))) "," "")
+							 result)))
+	  (concat (if negative "-" "") result))))
+
+(defun dsh-bridge--format-duration (ms)
+  "Format millisecond duration MS as \"450 ms\", \"12.3 s\", or \"2m 13.4s\"."
+  (if (not (numberp ms)) "—"
+	(let ((seconds (/ ms 1000.0)))
+	  (cond
+	   ((< ms 1000) (format "%.0f ms" ms))
+	   ((< seconds 60) (format "%.1f s" seconds))
+	   ((< seconds 3600)
+		(format "%dm %04.1fs" (floor (/ seconds 60))
+				(- seconds (* 60 (floor (/ seconds 60))))))
+	   (t (format "%dh %dm" (floor (/ seconds 3600))
+				  (floor (/ (% seconds 3600) 60))))))))
+
+(defun dsh-bridge--format-percent (num den)
+  "Format NUM/DEN as a percentage, or nil when DEN is not positive."
+  (if (and (numberp num) (numberp den) (> den 0))
+	  (format "%.1f%%" (* 100.0 (/ num (float den))))
+	nil))
+
+(defun dsh-bridge--format-time (ms)
+  "Format ms-epoch MS as an absolute time plus its relative age; nil -> \"—\"."
+  (if (numberp ms)
+	  (concat (format-time-string "%Y-%m-%d %H:%M:%S" (/ ms 1000))
+			  " (" (dsh-bridge--relative-age ms) ")")
+	"—"))
+
+(defun dsh-bridge--describe-section (title)
+  "Insert a page separator and TITLE as a section heading.
+The form feed makes `help-mode''s `n'/`p' walk the report's sections."
+  (unless (= (point) (point-min))
+	(insert "\n\n\f\n"))
+  (insert (propertize title 'face 'dsh-bridge-describe-heading-face) "\n"))
+
+(defun dsh-bridge--describe-row (label value &optional help)
+  "Insert an aligned LABEL/VALUE row.
+VALUE is a string or a function that inserts the value itself; HELP is
+an optional `help-echo' string covering the value."
+  (insert (propertize (format "  %-16s " label) 'face 'dsh-bridge-describe-label-face))
+  (let ((beg (point)))
+	(if (functionp value) (funcall value) (insert (format "%s" value)))
+	(when help (put-text-property beg (point) 'help-echo help)))
+  (insert "\n"))
+
+(defun dsh-bridge--describe-button (label function &optional help)
+  "Insert an action button LABEL that calls FUNCTION with no arguments."
+  (insert-text-button label
+					  'action (lambda (&rest _) (funcall function))
+					  'follow-link t
+					  'help-echo (or help (format "mouse-1/RET: %s" label))))
+
+(defun dsh-bridge--describe-model-label (report)
+  "The model display line for REPORT, or nil when no selection is known."
+  (let* ((model (alist-get 'model report))
+		 (name (dsh-bridge--describe-string (alist-get 'modelName report)))
+		 (provider (dsh-bridge--describe-string (alist-get 'provider model)))
+		 (id (dsh-bridge--describe-string (alist-get 'model model)))
+		 (effort (dsh-bridge--describe-string (alist-get 'reasoningEffort model))))
+	(when (or name provider id)
+	  (concat (or name (if (and provider id) (format "%s/%s" provider id)
+						 (or provider id)))
+			  (and effort (format " (%s)" effort))))))
+
+(defun dsh-bridge--describe-permission-label (report)
+  "Return (NAME . DESCRIPTION) for REPORT's current permission, or nil."
+  (let* ((permissions (alist-get 'permissions report))
+		 (current (dsh-bridge--describe-string (alist-get 'currentValue permissions)))
+		 (options (alist-get 'options permissions)))
+	(when current
+	  (let ((match (seq-find (lambda (option)
+							   (equal (alist-get 'value option) current))
+							 options)))
+		(cons (or (dsh-bridge--describe-string (alist-get 'name match)) current)
+			  (dsh-bridge--describe-string (alist-get 'description match)))))))
+
+(defun dsh-bridge--describe-stats (report)
+  "Insert the Stats section of REPORT."
+  (dsh-bridge--describe-section "Stats")
+  (let ((stats (alist-get 'stats report)))
+	(if (not stats)
+		(insert "  (unavailable)\n")
+	  (let* ((ttft (alist-get 'ttftMs stats))
+			 (ttft-steps (alist-get 'ttftSteps stats))
+			 (decode-ms (alist-get 'decodeMs stats))
+			 (decode-tokens (alist-get 'decodeTokens stats)))
+		(dsh-bridge--describe-row
+		 "Turns / steps"
+		 (format "%s / %s" (dsh-bridge--format-number (alist-get 'turns stats))
+				 (dsh-bridge--format-number (alist-get 'steps stats))))
+		(dsh-bridge--describe-row "LLM time"
+								  (dsh-bridge--format-duration (alist-get 'llmMs stats)))
+		(dsh-bridge--describe-row "Tool time"
+								  (dsh-bridge--format-duration (alist-get 'toolMs stats)))
+		(dsh-bridge--describe-row
+		 "First token"
+		 (if (and (numberp ttft) (numberp ttft-steps) (> ttft-steps 0))
+			 (format "%s avg over %s steps"
+					 (dsh-bridge--format-duration (/ ttft (float ttft-steps)))
+					 (dsh-bridge--format-number ttft-steps))
+		   (dsh-bridge--format-duration ttft)))
+		(dsh-bridge--describe-row
+		 "Decode"
+		 (concat (dsh-bridge--format-duration decode-ms)
+				 (if (numberp decode-tokens)
+					 (format " · %s tokens" (dsh-bridge--format-number decode-tokens))
+				   "")
+				 (if (and (numberp decode-tokens) (numberp decode-ms) (> decode-ms 0))
+					 (format " · %.1f tok/s" (/ decode-tokens (/ decode-ms 1000.0)))
+				   "")))))))
+
+(defun dsh-bridge--describe-tokens (report)
+  "Insert the Tokens section of REPORT."
+  (dsh-bridge--describe-section "Tokens")
+  (let ((tokens (alist-get 'tokens report)))
+	(if (not tokens)
+		(insert "  (unavailable)\n")
+	  (let ((uncached (alist-get 'uncachedInputTokens tokens))
+			(cache-read (alist-get 'cacheReadTokens tokens)))
+		(dsh-bridge--describe-row "Input (uncached)" (dsh-bridge--format-number uncached))
+		(dsh-bridge--describe-row "Output"
+								  (dsh-bridge--format-number (alist-get 'outputTokens tokens)))
+		(dsh-bridge--describe-row "Cache read" (dsh-bridge--format-number cache-read))
+		(dsh-bridge--describe-row "Cache write"
+								  (dsh-bridge--format-number (alist-get 'cacheWriteTokens tokens)))
+		(dsh-bridge--describe-row
+		 "Cache hit"
+		 (or (dsh-bridge--format-percent
+			  cache-read
+			  (and (numberp uncached) (numberp cache-read) (+ uncached cache-read)))
+			 "—"))))))
+
+(defun dsh-bridge--describe-context (report)
+  "Insert the Context section of REPORT."
+  (dsh-bridge--describe-section "Context")
+  (let ((context (alist-get 'context report)))
+	(if (not context)
+		(insert "  (unavailable)\n")
+	  (let ((next (or (alist-get 'projectedTokens context)
+					  (alist-get 'pressureTokens context)))
+			(window (alist-get 'contextWindow context))
+			(breakdown (alist-get 'breakdown report)))
+		(dsh-bridge--describe-row
+		 "Next request"
+		 (if (numberp next)
+			 (concat (dsh-bridge--format-number next)
+					 (if (numberp window)
+						 (format " / %s" (dsh-bridge--format-number window))
+					   "")
+					 (let ((percent (dsh-bridge--format-percent next window)))
+					   (if percent (format " (%s)" percent) "")))
+		   "—"))
+		(dsh-bridge--describe-row "Last request"
+								  (dsh-bridge--format-number (alist-get 'pressureTokens context)))
+		(when breakdown
+		  (dsh-bridge--describe-row
+		   "Breakdown"
+		   (format "system %s · tools %s · messages %s"
+				   (dsh-bridge--format-number (alist-get 'systemTokens breakdown))
+				   (dsh-bridge--format-number (alist-get 'toolsTokens breakdown))
+				   (dsh-bridge--format-number (alist-get 'messageTokens breakdown)))))))))
+
+(defun dsh-bridge--describe-actions (id)
+  "Insert the Actions section for session ID."
+  (dsh-bridge--describe-section "Actions")
+  (insert "  ")
+  (dsh-bridge--describe-button "[Open prompt]"
+							   (lambda () (dsh-bridge--describe-open-prompt id)))
+  (insert "  ")
+  (dsh-bridge--describe-button "[Latest turn]"
+							   (lambda () (dsh-bridge--describe-open-view id)))
+  (insert "  ")
+  (dsh-bridge--describe-button "[List sessions]" #'dsh-bridge-list-sessions)
+  (insert "  ")
+  (dsh-bridge--describe-button "[Copy id]"
+							   (lambda () (dsh-bridge--describe-copy-id id)))
+  (insert "\n"))
+
+(defun dsh-bridge--describe-insert (id session status alist)
+  "Insert the report body for session ID (nil when unknown).
+SESSION is the cached session row or nil; STATUS and ALIST are the
+`/session' response.  A non-200 STATUS renders the cached facts plus the
+failure reason, never a fake zero."
+  (let* ((report (and (eq status 200) (listp alist) alist))
+		 (failure (unless report
+					(or (dsh-bridge--error-message nil status alist)
+						"request failed or timed out")))
+		 (title (or (dsh-bridge--describe-string (alist-get 'title report))
+					(dsh-bridge--session-title session)
+					"[Untitled Session]"))
+		 (live (if report (eq (alist-get 'live report) t)
+				 (and session (alist-get 'live session))))
+		 (running (and report (eq (alist-get 'running report) t)))
+		 (cwd (or (dsh-bridge--describe-string (alist-get 'cwd report))
+				  (dsh-bridge--describe-string (alist-get 'cwd session))))
+		 (workspace (dsh-bridge--describe-string (alist-get 'workspace report)))
+		 (created (or (alist-get 'createdAt report) (alist-get 'createdAt session)))
+		 (last-active (or (alist-get 'lastActive report)
+						  (alist-get 'lastActive session)))
+		 (parent (dsh-bridge--describe-string (alist-get 'parentSession report)))
+		 (preset (dsh-bridge--describe-string (alist-get 'agentPreset report)))
+		 (model (dsh-bridge--describe-model-label report))
+		 (permissions (dsh-bridge--describe-permission-label report)))
+	(insert (propertize (format "DSH session %s" title)
+						'face 'dsh-bridge-describe-heading-face)
+			"\n\n")
+	(when failure
+	  (insert (propertize (format "  Report unavailable: %s\n" failure) 'face 'error)))
+	(dsh-bridge--describe-row
+	 "Id"
+	 (lambda ()
+	   (if id
+		   (dsh-bridge--describe-button id (lambda () (dsh-bridge--describe-copy-id id))
+										"mouse-1/RET: copy the session id")
+		 (insert "(unknown)")))
+	 "The raw DSH session id")
+	(dsh-bridge--describe-row "State" (format "%s%s" (if live "live" "saved")
+											  (if running " · running" "")))
+	(dsh-bridge--describe-row "Created" (dsh-bridge--format-time created))
+	(dsh-bridge--describe-row "Last prompt"
+							  (dsh-bridge--format-time (alist-get 'lastPromptAt report)))
+	(dsh-bridge--describe-row "Last active" (dsh-bridge--format-time last-active))
+	(dsh-bridge--describe-row
+	 "Directory"
+	 (if cwd
+		 (lambda ()
+		   (dsh-bridge--describe-button cwd
+										(lambda () (dsh-bridge--describe-open-directory cwd))))
+	   "—")
+	 cwd)
+	(when workspace
+	  (dsh-bridge--describe-row
+	   "Workspace"
+	   (lambda ()
+		 (dsh-bridge--describe-button workspace
+									  (lambda () (dsh-bridge--describe-open-directory cwd))))))
+	(dsh-bridge--describe-row "Preset" (or preset "—"))
+	(dsh-bridge--describe-row
+	 "Model"
+	 (if model
+		 (lambda ()
+		   (dsh-bridge--describe-button
+			model (lambda () (dsh-bridge--describe-open-prompt id))
+			"mouse-1/RET: open the prompt buffer (C-c C-m changes the model)"))
+	   "default"))
+	(dsh-bridge--describe-row "Permissions"
+							  (if permissions (car permissions) "—")
+							  (cdr permissions))
+	(when parent
+	  (dsh-bridge--describe-row
+	   "Forked from"
+	   (lambda ()
+		 (help-insert-xref-button parent 'dsh-bridge-describe-session-xref parent))))
+	(when (eq (alist-get 'isSeeded report) t)
+	  (dsh-bridge--describe-row "Seeded" "yes"))
+	(dsh-bridge--describe-stats report)
+	(dsh-bridge--describe-tokens report)
+	(dsh-bridge--describe-context report)
+	(dsh-bridge--describe-actions id)))
+
+(defun dsh-bridge--describe-copy-id (&optional id)
+  "Copy the described session's raw id to the kill ring."
   (interactive)
-  (let ((id (tabulated-list-get-id)))
-	(if (not id)
-		(message "dsh-bridge: no session under point")
-	  (let* ((session (dsh-bridge--session-for-id id))
-			 (buffer (get-buffer-create "*dsh-bridge-session-details*")))
-		(with-current-buffer buffer
-		  (let ((inhibit-read-only t))
-			(erase-buffer)
-			(insert (format "Session id:   %s\n" id))
-			(when session
-			  (insert (format "Title:		 %s\n"
-							  (or (dsh-bridge--session-title session) "[Untitled Session]")))
-			  (insert (format "State:		 %s\n"
-							  (if (alist-get 'live session) "live" "saved")))
-			  (insert (format "Directory:	 %s\n"
-							  (or (alist-get 'cwd session) "")))
-			  (let ((ts (or (alist-get 'lastActive session)
-							(alist-get 'createdAt session))))
-				(insert (format "Last active:  %s\n"
-								(if ts (format-time-string "%Y-%m-%d %H:%M:%S"
-														   (/ ts 1000))
-								  "")))))
-			(goto-char (point-min))))
-		(with-current-buffer buffer
-		  (special-mode))
-		(pop-to-buffer buffer)))))
+  (let ((id (or id dsh-bridge--describe-session)))
+	(if id
+		(progn (kill-new id) (message "dsh-bridge: copied session id %s" id))
+	  (message "dsh-bridge: no session"))))
+
+(defun dsh-bridge--describe-open-directory (directory)
+  "Open DIRECTORY in Dired, or as a file when it is not a directory."
+  (interactive "DDirectory: ")
+  (if (and (stringp directory) (not (string-empty-p directory)))
+	  (if (file-directory-p directory) (dired directory) (find-file directory))
+	(message "dsh-bridge: no directory recorded")))
+
+(defun dsh-bridge--describe-open-prompt (&optional id)
+  "Open the DSH-Prompt buffer for the described session."
+  (interactive)
+  (let ((id (or id dsh-bridge--describe-session)))
+	(if id
+		(pop-to-buffer (dsh-bridge--prompt-buffer id) dsh-bridge-prompt-display-action)
+	  (message "dsh-bridge: no session"))))
+
+(defun dsh-bridge--describe-open-view (&optional id)
+  "Fetch the described session's latest turn into a DSH-View buffer."
+  (interactive)
+  (let ((id (or id dsh-bridge--describe-session)))
+	(if id (dsh-bridge-fetch id) (message "dsh-bridge: no session"))))
+
+;;;###autoload
+(defun dsh-bridge-describe-session-at-mouse (event)
+  "Describe the session named by the clicked header-line label in EVENT."
+  (interactive "e")
+  ;; A header-line click's position names no buffer point (`posn-point' is
+  ;; nil there); the id travels on the clicked string.
+  (let* ((position (event-start event))
+	 (string-pos (and position (posn-string position)))
+	 (id (and string-pos
+		  (get-text-property (cdr string-pos)
+					 'dsh-bridge-session-id
+					 (car string-pos)))))
+	(if id
+		(dsh-bridge-describe-session id)
+	  (message "dsh-bridge: no session under the mouse"))))
+
+;;;###autoload
+(defun dsh-bridge-describe-session (&optional session-id)
+  "Show a read-only report for SESSION-ID.
+Interactively, use the DSH-Sessions row at point, else the buffer's
+effective session; with a prefix argument, prompt for any session id.
+The report is a `help-mode' buffer: `g' re-fetches it, `l'/`r' walk the
+describe history, and the session label in a DSH-View/DSH-Prompt header
+line opens it with a mouse click.  A cold session is read from its
+persisted log and is never resumed."
+  (interactive
+   (list (cond
+		  ((and current-prefix-arg (eq major-mode 'dsh-bridge-sessions-mode))
+		   (or (tabulated-list-get-id)
+			   (dsh-bridge--read-session-id "Describe session: ")))
+		  (current-prefix-arg
+		   (dsh-bridge--read-session-id "Describe session: "))
+		  ((eq major-mode 'dsh-bridge-sessions-mode)
+		   (tabulated-list-get-id))
+		  (t (dsh-bridge--effective-session)))))
+  (let* ((result (let ((dsh-bridge-timeout dsh-bridge-describe-timeout))
+				   (dsh-bridge--request "GET" (dsh-bridge--path "/session" session-id) nil)))
+		 (status (car result))
+		 (alist (cdr result))
+		 (report (and (eq status 200) (listp alist) alist))
+		 (id (or (and report (dsh-bridge--describe-string (alist-get 'sessionId report)))
+				 session-id
+				 (car-safe dsh-bridge--last-resolved-active)))
+		 (session (and id (dsh-bridge--session-for-id id)))
+		 (buffer (get-buffer-create dsh-bridge-describe-buffer-name))
+		 (here (eq (current-buffer) buffer)))
+	(with-current-buffer buffer
+	  (unless (derived-mode-p 'help-mode)
+		(dsh-bridge-describe-mode))
+	  ;; `help-buffer' returns THIS buffer only when `help-xref-following'
+	  ;; is non-nil AND the buffer is already help-mode-derived, and
+	  ;; `help-setup-xref' must run before `erase-buffer' because it records
+	  ;; point for the [back] button.
+	  (let ((inhibit-read-only t)
+			(help-xref-following t))
+		(help-setup-xref (list #'dsh-bridge-describe-session id)
+						 (called-interactively-p 'interactive))
+		(erase-buffer)
+		(setq-local dsh-bridge--describe-session id)
+		(dsh-bridge--describe-insert id session status alist)
+		(help-make-xrefs (current-buffer)))
+	  (goto-char (point-min)))
+	(unless here
+	  (pop-to-buffer buffer))))
+
 
 (defun dsh-bridge--list-sessions-in-buffer ()
   "Fill `*dsh-bridge-sessions*' with the current session roster.
@@ -4527,6 +4992,8 @@ effective session, `f' fetches the latest turn, `t' sets the default target,
 	 "---"
 	 ["Fetch Latest Turn" dsh-bridge-fetch
 	  :help "Fetch the latest assistant turn into a DSH-View buffer"]
+	 ["Describe Session" dsh-bridge-describe-session
+	  :help "Show a read-only report for a session"]
 	 ["Receive Message…" dsh-bridge-receive
 	  :help "Receive the latest message sent from DSH to Emacs"]
 	 ["Set Default Target Session" dsh-bridge-set-default-target
