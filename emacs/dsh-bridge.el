@@ -2692,45 +2692,35 @@ buffer re-fetches the shown session's newest turn."
 					  nil
 	  (lambda (status body http-status)
 		(let* ((alist (dsh-bridge--parse-json-body body))
-			   (err (dsh-bridge--error-message status http-status alist)))
+			   (err (dsh-bridge--error-message status http-status alist))
+			   shown-id turns buf)
 		  (cond
-		   (err (message "dsh-bridge: %s" err))
+		   (err
+			(message "dsh-bridge: %s" err))
 		   ((null alist)
 			(message "dsh-bridge: unreadable response: %s" body))
 		   (t
-			(when (null target)
+			(unless target
 			  (dsh-bridge--record-last-resolved alist))
-			(let* ((shown-id (or (alist-get 'sessionId alist) target))
-				   (turns (alist-get 'turns alist)))
-			  (when shown-id
-				;; Seed the status tracker from the response's running
-				;; flag, but only when the field is present: an older
-				;; plugin's response omits it, and overwriting with idle
-				;; would be wrong.  JSON `false' decodes to nil and `true'
-				;; to t (see `dsh-bridge--parse-json-body') — compare
-				;; against t, never truthiness.
-				(let ((running-pair (assoc 'running alist)))
-				  (when running-pair
-					(dsh-bridge--status-set shown-id
-											(if (eq (cdr running-pair) t)
-												'running 'idle))))
-				;; Field presence, not truthiness: an explicit empty
-				;; `turns' list (no turns, e.g. after a full compaction)
-				;; replaces the stale cache entry, and the response's
-				;; `epoch' is recorded for later incremental fetches.
-				(let ((turns-pair (assoc 'turns alist)))
-				  (when turns-pair
-					(dsh-bridge--turns-cache-store
-					 shown-id (cdr turns-pair) (alist-get 'epoch alist))))
-				;; A manual fetch ends any waiting state: show what the host
-				;; has now, whatever it is.
-				(let ((buf (dsh-bridge--view-open shown-id (car-safe turns)
-												  (alist-get 'cwd alist) t)))
-				  (with-current-buffer buf
-					(setq-local dsh-bridge--view-waiting nil)))
-				(message "dsh-bridge: turn fetched from session \"%s\""
-						 (or (alist-get 'title alist)
-							 (dsh-bridge--session-label shown-id))))))))))))
+			(when (setq shown-id
+						(or (alist-get 'sessionId alist) target))
+			  ;; Seed status tracker from running flag (if present).
+			  ;; Note: JSON `false' decodes to nil and `true' to t.
+			  (let ((running-pair (assoc 'running alist)))
+				(when running-pair
+				  (dsh-bridge--status-set shown-id
+										  (if (eq (cdr running-pair) t)
+											  'running 'idle))))
+			  ;; An empty `turns' list replaces the stale cache entry,
+			  ;; and epoch is recorded for later fetches.
+			  (when (setq turns (alist-get 'turns alist))
+				(dsh-bridge--turns-cache-store shown-id (cdr turns)
+											   (alist-get 'epoch alist)))
+			  ;; Show what the host has now, whatever it is.
+			  (setq buf (dsh-bridge--view-open shown-id (car-safe turns)
+											   (alist-get 'cwd alist) t))
+			  (with-current-buffer buf
+				(setq-local dsh-bridge--view-waiting nil))))))))))
 
 ;;;###autoload
 (defun dsh-bridge-receive ()
