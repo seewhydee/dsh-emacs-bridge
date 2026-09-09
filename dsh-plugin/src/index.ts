@@ -44,6 +44,10 @@
 //   POST /dsh-bridge/outbox/ack { ids }           -> clear collected entries
 //   POST /dsh-bridge/answer { questionId, sessionId, answers? | cancelled? }
 //        -> settle the bridge's pending ask-user waterfall answerer
+//   GET  /dsh-bridge/models?sessionId=     -> model catalog + current selection
+//   POST /dsh-bridge/model { sessionId?, provider, model, reasoningEffort? }
+//        -> change the target session's model (proxies session/selectModel)
+//   GET  /dsh-bridge/context?sessionId=    -> context occupancy (204 if none)
 //   POST /dsh-bridge/sessions/resume { sessionId }        -> resume a cold session
 //   POST /dsh-bridge/sessions/rename { sessionId, title } -> rename (resumes cold)
 //   POST /dsh-bridge/sessions/archive { sessionId }       -> archive (one-way)
