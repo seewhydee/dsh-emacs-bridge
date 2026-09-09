@@ -817,6 +817,18 @@ export function answerMatchesQuestions(
   return true
 }
 
+/**
+ * Whether a browser-side waterfall rejection is the web UI's own question
+ * cancel (the panel's close button). The client rejects with the harness's
+ * `ASK_CANCELLED` code; any other rejection (no answerer, no loaded session,
+ * transport failure) means the browser could not present the question and must
+ * leave Emacs deciding.
+ */
+export function isQuestionCancelRejection(error: unknown): boolean {
+  return typeof error === 'object' && error !== null
+    && (error as { code?: unknown }).code === 'ASK_CANCELLED'
+}
+
 /** One SSE `data:` frame announcing a pending question to Emacs. */
 export function askUserMessage(
   questionId: string,
@@ -826,13 +838,19 @@ export function askUserMessage(
   return `data: ${JSON.stringify({ kind: 'ask-user', questionId, sessionId, questions })}\n\n`
 }
 
-/** One SSE `data:` frame telling Emacs a question was resolved (answered/cancelled). */
+/**
+ * One SSE `data:` frame telling Emacs a question was resolved
+ * (answered/cancelled). `questionIds` carries the asker's own question ids, so
+ * the browser plugin can match the resolution to the web UI's pending question
+ * panel and dismiss it when Emacs answered first.
+ */
 export function askUserResolvedMessage(
   sessionId: string,
   questionId: string,
   outcome: 'answered' | 'cancelled',
+  questionIds: readonly string[] = [],
 ): string {
-  return `data: ${JSON.stringify({ kind: 'ask-user-resolved', sessionId, questionId, outcome })}\n\n`
+  return `data: ${JSON.stringify({ kind: 'ask-user-resolved', sessionId, questionId, outcome, questionIds })}\n\n`
 }
 
 /**

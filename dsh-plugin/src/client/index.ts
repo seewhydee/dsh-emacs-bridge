@@ -25,6 +25,7 @@ import type {} from '@deepseek-ai/dsh-client-locale/client'
 // Type-only: pulls the SlotRegistry service merge (ctx.slots).
 import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 import { en, zh } from './locales.ts'
+import { matchDismissRecord, type DismissRecord } from './question-dismiss.ts'
 import { SendToEmacs } from './SendToEmacs.tsx'
 
 /** Locale namespace owned by this plugin (its `t` seat on the assistant-actions entry). */
@@ -118,6 +119,69 @@ function applyDraft(ctx: ClientContext, sessionId: string, text: string): void {
   conversation.input.for(actx).setDraft(text)
 }
 
+/** Minimal face of one pending interaction, enough to cancel a resolved question. */
+interface PendingQuestionLike {
+  readonly kind: string
+  readonly sessionId: string
+  readonly questions: readonly { readonly id?: unknown }[]
+  cancel(): Promise<void>
+}
+
+/** Minimal face of the client UI-session service: the pending-interaction registry. */
+interface UiSessionService {
+  readonly pendingInteractions: {
+    getSnapshot(): ReadonlyMap<string, PendingQuestionLike>
+    subscribe(listener: () => void): () => void
+  }
+}
+
+/**
+ * Questions the host reported resolved (answered in Emacs, or cancelled there)
+ * whose web panel this client has not dismissed yet. The panel may not exist
+ * at broadcast time — the forwarded waterfall and this SSE stream are
+ * different transports — so each record is retried whenever the
+ * pending-interaction registry changes.
+ */
+const dismissRecords: DismissRecord[] = []
+
+/** How long an unmatched resolution record is retried before being dropped. */
+const DISMISS_RECORD_TTL_MS = 120_000
+
+/** Cancel any browser question panel whose question the host already resolved. */
+function dismissResolvedQuestions(ctx: ClientContext): void {
+  if (dismissRecords.length === 0) return
+  // Drop retries whose panel never appeared (e.g. the session was not loaded
+  // when Emacs answered), so a much later re-ask of the same ids is not
+  // dismissed by a stale record.
+  const now = Date.now()
+  for (let index = dismissRecords.length - 1; index >= 0; index -= 1) {
+    const record = dismissRecords[index]
+    if (record?.at !== undefined && now - record.at > DISMISS_RECORD_TTL_MS) {
+      dismissRecords.splice(index, 1)
+    }
+  }
+  const uiSession = ctx.get('uiSession') as UiSessionService | undefined
+  if (uiSession === undefined) return
+  for (const pending of uiSession.pendingInteractions.getSnapshot().values()) {
+    const index = matchDismissRecord(dismissRecords, pending)
+    if (index < 0) continue
+    dismissRecords.splice(index, 1)
+    // `cancel()` rejects when the panel already settled (the browser answered
+    // first); nothing is left to do then.
+    void pending.cancel().catch(() => {})
+  }
+}
+
+/** Remember a host-resolved question and dismiss its panel if it is already up. */
+function noteResolvedQuestion(ctx: ClientContext, sessionId: string, questionIds: string[]): void {
+  if (questionIds.length === 0) return
+  dismissRecords.push({ sessionId, questionIds, at: Date.now() })
+  // Bound the retry list: an unmatched record can only matter until its panel
+  // appears, and a long-lived tab must not accumulate stale entries.
+  if (dismissRecords.length > 32) dismissRecords.shift()
+  dismissResolvedQuestions(ctx)
+}
+
 /** Subscribe to the composer-draft SSE stream and apply drafts to the target session. */
 async function connectDraftStream(ctx: ClientContext): Promise<void> {
   let token: string
@@ -134,14 +198,27 @@ async function connectDraftStream(ctx: ClientContext): Promise<void> {
   // `purpose=draft` identifies this connection as the browser's draft stream:
   // the host's ask-user answerer must not count it as an Emacs client (this
   // stream exists whenever the web UI is open and never answers questions).
+  // It does receive the host's ask-user frames, which is how a question
+  // answered in Emacs dismisses the web UI's own panel.
   const source = new EventSource(
     `${location.origin}/dsh-bridge/events?token=${encodeURIComponent(token)}&purpose=draft`)
   draftSource = source
   source.addEventListener('message', (event: MessageEvent<string>) => {
-    let payload: { kind?: unknown; sessionId?: unknown; text?: unknown }
+    let payload: {
+      kind?: unknown; sessionId?: unknown; text?: unknown; questionIds?: unknown
+    }
     try {
       payload = JSON.parse(event.data) as typeof payload
     } catch {
+      return
+    }
+    if (payload.kind === 'ask-user-resolved' && typeof payload.sessionId === 'string') {
+      // The frame carries the asker's question ids as plain strings (unlike a
+      // pending interaction's `questions`, which are objects).
+      const questionIds = Array.isArray(payload.questionIds)
+        ? payload.questionIds.filter((id): id is string => typeof id === 'string')
+        : []
+      noteResolvedQuestion(ctx, payload.sessionId, questionIds)
       return
     }
     if (payload.kind !== 'draft' || typeof payload.sessionId !== 'string' || typeof payload.text !== 'string') return
@@ -155,6 +232,18 @@ async function connectDraftStream(ctx: ClientContext): Promise<void> {
  */
 export function apply(ctx: ClientContext): void {
   ctx.effect(() => ctx.locale.register(LOCALE_NS, { zh, en }))
+  // Retry pending dismissals whenever a question panel appears: the host's
+  // resolution frame can reach this SSE stream before the forwarded waterfall
+  // reaches the browser's pending-interaction registry. `uiSession` is an
+  // optional collaborator here — without it, the web panel simply is not
+  // dismissed by Emacs (the user can still close it).
+  ctx.inject(['uiSession'], (scope: ClientContext) => {
+    const uiSession = scope.get('uiSession') as UiSessionService | undefined
+    if (uiSession === undefined) return
+    scope.effect(() => uiSession.pendingInteractions.subscribe(() => {
+      dismissResolvedQuestions(scope)
+    }))
+  })
   ctx.slots.inject('conversation.chat.assistant-actions', () => {
     const dispose = ctx.slots.register({
       name: 'conversation.chat.assistant-actions',

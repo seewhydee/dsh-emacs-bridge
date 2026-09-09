@@ -16,6 +16,7 @@ import {
   isLoopbackAddress,
   isLoopbackHostname,
   isLoopbackOrigin,
+  isQuestionCancelRejection,
   isSubagentChild,
   latestAssistantText,
   manifestVersion,
@@ -850,11 +851,20 @@ describe('ask-user frame construction and answer validation', () => {
       .toBe('data: {"kind":"ask-user","questionId":"rpc-1","sessionId":"session-1","questions":[{"id":"q1","question":"Go?","options":[{"label":"Yes"}]}]}\n\n')
   })
 
-  it('askUserResolvedMessage emits the outcome frame', () => {
-    expect(askUserResolvedMessage('session-1', 'rpc-1', 'answered')).toBe(
-      'data: {"kind":"ask-user-resolved","sessionId":"session-1","questionId":"rpc-1","outcome":"answered"}\n\n')
+  it('askUserResolvedMessage emits the outcome frame with the asker question ids', () => {
+    expect(askUserResolvedMessage('session-1', 'rpc-1', 'answered', ['q1', 'q2'])).toBe(
+      'data: {"kind":"ask-user-resolved","sessionId":"session-1","questionId":"rpc-1","outcome":"answered","questionIds":["q1","q2"]}\n\n')
     expect(askUserResolvedMessage('session-1', 'rpc-1', 'cancelled')).toBe(
-      'data: {"kind":"ask-user-resolved","sessionId":"session-1","questionId":"rpc-1","outcome":"cancelled"}\n\n')
+      'data: {"kind":"ask-user-resolved","sessionId":"session-1","questionId":"rpc-1","outcome":"cancelled","questionIds":[]}\n\n')
+  })
+
+  it('isQuestionCancelRejection recognizes only the web UI cancel code', () => {
+    expect(isQuestionCancelRejection(Object.assign(new Error('cancelled'), { code: 'ASK_CANCELLED' }))).toBe(true)
+    // Any other browser failure must leave Emacs deciding, not cancel the ask.
+    expect(isQuestionCancelRejection(Object.assign(new Error('aborted'), { code: 'ASK_ABORTED' }))).toBe(false)
+    expect(isQuestionCancelRejection(new Error('no answerer'))).toBe(false)
+    expect(isQuestionCancelRejection(undefined)).toBe(false)
+    expect(isQuestionCancelRejection('ASK_CANCELLED')).toBe(false)
   })
 
   it('answerMatchesQuestions accepts answers naming pending question ids', () => {

@@ -22,7 +22,8 @@
 //   GET  /dsh-bridge/status                         -> { name, version } (loopback-fenced)
 //   GET  /dsh-bridge/events?token=                  -> EventSource (composer-draft push)
 //        (?purpose=draft marks the browser's own draft stream; an unmarked
-//        connection is Emacs and may own ask-user questions)
+//        connection is Emacs and is eligible to answer ask-user questions,
+//        which coexist with the web UI's own question panel)
 //   POST /dsh-bridge/send   { text, sessionId? } -> Agent.followup()
 //   GET  /dsh-bridge/output?sessionId=           -> latest assistant text
 //        (kept deliberately: a single-shot "latest text" probe; the Emacs
@@ -87,6 +88,7 @@ import {
   currentModelSelection,
   draftMessage,
   isLoopbackAddress,
+  isQuestionCancelRejection,
   isSubagentChild,
   latestAssistantText,
   manifestVersion,
@@ -405,15 +407,25 @@ export function apply(ctx: Context): void {
    * question to Emacs over SSE and settle the waterfall from `/answer`.
    *
    * Registered with `prepend` so it runs OUTSIDE the api-remotes browser
-   * forwarder: while an Emacs SSE client is connected, Emacs owns the
-   * question (the browser never sees it). The browser's own draft-push
-   * connection (marked `purpose=draft`) does not count — it exists whenever
-   * the web UI is open and never answers, so claiming on its behalf would
-   * strand the question. With no Emacs client the listener delegates via
-   * `next()` and the browser flow is untouched. An agent-less request
-   * likewise delegates. Cancel rejects the wait, which the asker surfaces as
-   * the tool-call failure (the old cancel-envelope semantics); delegating to
-   * the browser on cancel is a deferred idea.
+   * forwarder. When an Emacs SSE client is connected the bridge registers its
+   * own pending entry, and when the web UI is also open (`browserSseClients`
+   * non-empty) it still calls `next()` so the same request reaches the browser
+   * forwarder and the web UI's own question panel opens. The two presentations
+   * coexist and race: whichever answers first settles the waterfall, and the
+   * `ask-user-resolved` frame broadcast on settlement lets the browser plugin
+   * dismiss the panel it no longer owns (and lets Emacs banner its buffer as
+   * answered elsewhere). A browser-side rejection — no answerer, no session
+   * loaded, or a transport failure — is swallowed into a never-settling branch
+   * rather than ending the race, so Emacs (already registered above) remains
+   * the deciding answerer; the one exception is the web UI's own cancel
+   * (`ASK_CANCELLED`, the panel's close button), which settles the ask as
+   * cancelled rather than parking the turn on Emacs. The browser's own
+   * draft-push connection (marked `purpose=draft`) is not an Emacs client and
+   * never answers. With no Emacs client the listener delegates via `next()`
+   * and the browser flow is untouched. An agent-less request likewise
+   * delegates. Cancel rejects the wait, which the asker surfaces as the
+   * tool-call failure (the old cancel-envelope semantics); delegating to the
+   * browser on cancel is a deferred idea.
    */
   async function onUserQuestionsRequest(
     request: AskUserQuestionRequestEvent,
@@ -440,15 +452,35 @@ export function apply(ctx: Context): void {
     broadcast(askUserMessage(questionId, sessionId, questions))
     const onAbort = (): void => pendingQuestions.get(questionId)?.settle({ ok: false })
     request.signal?.addEventListener('abort', onAbort, { once: true })
+    // Also offer the request to the web UI, but only when the web UI is
+    // actually open (its draft SSE stream is the host-side signal for that):
+    // queueing a browser dispatch with no browser attached would strand it
+    // until one connects and then show an already-resolved question. Most
+    // browser-side rejections (no answerer, no loaded session) must not end
+    // the race — Emacs stays the deciding answerer — but the web UI's own
+    // cancel (the panel's close button) settles the ask as cancelled, matching
+    // the harness's semantics rather than parking the turn on Emacs.
+    const browserWait: Promise<QuestionSettlement> = browserSseClients.size === 0
+      ? new Promise<QuestionSettlement>(() => {})
+      : next().then(
+        answer => ({ ok: true as const, answers: answer.answers }),
+        (error: unknown) => {
+          if (isQuestionCancelRejection(error)) {
+            pendingQuestions.get(questionId)?.settle({ ok: false })
+          }
+          return new Promise<QuestionSettlement>(() => {})
+        },
+      )
     try {
-      const result = await wait
+      const result = await Promise.race([wait, browserWait])
       if (!result.ok) throw new Error('the user cancelled ask_user_question')
       outcome = 'answered'
       return { answers: result.answers }
     } finally {
       request.signal?.removeEventListener('abort', onAbort)
       pendingQuestions.delete(questionId)
-      broadcast(askUserResolvedMessage(sessionId, questionId, outcome))
+      broadcast(askUserResolvedMessage(sessionId, questionId, outcome,
+        questions.map(question => question.id)))
     }
   }
 
@@ -987,7 +1019,8 @@ export function apply(ctx: Context): void {
 
   // Answer ask-user requests from Emacs. Prepended so the bridge runs outside
   // the api-remotes browser forwarder regardless of plugin load order; the
-  // listener delegates via next() whenever no Emacs SSE client is connected.
+  // listener delegates via next() whenever no Emacs SSE client is connected,
+  // and otherwise races Emacs against a browser presentation it also opens.
   // A profile without the user-questions capability simply never dispatches
   // the event, so the ask-user path degrades to a no-op there.
   ctx.effect(

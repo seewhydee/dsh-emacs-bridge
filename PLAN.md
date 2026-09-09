@@ -61,8 +61,11 @@ re-verification checklist.
   Emacs keeps a default target plus per-buffer bindings.
 - **Cold sessions are first-class.** An explicit cold id resumes on demand;
   subagent-owned sessions are 409.
-- **Ask-user is Emacs-owned while an Emacs SSE client is connected**;
-  otherwise the bridge delegates to the browser (`next()`).
+- **Ask-user coexists with the web UI while an Emacs SSE client is
+  connected**: the bridge offers the question to Emacs and (when the web UI is
+  open) also calls `next()` so the browser panel appears; whichever answers
+  first wins and the resolved frame dismisses the other presentation. With no
+  Emacs SSE client the bridge delegates to the browser (`next()`) untouched.
 - **Plugin management stays user-confirmed.** Installs are validated with
   `dsh --profile <p> --dump-config`; the bridge never auto-restarts a server.
 - **`/output` is kept but unused** — a single-shot "latest text" probe; Emacs

@@ -3962,7 +3962,7 @@ copy silently instead of duplicating the registry entry."
     ;; The defensive clear also banners the live question buffer.
     (with-current-buffer (dsh-bridge--question-find-buffer "q1")
       (should dsh-bridge--question-dead)
-      (should (string-match-p "cancelled" (buffer-string))))
+      (should (string-match-p "no longer pending" (buffer-string))))
     (when (buffer-live-p (get-buffer "*dsh-bridge-output*"))
       (kill-buffer "*dsh-bridge-output*"))
     (when (dsh-bridge--question-find-buffer "q1")
@@ -4124,9 +4124,12 @@ the buffer for the same question keeps the marks (bury-then-return flow)."
 
 (ert-deftest dsh-bridge-question-validate-and-submit ()
   "Submission POSTs alist-shaped answers to /dsh-bridge/answer — the wire shape
-the apiproxy validates (regression: plist-style lists encode as junk JSON)."
+the apiproxy validates (regression: plist-style lists encode as junk JSON).  An
+accepted submit banners the buffer as sent and buries it, like sending from
+DSH-Prompt."
   (let ((dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t))))
-        (posted nil))
+        (posted nil)
+        (buried nil))
     (with-current-buffer
         (dsh-bridge--question-buffer "s1" "q1"
           '(( (id . "q1") (question . "Go?") (options . (((label . "Yes")) ((label . "No")))) )))
@@ -4139,15 +4142,18 @@ the apiproxy validates (regression: plist-style lists encode as junk JSON)."
       (cl-letf (((symbol-function 'dsh-bridge--call)
                  (lambda (_m _p payload cb)
                    (setq posted payload)
-                   (funcall cb nil "{\"accepted\":true}" 200))))
+                   (funcall cb nil "{\"accepted\":true}" 200)))
+                ((symbol-function 'bury-buffer)
+                 (lambda (&optional buffer) (setq buried (or buffer (current-buffer))))))
         (dsh-bridge--question-submit))
       (should (equal (alist-get 'questionId posted) "q1"))
       (should (equal (alist-get 'sessionId posted) "s1"))
       (should (equal (json-encode (list (cons 'answers (alist-get 'answers posted))))
                      "{\"answers\":[{\"id\":\"q1\",\"selected\":[\"Yes\"]}]}"))
-      ;; An accepted submit retires the buffer.
+      ;; An accepted submit retires the buffer and buries it.
       (should dsh-bridge--question-dead)
-      (should (string-match-p "answered elsewhere" (buffer-string))))
+      (should (eq buried (current-buffer)))
+      (should (string-match-p "Your answer was sent\\." (buffer-string))))
     (when (dsh-bridge--question-find-buffer "q1")
       (kill-buffer (dsh-bridge--question-find-buffer "q1")))))
 
@@ -4217,6 +4223,19 @@ unskipping leaves the question unsettled again."
               (options . (((label . "Approve")) ((label . "Refuse")))) )))
       (should (string-match-p "## Plan" (buffer-string)))
       (should (string-match-p "1\\. Do the thing" (buffer-string))))
+    (when (dsh-bridge--question-find-buffer "q1")
+      (kill-buffer (dsh-bridge--question-find-buffer "q1")))))
+
+(ert-deftest dsh-bridge-question-render-explains-keys ()
+  "The question buffer itself explains how to work it — which key selects an
+option and how to submit — instead of leaving that to the mode docstring."
+  (let ((dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t)))))
+    (with-current-buffer
+        (dsh-bridge--question-buffer "s1" "q1"
+          '(( (id . "q1") (question . "Go?") (options . (((label . "Yes")))) )))
+      (should (string-match-p "Mark an option with RET" (buffer-string)))
+      (should (string-match-p "C-c C-c submits" (buffer-string)))
+      (should (string-match-p "C-c C-k declines" (buffer-string))))
     (when (dsh-bridge--question-find-buffer "q1")
       (kill-buffer (dsh-bridge--question-find-buffer "q1")))))
 

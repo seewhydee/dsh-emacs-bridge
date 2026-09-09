@@ -238,11 +238,19 @@ session, an `Awaiting your response` message will appear.  Typing `a`
 here (or in the DSH-Sessions buffer with point on this session) opens
 a buffer where you can answer the query.
 
+If the web UI is open too, its own Q&A panel appears as well: the two
+interfaces coexist and race, and whichever you answer first wins.  If
+you answer in Emacs first, the web panel closes; if you answer in the
+web UI first, the Emacs question buffer is bannered as answered
+elsewhere.
+
 In the `*dsh-bridge-question: <Label>*` buffer, mark the option(s) you
 choose with `RET` or the option's number key (radio behavior for
 single-select questions, checkbox for multi-select); each question
 also has a `c` row for typing a custom answer.  Type `C-c C-c` to
-submit, and `C-c C-k` to decline (which cancels the tool call).
+submit — the buffer is buried once the answer is sent — and `C-c C-k`
+to decline (which cancels the tool call).  The buffer itself repeats
+these keys at the top.
 
 ## Development testing
 

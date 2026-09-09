@@ -2879,16 +2879,22 @@ note instead.  A no-op for sessions no view shows in either state."
 ;;; Ask-user questions (the DSH `ask_user_question` tool)
 
 ;; The ask-user path registers an in-process answerer on the host's
-;; `user-questions/request` waterfall (ahead of the browser forwarder,
-;; so while an Emacs SSE client is connected, Emacs owns the question;
-;; with no Emacs client connected the request delegates to the web UI
-;; untouched).  The browser plugin's own draft-push SSE connection is
+;; `user-questions/request` waterfall (ahead of the browser forwarder).
+;; While an Emacs SSE client is connected the bridge offers the question
+;; to Emacs and, when the web UI is also open, still hands the request
+;; to the browser forwarder so its own Q&A panel appears: the two
+;; presentations race, and whichever answers first settles the request.
+;; A browser-side rejection (no answerer, no loaded session, or the
+;; panel closed) never ends the race, so Emacs decides in that case.
+;; With no Emacs client connected the request delegates to the web UI
+;; untouched.  The browser plugin's own draft-push SSE connection is
 ;; marked and never counts as Emacs — it exists whenever the web UI is
-;; open and never answers questions.  No loopback wire and no
-;; third-party contact is involved, and the Emacs answer arrives over
-;; the bearer-authed `POST /dsh-bridge/answer` route.  A late or
-;; duplicate answer gets a 404 `not-pending` (benign); cancelling from
-;; Emacs fails the asking tool call.
+;; open and never answers questions (it does consume the resolved frame
+;; so it can dismiss the web panel after an Emacs answer).  No loopback
+;; wire and no third-party contact is involved, and the Emacs answer
+;; arrives over the bearer-authed `POST /dsh-bridge/answer` route.  A
+;; late or duplicate answer gets a 404 `not-pending` (benign);
+;; cancelling from Emacs fails the asking tool call.
 
 (defcustom dsh-bridge-question-auto-pop nil
   "Whether an arriving ask-user question pops to its question buffer.
@@ -2930,8 +2936,13 @@ auto-pop the question buffer on arrival (most users find that intrusive)."
 					 (equal dsh-bridge--question-id question-id))))
 			(buffer-list)))
 
-(defun dsh-bridge--question-mark-resolved (_session-id question-id outcome)
-  "Banner the question buffer for QUESTION-ID as resolved by OUTCOME."
+(defun dsh-bridge--question-mark-resolved (question-id message &optional bury)
+  "Mark QUESTION-ID's live buffer resolved, banner it with MESSAGE, and bury it.
+MESSAGE says what happened in the user's terms; BURY (the local-submit and
+local-decline paths) also removes the buffer from every window, matching how
+sending from DSH-Prompt exits.  A buffer already marked resolved is left alone,
+so the local settlement and the later SSE `ask-user-resolved' frame do not
+banner twice."
   (let ((buffer (dsh-bridge--question-find-buffer question-id)))
 	(when (and buffer
 			   (with-current-buffer buffer (not dsh-bridge--question-dead)))
@@ -2939,11 +2950,10 @@ auto-pop the question buffer on arrival (most users find that intrusive)."
 		(setq-local dsh-bridge--question-dead t)
 		(let ((inhibit-read-only t))
 		  (goto-char (point-min))
-		  (insert (propertize
-				   (format "This question was %s.\n\n"
-						   (if (equal outcome "cancelled") "cancelled" "answered elsewhere"))
-				   'face 'error))
-		  (goto-char (point-min)))))))
+		  (insert (propertize message 'face 'error))
+		  (goto-char (point-min))))
+	  (when bury
+		(bury-buffer buffer)))))
 
 ;; Registry maintenance ----------------------------------------------------
 
@@ -2952,7 +2962,8 @@ auto-pop the question buffer on arrival (most users find that intrusive)."
 Defensive cleanup on `turn-complete': a turn that ended without a resolved
 frame cannot still be waiting on the user."
   (dolist (pending (cdr (assoc session-id dsh-bridge--pending-questions)))
-	(dsh-bridge--question-mark-resolved session-id (car pending) "cancelled"))
+	(dsh-bridge--question-mark-resolved
+	 (car pending) "This question is no longer pending."))
   (setq dsh-bridge--pending-questions
 		(assoc-delete-all session-id dsh-bridge--pending-questions)))
 
@@ -2992,7 +3003,11 @@ stored copy, silently, without re-messaging or touching the question buffer."
 			  (assoc-delete-all session-id dsh-bridge--pending-questions)))))
   (dsh-bridge--status-event-render session-id)
   (dsh-bridge--view-await-refresh session-id)
-  (dsh-bridge--question-mark-resolved session-id question-id outcome))
+  (dsh-bridge--question-mark-resolved
+   question-id
+   (if (equal outcome "cancelled")
+	   "This question was cancelled."
+	 "This question was answered elsewhere (not in this buffer).")))
 
 ;; The question buffer -------------------------------------------------------
 
@@ -3036,9 +3051,19 @@ so point anywhere in the block identifies the question."
   (let ((inhibit-read-only t))
 	(erase-buffer)
 	(insert (propertize
-			 (format "Session \"%s\" is waiting for your answer\n\n"
+			 (format "Session \"%s\" is waiting for your answer\n"
 					 (dsh-bridge--session-label dsh-bridge--question-session))
 			 'face 'bold))
+	;; The buffer itself must say how to work it: the mode docstring is not
+	;; visible, and the keys (RET selects, C-c C-c submits) are not guessable.
+	(insert (substitute-command-keys
+			 (concat
+			  "Mark an option with \\[dsh-bridge--question-toggle-at-point] "
+			  "or its number key; type a custom answer on the `c' row.\n"
+			  "\\[dsh-bridge--question-skip] skips the question at point, "
+			  "\\[dsh-bridge--question-next] moves between questions.\n"
+			  "\\[dsh-bridge--question-submit] submits your answers, "
+			  "\\[dsh-bridge--question-decline] declines (cancels the tool call).\n\n")))
 	(let ((n 0)
 		  (total (length dsh-bridge--question-questions)))
 	  (dolist (question dsh-bridge--question-questions)
@@ -3261,12 +3286,14 @@ empty array, and a single-select custom answer never travels with a selection
 			   ((and reason (equal reason "not-pending"))
 				(message "dsh-bridge: already answered or cancelled")
 				(dsh-bridge--question-mark-resolved
-				 dsh-bridge--question-session dsh-bridge--question-id "answered"))
+				 dsh-bridge--question-id
+				 "This question was already answered or cancelled." t))
 			   (accepted
 				(message "dsh-bridge: answer sent to \"%s\""
 						 (dsh-bridge--session-label dsh-bridge--question-session))
 				(dsh-bridge--question-mark-resolved
-				 dsh-bridge--question-session dsh-bridge--question-id "answered"))
+				 dsh-bridge--question-id
+				 "Your answer was sent." t))
 			   (t (message "dsh-bridge: answer not accepted%s"
 						   (if reason (concat ": " reason) "")))))))))))
 
@@ -3289,9 +3316,13 @@ empty array, and a single-select custom answer never travels with a selection
 		   (accepted
 			(message "dsh-bridge: question cancelled")
 			(dsh-bridge--question-mark-resolved
-			 dsh-bridge--question-session dsh-bridge--question-id "cancelled"))
+			 dsh-bridge--question-id
+			 "You declined to answer; the question was cancelled." t))
 		   ((and reason (equal reason "not-pending"))
-			(message "dsh-bridge: already answered or cancelled"))
+			(message "dsh-bridge: already answered or cancelled")
+			(dsh-bridge--question-mark-resolved
+			 dsh-bridge--question-id
+			 "This question was already answered or cancelled." t))
 		   (t (message "dsh-bridge: decline not accepted%s"
 					   (if reason (concat ": " reason) "")))))))))
 
