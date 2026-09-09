@@ -2873,6 +2873,18 @@ note instead.  A no-op for sessions no view shows in either state."
 
 ;;; Ask-user questions (the DSH `ask_user_question` tool)
 
+;; The ask-user path registers an in-process answerer on the host's
+;; `user-questions/request` waterfall (ahead of the browser forwarder,
+;; so while an Emacs SSE client is connected, Emacs owns the question;
+;; with no Emacs client connected the request delegates to the web UI
+;; untouched).  The browser plugin's own draft-push SSE connection is
+;; marked and never counts as Emacs — it exists whenever the web UI is
+;; open and never answers questions.  No loopback wire and no
+;; third-party contact is involved, and the Emacs answer arrives over
+;; the bearer-authed `POST /dsh-bridge/answer` route.  A late or
+;; duplicate answer gets a 404 `not-pending` (benign); cancelling from
+;; Emacs fails the asking tool call.
+
 (defcustom dsh-bridge-question-auto-pop nil
   "Whether an arriving ask-user question pops to its question buffer.
 When nil (the default), an ask is announced in the echo area and via the `⏳

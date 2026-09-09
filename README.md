@@ -61,7 +61,7 @@ DSH plugin and Emacs library manually.
 From this repository's root directory:
 
 ```sh
-make build   # emits dsh-plugin/lib/index.js (host) + lib/client.js (browser)
+make build   # emits dsh-plugin/lib/index.js + lib/client.js
 ```
 
 If you have `dsh` installed on the executable path, run the following
@@ -157,22 +157,15 @@ are also available.
 
 ### DSH-View buffer
 
-This read-only buffer contains the model output for a DSH session, one
-**agent turn** at a time: a turn is the whole run from a prompt to an
-idle reply, so a multi-step turn that committed several short
-mid-turn replies ("Let me look at the working-tree changes first.")
-reads as one unit, its segments separated by `---` horizontal-rule
-dividers.  A turn that is still running ends with a quiet `(continuing...)`
-marker (dimmed, so it never reads as model text) — or, while the agent is
-parked waiting for you to answer an ask-user question, an `Awaiting your
-response` note; once the turn finishes the marker disappears and the content
-ends cleanly — the turn's elapsed
-time and end reason are signalled by the header and the echo area instead
-of cluttering the buffer.  The buffer is fetched by `f` from the
-transient menu or the DSH-Sessions buffer, `C-c C-f` from the DSH-Prompt
-buffer, or pushed from the web UI's "Send to Emacs" button (see below).
+This read-only buffer contains the model output for a DSH session.
+Each buffer holds one agent turn (i.e., all replies from a user prompt
+to an idle).  It is fetched by `f` from the transient menu or the
+DSH-Sessions buffer, `C-c C-f` from the DSH-Prompt buffer, or pushed
+from the web UI's "Send to Emacs" button (see below).  Also, from the
+DSH-Prompt buffer (see below), doing `C-c C-c` to send a prompt will
+subsequently pop to a DSH-View buffer to view the replies.
 
-The following commands are available:
+The following commands are available in a DSH-View buffer:
 
 * `g` — re-fetch the current session's newest turn.
 * `r` — open a DSH-Prompt buffer for the current session.
@@ -183,23 +176,11 @@ The following commands are available:
 * `l` — open the DSH-Sessions buffer.
 * `q` — quit the window and bury the buffer.
 
-The header line shows the session status glyph, the turn position, the
-session label, a refresh timestamp, the live context occupancy (`· N%`),
-and, while the shown session is running, an elapsed turn clock
-(`⏱ MM:SS`).  The latter two are "live turn" signals (see
-`dsh-bridge-view-elapsed-ticker`).  Turn boundaries are also announced in
-the echo area — `session "Label" is thinking…` on a turn start and the
-reason phrase on a turn end — for the session you are looking at; see
-`dsh-bridge-turn-boundary-echo`.
-
-A DSH-View buffer can **follow the latest turn**.  Pressing `M-n` at the
-newest turn turns on following (acting like "turn 0"): while the session
-runs, the buffer tracks the newest turn, appending each newly committed
-segment as it arrives instead of jumping from one-line reply to one-line
-reply, and the header shows a small following marker.  Pressing `M-p` (or
-any manual turn navigation) leaves following and steps back through
-history.  A send-and-exit (`C-c C-c` in the DSH-Prompt buffer) pops to
-the DSH-View and turns on following for the sent session.
+When created, a DSH-View buffer usually follows the latest turn: the
+header line shows `(latest/X)` as the turn counter, and the buffer is
+automatically updated as additional replies come in.  If you are
+walking through the turn history with `M-p`/`M-n`, doing `M-n` on the
+newest turn activates turn-following mode.
 
 If markdown-mode is installed, and `dsh-bridge-view-gfm` is non-nil,
 the reply is font-locked as GitHub-Flavored Markdown (the dividers use
@@ -251,42 +232,23 @@ run `M-x dsh-bridge-receive`) to pull the last message pushed.
 ### Answering ask-user questions
 
 When the model pauses to ask you something (`ask_user_question`), the
-bridge surfaces it in Emacs.  The session's status glyph becomes an
-awaiting marker (`⏳`), the DSH-View header spells out "awaiting your
-answer", the echo area announces the question, and a DSH-View buffer
-following the session ends with an `Awaiting your response: "…" — press
-<key> to view and answer` note (the key is whatever `dsh-bridge-answer`
-is bound to) instead of the usual `(continuing...)` marker.  The session
-stays `running` host-side (its turn is parked inside the tool call), so
-you must answer before it continues.
+bridge surfaces it in Emacs.  In a DSH-View buffer following the
+session, an `Awaiting your response` message will appear.  Typing `a`
+here (or in the DSH-Sessions buffer with point on this session) opens
+a buffer where you can answer the query.
 
-* `a` — in the DSH-View or DSH-Sessions buffer, open the pending
-  question buffer for the shown / point session.
-* In a `*dsh-bridge-question: <Label>*` buffer, mark the option(s) you
-  choose with `RET` or the option's number key (radio behavior for
-  single-select questions, checkbox for multi-select); each question also
-  has a `c` row for typing a custom answer.  `C-c C-s` skips the question
-  at point (answered with an empty selection), `TAB` moves between
-  questions, `C-c C-c` submits, and `C-c C-k` declines (cancels the
-  `ask_user_question` tool call).  `q` buries without answering — the
-  question stays pending and `a` reopens the buffer with your marks
-  intact.  A plan-review question renders the plan itself (the item's
-  `detail`) above its options.
-
-A question buffer is read-only until you answer; it names the session in
-its buffer-name and hides a resolved question behind a banner.  `a` (or
-`dsh-bridge-answer`) answers a session with a live pending ask; if you
-would rather have questions pop automatically, set
-`dsh-bridge-question-auto-pop` (default nil, since auto-popping is
-intrusive).
+In the `*dsh-bridge-question: <Label>*` buffer, mark the option(s) you
+choose with `RET` or the option's number key (radio behavior for
+single-select questions, checkbox for multi-select); each question
+also has a `c` row for typing a custom answer.  Type `C-c C-c` to
+submit, and `C-c C-k` to decline (which cancels the tool call).
 
 ## Development testing
 
-`make test` runs the fast unit suites (plugin logic via Vitest, elisp via ERT
-in batch). The seam harness under `integration/` (`make integration-test`)
-boots the real plugin against a live DeepSeek Harness host with a mock LLM and
-exercises the route/SSE surface end-to-end; it is the version-bump gate for the
-harness seams. See `integration/README.md`.
+Running `make test` launches the standard unit test suite (Vitest for
+plugin, ERT for elisp).  Running `make integration-test` performs a
+suite of integration tests that boots the plugin against a live
+DeepSeek Harness host with a mock LLM; see `integration/README.md`.
 
 ## Permissions, authentication, and failure bounds
 
@@ -298,18 +260,6 @@ Every `/dsh-bridge` route requires a shared bearer token stored at
 `~/.dsh/dsh-bridge-token`, generated on first use in mode 0600.  Emacs
 reads this file directly, while the browser plugin fetches it from the
 loopback-only `GET /dsh-bridge/token` route (peer- and origin-fenced).
-
-The ask-user path registers an in-process answerer on the host's
-`user-questions/request` waterfall (ahead of the browser forwarder, so
-while an Emacs SSE client is connected, Emacs owns the question; with no
-Emacs client connected the request delegates to the web UI untouched).
-The browser plugin's own draft-push SSE connection is marked and never
-counts as Emacs — it exists whenever the web UI is open and never
-answers questions.  No loopback wire and no third-party contact is
-involved, and the Emacs answer arrives over the bearer-authed `POST
-/dsh-bridge/answer` route.
-A late or duplicate answer gets a 404 `not-pending` (benign); cancelling
-from Emacs fails the asking tool call.
 
 HTTP request bodies are capped at 1 MiB; larger bodies get a 413
 error.  DSH-to-Emacs messages are held in a bounded outbox (100
