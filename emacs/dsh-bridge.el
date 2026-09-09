@@ -219,6 +219,15 @@ header and refreshed by a short repeating timer."
   :type 'boolean
   :group 'dsh-bridge)
 
+(defcustom dsh-bridge-view-follow-at-newest t
+  "Whether reaching the newest turn in a DSH-View buffer resumes following.
+If non-nil (the default), the DSH-View buffer automatically enters
+turn-following state if it shows the session's latest turn.  If nil, you
+must do an additional M-n (`dsh-bridge-prompt-next-history') from
+turn (1/X) to enable turn-following state."
+  :type 'boolean
+  :group 'dsh-bridge)
+
 (defcustom dsh-bridge-turn-boundary-echo t
   "Whether turn boundaries are announced in the echo area.
 When non-nil, each \"turn-start\" and \"turn-complete\" event produces a
@@ -1797,10 +1806,14 @@ filled with (a fetch, a \"Send to Emacs\" push, or a follow refill).")
 
 (defvar-local dsh-bridge--view-follow nil
   "Whether the DSH-View buffer is in turn-following state.
-If non-nil, the buffer tracks the session's newest turn, auto-refilling as its
-segments are committed (appending each new segment plus a divider) and
-flipping to a newer turn when one starts producing.  This variable is set to
-nil by any history-walking command or manual buffer navigation.")
+If non-nil, the buffer tracks the session's newest turn, auto-refilling
+as its segments are committed (appending each new segment plus a
+divider) and flipping to a newer turn when one appears.
+
+This is set to nil by `\\[dsh-bridge-view-previous-reply]', which goes
+to an older prompt.  The option `dsh-bridge-view-follow-at-newest'
+controls whether to re-enter it automatically whenever the DSH-View
+buffer is showing a session's latest turn.")
 
 (defvar-local dsh-bridge--view-waiting nil
   "While non-nil, the DSH-View shows the running placeholder: the user has
@@ -2513,44 +2526,31 @@ turn-following state."
 			(message "dsh-bridge: at the oldest turn")
 		  (dsh-bridge--view-show-turn next turns))))))
 
-(defun dsh-bridge--view-newer-turn-from-rest ()
-  "At rest, look for a newer turn and, if one exists, step to it.
-Force-refreshes the turn list; if the shown turn is no longer the newest
-(newer turns arrived on the host), step one newer, mirroring
-`dsh-bridge-view-previous-reply' in reverse.  When the shown turn is already
-the newest, enter turn-following state instead of reporting \"no newer turns\"."
-  (let ((turns (dsh-bridge--view-turns-refresh t)))
-	(if (null turns)
-		(message "dsh-bridge: no turns in this session")
-	  (let ((k (and dsh-bridge--view-turn
-				   (dsh-bridge--view-turn-index-of
-					turns dsh-bridge--view-turn))))
-		(cond
-		 ((null k) (message "dsh-bridge: no newer turns"))
-		 ((zerop k)
-		  (dsh-bridge--view-follow-enter))
-		 (t
-		  (dsh-bridge--view-show-turn (1- k) turns)))))))
-
 (defun dsh-bridge-view-next-reply ()
-  "Show the next (newer) turn; at the newest, enter follow state.
-`M-n' at the newest turn (whether at rest or mid-cycle) turns on following,
-which acts like \"turn 0\" and tracks the newest turn as it arrives.  While
-already following, `M-n' is a no-op.  When cycling toward the newest, the
-view ends in following state."
+  "In a DSH-View buffer, show the next (newer) turn of the current session."
   (interactive)
-  (cond
-   (dsh-bridge--view-follow
-	(message "dsh-bridge: already following the newest turn"))
-   ((null dsh-bridge--view-turn-index)
-	(dsh-bridge--view-newer-turn-from-rest))
-   ((zerop dsh-bridge--view-turn-index)
-	(dsh-bridge--view-follow-enter))
-   (t
-	(let ((turns (dsh-bridge--view-turns-refresh)))
-	  (when turns
-		(dsh-bridge--view-show-turn
-		 (1- dsh-bridge--view-turn-index) turns))))))
+  (if dsh-bridge--view-follow
+	  (message "dsh-bridge: already following the newest turn")
+	(let* ((k dsh-bridge--view-turn-index)
+		   (refetch-turn (and (null k) dsh-bridge--view-turn))
+		   turns)
+	  ;; If the view is at rest, try `dsh-bridge--view-turn' with a
+	  ;; refreshed list.
+	  (and refetch-turn
+		   (setq turns (dsh-bridge--view-turns-refresh t))
+		   (setq k (dsh-bridge--view-turn-index-of turns
+												   dsh-bridge--view-turn)))
+	  (cond
+	   ((null k)
+		(message "dsh-bridge: no newer turns"))
+	   ((or (zerop k)
+			(and (= k 1) dsh-bridge-view-follow-at-newest))
+		(dsh-bridge--view-follow-enter))
+	   (t
+		(unless refetch-turn
+		  (setq turns (dsh-bridge--view-turns-refresh)))
+		(when turns
+		  (dsh-bridge--view-show-turn (1- k) turns)))))))
 
 ;;; Verbs
 
@@ -2590,9 +2590,12 @@ and bury the buffer (see `dsh-bridge--prompt-exit')."
 					   (format "Resend same prompt to session \"%s\"? "
 							   (dsh-bridge--session-label guard-session)))))
 		(user-error "dsh-bridge: aborted"))
-	  (dsh-bridge-send-text text
-							dsh-bridge--prompt-session
-							#'dsh-bridge--prompt-exit))))
+	  ;; Capture the invoking window for `dsh-bridge--prompt-exit'.
+	  (let ((window (selected-window)))
+		(dsh-bridge-send-text text
+							  dsh-bridge--prompt-session
+							  (lambda (sent-id)
+								(dsh-bridge--prompt-exit sent-id window)))))))
 
 (defun dsh-bridge--prompt-blank ()
   "Erase the DSH-prompt buffer and reset its navigation state.
@@ -2637,7 +2640,7 @@ initializing its header line and other necessary variables."
 		(dsh-bridge--view-ticker-ensure))
 	  buf)))
 
-(defun dsh-bridge--prompt-exit (sent-session-id)
+(defun dsh-bridge--prompt-exit (sent-session-id &optional window)
   "Clean up after a successful `dsh-bridge-send-and-exit'.
 Called from `dsh-bridge-send-and-exit' after the prompt has been
 successfully sent to the DSH bridge, with SENT-SESSION-ID as the
@@ -2648,18 +2651,23 @@ stays in the prompt history; the next composition erases it, asking
 first only if it was edited further).
 
 If SENT-SESSION-ID is non-nil, pop to a DSH-View buffer showing that
-session in turn-following state."
+session in turn-following state.  WINDOW is the window the send was
+invoked from, if still showing the prompt buffer; it is quit when the
+view is already on screen, so the prompt does not linger next to it."
   (when (eq major-mode 'dsh-bridge-prompt-mode)
 	(set-buffer-modified-p nil)
 	(if (null sent-session-id)
 		(bury-buffer)
-	  (let ((buf (dsh-bridge--after-prompt-view sent-session-id)))
-		;; If the view buffer is already being shown, quit this window
-		;; (deleting it); otherwise, just bury the buffer.  This
+	  (let ((buf (dsh-bridge--after-prompt-view sent-session-id))
+			(prompt-window (or (and (window-live-p window)
+									(eq (window-buffer window) (current-buffer))
+									window)
+							   (get-buffer-window (current-buffer)))))
+		;; If the view buffer is already being shown, quit the prompt
+		;; window (deleting it); otherwise, bury the buffer.  This
 		;; avoids a situation where the view buffer appears twice.
-		(if (and (get-buffer-window buf)
-				 (eq (window-buffer) (current-buffer)))
-			(quit-window)
+		(if (and (get-buffer-window buf) prompt-window)
+			(quit-window nil prompt-window)
 		  (bury-buffer (current-buffer)))
 		(pop-to-buffer buf)))))
 
@@ -2685,44 +2693,48 @@ only.  Whole-buffer drafts confirm exactly like whole-buffer sends."
 (defun dsh-bridge-fetch (&optional session-id)
   "Fetch the latest DSH turn and show it in a DSH-View buffer.
 The session is the effective session of the current buffer; with a prefix
-argument, fetch from a chosen session for this call only.  `g' in a DSH-View
-buffer re-fetches the shown session's newest turn."
+argument, fetch from a chosen session for this call only.
+
+In a DSH-View buffer, `\\[revert-buffer]' re-fetches the latest turn.
+If that turn is still running, this turns on turn-following state."
   (interactive (list (dsh-bridge--read-session-override "Fetch from session: ")))
   (let ((target (or session-id (dsh-bridge--effective-session))))
-	(dsh-bridge--call "GET"
-					  (dsh-bridge--path "/turns" target)
-					  nil
-	  (lambda (status body http-status)
-		(let* ((alist (dsh-bridge--parse-json-body body))
-			   (err (dsh-bridge--error-message status http-status alist))
-			   shown-id turns buf)
-		  (cond
-		   (err
-			(message "dsh-bridge: %s" err))
-		   ((null alist)
-			(message "dsh-bridge: unreadable response: %s" body))
-		   (t
-			(unless target
-			  (dsh-bridge--record-last-resolved alist))
-			(when (setq shown-id
-						(or (alist-get 'sessionId alist) target))
-			  ;; Seed status tracker from running flag (if present).
-			  ;; Note: JSON `false' decodes to nil and `true' to t.
-			  (let ((running-pair (assoc 'running alist)))
-				(when running-pair
-				  (dsh-bridge--status-set shown-id
-										  (if (eq (cdr running-pair) t)
-											  'running 'idle))))
-			  ;; An empty `turns' list replaces the stale cache entry,
-			  ;; and epoch is recorded for later fetches.
-			  (when (setq turns (alist-get 'turns alist))
-				(dsh-bridge--turns-cache-store shown-id (cdr turns)
-											   (alist-get 'epoch alist)))
-			  ;; Show what the host has now, whatever it is.
-			  (setq buf (dsh-bridge--view-open shown-id (car-safe turns)
-											   (alist-get 'cwd alist) t))
-			  (with-current-buffer buf
-				(setq-local dsh-bridge--view-waiting nil))))))))))
+	(dsh-bridge--call "GET" (dsh-bridge--path "/turns" target) nil
+	 (lambda (status body http-status)
+	   (let* ((alist (dsh-bridge--parse-json-body body))
+			  (err (dsh-bridge--error-message status http-status alist))
+			  shown-id turns-pair turns buf)
+		 (cond
+		  (err
+		   (message "dsh-bridge: %s" err))
+		  ((null alist)
+		   (message "dsh-bridge: unreadable response: %s" body))
+		  (t
+		   (unless target
+			 (dsh-bridge--record-last-resolved alist))
+		   (when (setq shown-id
+					   (or (alist-get 'sessionId alist) target))
+			 ;; Seed status tracker from running flag (if present).
+			 ;; Note: JSON "false" decodes to nil and "true" to t.
+			 (let ((running-pair (assoc 'running alist)))
+			   (when running-pair
+				 (dsh-bridge--status-set shown-id
+										 (if (eq (cdr running-pair) t)
+											 'running 'idle))))
+			 ;; Cache the extracted turns array, if present.
+			 (when (setq turns-pair (assoc 'turns alist))
+			   (setq turns (cdr turns-pair))
+			   (dsh-bridge--turns-cache-store shown-id turns
+											  (alist-get 'epoch alist)))
+			 ;; Show what the host has now, whatever it is.
+			 (let ((follow (or (and turns
+									(dsh-bridge--view-turn-open-p (car-safe turns)))
+							   (eq (cdr (assoc 'running alist)) t))))
+			   (setq buf (dsh-bridge--view-open shown-id (car-safe turns)
+												(alist-get 'cwd alist)
+												(not follow))))
+			 (with-current-buffer buf
+			   (setq-local dsh-bridge--view-waiting nil))))))))))
 
 ;;;###autoload
 (defun dsh-bridge-receive ()
@@ -4049,7 +4061,8 @@ A saved (cold) session is resumed first, so the target is live once bound."
 (defun dsh-bridge-peek-session ()
   "Fetch the session under point's latest turn into a DSH-View buffer.
 Nothing is changed: not the default target, not the prompt buffer's binding
-(a one-shot fetch, like `C-u dsh-bridge-fetch')."
+(a one-shot fetch, like `C-u dsh-bridge-fetch'; a still-running turn is
+followed automatically, as with any fetch)."
   (interactive)
   (let ((id (tabulated-list-get-id)))
 	(if id

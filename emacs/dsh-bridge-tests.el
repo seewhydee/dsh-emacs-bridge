@@ -512,6 +512,73 @@ so the check must compare against t, not truthiness (a regression: a
       (should (eq (dsh-bridge--status-state "s1") (cdr case)))
       (kill-buffer "*dsh-bridge-output*"))))
 
+(ert-deftest dsh-bridge-fetch-running-turn-follows ()
+  "A fetch whose newest turn is still running turns on following: the view
+then grows in place as further segments commit."
+  (let ((dsh-bridge-default-session "s1"))
+    (cl-letf (((symbol-function 'dsh-bridge--call)
+               (lambda (_method _path _payload callback)
+                 (funcall callback nil
+                          (concat "{\"sessionId\":\"s1\",\"running\":true,\"turns\":["
+                                  "{\"turn\":5,\"startedAt\":1000,\"segments\":["
+                                  "{\"text\":\"partial reply\",\"time\":1000000,\"step\":1}]}]}")
+                          200)))
+              ((symbol-function 'dsh-bridge--request)
+               (lambda (&rest _) (cons nil nil))))
+      (dsh-bridge-fetch))
+    (let ((buf (get-buffer "*dsh-bridge-output*")))
+      (should buf)
+      (with-current-buffer buf
+        (should (equal dsh-bridge--view-content-session "s1"))
+        (should (equal dsh-bridge--view-turn 5))
+        (should (eq dsh-bridge--view-follow t))
+        (should (null dsh-bridge--view-turn-index))
+        (should (string-prefix-p "partial reply" (buffer-string)))
+        (should (string-match-p "latest" (format "%s" header-line-format)))))
+    (kill-buffer "*dsh-bridge-output*")))
+
+(ert-deftest dsh-bridge-fetch-idle-turn-stays-snapshot ()
+  "A fetch of a completed (idle) newest turn does not turn on following."
+  (let ((dsh-bridge-default-session "s1"))
+    (cl-letf (((symbol-function 'dsh-bridge--call)
+               (lambda (_method _path _payload callback)
+                 (funcall callback nil
+                          (concat "{\"sessionId\":\"s1\",\"running\":false,\"turns\":["
+                                  "{\"turn\":5,\"startedAt\":1000,\"endedAt\":2000,\"reason\":\"completed\",\"segments\":["
+                                  "{\"text\":\"final reply\",\"time\":1000000,\"step\":1}]}]}")
+                          200)))
+              ((symbol-function 'dsh-bridge--request)
+               (lambda (&rest _) (cons nil nil))))
+      (dsh-bridge-fetch))
+    (with-current-buffer "*dsh-bridge-output*"
+      (should (equal (buffer-string) "final reply"))
+      (should (null dsh-bridge--view-follow)))
+    (kill-buffer "*dsh-bridge-output*")))
+
+(ert-deftest dsh-bridge-fetch-caches-whole-turn-list ()
+  "A fetch records the response's whole `turns' array (newest first) as the
+cache entry, including the shown newest turn, so the position count and
+later incremental requests see every turn."
+  (let ((dsh-bridge-default-session "s1")
+        (dsh-bridge--turns-cache nil))
+    (cl-letf (((symbol-function 'dsh-bridge--call)
+               (lambda (_method _path _payload callback)
+                 (funcall callback nil
+                          (concat "{\"sessionId\":\"s1\",\"running\":false,\"turns\":["
+                                  "{\"turn\":3,\"startedAt\":1000,\"endedAt\":2000,\"reason\":\"completed\",\"segments\":["
+                                  "{\"text\":\"newest\",\"time\":1000000,\"step\":1}]},"
+                                  "{\"turn\":2,\"startedAt\":900,\"endedAt\":1900,\"reason\":\"completed\",\"segments\":["
+                                  "{\"text\":\"older\",\"time\":900000,\"step\":1}]}]}")
+                          200)))
+              ((symbol-function 'dsh-bridge--request)
+               (lambda (&rest _) (cons nil nil))))
+      (dsh-bridge-fetch))
+    (let ((cached (dsh-bridge--turns-cache-turns "s1")))
+      (should (= (length cached) 2))
+      (should (equal (alist-get 'turn (car cached)) 3))
+      (should (equal (alist-get 'turn (cadr cached)) 2)))
+    (kill-buffer "*dsh-bridge-output*")))
+
 (ert-deftest dsh-bridge-apply-session-directory ()
   "The helper sets default-directory (trailing slash), with cache fallback."
   (with-temp-buffer
@@ -1133,16 +1200,15 @@ after its last segment."
         (should (equal dsh-bridge--view-turn-index 2))
         (dsh-bridge-view-previous-reply)
         (should (equal (buffer-string) dsh-bridge-test--view-oldest-rendered))
-        ;; M-n walks back toward the newest, then enters turn-following.
+        ;; M-n walks back toward the newest; arriving there resumes
+        ;; turn-following.
         (dsh-bridge-view-next-reply)
         (should (equal (buffer-string) dsh-bridge-test--view-middle-rendered))
         (dsh-bridge-view-next-reply)
         (should (equal (buffer-string) dsh-bridge-test--view-newest-rendered))
-        (should (equal dsh-bridge--view-turn-index 0))
-        (dsh-bridge-view-next-reply)
-        (should (equal (buffer-string) dsh-bridge-test--view-newest-rendered))
         (should (eq dsh-bridge--view-follow t))
-        (should (null dsh-bridge--view-turn-index))))))
+        (should (null dsh-bridge--view-turn-index))
+        (should (string-match-p " (latest/3)" (format "%s" header-line-format)))))))
 
 (ert-deftest dsh-bridge-view-turn-navigation-no-turns ()
   "With no turns, M-p reports it and leaves the buffer alone."
@@ -2600,6 +2666,111 @@ its committed content is what the user should be watching."
   (when (buffer-live-p (get-buffer "*dsh-bridge-output*"))
     (kill-buffer "*dsh-bridge-output*")))
 
+(defun dsh-bridge-test--prompt-exit-two-windows (steal hint)
+  "Set up a prompt window below a view window and run `dsh-bridge--prompt-exit'.
+STEAL, when non-nil, makes the stubbed `dsh-bridge--after-prompt-view' pop to
+the view before returning, simulating a process filter (an outbox push) that
+moves window selection during the synchronous send.  HINT, when non-nil, passes
+the invoking window to `dsh-bridge--prompt-exit'; otherwise it is omitted so
+the prompt's window must be found by buffer.  Returns the prompt buffer and the
+view buffer; the caller must unwind the window configuration."
+  (let ((view (get-buffer-create "*dsh-bridge-output*"))
+        (prompt (get-buffer-create "*dsh-bridge-prompt*"))
+        w1 w2)
+    (with-current-buffer view
+      (dsh-bridge-view-mode)
+      (setq-local dsh-bridge--view-content-session "s1"))
+    (with-current-buffer prompt
+      (dsh-bridge-prompt-mode))
+    (delete-other-windows)
+    (setq w1 (selected-window))
+    (set-window-buffer w1 view)
+    (setq w2 (split-window w1 nil 'below))
+    (set-window-buffer w2 prompt)
+    (select-window w2)
+    (cl-letf (((symbol-function 'dsh-bridge--after-prompt-view)
+               (lambda (_id)
+                 (when steal
+                   ;; Mimic a process filter popping the view during the
+                   ;; fetch: window selection moves, but the current buffer
+                   ;; is restored around the filter call.
+                   (save-current-buffer (pop-to-buffer view)))
+                 view)))
+      (with-current-buffer prompt
+        (if hint
+            (dsh-bridge--prompt-exit "s1" w2)
+          (dsh-bridge--prompt-exit "s1"))))
+    (list prompt view)))
+
+(defun dsh-bridge-test--assert-prompt-window-quit (steal hint)
+  "Run the two-window prompt-exit scenario and assert the prompt window is gone."
+  (let ((config (current-window-configuration)))
+    (unwind-protect
+        (let ((pair (dsh-bridge-test--prompt-exit-two-windows steal hint)))
+          (should-not (get-buffer-window (nth 0 pair)))
+          (should (eq (window-buffer) (nth 1 pair))))
+      (set-window-configuration config)
+      (dolist (b '("*dsh-bridge-output*" "*dsh-bridge-prompt*"))
+        (when (buffer-live-p (get-buffer b)) (kill-buffer b))))))
+
+(ert-deftest dsh-bridge-prompt-exit-quits-prompt-window-when-selection-moves ()
+  "C-c C-c removes the prompt window even when window selection moves to the
+DSH-View while the synchronous send runs (e.g. an outbox push pops the view).
+The prompt window is identified by buffer, so the stale-selection check that
+used to strand it on screen no longer applies."
+  (dsh-bridge-test--assert-prompt-window-quit t t))
+
+(ert-deftest dsh-bridge-prompt-exit-finds-prompt-window-without-hint ()
+  "Without the invoking-window hint, `dsh-bridge--prompt-exit' still finds the
+prompt's window by buffer when selection has moved away."
+  (dsh-bridge-test--assert-prompt-window-quit t nil))
+
+(ert-deftest dsh-bridge-prompt-exit-quits-prompt-window-without-steal ()
+  "The normal case still quits the prompt's window when the view is already
+shown and selection never moves."
+  (dsh-bridge-test--assert-prompt-window-quit nil t))
+
+(ert-deftest dsh-bridge-send-and-exit-captures-window-before-send ()
+  "The invoking window is captured before the synchronous POST, so window
+selection moving during the send cannot strand the prompt on screen."
+  (let ((config (current-window-configuration))
+        (view (get-buffer-create "*dsh-bridge-output*"))
+        (prompt (get-buffer-create "*dsh-bridge-prompt*"))
+        (dsh-bridge-default-session nil)
+        (dsh-bridge--last-resolved-active nil)
+        (dsh-bridge--last-sent nil)
+        (dsh-bridge-prompt-resend-confirm nil)
+        w1 w2)
+    (unwind-protect
+        (progn
+          (with-current-buffer view
+            (dsh-bridge-view-mode)
+            (setq-local dsh-bridge--view-content-session "s1"))
+          (with-current-buffer prompt
+            (dsh-bridge-prompt-mode)
+            (insert "hi")
+            (setq-local dsh-bridge--prompt-session "s1"))
+          (delete-other-windows)
+          (setq w1 (selected-window))
+          (set-window-buffer w1 view)
+          (setq w2 (split-window w1 nil 'below))
+          (set-window-buffer w2 prompt)
+          (select-window w2)
+          (cl-letf (((symbol-function 'dsh-bridge--call)
+                     (lambda (_method _path _payload callback)
+                       ;; Steal selection during the POST, then answer.
+                       (save-current-buffer (pop-to-buffer view))
+                       (funcall callback nil "{\"sessionId\":\"s1\"}" 200)))
+                    ((symbol-function 'dsh-bridge--after-prompt-view)
+                     (lambda (_id) view)))
+            (with-current-buffer prompt
+              (dsh-bridge-send-and-exit)))
+          (should-not (get-buffer-window prompt))
+          (should (eq (window-buffer) view)))
+      (set-window-configuration config)
+      (dolist (b '("*dsh-bridge-output*" "*dsh-bridge-prompt*"))
+        (when (buffer-live-p (get-buffer b)) (kill-buffer b))))))
+
 (ert-deftest dsh-bridge-view-waiting-state ()
   "The waiting state shows the `(running...)' placeholder, has no `(k/n)'
 position (it is not a turn), and accepts only content from a turn newer than
@@ -3083,7 +3254,7 @@ refresh returns content again — the epoch is kept and then updated."
 
 (ert-deftest dsh-bridge-view-next-reply-from-rest-steps-to-newer ()
   "M-n at rest refreshes the turn list and steps to a newer turn when one has
-arrived (new turns land at the head)."
+arrived (new turns land at the head); landing on the newest resumes following."
   (let* ((newest-open (dsh-bridge-test--view-turn 40 4000000
                        (list (dsh-bridge-test--view-segment "brand-new" 4001000 1))))
          (new-turns (cons newest-open dsh-bridge-test--view-turns))
@@ -3103,10 +3274,11 @@ arrived (new turns land at the head)."
                  (lambda (_method _path _payload)
                    (cons 200 (list (cons 'sessionId "s1")
                                    (cons 'turns new-turns))))))
-        (dsh-bridge--view-newer-turn-from-rest))
+        (dsh-bridge-view-next-reply))
       (should (equal (buffer-string) (dsh-bridge--view-turn-render newest-open)))
-      ;; The shown turn is the new newest: its index is 0.
-      (should (eq dsh-bridge--view-turn-index 0)))
+      ;; Reaching the new newest resumes following rather than pinning it.
+      (should (eq dsh-bridge--view-follow t))
+      (should (null dsh-bridge--view-turn-index)))
     (kill-buffer "*dsh-bridge-output*")))
 
 (ert-deftest dsh-bridge-view-next-reply-from-rest-at-newest ()
@@ -3129,7 +3301,7 @@ state (\"turn 0\") and announces it."
           (insert (dsh-bridge--view-turn-render newest))
           (setq-local dsh-bridge--view-turn (alist-get 'turn newest)))
         (setq-local dsh-bridge--view-turn-index nil)
-        (dsh-bridge--view-newer-turn-from-rest)
+        (dsh-bridge-view-next-reply)
         (should (equal (buffer-string) (dsh-bridge--view-turn-render newest)))
         (should (eq dsh-bridge--view-follow t))
         (should (null dsh-bridge--view-turn-index))
@@ -3154,10 +3326,64 @@ leaves the buffer and index untouched."
         (let ((inhibit-read-only t)) (erase-buffer) (insert "a pushed message"))
         (setq-local dsh-bridge--view-turn nil)
         (setq-local dsh-bridge--view-turn-index nil)
-        (dsh-bridge--view-newer-turn-from-rest)
+        (dsh-bridge-view-next-reply)
         (should (equal (buffer-string) "a pushed message"))
         (should (null dsh-bridge--view-turn-index))
         (should (string-match-p "no newer turns" msg)))
+      (kill-buffer "*dsh-bridge-output*"))))
+
+(ert-deftest dsh-bridge-view-next-reply-auto-follows-at-newest ()
+  "M-n onto the newest turn resumes following directly: cycling up from the
+second-newest turn needs no extra M-n (the pinned `(1/X)' stop is gone)."
+  (let* ((dsh-bridge--turns-cache
+          (dsh-bridge-test--view-cache dsh-bridge-test--view-turns))
+         (dsh-bridge-view-follow-at-newest t))
+    (cl-letf (((symbol-function 'dsh-bridge--request)
+               (lambda (_m _p _pl)
+                 (cons 200 (list (cons 'sessionId "s1")
+                                 (cons 'turns dsh-bridge-test--view-turns))))))
+      (with-current-buffer (get-buffer-create "*dsh-bridge-output*")
+        (dsh-bridge-view-mode)
+        (setq-local dsh-bridge--view-content-session "s1")
+        (let ((inhibit-read-only t))
+          (erase-buffer)
+          (insert dsh-bridge-test--view-middle-rendered))
+        ;; Mid-cycle at index 1 (the newest-but-one turn): M-n follows.
+        (setq-local dsh-bridge--view-turn 20)
+        (setq-local dsh-bridge--view-turn-index 1)
+        (dsh-bridge-view-next-reply)
+        (should (equal (buffer-string) dsh-bridge-test--view-newest-rendered))
+        (should (eq dsh-bridge--view-follow t))
+        (should (null dsh-bridge--view-turn-index)))
+      (kill-buffer "*dsh-bridge-output*"))))
+
+(ert-deftest dsh-bridge-view-next-reply-follow-at-newest-off-pins ()
+  "With `dsh-bridge-view-follow-at-newest' nil, M-n onto the newest turn pins
+it at `(1/X)' (index 0, not following); a further M-n turns following on."
+  (let* ((dsh-bridge--turns-cache
+          (dsh-bridge-test--view-cache dsh-bridge-test--view-turns))
+         (dsh-bridge-view-follow-at-newest nil))
+    (cl-letf (((symbol-function 'dsh-bridge--request)
+               (lambda (_m _p _pl)
+                 (cons 200 (list (cons 'sessionId "s1")
+                                 (cons 'turns dsh-bridge-test--view-turns))))))
+      (with-current-buffer (get-buffer-create "*dsh-bridge-output*")
+        (dsh-bridge-view-mode)
+        (setq-local dsh-bridge--view-content-session "s1")
+        (let ((inhibit-read-only t))
+          (erase-buffer)
+          (insert dsh-bridge-test--view-middle-rendered))
+        (setq-local dsh-bridge--view-turn 20)
+        (setq-local dsh-bridge--view-turn-index 1)
+        ;; Pinned at the newest: shown at (1/X), not following.
+        (dsh-bridge-view-next-reply)
+        (should (equal (buffer-string) dsh-bridge-test--view-newest-rendered))
+        (should (equal dsh-bridge--view-turn-index 0))
+        (should-not dsh-bridge--view-follow)
+        ;; One more M-n turns following on.
+        (dsh-bridge-view-next-reply)
+        (should (eq dsh-bridge--view-follow t))
+        (should (null dsh-bridge--view-turn-index)))
       (kill-buffer "*dsh-bridge-output*"))))
 
 (ert-deftest dsh-bridge-prompt-history-position ()

@@ -178,9 +178,10 @@ The following commands are available in a DSH-View buffer:
 
 When created, a DSH-View buffer usually follows the latest turn: the
 header line shows `(latest/X)` as the turn counter, and the buffer is
-automatically updated as additional replies come in.  If you are
-walking through the turn history with `M-p`/`M-n`, doing `M-n` on the
-newest turn activates turn-following mode.
+automatically updated as additional replies come in.  Walking back
+through older turns with `M-p` suspends following; cycling back to the
+newest turn with `M-n` resumes it automatically (to customize this
+behavior, change `dsh-bridge-view-follow-at-newest`).
 
 If markdown-mode is installed, and `dsh-bridge-view-gfm` is non-nil,
 the reply is font-locked as GitHub-Flavored Markdown (the dividers use
