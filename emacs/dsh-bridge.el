@@ -793,8 +793,7 @@ headers (\"\" when no header terminator is present)."
 (defvar dsh-bridge--notifications-paused nil
   "Whether the user has explicitly paused the DSH notification listener.
 `dsh-bridge-notifications-stop' latches this so the listener stays off until
-`dsh-bridge-notifications-start' is called again; the bridge itself never
-un-pauses it.")
+`dsh-bridge-notifications-start' is called again.")
 
 (defvar dsh-bridge--notifications-process nil
   "The DSH bridge's live SSE notification process, or nil.")
@@ -803,7 +802,7 @@ un-pauses it.")
   "Reconnect timer for the DSH notification listener, or nil.")
 
 (defvar dsh-bridge--notifications-raw ""
-  "Raw bytes from the DSH notification process.
+  "Raw bytes from the DSH bridge's notification process.
 This variable is managed solely by `dsh-bridge--notifications-connect'
 and `dsh-bridge--notification-filter'.")
 
@@ -811,13 +810,13 @@ and `dsh-bridge--notification-filter'.")
   "Non-nil once the HTTP response headers have been consumed.")
 
 (defvar dsh-bridge--notifications-sse ""
-  "Raw (unibyte) SSE bytes from the notification process, not yet framed.
-The `data:' payloads are decoded to `utf-8' only at the point of
-consumption, in `dsh-bridge--sse-parse'.  This variable is managed solely
-by `dsh-bridge--notifications-connect' and `dsh-bridge--notification-filter'.")
+  "Raw bytes from the DSH bridge's notification process.
+The \"data:\" payloads are decoded to UTF-8 only at the point of
+consumption, in `dsh-bridge--sse-parse'.  This variable is managed by
+`dsh-bridge--notifications-connect' and `dsh-bridge--notification-filter'.")
 
 (defvar dsh-bridge--notifications-receive-pending nil
-  "Non-nil while a receive is already scheduled for a push notification.")
+  "Non-nil while a receive is scheduled for a push notification.")
 
 (defun dsh-bridge--chunked-decode (text)
   "Decode HTTP/1.1 chunked-transfer-encoded TEXT (a unibyte string).
@@ -845,13 +844,12 @@ REST is the raw trailing text of an incomplete chunk."
 	(cons (apply #'concat (nreverse chunks)) rest)))
 
 (defun dsh-bridge--sse-parse (text)
-  "Parse accumulated SSE byte stream TEXT into (EVENTS . REST).
-TEXT is raw bytes (a unibyte string).  In the return value, EVENTS is a
-list of decoded `data:' payloads (alists), and REST is the trailing bytes
-with no complete event terminator.  Framing is done on the raw bytes and
-each `data:' payload is decoded to `utf-8' only at the point of
-consumption, so a multibyte character split across chunk boundaries is
-never decoded prematurely."
+  "Parse the accumulated bytes TEXT into (EVENTS . REST).
+TEXT is a unibyte string containing the accumulated raw bytes from the
+DSH bridge's notification process.
+
+In the return value, EVENTS is a list of \"data:\" payloads (alists),
+decoded from UTF-8, and REST stores the trailing bytes."
   (let ((events nil)
 		(rest text))
 	(while (string-match "\\(?:\r?\n\\)\\{2\\}" rest)
@@ -859,6 +857,9 @@ never decoded prematurely."
 		(setq rest (substring rest (match-end 0)))
 		(dolist (line (split-string chunk "\r?\n"))
 		  (when (string-prefix-p "data:" line)
+			;; Payload is decoded at the point of consumption, so a
+			;; multibyte character split across chunk boundaries is
+			;; never decoded prematurely.
 			(let* ((payload (decode-coding-string
 							 (string-trim (substring line 5)) 'utf-8))
 				   (json (condition-case nil
@@ -872,10 +873,8 @@ never decoded prematurely."
 (defun dsh-bridge--notification-handle-events (events)
   "Dispatch decoded notification EVENTS received over the DSH bridge.
 Currently supported events are:
-- `turn-start': update status tracker, re-render, refresh model and turn
-  caches (the turn refresh keeps the View `(k/n)' counter live during a turn).
-- `turn-complete': same as (i), plus update session cache's `lastActive'
-  slot (see `dsh-bridge--sessions-cache').
+- `turn-start': update status tracker, re-render, refresh DSH-View caches.
+- `turn-complete': same as (i), and update session cache's `lastActive' slot.
 - `replies-changed': refresh the turn cache (a text-bearing assistant message
   was committed mid-turn; the frame's `turn' names the turn that grew).
 - `context': update `dsh-bridge--session-context' and re-render header
@@ -1769,10 +1768,9 @@ by an Emacs command, the value is nil.")
 
 (defvar dsh-bridge--turns-cache nil
   "Alist of cached DSH-View turns, in the form (SESSION-ID EPOCH . TURNS).
-For each entry, SESSION-ID is a session id string, EPOCH is the session's
-history epoch — the surface `replaceGeneration` the list was folded under, as
-served by `GET /dsh-bridge/turns' — and TURNS is a list of turn records,
-newest first.  Each turn record is an alist:
+For each turn, SESSION-ID is a session id string, EPOCH is its history
+epoch, and TURNS is a list of turn records, newest first.  Each turn
+record is an alist:
 
   (turn . NUMBER)
   (startedAt . MS-EPOCH)
@@ -1780,24 +1778,13 @@ newest first.  Each turn record is an alist:
   (reason . KIND-STRING)	; absent while the turn is open
   (segments . ((text . STRING) (time . MS-EPOCH) (step . NUMBER)) ...)
 
-TURNS holds the session's text-bearing turns (oldest segment first within
-each), newest first — the same fold the old reply list projected, grouped by
-harness turn number, so a turn with several short mid-turn replies between
-tool calls reads as one unit.  Turn numbers are non-contiguous, so TURNS is
-never indexed by arithmetic on them.
-
-An entry whose TURNS is empty is a *known-empty* snapshot (a session folded
-to no turns, e.g. after a full compaction): the session is cached at EPOCH
-with no turns, distinct from having no entry at all.  Access the parts via
-`dsh-bridge--turns-cache-entry' (the (EPOCH . TURNS) value or nil),
-`dsh-bridge--turns-cache-turns', and `dsh-bridge--turns-cache-epoch';
-`dsh-bridge--turns-cache-store' is the single writer for both halves.")
+An entry may have TURNS nil, which refers to a session folded to no
+turns, e.g. after a compaction.")
 
 (defvar-local dsh-bridge--view-turn nil
   "Turn number of the turn the DSH-View buffer shows, or nil.
-A nil value means the view holds content with no turn identity: a pushed
-\"Send to Emacs\" message whose text was not filled from a cached turn
-record, or an empty buffer.")
+A nil value corresponds to content with no turn identity, e.g., a
+message pushed from DSH.")
 
 (defvar-local dsh-bridge--view-turn-index nil
   "Index into the buffer's newest-first cached turn list, or nil.
@@ -2785,23 +2772,26 @@ model text that happens to read \"(continuing...)\" is never stripped."
 
 (defun dsh-bridge--view-fill (session-id turn received-at &optional cwd no-turns-refresh preserve-point)
   "Fill the current buffer with TURN as the shown content of SESSION-ID.
-TURN is a turn record (alist), a raw text string (a pushed message with no
-turn identity), or nil (empty content).  The current buffer is put into
-`dsh-bridge-view-mode' if it is not already (the caller picks and, if
-needed, creates the buffer).
-RECEIVED-AT is the ms-epoch send time for a pushed message, or nil for
-a fetch.  Does not select the window (the caller decides whether to
-pop); a record fill refreshes the session's turn list so the `(k/n)'
-position count is current, then sets the header only after the content
-is in place — unless NO-TURNS-REFRESH is non-nil, for callers that have
-refreshed the shared cache once already (see
-`dsh-bridge--turns-cache-fetch').  A raw string fill (a pushed message
-with no turn identity) never refreshes: it has no position to display.
-With PRESERVE-POINT, point survives when the new content merely extends
-the old (the mid-turn append case, where the old terminal
-`(continuing...)' marker gives way to the next segment's leading `---');
-otherwise point goes to the top.  Turn-following state is preserved when
-refilling the same session and dropped when the shown session changes."
+The current buffer, which the caller is responsible for selecting and/or
+creating, is put into `dsh-bridge-view-mode' if it is not already.  This
+function does not perform any window-management.
+
+TURN is either a turn record (see `dsh-bridge--turns-cache'), a raw text
+string (a pushed message with no turn identity), or nil (empty content).
+
+RECEIVED-AT is the ms-epoch send time for a pushed message, or nil.
+
+CWD is the session's current working directory.
+
+NO-TURNS-REFRESH, if non-nil, means not to refresh the session's turn
+list (if omitted or default, a record fill refreshes this so the `(k/n)'
+position count remains up-to-date).
+
+If PRESERVE-POINT, point survives when the new content merely extends
+the old.
+
+The DSH-View buffer's turn-following state is preserved when refilling
+the same session, and dropped when the shown session changes."
   (unless (eq major-mode 'dsh-bridge-view-mode)
     (dsh-bridge-view-mode))
   (add-hook 'kill-buffer-hook #'dsh-bridge--view-ticker-ensure-later nil t)
