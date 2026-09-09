@@ -1742,13 +1742,9 @@ success branch of the send, after the history is recorded."
 				;; fails to start is corrected by its `turn-complete'/error.
 				(dsh-bridge--status-set sent-id 'running)
 				(dsh-bridge--status-event-render sent-id)
-				(message "dsh-bridge: prompt sent%s"
-						 (if sent-id
-							 (format " to \"%s\" — thinking…"
-									 (dsh-bridge--session-label sent-id))
-						   ""))
+				(message "dsh-bridge: prompt sent")
 				(when (null target)
-				  ;; The host resolved last-active itself: record it for display.
+				  ;; The host resolved last-active itself: record it.
 				  (dsh-bridge--record-last-resolved alist))
 				(dsh-bridge--prompt-history-record-send sent-id text)
 				(when (functionp on-success)
@@ -2704,9 +2700,9 @@ stays in the prompt history; the next composition erases it, asking
 first only if it was edited further).
 
 If SENT-SESSION-ID is non-nil, pop to a DSH-View buffer showing that
-session in turn-following state.  WINDOW is the window the send was
-invoked from, if still showing the prompt buffer; it is quit when the
-view is already on screen, so the prompt does not linger next to it."
+session in turn-following state.  WINDOW, if non-nil, is the window the
+send was invoked from; if still showing the prompt buffer, it is called
+with `quit-window' to dismiss the prompt."
   (when (eq major-mode 'dsh-bridge-prompt-mode)
 	(set-buffer-modified-p nil)
 	(if (null sent-session-id)
@@ -2716,12 +2712,10 @@ view is already on screen, so the prompt does not linger next to it."
 									(eq (window-buffer window) (current-buffer))
 									window)
 							   (get-buffer-window (current-buffer)))))
-		;; If the view buffer is already being shown, quit the prompt
-		;; window (deleting it); otherwise, bury the buffer.  This
-		;; avoids a situation where the view buffer appears twice.
-		(if (and (get-buffer-window buf) prompt-window)
-			(quit-window nil prompt-window)
-		  (bury-buffer (current-buffer)))
+		;; We want to dismiss the prompt buffer/window and show the
+		;; view buffer, WITHOUT showing the view buffer in two
+		;; separate windows or keeping the prompt buffer on-screen.
+		(when prompt-window (quit-window nil prompt-window))
 		(pop-to-buffer buf)))))
 
 ;;;###autoload
