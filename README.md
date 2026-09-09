@@ -152,8 +152,7 @@ The following commands are available from the DSH-Sessions buffer:
 * `d` — archive the session at point.
 * `+` — create a new session, optionally in a new workspace.
 * `W` — rename the workspace of the session at point.
-* `D` — show the session's read-only report (see
-  [Session report buffer](#session-report-buffer)).
+* `D` — describe the session.
 * `g` — refresh the DSH-Sessions buffer.
 
 For a full list, see the menu bar.  Other `tabulated-list-mode` keys
@@ -182,12 +181,11 @@ The following commands are available in a DSH-View buffer:
 * `l` — open the DSH-Sessions buffer.
 * `q` — quit the window and bury the buffer.
 
-When created, a DSH-View buffer usually follows the latest turn: the
-header line shows `(latest/X)` as the turn counter, and the buffer is
-automatically updated as additional replies come in.  Walking back
-through older turns with `M-p` suspends following; cycling back to the
-newest turn with `M-n` resumes it automatically (to customize this
-behavior, change `dsh-bridge-view-follow-at-newest`).
+When created, a DSH-View buffer usually follows the latest turn, so
+that the buffer is automatically updated as more replies arrive.
+Walking back through older turns with `M-p` suspends following;
+cycling back to the newest turn with `M-n` resumes it automatically.
+To customize this behavior, change `dsh-bridge-view-follow-at-newest`.
 
 If markdown-mode is installed, and `dsh-bridge-view-gfm` is non-nil,
 the reply is font-locked as GitHub-Flavored Markdown (the dividers use
@@ -202,70 +200,36 @@ determined by how this buffer was invoked; for instance, `r` from a
 DSH-View buffer opens a prompt for the same session.  If a renamed
 DSH-Prompt buffer is already bound to that session, it is reused.
 
-Opening a prompt starts a fresh composition: text kept from a previous
-send is erased silently, while an unsent or further-edited draft is
-erased only after a `y-or-n-p` confirmation (answering "no" keeps the
-text).  Use `C-c C-s` to rebind the buffer to another session.
-
 The following commands are available from the DSH-Prompt buffer:
 
-* `C-c C-c` — send the whole buffer as a prompt (an active region is
-  ignored, as in Message mode).  On success, bury the buffer (keeping
-  its text) and pop to the DSH-View for that session in turn-following
-  state.  The sent text stays in the prompt history, so `M-p`
-  retrieves it.
-* `C-c C-d` — push it to the DSH composer as a draft instead.  The
-  buffer's text is left in place.
+* `C-c C-c` — send the buffer as a prompt.  On success, bury the
+  buffer and pop to the DSH-View for that session.
+* `C-c C-d` — push the buffer to the DSH composer as a draft.
 * `C-c C-m` — set the model and reasoning effort.
-* `C-c C-s` — rebind this buffer to a chosen session (or follow the
-  default target).
+* `C-c C-s` — rebind the buffer to another session.
 * `C-c C-k` — erase the buffer.
 * `C-c C-f` — open the DSH-View buffer for this session.
 * `C-c C-l` — open the DSH-Sessions buffer.
-* `M-p` / `M-n` — walk the session's prompt history.  An edited history
-  entry must be sent or reverted (`M-x revert-buffer`) before walking
-  on; reverting a pristine entry returns to the draft.
+* `M-p`/`M-n` — walk the session's prompt history.
+
+While walking the prompt history with `M-p`/`M-n`, you may edit
+earlier prompts.  This blocks further history navigation; to resume,
+you must send the prompt first, or revert with `M-x revert-buffer`.
 
 When `markdown-mode` is installed, this buffer derives from it, so
 most markdown editing commands are also available.
 
-### Session report buffer
+### Answering ask-user questions
 
-`M-x dsh-bridge-describe-session` (or `D` from the DSH-Sessions and
-DSH-View buffers, or `D` from the transient menu) opens a read-only
-report for a session: its identity and lineage (id, state, directory,
-workspace, preset, model, permissions, fork parent), whole-log
-statistics (turns, steps, LLM and tool time, first-token latency,
-decode throughput), token usage with cache-hit percentage, and context
-occupancy.  A cold (persisted-only) session is read from its log and is
-**not** resumed.
+When the model requests additional user inputs via the
+`ask_user_question` tool, the query is surfaced in the DSH-View
+buffer.  Typing `a` here (or in the DSH-Sessions buffer with point on
+the session) opens a buffer for handling the query.
 
-The buffer is an Emacs Help mode buffer, so the standard help keys
-apply:
-
-* `q` — quit the window.
-* `g` — re-fetch the report.
-* `l` / `r` — go back / forward through the describe history.  These
-  are Help mode's keys here, not the bridge's list-sessions/reply.
-* `n` / `p` — move to the next / previous section.
-* `TAB` / `S-TAB` — move between buttons; `RET` or `mouse-2` follows
-  the button at point.
-* `?` — describe the mode.
-
-Bridge commands in the report buffer: `w` copies the session id, `f`
-opens the DSH-View for the session's latest turn, and `o` opens the
-DSH-Prompt buffer.  The report also has buttons for the session id
-(copy), the directory (Dired), the model (open the prompt buffer, where
-`C-c C-m` changes it), and the parent session (describe it, which
-pushes onto the `l`/`r` history).  The report refreshes automatically
-when the session's turn completes if the buffer is visible; set
-`dsh-bridge-describe-auto-refresh` to nil to make it a snapshot.
-
-The session label in the DSH-View and DSH-Prompt header lines is also
-clickable: `mouse-1` on it opens the same report.
-
-Bookmarks on the report buffer are not supported: `help-mode`'s
-bookmark support hardcodes popping to `*Help*`.
+In this buffer, mark the option(s) you choose with `RET` or the
+option's number key, or type a custom answer.  To submit the answers,
+type `C-c C-c`; alternatively, type `C-c C-k` to decline the query,
+canceling the tool call.
 
 ### Sending text from DSH to Emacs
 
@@ -273,28 +237,6 @@ The DSH plugin adds a "Send to Emacs" button that lets you push
 specific assistant messages to Emacs.  This automatically pops to the
 DSH-View buffer in Emacs.  You can use `i` in the DSH-View buffer (or
 run `M-x dsh-bridge-receive`) to pull the last message pushed.
-
-### Answering ask-user questions
-
-When the model pauses to ask you something (`ask_user_question`), the
-bridge surfaces it in Emacs.  In a DSH-View buffer following the
-session, an `Awaiting your response` message will appear.  Typing `a`
-here (or in the DSH-Sessions buffer with point on this session) opens
-a buffer where you can answer the query.
-
-If the web UI is open too, its own Q&A panel appears as well: the two
-interfaces coexist and race, and whichever you answer first wins.  If
-you answer in Emacs first, the web panel closes; if you answer in the
-web UI first, the Emacs question buffer is bannered as answered
-elsewhere.
-
-In the `*dsh-bridge-question: <Label>*` buffer, mark the option(s) you
-choose with `RET` or the option's number key (radio behavior for
-single-select questions, checkbox for multi-select); each question
-also has a `c` row for typing a custom answer.  Type `C-c C-c` to
-submit — the buffer is buried once the answer is sent — and `C-c C-k`
-to decline (which cancels the tool call).  The buffer itself repeats
-these keys at the top.
 
 ## Development testing
 
