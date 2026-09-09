@@ -1169,19 +1169,22 @@ when the body is not a JSON object."
 		  (cons status alist))))))
 
 (defun dsh-bridge--fetch-sessions ()
-  "Return a list of DSH session data, or nil on error.
-Also seed the status tracker using each session's `running' flag, and
-cache the overall result in `dsh-bridge--sessions-cache'.
-See `dsh-bridge--sessions-cache' for the session data format."
+  "Fetch the DSH session roster and return (STATUS . SESSIONS).
+STATUS is the HTTP status, or nil on a transport failure.  SESSIONS is
+the decoded session data, in the format of `dsh-bridge--sessions-cache'.
+Also, update `dsh-bridge--sessions-cache' with the results.
+
+SESSIONS may be nil if the roster is empty, or when the response has no
+`sessions' key; callers can distinguish between the two cases by
+checking STATUS for a failed request."
   (let* ((result (dsh-bridge--request "GET" "/sessions" nil))
-		 (alist (cdr result))
-		 (bridge-sessions-data (assoc 'sessions alist))
-		 (sessions (cdr bridge-sessions-data)))
-	(when sessions
+		 (status (car result))
+		 (sessions (and (eq status 200)
+						(cdr (assoc 'sessions (cdr result))))))
+	(when (eq status 200)
 	  (setq dsh-bridge--sessions-cache sessions)
-	  ;; Seed the session status tracker.  Every listed session's
-	  ;; `running' flag becomes its live status; any session that is
-	  ;; no longer listed is dropped."
+	  ;; Update session status trackers.  Each session's `running'
+	  ;; flag becomes its live status; unlisted sessions are dropped."
 	  (let ((seen '()) id)
 		(dolist (session sessions)
 		  (when (setq id (alist-get 'id session))
@@ -1192,7 +1195,7 @@ See `dsh-bridge--sessions-cache' for the session data format."
 		(setq dsh-bridge--session-status
 			  (seq-filter (lambda (entry) (member (car entry) seen))
 						  dsh-bridge--session-status))))
-	sessions))
+	(cons status sessions)))
 
 ;;; Session labels
 
@@ -1418,7 +1421,7 @@ when non-nil, is an extra choice (e.g. \"(last-active)\" or \"(default)\") that
 returns nil.  When several sessions share a title, a second completing-read
 resolves the collision.	 With no sessions and no PSEUDO-ENTRY, signals an
 error."
-  (let* ((sessions (dsh-bridge--fetch-sessions))
+  (let* ((sessions (cdr (dsh-bridge--fetch-sessions)))
 		 (choices (mapcar (lambda (s) ; return (LABEL . SESSION-DATA)
 							(cons (dsh-bridge--session-label s t) s))
 						  sessions))
@@ -4234,17 +4237,18 @@ The row's workspace id comes from the cached session; prompts for the new title
 		(pop-to-buffer buffer)))))
 
 (defun dsh-bridge--list-sessions-in-buffer ()
-  "Fill `*dsh-bridge-sessions*' with the current session list.
-Returns non-nil when sessions were listed."
-  (let ((sessions (dsh-bridge--fetch-sessions)))
-	(if (null sessions)
-		nil
-	  (let ((visible (seq-filter #'dsh-bridge--session-visible-p sessions)))
+  "Fill `*dsh-bridge-sessions*' with the current session roster.
+Return non-nil if the roster was fetched.  If the fetch fails, leave the
+DSH-Sessions buffer untouched and return nil."
+  (let ((fetch (dsh-bridge--fetch-sessions)))
+	(when (eq (car fetch) 200)
+	  (let ((visible (seq-filter #'dsh-bridge--session-visible-p
+								 (cdr fetch))))
 		(with-current-buffer (get-buffer-create "*dsh-bridge-sessions*")
 		  (unless (eq major-mode 'dsh-bridge-sessions-mode)
 			(dsh-bridge-sessions-mode))
-		  ;; Override tabulated-list's re-print-only revert: `g' must re-fetch
-		  ;; the session list from the host.
+		  ;; Override tabulated-list's re-print-only revert: `g' must
+		  ;; re-fetch the session list from the host.
 		  (setq-local revert-buffer-function
 					  (lambda (&rest _) (dsh-bridge--list-sessions-in-buffer)))
 		  (setq tabulated-list-format (dsh-bridge--sessions-format))
@@ -4254,8 +4258,8 @@ Returns non-nil when sessions were listed."
 		  (tabulated-list-init-header)
 		  ;; REMEMBER-POS: entry ids are session ids, so an auto-refresh or
 		  ;; post-mutation reprint keeps point on the same session's row.
-		  (tabulated-list-print t)))
-	  t)))
+		  (tabulated-list-print t))
+		t))))
 
 (defun dsh-bridge--refresh-sessions-buffer ()
   "Re-render `*dsh-bridge-sessions*' in place if it is live."
@@ -4455,7 +4459,7 @@ default target, `…' = running."
   (interactive)
   (if (dsh-bridge--list-sessions-in-buffer)
 	  (pop-to-buffer "*dsh-bridge-sessions*")
-	(message "dsh-bridge: no sessions (or request failed)")))
+	(message "dsh-bridge: failed to fetch sessions")))
 
 ;;; The dispatcher
 

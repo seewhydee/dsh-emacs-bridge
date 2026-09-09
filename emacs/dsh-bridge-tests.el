@@ -142,8 +142,9 @@ round-trip."
         (dsh-bridge-default-session nil))
     (cl-letf (((symbol-function 'dsh-bridge--fetch-sessions)
                (lambda ()
-                 '(((id . "live-1") (live . t) (cwd . "/a"))
-                   ((id . "saved-1") (live . nil) (cwd . "/b")))))
+                 (cons 200
+                       '(((id . "live-1") (live . t) (cwd . "/a"))
+                         ((id . "saved-1") (live . nil) (cwd . "/b"))))))
               ((symbol-function 'completing-read)
                (lambda (_prompt table &rest _rest)
                  (setq table-seen table)
@@ -418,7 +419,7 @@ call only, leaving the default target untouched."
       (goto-char (point-min))
       (set-mark (point-max))
       (cl-letf (((symbol-function 'dsh-bridge--fetch-sessions)
-                 (lambda () '(((id . "live-1") (live . t)))))
+                 (lambda () (cons 200 '(((id . "live-1") (live . t))))))
                 ((symbol-function 'completing-read)
                  (lambda (_prompt _table &rest _) "live-1"))
                 ((symbol-function 'dsh-bridge--call)
@@ -1385,7 +1386,7 @@ attempt."
                           ((id . "saved-1") (live . nil) (title . "A saved one") (cwd . "/b")
                            (createdAt . 1690000000000)))))
                    (setq dsh-bridge--sessions-cache sessions)
-                   sessions)))
+                   (cons 200 sessions))))
               ((symbol-function 'pop-to-buffer) (lambda (&rest _) nil)))
       (dsh-bridge-list-sessions))
     (let ((buf (get-buffer "*dsh-bridge-sessions*")))
@@ -1438,7 +1439,7 @@ Emoji glyphs are double-width; in a one-column cell
                         '(((id . "live-1") (live . t) (running . nil) (title . "First live")
                            (lastActive . 1700000000000) (workspace . "WS A")))))
                    (setq dsh-bridge--sessions-cache sessions)
-                   sessions)))
+                   (cons 200 sessions))))
               ((symbol-function 'pop-to-buffer) (lambda (&rest _) nil)))
       (dsh-bridge-list-sessions))
     (let ((buf (get-buffer "*dsh-bridge-sessions*")))
@@ -1473,7 +1474,7 @@ The cell is `dsh-bridge--session-label' with the fallback-face argument."
   (let ((dsh-bridge-default-session nil)
         (dsh-bridge-show-session-ids t))
     (cl-letf (((symbol-function 'dsh-bridge--fetch-sessions)
-               (lambda () '(((id . "live-1") (live . t) (cwd . "/a")))))
+               (lambda () (cons 200 '(((id . "live-1") (live . t) (cwd . "/a"))))))
               ((symbol-function 'pop-to-buffer) (lambda (&rest _) nil)))
       (dsh-bridge-list-sessions))
     (let ((buf (get-buffer "*dsh-bridge-sessions*")))
@@ -1489,9 +1490,10 @@ The cell is `dsh-bridge--session-label' with the fallback-face argument."
   (let ((dsh-bridge-default-session nil))
     (cl-letf (((symbol-function 'dsh-bridge--fetch-sessions)
                (lambda ()
-                 '(((id . "live-1") (live . t) (cwd . "/a"))
-                   ((id . "saved-1") (live . nil) (cwd . "/b"))
-                   ((id . "arch-1") (live . nil) (archived . t) (cwd . "/c")))))
+                 (cons 200
+                       '(((id . "live-1") (live . t) (cwd . "/a"))
+                         ((id . "saved-1") (live . nil) (cwd . "/b"))
+                         ((id . "arch-1") (live . nil) (archived . t) (cwd . "/c"))))))
               ((symbol-function 'pop-to-buffer) (lambda (&rest _) nil)))
       (dsh-bridge-list-sessions)
       (let ((buf (get-buffer "*dsh-bridge-sessions*")))
@@ -1696,11 +1698,11 @@ a filled circle for an idle live session, a filled square for a running one,
   "`g' in the sessions buffer re-fetches the list from the host."
   (let ((dsh-bridge-default-session nil))
     (cl-letf (((symbol-function 'dsh-bridge--fetch-sessions)
-               (lambda () '(((id . "live-1") (live . t) (cwd . "/a")))))
+               (lambda () (cons 200 '(((id . "live-1") (live . t) (cwd . "/a"))))))
               ((symbol-function 'pop-to-buffer) (lambda (&rest _) nil)))
       (dsh-bridge-list-sessions))
     (cl-letf (((symbol-function 'dsh-bridge--fetch-sessions)
-               (lambda () '(((id . "live-2") (live . t) (cwd . "/b")))))
+               (lambda () (cons 200 '(((id . "live-2") (live . t) (cwd . "/b"))))))
               ((symbol-function 'pop-to-buffer) (lambda (&rest _) nil)))
       (with-current-buffer (get-buffer "*dsh-bridge-sessions*")
         (revert-buffer t t)))
@@ -1708,6 +1710,87 @@ a filled circle for an idle live session, a filled square for a running one,
                                        (get-buffer "*dsh-bridge-sessions*"))))
       (should (assoc "live-2" entries))
       (should-not (assoc "live-1" entries)))))
+
+(ert-deftest dsh-bridge-fetch-sessions-empty-roster-is-success ()
+  "A 200 `{sessions: []}' decodes to an empty roster that still counts as
+success: the fetch returns (200 . nil), clears the stale sessions cache, and
+empties the status tracker (a wiped roster must not linger)."
+  (let ((dsh-bridge--sessions-cache '(((id . "old") (live . t))))
+        (dsh-bridge--session-status '(("old" . idle))))
+    (cl-letf (((symbol-function 'dsh-bridge--request)
+               (lambda (&rest _) (cons 200 (list (cons 'sessions nil))))))
+      (let ((fetch (dsh-bridge--fetch-sessions)))
+        (should (eq (car fetch) 200))
+        (should (null (cdr fetch)))))
+    (should (null dsh-bridge--sessions-cache))
+    (should (null dsh-bridge--session-status))))
+
+(ert-deftest dsh-bridge-fetch-sessions-seeds-cache-and-status ()
+  "A 200 with sessions returns them and reseeds the cache and status tracker."
+  (let ((dsh-bridge--sessions-cache nil)
+        (dsh-bridge--session-status nil))
+    (cl-letf (((symbol-function 'dsh-bridge--request)
+               (lambda (&rest _)
+                 (cons 200
+                       (list (cons 'sessions
+                                   (list (list (cons 'id "s1") (cons 'live t)
+                                               (cons 'running t))
+                                         (list (cons 'id "s2") (cons 'live t)))))))))
+      (let ((fetch (dsh-bridge--fetch-sessions)))
+        (should (eq (car fetch) 200))
+        (should (= (length (cdr fetch)) 2))))
+    (should (equal (mapcar (lambda (s) (alist-get 'id s))
+                           dsh-bridge--sessions-cache)
+                   '("s1" "s2")))
+    (should (eq (dsh-bridge--status-state "s1") 'running))
+    (should (eq (dsh-bridge--status-state "s2") 'idle))))
+
+(ert-deftest dsh-bridge-fetch-sessions-failure-keeps-cache ()
+  "A failed fetch (HTTP error or transport failure) is reported and leaves
+the cached roster and tracker untouched."
+  (dolist (case (list (cons 500 (list (cons 'error "boom")))
+                      (cons nil nil)))
+    (let ((dsh-bridge--sessions-cache '(((id . "old") (live . t)))))
+      (cl-letf (((symbol-function 'dsh-bridge--request)
+                 (lambda (&rest _) case)))
+        (let ((fetch (dsh-bridge--fetch-sessions)))
+          (should (eq (car fetch) (car case)))
+          (should (null (cdr fetch)))))
+      (should (equal dsh-bridge--sessions-cache
+                     '(((id . "old") (live . t))))))))
+
+(ert-deftest dsh-bridge-list-sessions-empty-roster-opens-list ()
+  "An empty roster still opens the session list: an empty tabulated buffer,
+so the list's actions (`+' create, `g' re-fetch, `v' archived visibility)
+stay available instead of a bare error message."
+  (when (get-buffer "*dsh-bridge-sessions*")
+    (kill-buffer "*dsh-bridge-sessions*"))
+  (let ((dsh-bridge-default-session nil))
+    (cl-letf (((symbol-function 'dsh-bridge--fetch-sessions)
+               (lambda () (cons 200 nil)))
+              ((symbol-function 'pop-to-buffer) (lambda (&rest _) nil)))
+      (dsh-bridge-list-sessions))
+    (let ((buf (get-buffer "*dsh-bridge-sessions*")))
+      (should buf)
+      (should (eq (buffer-local-value 'major-mode buf)
+                  'dsh-bridge-sessions-mode))
+      (should (null (buffer-local-value 'tabulated-list-entries buf)))
+      ;; The column header is still in place, so the layout renders.
+      (should (buffer-local-value 'tabulated-list-format buf)))))
+
+(ert-deftest dsh-bridge-list-sessions-failed-fetch-no-buffer ()
+  "A failed roster fetch reports an error and opens no sessions buffer."
+  (when (get-buffer "*dsh-bridge-sessions*")
+    (kill-buffer "*dsh-bridge-sessions*"))
+  (let ((msg nil)
+        (dsh-bridge-default-session nil))
+    (cl-letf (((symbol-function 'dsh-bridge--fetch-sessions)
+               (lambda () (cons nil nil)))
+              ((symbol-function 'message)
+               (lambda (&rest args) (setq msg (apply #'format args)))))
+      (dsh-bridge-list-sessions))
+    (should (string-match-p "failed to fetch sessions" msg))
+    (should-not (get-buffer "*dsh-bridge-sessions*"))))
 
 ;;; Plugin management: probe, diagnosis, install/uninstall
 
