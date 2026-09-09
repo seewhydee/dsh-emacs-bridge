@@ -1717,8 +1717,42 @@ session as default target."
     (let ((create (cadr (assoc "/sessions/create"
                                (mapcar (lambda (c) (list (cadr c) c)) called)))))
       (should create)
-      (should (equal (cdr (assoc 'path (caddr create))) default-directory)))
+      ;; The answer arrives in `read-directory-name' form (here an abbreviated
+      ;; `~' path), so it must be expanded before it reaches the host.
+      (should (equal (cdr (assoc 'path (caddr create)))
+                     (expand-file-name default-directory))))
     (should (equal bound-target "s-new"))))
+
+(ert-deftest dsh-bridge-create-session-expands-new-workspace-path ()
+  "A `~'-relative new-workspace answer is expanded before it is POSTed.
+The host's workspace registry rejects a path that is not fully qualified."
+  (let ((called nil))
+    (cl-letf (((symbol-function 'completing-read)
+               (lambda (&rest _) "New workspace…"))
+              ((symbol-function 'read-directory-name)
+               (lambda (&rest _) "~/dsh-bridge-test-dir/"))
+              ;; Accept only the expanded form, so an unexpanded `~' answer
+              ;; would fail the existing-directory check and never POST.
+              ((symbol-function 'file-directory-p)
+               (lambda (dir) (equal dir (expand-file-name "~/dsh-bridge-test-dir/"))))
+              ((symbol-function 'read-string)
+               (lambda (&rest _) ""))
+              ((symbol-function 'dsh-bridge--request)
+               (lambda (method path payload)
+                 (push (list method path payload) called)
+                 (if (equal path "/workspaces")
+                     (cons 200 (list (cons 'workspaces nil)))
+                   (cons 201 (list (cons 'sessionId "s-new"))))))
+              ((symbol-function 'dsh-bridge--fetch-sessions) (lambda () nil))
+              ((symbol-function 'dsh-bridge--refresh-sessions-buffer) (lambda () nil))
+              ((symbol-function 'dsh-bridge-set-default-target)
+               (lambda (id) nil)))
+      (dsh-bridge-create-session))
+    (let ((create (cadr (assoc "/sessions/create"
+                               (mapcar (lambda (c) (list (cadr c) c)) called)))))
+      (should create)
+      (should (equal (cdr (assoc 'path (caddr create)))
+                     (expand-file-name "~/dsh-bridge-test-dir/"))))))
 
 (ert-deftest dsh-bridge-create-session-rejects-non-directory ()
   "A \"New workspace…\" path that is not a directory is a user error, no POST."

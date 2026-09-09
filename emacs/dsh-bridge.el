@@ -4123,7 +4123,9 @@ cold sessions alike."
   "Create a new DSH session, optionally in a new workspace.
 Completing-read over the host's workspaces plus a \"New workspace…\" entry; a
 new workspace prompts for an existing directory (and an optional title).  The
-new session is bound as the default target."
+prompted directory is expanded to a fully-qualified path before it is sent, so
+a `~'-relative or relative answer is accepted.  The new session is bound as the
+default target."
   (interactive)
   (let* ((wresult (dsh-bridge--request "GET" "/workspaces" nil))
 		 (wstatus (car wresult))
@@ -4148,7 +4150,8 @@ new session is bound as the default target."
 																 choice))
 													  workspaces)))
 								 (and match (alist-get 'id match)))))
-			 (new-path (and is-new (read-directory-name "New workspace directory: "))))
+			 (new-path (and is-new (expand-file-name
+									(read-directory-name "New workspace directory: ")))))
 		(if (and is-new (not (file-directory-p new-path)))
 			(user-error "dsh-bridge: %s is not an existing directory" new-path)
 		  (let* ((workspaceTitle (and is-new

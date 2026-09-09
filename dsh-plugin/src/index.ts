@@ -667,11 +667,16 @@ export function apply(ctx: Context): void {
    * selection-install-then-preset-mount, matching the gateway's
    * `composeAgent` ordering. For a resumed cold session the preset is resolved
    * from its log; for a created session it is the deployment default.
+   *
+   * The setup callback follows the harness `AgentSetup` contract exactly:
+   * `(agentCtx, agent)`. Read the agent from the second argument — the scoped
+   * context does not expose an `agent` service, so `agentCtx.agent` throws
+   * "cannot get property \"agent\" without inject".
    */
   async function composeBridgeAgent(presetId: string | undefined): Promise<{
     agentOptions: AgentOptions
     agentPreset?: string
-    setup: (agentCtx: Context) => Promise<void>
+    setup: (agentCtx: Context, agent: Agent) => Promise<void>
   }> {
     const selection = (ctx.get('agentDefaultModel') as AgentDefaultModelService | undefined)?.currentSelection()
     if (selection === undefined) {
@@ -682,10 +687,8 @@ export function apply(ctx: Context): void {
     if (presets === undefined) {
       return {
         agentOptions,
-        setup: (agentCtx: Context) => {
-          const agent = agentCtx.agent
-          if (agent === undefined) throw new Error('dsh-bridge: agent setup has no scoped agent')
-          installModelSelection(agentCtx, bridgeSelectionRef(agent, selection))
+        setup: (agentCtx: Context, agent: Agent) => {
+          installModelSelection(agent.ctx, bridgeSelectionRef(agent, selection))
           return Promise.resolve()
         },
       }
@@ -694,10 +697,8 @@ export function apply(ctx: Context): void {
     return {
       agentOptions,
       agentPreset: resolvedId,
-      setup: async (agentCtx: Context) => {
-        const agent = agentCtx.agent
-        if (agent === undefined) throw new Error('dsh-bridge: agent setup has no scoped agent')
-        installModelSelection(agentCtx, bridgeSelectionRef(agent, selection))
+      setup: async (agentCtx: Context, agent: Agent) => {
+        installModelSelection(agent.ctx, bridgeSelectionRef(agent, selection))
         await presets.mount(agentCtx, resolvedId)
       },
     }
