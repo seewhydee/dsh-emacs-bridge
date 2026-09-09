@@ -274,15 +274,14 @@ formatted as an alist with these keys:
 - `archived' (boolean)")
 
 (defvar-local dsh-bridge--sessions-archived-p nil
-  "Whether `*dsh-bridge-sessions*' shows archived sessions.
-Initialized from `dsh-bridge-sessions-show-archived' when the buffer is
-created and toggled by `v'.")
+  "Whether the DSH-Sessions buffer shows archived sessions.
+This is initialized by the option `dsh-bridge-sessions-show-archived',
+and toggled by `\\[dsh-bridge-toggle-archived-sessions]'.")
 
 (defvar dsh-bridge--session-status nil
   "Alist of (SESSION-ID . running|idle) live session status, or nil.
-This variable is seeded from the sessions list managed by the DSH
-plugin, and then updated based on turn-start/turn-complete frames in the
-notification stream.")
+This variable is seeded from the host's sessions list, and updated based
+on turn-start/turn-complete frames in the notification stream.")
 
 (defvar dsh-bridge--session-models nil
   "Alist of (SESSION-ID . MODEL-DATA) for the DSH model catalog.
