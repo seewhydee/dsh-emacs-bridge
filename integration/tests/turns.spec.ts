@@ -134,7 +134,15 @@ describe('degraded profile (optional service removed)', () => {
   it('still boots and serves status with a disable-fenced variant', async () => {
     // Boot a fixture with the session-title service disabled to prove the
     // bridge degrades gracefully (per AGENTS.md) rather than failing to load.
-    const fixture = await launch({ timeoutMs: 120000, disable: ['session-title'] })
+    // Disable the first-prompt title row too: it hard-injects `sessionTitle`
+    // (`inject = ['sessionTitle', ...]`), so disabling the provider alone
+    // strands it pending and the harness fails the boot audit before the bridge
+    // ever mounts. The bridge reads the same service with `ctx.get`, so its
+    // activation is exactly what this variant proves.
+    const fixture = await launch({
+      timeoutMs: 120000,
+      disable: ['session-title', 'session-title-llm'],
+    })
     try {
       const status = await get(fixture, '/dsh-bridge/status')
       expect(status.body.name).toBe('dsh-emacs-bridge')

@@ -18,11 +18,17 @@ nothing boots the **real plugin against a real host**. This framework does:
 - drives the plugin over real HTTP/SSE and asserts the frames and routes;
 - covers the ask-user seam end-to-end (the model calls `ask_user_question`
   mid-turn; the bridge's `user-questions/request` waterfall answerer must
-  surface an `ask-user` SSE frame and settle the turn from `/answer`) and
-  grows via the coverage checklist in `../integration-testing-plan.md`.
+  surface an `ask-user` SSE frame and settle the turn from `/answer`);
+- covers session creation and workspace management — create by path and by
+  workspace id, resolve-on-repeat-path, workspace-rename bounds, session
+  rename/archive — in `tests/sessions.spec.ts`.
 
 The mock, the launcher, and the vitest suites are the automated layer; the
 `.el` files are the batch ERT layer and the interactive UX runner.
+
+`make integration-test` is the pre-commit gate for host-plane (`dsh-plugin/src`)
+changes and the version-bump gate for the harness seams AGENTS.md lists. It is
+deliberately **not** part of `make test`, which stays unit-only and fast.
 
 ## Prerequisites
 
@@ -63,6 +69,15 @@ integration/
   dsh-bridge-it.el        batch ERT end-to-end layer
   dsh-bridge-scenario.el  interactive UX runner (emacs -Q -l ...)
 ```
+
+## Coverage
+
+| Spec | Covers |
+|---|---|
+| `tests/turns.spec.ts` | turn fold into `/turns`, auxiliary title/compaction calls, model catalog + selection parity, outbox round trip, 404/oversize bounds, degraded-profile boot |
+| `tests/ask-user.spec.ts` | the ask-user waterfall end to end (SSE frame, `/answer` settlement, pending-question replay) and the browser-draft stream never owning a question |
+| `tests/sessions.spec.ts` | create by `path` (new and already-known workspace), create by `workspaceId`, create-argument bounds, workspace rename/conflict/blank/unknown, session rename/archive/unknown |
+| `dsh-bridge-it.el` | the live-Emacs seat of the ask-user path |
 
 ## Mock LLM
 

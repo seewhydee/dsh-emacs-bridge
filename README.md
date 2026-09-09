@@ -250,6 +250,8 @@ Running `make test` launches the standard unit test suite (Vitest for
 plugin, ERT for elisp).  Running `make integration-test` performs a
 suite of integration tests that boots the plugin against a live
 DeepSeek Harness host with a mock LLM; see `integration/README.md`.
+It is not part of `make test` (which stays fast); run it before
+committing a host-plugin change and before a release.
 
 ## Permissions, authentication, and failure bounds
 
