@@ -173,6 +173,12 @@
        (and (listp turns) turns)))
    timeout-ms))
 
+(defun dsh-bridge-it--session-ids ()
+  "The fixture roster's session ids (live and persisted)."
+  (let* ((result (dsh-bridge--request "GET" "/sessions" nil))
+         (rows (alist-get 'sessions (cdr result))))
+    (mapcar (lambda (row) (alist-get 'id row)) rows)))
+
 (ert-deftest dsh-bridge-it-describe-session ()
   "The real session report renders live host statistics in a help-mode buffer."
   (unwind-protect
@@ -200,6 +206,41 @@
               (should (string-match-p "Cache hit" text))))))
     (when (get-buffer dsh-bridge-describe-buffer-name)
       (kill-buffer dsh-bridge-describe-buffer-name))
+    (dsh-bridge-it--kill-fixture)))
+
+(ert-deftest dsh-bridge-it-fork-turn ()
+  "The live-Emacs seat of branching: `B' forks the shown turn into a child.
+Drives the real command against the live fixture: fetch a session with one
+completed turn, fork from its view, and prove the new child carries the
+source as `parentSession' with `isSeeded' set."
+  (unwind-protect
+      (let* ((facts (dsh-bridge-it--boot-fixture)))
+        (setq dsh-bridge-it--fixture facts)
+        (setq dsh-bridge-url (concat (dsh-bridge-it--url) "/dsh-bridge"))
+        (setq dsh-bridge-token-file
+              (expand-file-name "dsh-bridge-token" (alist-get 'dshHome facts)))
+        (dsh-bridge-it--script-mock
+         (vector (list :kind "text" :text "Branch this.")))
+        (let* ((session-id (dsh-bridge-it--create-session
+                            (expand-file-name "../" dsh-bridge-it--directory)))
+               (before (dsh-bridge-it--session-ids)))
+          (dsh-bridge-send-text "Please branch." session-id)
+          (should (dsh-bridge-it--wait-for-turns session-id 30000))
+          ;; Open the session's DSH-View, which selects the buffer, then branch
+          ;; the shown (completed) turn; the command opens the child and its
+          ;; prompt.
+          (dsh-bridge-fetch session-id t)
+          (dsh-bridge-fork-turn)
+          (let* ((after (dsh-bridge-it--session-ids))
+                 (child (seq-find (lambda (id) (not (member id before))) after)))
+            (should child)
+            (let* ((result (dsh-bridge--request
+                            "GET" (dsh-bridge--path "/session" child) nil))
+                   (report (cdr result)))
+              (should (equal (alist-get 'parentSession report) session-id))
+              (should (eq (alist-get 'isSeeded report) t))))))
+    (when (get-buffer "*dsh-bridge-prompt*")
+      (kill-buffer "*dsh-bridge-prompt*"))
     (dsh-bridge-it--kill-fixture)))
 
 (ert-deftest dsh-bridge-it-ask-user ()  "Flagship: the live-Emacs seat of the ask-user path."

@@ -109,6 +109,10 @@ export interface AssistantTurn {
   endedAt?: number
   /** The `turn/end` reason kind (`completed`/`aborted`/...); absent while open. */
   reason?: string
+  /** The `seq` of the turn's `turn/end` event: the fork anchor that cuts after
+   * this turn (the harness's `session/fork` boundary). Absent while the turn
+   * is open, which is what makes an unfinished turn un-forkable. */
+  endSeq?: number
   /** The turn's text-bearing assistant messages, oldest first. */
   segments: readonly AssistantTurnSegment[]
 }
@@ -132,7 +136,8 @@ export interface SessionTurnLogLike {
  * compaction-replaced history stays hidden — shadowed turns simply vanish
  * from the result, matching what `/replies` used to serve. Turn start/end
  * boundary events are log-only (never surface nodes), so `startedAt`,
- * `endedAt`, and `reason` are folded from a separate pass over the log.
+ * `endedAt`, `reason`, and the `turn/end`'s `endSeq` (the fork anchor) are
+ * folded from a separate pass over the log.
  */
 export function assistantTurns(log: SessionTurnLogLike): AssistantTurn[] {
   const byTurn = new Map<number, AssistantTurnSegment[]>()
@@ -159,9 +164,13 @@ export function assistantTurns(log: SessionTurnLogLike): AssistantTurn[] {
   // Turn boundaries are log-only, so fold start/end facts for the turns that
   // produced text from the events themselves. A turn has one `turn/start`
   // (first wins for the start time) and at most one `turn/end` (last wins).
+  // The boundary fold is indexed rather than `for...of` so a sparse log can
+  // fall back to the array position for `endSeq`.
   const starts = new Map<number, number>()
-  const ends = new Map<number, { time: number; reason?: string }>()
-  for (const event of log.events) {
+  const ends = new Map<number, { time: number; reason?: string; seq: number }>()
+  for (let index = 0; index < log.events.length; index += 1) {
+    const event = log.events[index]
+    if (event === undefined) continue
     if (event.type === 'turn/start') {
       const data = event.data as { turn?: unknown } | undefined
       const turn = data?.turn
@@ -174,6 +183,7 @@ export function assistantTurns(log: SessionTurnLogLike): AssistantTurn[] {
         ends.set(turn, {
           time: event.time,
           ...(typeof kind === 'string' ? { reason: kind } : {}),
+          seq: typeof event.seq === 'number' ? event.seq : index,
         })
       }
     }
@@ -191,6 +201,7 @@ export function assistantTurns(log: SessionTurnLogLike): AssistantTurn[] {
     if (end !== undefined) {
       record.endedAt = end.time
       if (end.reason !== undefined) record.reason = end.reason
+      record.endSeq = end.seq
     }
     turns.push(record)
   }
@@ -278,6 +289,10 @@ export interface SessionEventLike {
   time: number
   type?: string
   data?: unknown
+  /** The event's log position. Present on real session events (the log is
+   * seq-indexed, so it also equals the array index); optional here so
+   * structural fixtures need not carry it. */
+  seq?: number
 }
 
 /** Structural view of one live session, enough for targeting and listing. */

@@ -199,8 +199,11 @@ const SURFACE_TYPES = new Set(['user/message', 'assistant/message', 'tool/result
 
 function turnLog(events: readonly SessionEventLike[]): SessionTurnLogLike {
   // Nodes are the seqs of message-producing events, index-aligned with events
-  // (the harness log invariant: events[seq] is the event with that seq).
-  return { events: [...events], nodes: events.flatMap((e, i) => (e.type && SURFACE_TYPES.has(e.type) ? [i] : [])) }
+  // (the harness log invariant: events[seq] is the event with that seq). Real
+  // logs carry `seq` on every event; stamp it here so the fold's primary path
+  // (not just the index fallback) is exercised.
+  const seqd = events.map((event, index) => ({ ...event, seq: index }))
+  return { events: seqd, nodes: seqd.flatMap((e, i) => (e.type && SURFACE_TYPES.has(e.type) ? [i] : [])) }
 }
 
 function text(...parts: string[]): Array<{ type: string; text?: string }> {
@@ -225,6 +228,7 @@ describe('assistantTurns', () => {
         startedAt: 1000,
         endedAt: 2500,
         reason: 'completed',
+        endSeq: 7,
         segments: [
           { text: 'Let me look at the files.', time: 1100, step: 1 },
           { text: 'I see the change; applying it.', time: 1300, step: 2 },
@@ -262,6 +266,7 @@ describe('assistantTurns', () => {
         startedAt: 1000,
         endedAt: 1500,
         reason: 'completed',
+        endSeq: 6,
         segments: [{ text: 'real answer', time: 1400, step: 4 }],
       },
     ])
@@ -292,7 +297,31 @@ describe('assistantTurns', () => {
     expect(turns[0]).toMatchObject({ turn: 5, startedAt: 1000 })
     expect(turns[0]!.endedAt).toBeUndefined()
     expect(turns[0]!.reason).toBeUndefined()
+    // An open turn has no fork anchor: the key is absent, not undefined-valued.
+    expect(Object.hasOwn(turns[0]!, 'endSeq')).toBe(false)
     expect(turns[0]!.segments).toHaveLength(2)
+  })
+
+  it('carries the turn/end seq as endSeq (the fork anchor)', () => {
+    const log = turnLog([
+      turnStart(1, 1000), userMessage(1010),
+      assistantMessage(1, 1, 1100, text('done')),
+      turnEnd(1, 1500),
+    ])
+    expect(assistantTurns(log)[0]!.endSeq).toBe(3)
+  })
+
+  it('falls back to the log index when a turn/end event carries no seq', () => {
+    // Structural fixtures need not stamp `seq`; the fold then uses the event's
+    // position, which the harness log invariant makes equal to the seq.
+    const events: SessionEventLike[] = [
+      turnStart(1, 1000),
+      userMessage(1010),
+      assistantMessage(1, 1, 1100, text('done')),
+      turnEnd(1, 1500),
+    ]
+    const log: SessionTurnLogLike = { events, nodes: [1, 2] }
+    expect(assistantTurns(log)[0]!.endSeq).toBe(3)
   })
 
   it('marks an interrupted (aborted) turn with its reason and partial segment', () => {
@@ -307,6 +336,7 @@ describe('assistantTurns', () => {
         startedAt: 1000,
         endedAt: 1200,
         reason: 'aborted',
+        endSeq: 3,
         segments: [{ text: 'partial reply', time: 1100, step: 1 }],
       },
     ])

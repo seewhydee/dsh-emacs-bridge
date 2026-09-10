@@ -914,7 +914,7 @@ draft when the entry shown is pristine."
 ;;; The view buffers
 
 (ert-deftest dsh-bridge-view-mode-basics ()
-  "The view mode is read-only and binds g/q/r/w/i/l plus M-p/M-n — and no
+  "The view mode is read-only and binds g/q/r/w/B/i/l plus M-p/M-n — and no
 compose/fetch/targeting verbs."
   (with-temp-buffer
     (dsh-bridge-view-mode)
@@ -925,6 +925,8 @@ compose/fetch/targeting verbs."
   (should (eq (lookup-key dsh-bridge-view-mode-map (kbd "r")) #'dsh-bridge-reply))
   (should (eq (lookup-key dsh-bridge-view-mode-map (kbd "w"))
               #'dsh-bridge-copy-reply))
+  (should (eq (lookup-key dsh-bridge-view-mode-map (kbd "B"))
+              #'dsh-bridge-fork-turn))
   (should (eq (lookup-key dsh-bridge-view-mode-map (kbd "i"))
               #'dsh-bridge-receive))
   (should (eq (lookup-key dsh-bridge-view-mode-map (kbd "l"))
@@ -1018,6 +1020,106 @@ attempt."
         (dsh-bridge-reply))
       (should (null bound))
       (should (string-match-p "HTTP 409" msg)))))
+
+;;; Fork (branch) a turn
+
+(defun dsh-bridge-test--fork-record (turn end-seq)
+  "A completed turn record for TURN carrying END-SEQ as its fork anchor."
+  (append (dsh-bridge-test--view-turn
+           turn 1000 (list (dsh-bridge-test--view-segment "reply" 1100 1)) 1200)
+          (list (cons 'endSeq end-seq))))
+
+(ert-deftest dsh-bridge-fork-turn-posts-ended-turn-and-opens-child ()
+  "`B' forks the shown completed turn at its endSeq and opens the child.
+The round trip posts the shown session id and the record's `endSeq' to
+POST /fork, then opens the child's view and prompt."
+  (let ((dsh-bridge--turns-cache
+         (dsh-bridge-test--view-cache (list (dsh-bridge-test--fork-record 30 42))))
+        (seen nil) (fetched nil) (prompted nil) (popped nil))
+    (with-temp-buffer
+      (dsh-bridge-view-mode)
+      (setq-local dsh-bridge--view-content-session "s1")
+      (setq-local dsh-bridge--view-turn 30)
+      ;; A non-nil index keeps the turn refresh off the wire: the seeded cache
+      ;; is authoritative, so only the fork request is issued.
+      (setq-local dsh-bridge--view-turn-index 0)
+      (cl-letf (((symbol-function 'dsh-bridge--request)
+                 (lambda (method path payload)
+                   (setq seen (list method path payload))
+                   (cons 201 '((ok . t) (sessionId . "child")))))
+                ((symbol-function 'dsh-bridge-fetch)
+                 (lambda (id same-window) (setq fetched (list id same-window))))
+                ((symbol-function 'dsh-bridge--prompt-buffer)
+                 (lambda (id) (setq prompted id)
+                         (get-buffer-create "*dsh-bridge-prompt*")))
+                ((symbol-function 'pop-to-buffer)
+                 (lambda (buf &optional action) (setq popped (list buf action)))))
+        (dsh-bridge-fork-turn))
+      (should (equal (car seen) "POST"))
+      (should (equal (cadr seen) "/fork"))
+      (should (equal (alist-get 'sessionId (caddr seen)) "s1"))
+      (should (equal (alist-get 'atSeq (caddr seen)) 42))
+      (should (equal fetched '("child" t)))
+      (should (equal prompted "child"))
+      (should (equal (car popped) (get-buffer-create "*dsh-bridge-prompt*")))
+      (should (equal (cadr popped) dsh-bridge-prompt-display-action)))))
+
+(ert-deftest dsh-bridge-fork-turn-refuses-open-turn ()
+  "An open (still running) shown turn is refused: it has no `endSeq' anchor.
+No request is issued."
+  (let ((dsh-bridge--turns-cache
+         (dsh-bridge-test--view-cache
+          (list (dsh-bridge-test--view-turn
+                 30 1000 (list (dsh-bridge-test--view-segment "partial" 1100 1))))))
+        (requested nil))
+    (with-temp-buffer
+      (dsh-bridge-view-mode)
+      (setq-local dsh-bridge--view-content-session "s1")
+      (setq-local dsh-bridge--view-turn 30)
+      (setq-local dsh-bridge--view-turn-index 0)
+      (cl-letf (((symbol-function 'dsh-bridge--request)
+                 (lambda (&rest _) (setq requested t))))
+        (should-error (dsh-bridge-fork-turn) :type 'user-error))
+      (should-not requested))))
+
+(ert-deftest dsh-bridge-fork-turn-refuses-pushed-message ()
+  "A shown message with no turn identity is refused; no request is issued."
+  (let ((dsh-bridge--turns-cache (dsh-bridge-test--view-cache dsh-bridge-test--view-turns))
+        (requested nil))
+    (with-temp-buffer
+      (dsh-bridge-view-mode)
+      (setq-local dsh-bridge--view-content-session "s1")
+      (setq-local dsh-bridge--view-turn nil)
+      (setq-local dsh-bridge--view-turn-index 0)
+      (cl-letf (((symbol-function 'dsh-bridge--request)
+                 (lambda (&rest _) (setq requested t))))
+        (should-error (dsh-bridge-fork-turn) :type 'user-error))
+      (should-not requested))))
+
+(ert-deftest dsh-bridge-fork-turn-refuses-outside-view ()
+  "The command is a DSH-View verb; elsewhere it is a user error."
+  (with-temp-buffer
+    (should-error (dsh-bridge-fork-turn) :type 'user-error)))
+
+(ert-deftest dsh-bridge-fork-turn-echoes-host-error ()
+  "A failed fork echoes the host's error and opens nothing."
+  (let ((dsh-bridge--turns-cache
+         (dsh-bridge-test--view-cache (list (dsh-bridge-test--fork-record 30 42))))
+        (fetched nil) (msg nil))
+    (with-temp-buffer
+      (dsh-bridge-view-mode)
+      (setq-local dsh-bridge--view-content-session "s1")
+      (setq-local dsh-bridge--view-turn 30)
+      (setq-local dsh-bridge--view-turn-index 0)
+      (cl-letf (((symbol-function 'dsh-bridge--request)
+                 (lambda (&rest _) (cons 409 '((error . "not completed")))))
+                ((symbol-function 'dsh-bridge-fetch)
+                 (lambda (&rest _) (setq fetched t)))
+                ((symbol-function 'message)
+                 (lambda (&rest args) (setq msg (apply #'format args)))))
+        (dsh-bridge-fork-turn))
+      (should-not fetched)
+      (should (string-match-p "not completed" msg)))))
 
 (ert-deftest dsh-bridge-copy-reply ()
   "`dsh-bridge-copy-reply' copies the whole reply without a region."

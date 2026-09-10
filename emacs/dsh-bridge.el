@@ -16,7 +16,7 @@
 ;; along with this program.	 If not, see <https://www.gnu.org/licenses/>.
 
 ;; Author: Chong Yidong <cyd@stupidchicken.com>
-;; Version: 0.8.0
+;; Version: 0.9.0
 ;; Package-Requires: ((emacs "29.1"))
 ;; Keywords: tools, convenience
 
@@ -76,7 +76,7 @@
 (require 'button)
 (require 'help-mode)
 
-(defconst dsh-bridge-version "0.8.0"
+(defconst dsh-bridge-version "0.9.0"
   "Version string for the DSH-Bridge package.
 This should match the version reported by the running DSH plugin.")
 
@@ -1846,6 +1846,7 @@ record is an alist:
   (startedAt . MS-EPOCH)
   (endedAt . MS-EPOCH)		; absent while the turn is open
   (reason . KIND-STRING)	; absent while the turn is open
+  (endSeq . SEQ)		; absent while the turn is open; the fork anchor
   (segments . ((text . STRING) (time . MS-EPOCH) (step . NUMBER)) ...)
 
 An entry may have TURNS nil, which refers to a session folded to no
@@ -2349,7 +2350,9 @@ quotes it into the mode metadata and the docstring generation calls
 	 "Major mode for DSH-View buffers.
 Read-only.  Keys: `g' refresh (re-fetch the shown session's newest turn),
 `r' reply (bind the prompt buffer to the shown session, without changing the
-default target), `w' copy, `i' receive (pull the latest \"Send to Emacs\"
+default target), `w' copy, `B' branch the shown turn into a new session
+(the child inherits the preset but starts on the default model), `i' receive
+(pull the latest \"Send to Emacs\"
 message), `l' list sessions, `q' dismiss.  `M-p'/`M-n' cycle the shown
 session's agent turns (older / newer; a turn is the whole run from a prompt
 to an idle reply, and the header shows the position `k/n' over the session's
@@ -2383,6 +2386,7 @@ is applied."
 (define-key dsh-bridge-view-mode-map (kbd "w") #'dsh-bridge-copy-reply)
 (define-key dsh-bridge-view-mode-map (kbd "i") #'dsh-bridge-receive)
 (define-key dsh-bridge-view-mode-map (kbd "a") #'dsh-bridge-answer)
+(define-key dsh-bridge-view-mode-map (kbd "B") #'dsh-bridge-fork-turn)
 (define-key dsh-bridge-view-mode-map (kbd "D") #'dsh-bridge-describe-session)
 (define-key dsh-bridge-view-mode-map (kbd "l") #'dsh-bridge-list-sessions)
 (define-key dsh-bridge-view-mode-map (kbd "M-p")
@@ -2397,6 +2401,8 @@ is applied."
 	 :help "Bind the prompt buffer to the shown session"]
 	["Copy" dsh-bridge-copy-reply
 	 :help "Copy the reply (region, else the whole shown turn)"]
+	["Branch Turn" dsh-bridge-fork-turn
+	 :help "Branch the shown turn into a new session"]
 	["Receive Message…" dsh-bridge-receive
 	 :help "Receive the latest message DSH sent to Emacs"]
 	["Describe Session" dsh-bridge-describe-session
@@ -3740,6 +3746,65 @@ shown in another window so the output stays visible."
 	 (t
 	  (pop-to-buffer (dsh-bridge--prompt-buffer id)
 					 dsh-bridge-prompt-display-action)))))
+
+(defun dsh-bridge--shown-turn-record ()
+  "The turn record the current DSH-View buffer shows, or nil.
+Force-refreshes the session's turn cache when the view is at rest, so the
+record's `endSeq' is current, then finds the record by turn number."
+  (let* ((turns (dsh-bridge--view-turns-refresh
+                 (null dsh-bridge--view-turn-index)))
+         (turn dsh-bridge--view-turn))
+    (and turn turns
+         (seq-find (lambda (record)
+                     (equal (alist-get 'turn record) turn))
+                   turns))))
+
+(defun dsh-bridge--fork-turn (session-id at-seq)
+  "Fork SESSION-ID at AT-SEQ via POST /fork; return the child id, or nil.
+AT-SEQ is the shown turn's `endSeq', the fork anchor the host cuts after.
+On failure the host's error is echoed and nil is returned."
+  (message "dsh-bridge: branching…")
+  (redisplay t)
+  (let* ((result (dsh-bridge--request
+                  "POST" "/fork"
+                  (list (cons 'sessionId session-id) (cons 'atSeq at-seq))))
+         (status (car result))
+         (alist (cdr result)))
+    (if (and (memq status '(200 201)) (alist-get 'sessionId alist))
+        (alist-get 'sessionId alist)
+      (message "dsh-bridge: %s"
+               (or (dsh-bridge--error-message nil status alist)
+                   "failed to branch the turn"))
+      nil)))
+
+;;;###autoload
+(defun dsh-bridge-fork-turn ()
+  "Branch the shown turn into a new session, then open the child.
+The child inherits the conversation through the shown turn and the agent
+preset, but starts on the default model and is not auto-titled.  A turn
+that has not completed cannot be a fork anchor, so an open turn is
+refused.  Only meaningful in a DSH-View buffer."
+  (interactive)
+  (unless (eq major-mode 'dsh-bridge-view-mode)
+    (user-error "dsh-bridge: not a DSH-View buffer"))
+  (let ((id dsh-bridge--view-content-session))
+    (unless id
+      (user-error "dsh-bridge: this view has no session"))
+    (let* ((record (dsh-bridge--shown-turn-record))
+           (end-seq (and record (alist-get 'endSeq record))))
+      (unless end-seq
+        (user-error "dsh-bridge: the shown turn is not completed; branch a completed turn"))
+      (let ((child (dsh-bridge--fork-turn id end-seq)))
+        (when child
+          ;; Open the child's conversation: its view in this window, then its
+          ;; prompt below (the `dsh-bridge-reply' window shape).  The child's
+          ;; newest inherited turn is complete, so `dsh-bridge-fetch' fills the
+          ;; view with it rather than the waiting placeholder.
+          (dsh-bridge-fetch child t)
+          (pop-to-buffer (dsh-bridge--prompt-buffer child)
+                         dsh-bridge-prompt-display-action)
+          (message "dsh-bridge: branched into %s (preset inherited; default model; untitled)"
+                   (dsh-bridge--id-tail child)))))))
 
 (defun dsh-bridge--view-shown-turn-markdown ()
   "The raw Markdown of the turn the DSH-View buffer shows, or nil.

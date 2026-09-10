@@ -129,22 +129,25 @@ and make it reachable without going through the sessions list.
 
 ### 2. Branch a turn into a new conversation
 
-- **Seam** — `session/fork` Remote (proxy through the existing `rpcCall`;
-  the method is `fork(request: SessionForkRequest)` with `SessionForkRequest
-  = {sessionId, atSeq?}`, so the `{args}` payload should be `{request:
-  {sessionId, atSeq?}}` — the same named-argument form `/model` already
-  uses; still confirm with a live probe) or
-  `ctx.get('sessionController').fork(...)`. The boundary is the first
-  `turn/end` at/after `atSeq`; omit `atSeq` for the last completed turn. A
-  fork without `atSeq` succeeds even mid-turn (cutting at the last completed
-  `turn/end`); `session/fork-unavailable` is thrown only when `atSeq` pins a
-  turn that has not completed — the shown-turn target below never trips it.
-- **Target** — the *shown* turn: fork at its `endSeq` (the `/turns` addition
-  above).
-- **UX** — `b` in DSH-View forks at the shown turn, then opens the child's
-  prompt/view and reports the new id. State plainly that a fork **inherits the
-  preset but not the model** (the child starts on the default model) and is
-  not auto-titled host-side (the web UI titles it client-side).
+**Implemented.**
+
+- **Seam** — `ctx.get('sessionController').fork(...)` (the native service; the
+  `session/fork` Remote proxy through `rpcCall` was the rejected alternative).
+  The boundary is the first `turn/end` at/after `atSeq`; omit `atSeq` for the
+  last completed turn. A fork without `atSeq` succeeds even mid-turn (cutting
+  at the last completed `turn/end`); `session/fork-unavailable` is thrown only
+  when `atSeq` pins a turn that has not completed. The host route
+  (`POST /dsh-bridge/fork`) is `logic.ts`-free wiring over the service, resolves
+  its source read-only (never resuming a cold session), 409s a subagent source,
+  and maps the seam's `RemoteError` codes by their `isDSHRemoteError` marker.
+- **Target** — the *shown* turn: fork at its `endSeq`, added to the `/turns`
+  record (the `turn/end` event's `seq`); an open turn has no `endSeq` and is
+  refused.
+- **UX** — `B` in DSH-View forks at the shown turn, then opens the child's view
+  (following) and its prompt, and reports the new id tail. The fork message
+  states that a fork **inherits the preset but not the model** (the child starts
+  on the default model) and is not auto-titled host-side (the web UI titles it
+  client-side).
 
 ### 3. Transcript buffer
 

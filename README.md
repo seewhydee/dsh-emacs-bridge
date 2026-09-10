@@ -174,6 +174,8 @@ The following commands are available in a DSH-View buffer:
 * `r` — open a DSH-Prompt buffer for the current session.
 * `w` — copy the reply (region, else the whole shown turn's raw
   Markdown without the divider lines) to the kill ring.
+* `B` — branch the shown turn into a new session (see
+  [Branching a turn](#branching-a-turn)).
 * `i` — receive the latest "Send to Emacs" message (see below).
 * `D` — show the session's read-only report (see
   [Session report buffer](#session-report-buffer)).
@@ -190,6 +192,26 @@ To customize this behavior, change `dsh-bridge-view-follow-at-newest`.
 If markdown-mode is installed, and `dsh-bridge-view-gfm` is non-nil,
 the reply is font-locked as GitHub-Flavored Markdown (the dividers use
 GFM horizontal-rule syntax, so they render cleanly).
+
+### Branching a turn
+
+`B` in a DSH-View buffer *branches* the shown turn into a new session:
+the host forks the session's prefix through the end of that turn into a
+child session, and Emacs then opens the child's DSH-View (following its
+inherited turns) together with a DSH-Prompt buffer for it.  This is the
+same operation as the web UI's per-message "Fork" action, and the new
+session appears in both session lists.
+
+Two things differ from the source, by design: the child inherits the
+agent *preset* but starts on the *default model* (the fork does not
+copy the source's current model selection), and it is not auto-titled,
+so it shows up by its id tail until you rename it or its first prompt
+is titled.  Emacs says both in the confirmation message.
+
+A turn that is still running has no fork boundary and cannot be
+branched; cycle to a completed turn first (`M-p`).  The fork route
+reads a cold source session without resuming it, so branching does not
+spawn the source's agent as a side effect.
 
 ### DSH-Prompt buffer
 
@@ -267,8 +289,9 @@ reported to the collector.  Naming a cold (persisted-only) session
 from Emacs resumes it on demand, matching the web UI; an id neither
 live nor persisted is 404, a subagent-owned session is 409, and a
 draft push fails with 409 when no browser client is subscribed.  The
-read-only session report is the one exception: it observes a cold
-session's persisted log without resuming it.
+read-only session report and the `POST /dsh-bridge/fork` source read are
+the exceptions: each observes a cold session's persisted log without
+resuming it.
 
 ## License
 

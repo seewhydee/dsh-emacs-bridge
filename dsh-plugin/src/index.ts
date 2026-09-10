@@ -36,11 +36,12 @@
 //   GET  /dsh-bridge/prompts?sessionId=           -> user prompts, newest first
 //   GET  /dsh-bridge/turns?sessionId=             -> turn-aggregated assistant
 //        replies, newest first (each turn: { turn, startedAt, endedAt?,
-//        reason?, segments: [{ text, time, step }] }) plus running, epoch,
-//        title and cwd.  Optional since=<turn>&epoch=<n> request the
-//        incremental suffix: turns with turn >= since when the epoch matches
-//        the surface's replaceGeneration, else the full list
-//        (incremental: true|false)
+//        reason?, endSeq?, segments: [{ text, time, step }] }; endSeq is the
+//        turn/end event's seq — the session/fork anchor — and is absent while
+//        the turn is open) plus running, epoch, title and cwd.  Optional
+//        since=<turn>&epoch=<n> request the incremental suffix: turns with
+//        turn >= since when the epoch matches the surface's replaceGeneration,
+//        else the full list (incremental: true|false)
 //   POST /dsh-bridge/draft { text, sessionId? }   -> push a composer draft (SSE)
 //   GET  /dsh-bridge/outbox                       -> collect DSH->Emacs entries
 //   POST /dsh-bridge/outbox { text | messageId, sessionId, source? }
@@ -58,6 +59,10 @@
 //   POST /dsh-bridge/sessions/archive { sessionId }       -> archive (one-way)
 //   POST /dsh-bridge/sessions/create { workspaceId | path, workspaceTitle? }
 //        -> create a session in a workspace (exactly one of the two keys)
+//   POST /dsh-bridge/fork { sessionId?, atSeq? } -> branch a completed-turn
+//        prefix into a new session (returns the child id; the source may be
+//        cold — it is never resumed; 409 session/fork-unavailable or
+//        subagent-owned, 501 without a session controller)
 //   GET  /dsh-bridge/workspaces                   -> workspace roster
 //   POST /dsh-bridge/workspaces/rename { workspaceId, title } -> rename a workspace
 
@@ -257,6 +262,16 @@ interface SessionTitleService {
   rename(session: Session, title: string): { title: string }
 }
 
+/**
+ * Minimal face of the optional `sessionController` service (fork). Read via
+ * `ctx.get`; a profile without the service answers `/fork` with 501 and the
+ * rest of the bridge is unaffected. Call `fork` as a method on the service
+ * (its prototype method needs the receiver), never destructured.
+ */
+interface SessionControllerService {
+  fork(request: { sessionId: SessionId; atSeq?: number }): Promise<{ sessionId: SessionId }>
+}
+
 /** A bridge-scoped error carrying the HTTP status Emacs maps to. */
 class BridgeError extends Error {
   constructor(readonly status: number, message: string) {
@@ -279,6 +294,34 @@ function isWorkspaceUnknownSessionError(error: unknown): error is Error {
 function bridgeErrorStatus(error: unknown): number {
   if (error instanceof BridgeError) return error.status
   if (error instanceof PayloadTooLargeError) return 413
+  return 500
+}
+
+/**
+ * Whether an error is a Typert `RemoteError` carrying CODE. Identified by its
+ * structural marker (never `instanceof`): the error may cross a bundle/realm
+ * boundary, and the harness's own rule is that the marker is the identity.
+ * A plain `Error` escaping a service seam (e.g. `presetForObservation` with no
+ * `sessionProjections` mounted) carries no marker and is deliberately not
+ * matched — it falls through to the caller's 500.
+ */
+function isRemoteErrorCode(error: unknown, code: string): boolean {
+  return typeof error === 'object' && error !== null
+    && (error as { isDSHRemoteError?: unknown }).isDSHRemoteError === true
+    && (error as { code?: unknown }).code === code
+}
+
+/**
+ * The HTTP status for a `/fork` failure: bridge errors keep their status, the
+ * fork seam's taxonomy maps to the route's conventions, and anything else
+ * (including the unwrapped plain errors noted on `isRemoteErrorCode`) is 500.
+ */
+function forkErrorStatus(error: unknown): number {
+  if (error instanceof BridgeError) return error.status
+  if (isRemoteErrorCode(error, 'session/fork-unavailable')) return 409
+  if (isRemoteErrorCode(error, 'session/not-found')) return 404
+  if (isRemoteErrorCode(error, 'gateway/bad-request')) return 400
+  if (isRemoteErrorCode(error, 'session/workspace-attach-failed')) return 502
   return 500
 }
 
@@ -1491,8 +1534,10 @@ export function apply(ctx: Context): void {
       // The output buffer's turn navigation: the session's turn-aggregated
       // assistant replies, newest first (the mirror of /prompts, grouped by
       // harness turn).  Each turn carries its committed text segments plus the
-      // turn's start/end facts, so Emacs can render a whole turn with divider
-      // lines and walk M-p/M-n turn-by-turn.  The fold walks the session's own
+      // turn's start/end facts (including the `turn/end` event's seq as
+      // `endSeq`, the anchor `POST /fork` cuts after), so Emacs can render a
+      // whole turn with divider lines and walk M-p/M-n turn-by-turn.  The fold
+      // walks the session's own
       // surface (`Session.surface.nodes` + `Session.snapshotEvents()[seq]` — the same
       // surface `deriveMessages()` folds), so compaction-replaced history stays
       // hidden exactly as the reply list it replaces did.  EPOCH is the
@@ -1809,6 +1854,79 @@ export function apply(ctx: Context): void {
           broadcastSessionsChanged(String(sessionId))
         } catch (error: unknown) {
           sendJson(res, bridgeErrorStatus(error), { error: error instanceof Error ? error.message : String(error) })
+        }
+        return
+      }
+
+      // Branch a completed-turn prefix of a session into a new one. The source
+      // id is resolved read-only (never resumed — the fork seam observes the
+      // source cold-safe), so a cold source forks without spawning its agent.
+      // The subagent fence is the stricter targeting-route form, not a literal
+      // mirror of `/session` (which checks `header.origin` alone): forking is a
+      // mutation, so a subagent child whose parent is merely cold is refused
+      // too. The new session is announced by the harness's own `session/created`
+      // event, which the listener above already broadcasts.
+      if (req.method === 'POST' && pathname === '/dsh-bridge/fork') {
+        try {
+          const body = (await readJson(req)) as { sessionId?: unknown; atSeq?: unknown } | undefined
+          let explicitId: string | undefined
+          if (body?.sessionId !== undefined && body.sessionId !== null) {
+            if (typeof body.sessionId !== 'string') {
+              sendJson(res, 400, { error: 'sessionId must be a string' })
+              return
+            }
+            explicitId = body.sessionId
+          }
+          let atSeq: number | undefined
+          if (body?.atSeq !== undefined && body.atSeq !== null) {
+            if (typeof body.atSeq !== 'number' || !Number.isSafeInteger(body.atSeq) || body.atSeq < 0) {
+              sendJson(res, 400, { error: 'atSeq must be a non-negative safe integer' })
+              return
+            }
+            atSeq = body.atSeq
+          }
+          const sessionController = ctx.get('sessionController') as SessionControllerService | undefined
+          if (sessionController === undefined) {
+            sendJson(res, 501, { error: 'profile lacks a session controller (no fork support)' })
+            return
+          }
+          const id = await resolveReadId(explicitId)
+          const live = sessions.list().find(session => String(session.id) === id)
+          if (live !== undefined) {
+            if (isSubagentChild(live.header.origin, ownedByLiveParent(live))) {
+              sendJson(res, 409, { error: `session ${id} is owned by a subagent` })
+              return
+            }
+          } else {
+            const snapshot = await sessionPersistence.stat(id)
+            if (snapshot?.header.origin === 'subagent') {
+              sendJson(res, 409, { error: `session ${id} is owned by a subagent` })
+              return
+            }
+          }
+          const child = await sessionController.fork({
+            sessionId: id as SessionId,
+            ...(atSeq === undefined ? {} : { atSeq }),
+          })
+          sendJson(res, 201, {
+            ok: true,
+            sessionId: String(child.sessionId),
+            parentSessionId: id,
+            atSeq: atSeq ?? null,
+          })
+        } catch (error: unknown) {
+          const status = forkErrorStatus(error)
+          // A workspace-attach failure happens AFTER the child exists; surface
+          // its id so a caller can still reach the (orphaned) child.
+          const details = (error as { details?: { sessionId?: unknown } } | null)?.details
+          const childId = isRemoteErrorCode(error, 'session/workspace-attach-failed')
+            && typeof details?.sessionId === 'string'
+            ? { sessionId: details.sessionId }
+            : {}
+          sendJson(res, status, {
+            error: error instanceof Error ? error.message : String(error),
+            ...childId,
+          })
         }
         return
       }
