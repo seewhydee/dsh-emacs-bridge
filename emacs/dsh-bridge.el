@@ -3589,8 +3589,9 @@ session and persists as the default, exactly as the web UI does."
                                (format "%s/%s" (alist-get 'provider current)
                                        (alist-get 'model current))))
              (annotation (lambda (cand)
-                           (let ((entry (assoc cand catalog)))
-                             (or (alist-get 'name (caddr entry)) "")))))
+                           (let ((name (alist-get 'name (caddr (assoc cand catalog)))))
+                             (and (stringp name) (not (string-empty-p name))
+                                  (concat " " name))))))
         (if (null catalog)
             (message "dsh-bridge: no models available")
           (let ((chosen (completing-read

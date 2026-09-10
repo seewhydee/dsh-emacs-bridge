@@ -3065,6 +3065,29 @@ when the caches are empty."
       (dsh-bridge--fetch-models "s1" t)
       (should (= calls 2)))))
 
+(ert-deftest dsh-bridge-select-model-annotation-separated ()
+  "Model completion annotations are separated from the candidate by a space,
+and a model with no display name gets no annotation."
+  (let ((annotation nil))
+    (cl-letf (((symbol-function 'dsh-bridge--fetch-models)
+               (lambda (&rest _)
+                 '((current . ((provider . "p1") (model . "m1")))
+                   (groups . (((id . "p1")
+                               (models . (((id . "m1") (name . "M1"))
+                                          ((id . "m2"))))))))))
+              ((symbol-function 'completing-read)
+               (lambda (_prompt table &rest _)
+                 (setq annotation
+                       (completion-metadata-get (funcall table "" nil 'metadata)
+                                                'annotation-function))
+                 "p1/m1"))
+              ((symbol-function 'dsh-bridge--select-model-apply)
+               (lambda (&rest _) t)))
+      (dsh-bridge-select-model))
+    (should annotation)
+    (should (equal (funcall annotation "p1/m1") " M1"))
+    (should (null (funcall annotation "p1/m2")))))
+
 (ert-deftest dsh-bridge-fetch-context ()
   "fetch-context seeds the cache once and skips when cached."
   (let ((dsh-bridge--session-context nil) (calls 0))
