@@ -4110,7 +4110,9 @@ copy silently instead of duplicating the registry entry."
       (kill-buffer (dsh-bridge--question-find-buffer "q1")))))
 
 (ert-deftest dsh-bridge-ask-user-resolved ()
-  "A resolved frame retires the pending question and banners the question buffer."
+  "A resolved frame retires the pending question and banners the question buffer.
+The banner stands on its own line, and the resolved buffer no longer claims the
+session is waiting for an answer."
   (let ((dsh-bridge--pending-questions nil)
         (dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t)))))
     (cl-letf (((symbol-function 'message) (lambda (&rest _) nil))
@@ -4120,9 +4122,47 @@ copy silently instead of duplicating the registry entry."
     (should-not (dsh-bridge--session-awaiting-p "s1"))
     (with-current-buffer (get-buffer "*dsh-bridge-question: T*")
       (should dsh-bridge--question-dead)
-      (should (string-match-p "answered elsewhere" (buffer-string))))
+      (should (string-match-p
+               "\\`This question was answered elsewhere (not in this buffer)\\.\n"
+               (buffer-string)))
+      (should-not (string-match-p "is waiting for your answer" (buffer-string))))
     (when (buffer-live-p (get-buffer "*dsh-bridge-question: T*"))
       (kill-buffer "*dsh-bridge-question: T*"))))
+
+(ert-deftest dsh-bridge-ask-user-resolved-after-local-submit ()
+  "A resolved frame that outruns the submit POST's own response banners the
+buffer with what this buffer did — the answer was sent here, not elsewhere —
+and the late callback settling afterwards does not banner a second time."
+  (let ((dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t))))
+        (pending-cb nil))
+    (with-current-buffer
+        (dsh-bridge--question-buffer "s1" "q1"
+          '(( (id . "q1") (question . "Go?") (options . (((label . "Yes")))) )))
+      (goto-char (point-min))
+      (re-search-forward "1\\. Yes")
+      (goto-char (line-beginning-position))
+      (dsh-bridge--question-toggle-at-point)
+      ;; The POST is in flight: capture its callback without calling it, the
+      ;; way a slow response leaves it while the SSE frame arrives.
+      (cl-letf (((symbol-function 'dsh-bridge--call)
+                 (lambda (_m _p _payload cb) (setq pending-cb cb))))
+        (dsh-bridge--question-submit))
+      (should (functionp pending-cb))
+      ;; The host's resolved frame lands before the response does.
+      (dsh-bridge--ask-user-resolved "s1" "q1" "answered")
+      (should dsh-bridge--question-dead)
+      (should-not (string-match-p "answered elsewhere" (buffer-string)))
+      (should (string-match-p "\\`Your answer was sent\\.\n" (buffer-string)))
+      (should-not (string-match-p "is waiting for your answer" (buffer-string)))
+      ;; A re-render of the resolved buffer keeps the banner and the header out.
+      (dsh-bridge--question-rerender-at-point)
+      (should (string-match-p "\\`Your answer was sent\\.\n" (buffer-string)))
+      (should-not (string-match-p "is waiting for your answer" (buffer-string)))
+      ;; The response callback settling afterwards must not banner again.
+      (funcall pending-cb nil "{\"accepted\":true}" 200)
+      (should (equal (how-many "Your answer was sent\\." (point-min) (point-max)) 1)))
+    (when (dsh-bridge--question-find-buffer "q1")
+      (kill-buffer (dsh-bridge--question-find-buffer "q1")))))
 
 (defun dsh-bridge-test--pending-ask (session question)
   "A `dsh-bridge--pending-questions' registry with one QUESTION for SESSION."
@@ -4369,14 +4409,38 @@ unskipping leaves the question unsettled again."
 
 (ert-deftest dsh-bridge-question-render-explains-keys ()
   "The question buffer itself explains how to work it — which key selects an
-option and how to submit — instead of leaving that to the mode docstring."
+option, where a custom answer is typed, and how to submit — instead of leaving
+that to the mode docstring."
   (let ((dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t)))))
     (with-current-buffer
         (dsh-bridge--question-buffer "s1" "q1"
           '(( (id . "q1") (question . "Go?") (options . (((label . "Yes")))) )))
       (should (string-match-p "Mark an option with RET" (buffer-string)))
+      (should (string-match-p "read in the minibuffer" (buffer-string)))
+      (should (string-match-p "Session \"T\" is waiting for your answer"
+                              (buffer-string)))
       (should (string-match-p "C-c C-c submits" (buffer-string)))
       (should (string-match-p "C-c C-k declines" (buffer-string))))
+    (when (dsh-bridge--question-find-buffer "q1")
+      (kill-buffer (dsh-bridge--question-find-buffer "q1")))))
+
+(ert-deftest dsh-bridge-question-custom-row-is-an-action ()
+  "The custom-answer row reads as an action, not a checkbox: it carries no
+`[ ]' bracket (which would suggest it must be marked before typing), says the
+text is read via RET/`c', and once answered shows the stored text together with
+how to edit or clear it."
+  (let ((dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t)))))
+    (with-current-buffer
+        (dsh-bridge--question-buffer "s1" "q1"
+          '(( (id . "q1") (question . "Go?") (options . (((label . "Yes")))) )))
+      (should (string-match-p "^      c\\. Type a custom answer" (buffer-string)))
+      (should (string-match-p "RET here or `c'" (buffer-string)))
+      (should-not (string-match-p "\\[.\\] c\\." (buffer-string)))
+      (cl-letf (((symbol-function 'read-string) (lambda (&rest _) "because reasons")))
+        (dsh-bridge--question-custom-answer "q1"))
+      (should (string-match-p "Custom answer: because reasons" (buffer-string)))
+      (should (string-match-p "RET to edit; empty clears" (buffer-string)))
+      (should-not (string-match-p "\\[.\\] c\\." (buffer-string))))
     (when (dsh-bridge--question-find-buffer "q1")
       (kill-buffer (dsh-bridge--question-find-buffer "q1")))))
 

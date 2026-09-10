@@ -3006,6 +3006,18 @@ auto-pop the question buffer on arrival (most users find that intrusive)."
   "List of QUESTION-IDs the user chose to skip (answered with no selection).")
 (defvar-local dsh-bridge--question-dead nil
   "Non-nil once the question this buffer asks is resolved (answered/cancelled).")
+(defvar-local dsh-bridge--question-sent nil
+  "What this buffer itself did, as a message, once it POSTs an answer or decline.
+Set before the POST leaves.  The host broadcasts `ask-user-resolved' when the
+waterfall settles, and that frame can reach us before the POST's own response
+callback runs; `dsh-bridge--ask-user-resolved' then banners this buffer with
+what it did rather than with \"answered elsewhere\".")
+(defvar-local dsh-bridge--question-banner nil
+  "The resolution banner rendered at the top of the buffer, or nil while the
+question is open.  Set with `dsh-bridge--question-dead' by
+`dsh-bridge--question-mark-resolved' and re-emitted by
+`dsh-bridge--question-render', which also drops the now-false \"waiting for
+your answer\" header.")
 
 (defun dsh-bridge--question-find-buffer (question-id)
   "The live question buffer answering QUESTION-ID, or nil."
@@ -3021,16 +3033,16 @@ MESSAGE says what happened in the user's terms; BURY (the local-submit and
 local-decline paths) also removes the buffer from every window, matching how
 sending from DSH-Prompt exits.  A buffer already marked resolved is left alone,
 so the local settlement and the later SSE `ask-user-resolved' frame do not
-banner twice."
+banner twice.  The buffer is re-rendered so the banner replaces the now-false
+\"waiting for your answer\" header rather than sitting above it."
   (let ((buffer (dsh-bridge--question-find-buffer question-id)))
 	(when (and buffer
 			   (with-current-buffer buffer (not dsh-bridge--question-dead)))
 	  (with-current-buffer buffer
 		(setq-local dsh-bridge--question-dead t)
-		(let ((inhibit-read-only t))
-		  (goto-char (point-min))
-		  (insert (propertize message 'face 'error))
-		  (goto-char (point-min))))
+		(setq-local dsh-bridge--question-banner
+				  (or dsh-bridge--question-sent message))
+		(dsh-bridge--question-render))
 	  (when bury
 		(bury-buffer buffer)))))
 
@@ -3073,7 +3085,10 @@ stored copy, silently, without re-messaging or touching the question buffer."
 		  (pop-to-buffer buffer))))))
 
 (defun dsh-bridge--ask-user-resolved (session-id question-id outcome)
-  "Retire a pending ask for SESSION-ID when it was ANSWERED or CANCELLED."
+  "Retire a pending ask for SESSION-ID when it was ANSWERED or CANCELLED.
+The banner repeats what this buffer did when this Emacs was the one answering:
+the host's resolved frame races the answer POST's response, so \"answered
+elsewhere\" is only right when the buffer has no local submit on record."
   (let ((entry (assoc session-id dsh-bridge--pending-questions)))
 	(when entry
 	  (setcdr entry (cl-delete question-id (cdr entry) :key #'car :test #'equal))
@@ -3082,11 +3097,13 @@ stored copy, silently, without re-messaging or touching the question buffer."
 			  (assoc-delete-all session-id dsh-bridge--pending-questions)))))
   (dsh-bridge--status-event-render session-id)
   (dsh-bridge--view-await-refresh session-id)
-  (dsh-bridge--question-mark-resolved
-   question-id
-   (if (equal outcome "cancelled")
-	   "This question was cancelled."
-	 "This question was answered elsewhere (not in this buffer).")))
+  (let ((buffer (dsh-bridge--question-find-buffer question-id)))
+	(dsh-bridge--question-mark-resolved
+	 question-id
+	 (or (and buffer (buffer-local-value 'dsh-bridge--question-sent buffer))
+		 (if (equal outcome "cancelled")
+			 "This question was cancelled."
+		   "This question was answered elsewhere (not in this buffer).")))))
 
 ;; The question buffer -------------------------------------------------------
 
@@ -3118,6 +3135,8 @@ with `q' and returning with `a' keeps any in-progress marks.  A name collision
 		  (setq-local dsh-bridge--question-custom nil)
 		  (setq-local dsh-bridge--question-skipped nil)
 		  (setq-local dsh-bridge--question-dead nil)
+		  (setq-local dsh-bridge--question-sent nil)
+		  (setq-local dsh-bridge--question-banner nil)
 		  (dsh-bridge--question-render))
 		buffer))))
 
@@ -3126,19 +3145,31 @@ with `q' and returning with `a' keeps any in-progress marks.  A name collision
 The whole buffer is re-rendered from `dsh-bridge--question-questions' plus the
 selection/custom/skipped state on every change, so markers can never drift.
 Every line of a question's block carries its question id as a text property,
-so point anywhere in the block identifies the question."
+so point anywhere in the block identifies the question.  A resolved buffer
+renders its resolution banner in place of the \"waiting for your answer\"
+header."
   (let ((inhibit-read-only t))
 	(erase-buffer)
-	(insert (propertize
-			 (format "Session \"%s\" is waiting for your answer\n"
-					 (dsh-bridge--session-label dsh-bridge--question-session))
-			 'face 'bold))
+	(if dsh-bridge--question-dead
+		;; The session is no longer waiting; the resolution banner, if any,
+		;; takes the header's place.
+		(when dsh-bridge--question-banner
+		  (insert (propertize dsh-bridge--question-banner 'face 'error) "\n"))
+	  (insert (propertize
+			   (format "Session \"%s\" is waiting for your answer\n"
+					   (dsh-bridge--session-label dsh-bridge--question-session))
+			   'face 'bold)))
 	;; The buffer itself must say how to work it: the mode docstring is not
 	;; visible, and the keys (RET selects, C-c C-c submits) are not guessable.
 	(insert (substitute-command-keys
 			 (concat
 			  "Mark an option with \\[dsh-bridge--question-toggle-at-point] "
-			  "or its number key; type a custom answer on the `c' row.\n"
+			  "or its number key.  To answer with free text, press "
+			  "\\[dsh-bridge--question-toggle-at-point] on the `c' row "
+			  "(or `c' anywhere in the question): the answer is read in the "
+			  "minibuffer, and an empty entry clears it.  On a single-choice "
+			  "question a custom answer replaces any marked option; on a "
+			  "multi-choice one it accompanies them.\n"
 			  "\\[dsh-bridge--question-skip] skips the question at point, "
 			  "\\[dsh-bridge--question-next] moves between questions.\n"
 			  "\\[dsh-bridge--question-submit] submits your answers, "
@@ -3180,13 +3211,19 @@ so point anywhere in the block identifies the question."
 									(concat " — " desc) "")))
 				(put-text-property start (1- (point)) 'dsh-bridge-option label))))
 		  ;; The custom-answer row is always present (the web UI offers one per
-		  ;; question): RET or `c' prompts for the text.
-		  (let ((start (point)))
-			(insert (format "  [%s] c. %s\n"
-							(if (and custom (not (string-empty-p custom))) "x" " ")
-							(if (and custom (not (string-empty-p custom)))
-								(concat "Custom: " custom)
-							  "Type a custom answer")))
+		  ;; question).  It is drawn as an action, not a checkbox: a `[ ]'
+		  ;; bracket here would read as "mark this to enable typing" even
+		  ;; though RET/`c' simply opens a minibuffer prompt.  The trailing
+		  ;; hint says where the text goes and how to change or clear it.
+		  (let* ((has-custom (and custom (not (string-empty-p custom))))
+				 (start (point)))
+			(insert (format "      c. %s %s\n"
+							(if has-custom
+								(concat "Custom answer: " custom)
+							  "Type a custom answer...")
+							(if has-custom
+								"(RET to edit; empty clears)"
+							  "(RET here or `c')")))
 			(put-text-property start (1- (point)) 'dsh-bridge-option-custom t))
 		  (put-text-property block-start (point) 'dsh-bridge-question-id qid))))
 	(goto-char (point-min))))
@@ -3243,7 +3280,7 @@ the marks (the harness's `matchesQuestions' wire rules)."
   (let* ((question (seq-find (lambda (q) (equal (alist-get 'id q) qid))
 							 dsh-bridge--question-questions))
 		 (current (cdr (assoc qid dsh-bridge--question-custom)))
-		 (text (read-string (format "Custom answer for \"%s\": "
+		 (text (read-string (format "Custom answer for \"%s\" (empty clears): "
 									(or (and question (alist-get 'question question)) ""))
 							current)))
 	(if (string-empty-p text)
@@ -3349,6 +3386,9 @@ empty array, and a single-select custom answer never travels with a selection
 	  (when (null answers)
 		(message "dsh-bridge: not all questions answered"))
 	  (when answers
+		;; Record what this buffer did before the request leaves: the
+		;; resolved frame can outrun the POST's response (see the variable).
+		(setq dsh-bridge--question-sent "Your answer was sent.")
 		(dsh-bridge--call "POST" "/answer"
 		  (append (list (cons 'questionId dsh-bridge--question-id)
 						(cons 'sessionId dsh-bridge--question-session))
@@ -3381,6 +3421,8 @@ empty array, and a single-select custom answer never travels with a selection
   (interactive)
   (if dsh-bridge--question-dead
 	  (message "dsh-bridge: this question was already resolved")
+	(setq dsh-bridge--question-sent
+		  "You declined to answer; the question was cancelled.")
 	(dsh-bridge--call "POST" "/answer"
 	  (list (cons 'questionId dsh-bridge--question-id)
 			(cons 'sessionId dsh-bridge--question-session)
@@ -3433,11 +3475,13 @@ session; otherwise reports that no question is pending."
   "Define `dsh-bridge-question-mode'."
   (define-derived-mode dsh-bridge-question-mode special-mode "DSH-Question"
 	"Major mode for an ask-user question buffer.
-Read-only; mark options with `RET' or an option's number key, type a custom
-answer on the `c' row, skip the question at point with `C-c C-s', move between
-questions with `TAB'.  `C-c C-c' submits the answer, `C-c C-k' declines
-(cancels the tool call), `q' buries without answering (the question stays
-pending and `a' reopens the buffer with any marks intact)."))
+Read-only; mark options with `RET' or an option's number key.  Free text is
+entered in the minibuffer: press `RET' on the `c' row (or `c' anywhere in the
+question) to type a custom answer, and an empty entry clears it.  Skip the
+question at point with `C-c C-s'; move between questions with `TAB'.  `C-c C-c'
+submits the answer, `C-c C-k' declines (cancels the tool call), and `q' buries
+without answering (the question stays pending, and `a' reopens the buffer with
+any marks intact)."))
 (dsh-bridge--define-question-mode)
 
 (defvar dsh-bridge-question-mode-map)

@@ -226,10 +226,12 @@ When the model requests additional user inputs via the
 buffer.  Typing `a` here (or in the DSH-Sessions buffer with point on
 the session) opens a buffer for handling the query.
 
-In this buffer, mark the option(s) you choose with `RET` or the
-option's number key, or type a custom answer.  To submit the answers,
-type `C-c C-c`; alternatively, type `C-c C-k` to decline the query,
-canceling the tool call.
+In this buffer, mark the option(s) you choose with `RET`.  You can
+also navigate to a question block and type your desired option's
+number key, or `c` to write a freeform answer via the minibuffer.
+
+To submit the answers, type `C-c C-c`.  Alternatively, type `C-c C-k`
+to decline the query, canceling the tool call.
 
 ### Sending text from DSH to Emacs
 
