@@ -1898,10 +1898,17 @@ export function apply(ctx: Context): void {
               return
             }
           } else {
-            const snapshot = await sessionPersistence.stat(id)
-            if (snapshot?.header.origin === 'subagent') {
-              sendJson(res, 409, { error: `session ${id} is owned by a subagent` })
-              return
+            // A persistence backend failure degrades the fence rather than
+            // failing the route: the fork seam observes the source itself and
+            // surfaces its own error (the same tolerance `persistedHeaders`
+            // applies).
+            try {
+              if ((await sessionPersistence.stat(id))?.header.origin === 'subagent') {
+                sendJson(res, 409, { error: `session ${id} is owned by a subagent` })
+                return
+              }
+            } catch {
+              // degraded: no cold header to check
             }
           }
           const child = await sessionController.fork({

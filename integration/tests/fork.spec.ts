@@ -16,10 +16,13 @@ import {
 async function runTextTurn(fixture, sessionId, text = 'The reply.') {
   await scriptMock(fixture, [{ kind: 'text', text }])
   const sse = openSse(fixture, { timeoutMs: 10000 })
-  const sent = await post(fixture, '/dsh-bridge/send', { text: 'Say it.', sessionId })
-  expect(sent.status).toBe(200)
-  await sse.waitFor('turn-complete')
-  sse.close()
+  try {
+    const sent = await post(fixture, '/dsh-bridge/send', { text: 'Say it.', sessionId })
+    expect(sent.status).toBe(200)
+    await sse.waitFor('turn-complete')
+  } finally {
+    sse.close()
+  }
 }
 
 describe('branching a turn (POST /dsh-bridge/fork)', () => {
