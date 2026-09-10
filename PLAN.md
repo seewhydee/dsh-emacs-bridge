@@ -36,7 +36,7 @@ for the Elisp) plus the `integration/` seam harness.
   per-turn DSH-View with `M-p`/`M-n`, follow mode and GFM rendering; DSH-Prompt
   composer with prompt history and model selection; SSE consumer with
   reconnect; plugin install/diagnosis.
-- **Session report** (candidate 1, [describe-session-plan.md](describe-session-plan.md)):
+- **Session report** (candidate 1):
   `GET /dsh-bridge/session` reads one session through `ctx.sessionQuery`
   (live or cold, never resuming) and returns identity/lineage plus
   `sessionStats`/`tokenUsage`/`contextPressure`/`contextBreakdown`/
@@ -99,9 +99,7 @@ Ordered by recommended sequence. Harness seams were verified against DSH
 
 ### 1. Session stats in `describe-session` (read-only)
 
-**Implemented** — see [describe-session-plan.md](describe-session-plan.md) and
-the Status list above; the section below is retained as the original design
-record.
+**Implemented**.
 
 Turn the current `D`/sessions-list details buffer into a real session report,
 and make it reachable without going through the sessions list.
