@@ -2152,29 +2152,59 @@ marker."
     (dsh-bridge--view-ticker-ensure)
     (message "dsh-bridge: following the newest turn")))
 
-(defun dsh-bridge--view-open (session-id turn &optional cwd nofollow)
-  "Pop to a DSH-View buffer viewing SESSION-ID, filled with TURN (a record or nil).
-Reuses a live DSH-View buffer already showing SESSION-ID (with a nil
-SESSION-ID, any view not bound to a session); otherwise uses the default
-`*dsh-bridge-output*' buffer, creating it if needed — a default buffer
-showing another session is re-pointed at SESSION-ID, dropping the follow
-state of the session it was showing.  CWD, when non-nil, sets
-the buffer's workspace directory (see `dsh-bridge--apply-session-directory').
-The caller must have refreshed the turns cache already (the fill skips its own
-refresh, so a record filled here is the fresh one).  Turn-following is enabled
-unless NOFOLLOW is non-nil (the fill itself preserves a pre-existing follow
-state when the session is unchanged).  Returns the buffer."
-  (let ((buf (or (dsh-bridge--session-view session-id)
-                 (get-buffer-create "*dsh-bridge-output*"))))
-    (with-current-buffer buf
-      (dsh-bridge--view-fill session-id turn nil cwd t)
-      (unless nofollow
-        (setq-local dsh-bridge--view-follow t))
-      ;; Re-set the header after the follow flag so the `⤓' marker is right.
-      (setq header-line-format (dsh-bridge--view-header-line))
-      (dsh-bridge--view-ticker-ensure))
-    (pop-to-buffer buf)
-    buf))
+(defun dsh-bridge--view-open (session-alist &optional same-window)
+  "Pop to a DSH-View buffer showing the session described by SESSION-ALIST.
+SESSION-ALIST is the body of a successful \"GET /dsh-bridge/turns\"
+response, and has a different format from the session alists stored in
+`dsh-bridge--sessions-cache':
+
+- `sessionId' (string, required): the session the response describes.
+- `turns' (list, optional): the turn records, newest first, each having
+  the form of an alist.
+- `epoch' (number, optional): a ms timestamp.
+- `running' (boolean, optional): whether the agent is mid-turn.  Its
+  presence (not truthiness) seeds the status tracker.
+- `title' (string, optional) and `cwd' (string, optional): display title
+  and workspace directory (used for our display cache).
+
+This function reuses a live DSH-View buffer already showing the session,
+else a `*dsh-bridge-output*' buffer.  If SAME-WINDOW is non-nil, prefer
+to pop to the buffer using the same window.  Return the buffer."
+  (let ((id (alist-get 'sessionId session-alist)))
+	(unless id
+	  (error "dsh-bridge: /turns response has no sessionId"))
+	(let* ((running-pair (assoc 'running session-alist))
+		   (running (eq (cdr-safe running-pair) t))
+		   (turns-pair (assoc 'turns session-alist))
+		   (turns (cdr-safe turns-pair))
+		   (follow (or (and turns
+							(dsh-bridge--view-turn-open-p (car-safe turns)))
+					   running))
+		   (cwd (alist-get 'cwd session-alist))
+		   (buffer (or (dsh-bridge--session-view id)
+					   (get-buffer-create "*dsh-bridge-output*"))))
+	  ;; Seed the status tracker when the field is present.
+	  ;; JSON `false' decodes to nil, so compare value against t.
+	  (when running-pair
+		(dsh-bridge--status-set id (if running 'running 'idle)))
+	  ;; Cache the whole turns array: an explicit empty list is a
+	  ;; known-empty entry that replaces a stale one.
+	  (when turns-pair
+		(dsh-bridge--turns-cache-store id turns
+									   (alist-get 'epoch session-alist)))
+	  (with-current-buffer buffer
+		(dsh-bridge--view-fill id (car-safe turns) nil cwd t)
+		(when follow
+		  (setq-local dsh-bridge--view-follow t))
+		;; Re-set header after the follow flag so `⤓' marker is right.
+		(setq header-line-format (dsh-bridge--view-header-line))
+		(dsh-bridge--view-ticker-ensure)
+		(setq-local dsh-bridge--view-waiting nil))
+	  (funcall (if same-window
+				   #'pop-to-buffer-same-window
+				 #'pop-to-buffer)
+			   buffer)
+	  buffer)))
 
 (defun dsh-bridge--view-follow-refill (session-id)
   "Refill every DSH-View buffer following SESSION-ID with its newest turn.
@@ -2737,51 +2767,27 @@ only.  Whole-buffer drafts confirm exactly like whole-buffer sends."
 	(dsh-bridge-send-draft (dsh-bridge--region-or-buffer) session-id)))
 
 ;;;###autoload
-(defun dsh-bridge-fetch (&optional session-id)
+(defun dsh-bridge-fetch (&optional session-id same-window)
   "Fetch the latest DSH turn and show it in a DSH-View buffer.
-The session is the effective session of the current buffer; with a prefix
-argument, fetch from a chosen session for this call only.
-
-In a DSH-View buffer, `\\[revert-buffer]' re-fetches the latest turn.
-If that turn is still running, this turns on turn-following state."
+The session is the effective session of the current buffer; with a
+prefix argument, fetch from a chosen session for this call only.
+If SAME-WINDOW is non-nil, prefer to show the buffer in the same window."
   (interactive (list (dsh-bridge--read-session-override "Fetch from session: ")))
   (let ((target (or session-id (dsh-bridge--effective-session))))
 	(dsh-bridge--call "GET" (dsh-bridge--path "/turns" target) nil
-	 (lambda (status body http-status)
-	   (let* ((alist (dsh-bridge--parse-json-body body))
-			  (err (dsh-bridge--error-message status http-status alist))
-			  shown-id turns-pair turns buf)
-		 (cond
-		  (err
-		   (message "dsh-bridge: %s" err))
-		  ((null alist)
-		   (message "dsh-bridge: unreadable response: %s" body))
-		  (t
-		   (unless target
-			 (dsh-bridge--record-last-resolved alist))
-		   (when (setq shown-id
-					   (or (alist-get 'sessionId alist) target))
-			 ;; Seed status tracker from running flag (if present).
-			 ;; Note: JSON "false" decodes to nil and "true" to t.
-			 (let ((running-pair (assoc 'running alist)))
-			   (when running-pair
-				 (dsh-bridge--status-set shown-id
-										 (if (eq (cdr running-pair) t)
-											 'running 'idle))))
-			 ;; Cache the extracted turns array, if present.
-			 (when (setq turns-pair (assoc 'turns alist))
-			   (setq turns (cdr turns-pair))
-			   (dsh-bridge--turns-cache-store shown-id turns
-											  (alist-get 'epoch alist)))
-			 ;; Show what the host has now, whatever it is.
-			 (let ((follow (or (and turns
-									(dsh-bridge--view-turn-open-p (car-safe turns)))
-							   (eq (cdr (assoc 'running alist)) t))))
-			   (setq buf (dsh-bridge--view-open shown-id (car-safe turns)
-												(alist-get 'cwd alist)
-												(not follow))))
-			 (with-current-buffer buf
-			   (setq-local dsh-bridge--view-waiting nil))))))))))
+      (lambda (status body http-status)
+		(let* ((alist (dsh-bridge--parse-json-body body))
+			   (err (dsh-bridge--error-message status http-status alist)))
+		  (cond
+		   (err
+			(message "dsh-bridge: %s" err))
+		   ((null alist)
+			(message "dsh-bridge: unreadable response: %s" body))
+		   (t
+			;; A nil target is resolved by the host: record it for display.
+			(unless target
+			  (dsh-bridge--record-last-resolved alist))
+			(dsh-bridge--view-open alist same-window))))))))
 
 ;;;###autoload
 (defun dsh-bridge-receive ()
@@ -4055,7 +4061,7 @@ notifications."
 	 :help "Set the default target to the session under point"]
 	["Clear Default Target" dsh-bridge-clear-default-target
 	 :help "Clear the default target (use last-active)"]
-	["Peek Latest Turn" dsh-bridge-peek-session
+	["View Latest Turn" dsh-bridge-peek-session
 	 :help "Fetch the session's latest turn without changing anything"]
 	["Show/Hide Archived" dsh-bridge-toggle-archived-sessions
 	 :help "Toggle whether archived sessions are shown"]
@@ -4114,17 +4120,17 @@ leaving the not-known report to the caller."
 	 (t nil))))
 
 (defun dsh-bridge-open-session ()
-  "Open the session under point: bind the prompt buffer to it and pop it up.
-A saved (cold) session is resumed first (echoing \"resuming…\"), matching the
-web UI's implicit-resume model.	 The default target is not changed."
+  "In a DSH-Sessions buffer, open a prompt for the session under point.
+If the session is saved (cold), resume it first.  This command does not
+change the default target session."
   (interactive)
   (let ((id (tabulated-list-get-id)))
 	(cond
 	 ((null id)
 	  (message "dsh-bridge: no session under point"))
 	 ((dsh-bridge--ensure-session-live id)
-	  (pop-to-buffer (dsh-bridge--prompt-buffer id)
-					 dsh-bridge-prompt-display-action))
+	  (pop-to-buffer-same-window (dsh-bridge--prompt-buffer id)
+								 dsh-bridge-prompt-display-action))
 	 (t
 	  ;; A failed resume already echoed the host's error; only an id
 	  ;; the cache does not know at all gets the not-known message.
@@ -4144,14 +4150,11 @@ A saved (cold) session is resumed first, so the target is live once bound."
 		(dsh-bridge--warn-if-unknown-session id)))))
 
 (defun dsh-bridge-peek-session ()
-  "Fetch the session under point's latest turn into a DSH-View buffer.
-Nothing is changed: not the default target, not the prompt buffer's binding
-(a one-shot fetch, like `C-u dsh-bridge-fetch'; a still-running turn is
-followed automatically, as with any fetch)."
+  "In a DSH-Sesssions buffer, view the session under point in a DSH-View buffer."
   (interactive)
   (let ((id (tabulated-list-get-id)))
 	(if id
-		(dsh-bridge-fetch id)
+		(dsh-bridge-fetch id t)
 	  (message "dsh-bridge: no session under point"))))
 
 (defun dsh-bridge-toggle-archived-sessions ()
@@ -4407,9 +4410,11 @@ DSH-Prompt buffer, `D' re-describes the session.")
 
 (defun dsh-bridge--describe-section (title)
   "Insert a page separator and TITLE as a section heading.
-The form feed makes `help-mode''s `n'/`p' walk the report's sections."
+The form feed makes `help-mode''s `n'/`p' walk the report's sections, and
+its line is the single blank line between sections; the zero-width
+`display' property keeps the `^L' glyph from showing."
   (unless (= (point) (point-min))
-	(insert "\n\n\f\n"))
+	(insert (propertize "\f" 'display "") "\n"))
   (insert (propertize title 'face 'dsh-bridge-describe-heading-face) "\n"))
 
 (defun dsh-bridge--describe-row (label value &optional help)

@@ -579,6 +579,34 @@ later incremental requests see every turn."
       (should (equal (alist-get 'turn (cadr cached)) 2)))
     (kill-buffer "*dsh-bridge-output*")))
 
+(ert-deftest dsh-bridge-fetch-last-resolved-recording ()
+  "A nil-target fetch records the host-resolved session for display; an
+explicit target is not the host's resolution, so nothing is recorded."
+  (dolist (case (list (cons nil t) (cons "s1" nil)))
+    (let ((dsh-bridge-default-session (car case))
+          (dsh-bridge--last-resolved-active nil))
+      (cl-letf (((symbol-function 'dsh-bridge--call)
+                 (lambda (_method _path _payload callback)
+                   (funcall callback nil
+                            "{\"sessionId\":\"s1\",\"title\":\"T\",\"turns\":[]}"
+                            200)))
+                ((symbol-function 'dsh-bridge--request)
+                 (lambda (&rest _) (cons nil nil))))
+        (dsh-bridge-fetch))
+      (if (cdr case)
+          (should (equal dsh-bridge--last-resolved-active '("s1" . "T")))
+        (should (null dsh-bridge--last-resolved-active)))
+      (kill-buffer "*dsh-bridge-output*"))))
+
+(ert-deftest dsh-bridge-fetch-missing-session-id-signals ()
+  "A `/turns' response without a sessionId is a protocol error: the view is
+not opened and no guessed target is used."
+  (let ((dsh-bridge-default-session "s1"))
+    (cl-letf (((symbol-function 'dsh-bridge--call)
+               (lambda (_method _path _payload callback)
+                 (funcall callback nil "{\"turns\":[]}" 200))))
+      (should-error (dsh-bridge-fetch) :type 'error))))
+
 (ert-deftest dsh-bridge-apply-session-directory ()
   "The helper sets default-directory (trailing slash), with cache fallback."
   (with-temp-buffer
@@ -3600,7 +3628,7 @@ re-renders the surfaces, and announces it."
       (dsh-bridge-send-text "hello" "s1"))
     (should (eq (dsh-bridge--status-state "s1") 'running))
     (should (equal rendered '("s1")))
-    (should (string-match-p "thinking…" msg))))
+    (should (string-match-p "prompt sent" msg))))
 
 (ert-deftest dsh-bridge-prompt-blank ()
   "`dsh-bridge--prompt-blank' clears the prompt buffer and resets its navigation,
@@ -4336,8 +4364,16 @@ parent-session link describes the parent."
         (should (string-match-p "Next request\\s-+123,456 / 200,000 (61\\.7%)" text))
         (should (string-match-p "Workspace write" text))
         (should (string-match-p "Model M" text)))
-      ;; Sections are help-mode pages.
+      ;; Sections are help-mode pages; the form feed stays in the buffer so
+      ;; `n'/`p' page navigation works, but its `^L' glyph is display-hidden.
       (should (string-match-p "\f" (buffer-string)))
+      (goto-char (point-min))
+      (should (search-forward "\f" nil t))
+      (should (equal (get-text-property (1- (point)) 'display) ""))
+      ;; The delimiter's own line is the single blank line between sections:
+      ;; exactly one newline separates the previous row from the form feed.
+      (should (string-match-p "\n\f\n" (buffer-string)))
+      (should-not (string-match-p "\n\n\f" (buffer-string)))
       (should (next-button (point-min))))))
 
 (ert-deftest dsh-bridge-describe-session-buffer-session ()
