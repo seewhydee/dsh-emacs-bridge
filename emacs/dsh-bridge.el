@@ -309,7 +309,11 @@ This is initialized by the option `dsh-bridge-sessions-show-archived',
 and toggled by `\\[dsh-bridge-toggle-archived-sessions]'.")
 
 (defvar dsh-bridge--session-status nil
-  "Alist of (SESSION-ID . running|idle) live session status, or nil.
+  "Alist of (SESSION-ID STATE . START-MS) live session status, or nil.
+STATE is `running' or `idle'.  START-MS is the ms-epoch time of the
+session's turn start; it is present only while STATE is `running' and a
+start time was recorded.
+
 This variable is seeded from the host's sessions list, and updated based
 on turn-start/turn-complete frames in the notification stream.")
 
@@ -353,8 +357,8 @@ see any \"turn-start\" frame for the session."
 Saved (cold) sessions are always `unknown'; for others, the result is
 obtained by trying to look up the cached `dsh-bridge--session-status',
 then the cached session data's `running' flag, and finally falling back
-on `unknown'.  No active retrieval is done.  The status tracker entry is
-(SESSION-ID . (STATE . START-MS)), where START-MS may be nil."
+on `unknown'.  No active retrieval is done.  See
+`dsh-bridge--session-status' for the tracker entry shape."
   (let ((row (and session-id (dsh-bridge--session-for-id session-id))))
 	(or (and row (not (alist-get 'live row)) 'unknown)
 		(and session-id
@@ -1735,20 +1739,27 @@ success branch of the send, after the history is recorded."
 		   (err (message "dsh-bridge: %s" err))
 		   ((null alist)
 			(message "dsh-bridge: unreadable response: %s" body))
-		   (t (let ((sent-id (alist-get 'sessionId alist)))
-				;; Optimistically mark the sent session running so the header
-				;; and sessions row flip immediately — the SSE `turn-start`
-				;; round-trip usually arrives a moment later.  A turn that
-				;; fails to start is corrected by its `turn-complete'/error.
+		   (t
+			;; The session id in the response is authoritative,
+			;; falling back to the requested target.  When neither
+			;; names a session, the prompt is still reported as sent,
+			;; but no session state is recorded or rendered.
+			(let ((sent-id (or (alist-get 'sessionId alist) target)))
+			  (if (null sent-id)
+				  (message "dsh-bridge: prompt sent, but host reported no session")
+				;; Optimistically mark the session as running so the
+				;; header and sessions row flip immediately.  The SSE
+				;; `turn-start' round-trip usually arrives shortly.  A
+				;; turn that fails to start is corrected later.
 				(dsh-bridge--status-set sent-id 'running)
 				(dsh-bridge--status-event-render sent-id)
 				(message "dsh-bridge: prompt sent")
 				(when (null target)
 				  ;; The host resolved last-active itself: record it.
 				  (dsh-bridge--record-last-resolved alist))
-				(dsh-bridge--prompt-history-record-send sent-id text)
-				(when (functionp on-success)
-				  (funcall on-success sent-id))))))))))
+				(dsh-bridge--prompt-history-record-send sent-id text))
+			  (when (functionp on-success)
+				(funcall on-success sent-id))))))))))
 
 (defun dsh-bridge-send-draft (text &optional session-id)
   "Send TEXT to the DSH composer as a draft (not submitted).
@@ -2894,20 +2905,22 @@ the same session, and dropped when the shown session changes."
   (dsh-bridge--view-ticker-ensure))
 
 (defun dsh-bridge--display-received (entries)
-  "Display the newest entry of ENTRIES (oldest-first list) in a DSH-View buffer.
-Reuses a view already showing the entry's session, else the default
-`*dsh-bridge-output*' buffer; fills without selecting it (selection is the
-caller's business) and returns the filled buffer.  Sets the content session
-from the entry's `sessionId' and the header's sent time from the entry's own
-`ts'.  A pushed message has no turn identity, so the fill is the raw text
-(no divider lines, no `(k/n)' position).  The workspace follows the session
-when the cache knows it (outbox entries carry no `cwd', so this is
-best-effort)."
+  "Display the newest entry of ENTRIES (an oldest-first list).
+Reuses a DSH-View buffer (one already showing the entry's session, else
+a buffer named `*dsh-bridge-output*'), fills it, and returns the buffer.
+
+The content session is the entry's `sessionId', falling back to the
+current buffer's session when the host omitted it.  When neither is
+known, the default buffer is used."
   (let* ((entry (car (last entries)))
-		 (session-id (alist-get 'sessionId entry))
+		 (entry-id (alist-get 'sessionId entry))
+		 (session-id (or entry-id (dsh-bridge--buffer-session)))
 		 (text (or (alist-get 'text entry) ""))
-		 (buf (or (dsh-bridge--session-view session-id)
-				  (get-buffer-create "*dsh-bridge-output*"))))
+		 (buf (if session-id (dsh-bridge--session-view session-id))))
+	(unless buf
+	  (setq buf (get-buffer-create "*dsh-bridge-output*")))
+	(unless entry-id
+	  (message "dsh-bridge: message received without a session id"))
 	(with-current-buffer buf
 	  (dsh-bridge--view-fill session-id text (alist-get 'ts entry))
 	  ;; A pushed message supersedes any waiting placeholder.

@@ -157,8 +157,11 @@ round-trip."
   "The dispatcher header labels the effective session with the right qualifier.
 A leading space (protecting the status glyph from the menu cursor) is
 present iff the indicator style produces a glyph."
-  (let ((dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t))))
-        (dsh-bridge--session-status '(("s1" . idle)))
+  (let ((dsh-bridge--sessions-cache
+         '(((id . "s1") (title . "T") (live . t) (running . t))))
+        ;; The tracker outranks the row's `running' flag for a live session,
+        ;; so the idle glyph below proves the tracker entry is consulted.
+        (dsh-bridge--session-status '(("s1" idle)))
         (dsh-bridge-status-indicator 'geometric))
     ;; Bound buffer session: plain label.
     (with-temp-buffer
@@ -238,6 +241,42 @@ recorded."
                           200))))
       (dsh-bridge-send-text "hello"))
     (should (null dsh-bridge--last-resolved-active))))
+
+(ert-deftest dsh-bridge-send-text-missing-response-session ()
+  "A response without a `sessionId' falls back to the requested target; with
+neither, the send is still reported but no session state is touched."
+  ;; Explicit target: the fallback keeps the normal bookkeeping.
+  (let ((dsh-bridge-default-session "s1")
+        (dsh-bridge--session-status nil)
+        (dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t))))
+        (dsh-bridge--prompt-history nil)
+        (dsh-bridge--last-sent nil)
+        (sent 'uncalled)
+        (msg nil))
+    (cl-letf (((symbol-function 'dsh-bridge--call)
+               (lambda (_method _path _payload callback)
+                 (funcall callback nil "{\"ok\":true}" 200)))
+              ((symbol-function 'message)
+               (lambda (&rest args) (setq msg (apply #'format args)))))
+      (dsh-bridge-send-text "hello" nil (lambda (id) (setq sent id))))
+    (should (equal sent "s1"))
+    (should (eq (dsh-bridge--status-state "s1") 'running))
+    (should (string-match-p "prompt sent" msg)))
+  ;; No target at all: the host named no session, so nothing is tracked or
+  ;; rendered, but the prompt is still reported as sent.
+  (let ((dsh-bridge-default-session nil)
+        (dsh-bridge--session-status nil)
+        (sent 'uncalled)
+        (msg nil))
+    (cl-letf (((symbol-function 'dsh-bridge--call)
+               (lambda (_method _path _payload callback)
+                 (funcall callback nil "{\"ok\":true}" 200)))
+              ((symbol-function 'message)
+               (lambda (&rest args) (setq msg (apply #'format args)))))
+      (dsh-bridge-send-text "hello" nil (lambda (id) (setq sent id))))
+    (should (null sent))
+    (should (null dsh-bridge--session-status))
+    (should (string-match-p "no session" msg))))
 
 ;;; Session labels
 
@@ -1130,6 +1169,55 @@ selecting it."
     (with-current-buffer "*dsh-bridge-output*"
       (should (equal default-directory "/w/sess2/")))))
 
+(ert-deftest dsh-bridge-receive-missing-session-id-uses-buffer-session ()
+  "An outbox entry without a `sessionId' falls back to the current buffer's
+session and reports the missing id."
+  (let ((msgs nil))
+    (cl-letf (((symbol-function 'dsh-bridge--request)
+               (lambda (method _path _payload)
+                 (cond ((equal method "GET")
+                        (cons 200 (list (cons 'entries
+                                              (list (list (cons 'id "e1")
+                                                          (cons 'text "pushed")
+                                                          (cons 'ts 1000000)))))))
+                       (t (cons 200 (list (cons 'ok t)))))))
+              ((symbol-function 'message)
+               (lambda (&rest args) (push (apply #'format args) msgs))))
+      (with-current-buffer (get-buffer-create "*dsh-bridge-output*")
+        (dsh-bridge-view-mode)
+        (setq-local dsh-bridge--view-content-session "s9")
+        (dsh-bridge-receive)))
+    (with-current-buffer "*dsh-bridge-output*"
+      (should (equal (buffer-string) "pushed"))
+      (should (equal dsh-bridge--view-content-session "s9")))
+    (should (seq-some (lambda (m) (string-match-p "without a session id" m)) msgs))
+    (kill-buffer "*dsh-bridge-output*")))
+
+(ert-deftest dsh-bridge-receive-missing-session-id-defaults-to-output ()
+  "With no session id and no buffer session, receive fills the default output
+buffer and reports the missing id."
+  (let ((msgs nil)
+        (dsh-bridge--sessions-cache nil))
+    (when (get-buffer "*dsh-bridge-output*")
+      (kill-buffer "*dsh-bridge-output*"))
+    (cl-letf (((symbol-function 'dsh-bridge--request)
+               (lambda (method _path _payload)
+                 (cond ((equal method "GET")
+                        (cons 200 (list (cons 'entries
+                                              (list (list (cons 'id "e1")
+                                                          (cons 'text "orphan")
+                                                          (cons 'ts 1000000)))))))
+                       (t (cons 200 (list (cons 'ok t)))))))
+              ((symbol-function 'message)
+               (lambda (&rest args) (push (apply #'format args) msgs))))
+      (with-temp-buffer
+        (dsh-bridge-receive)))
+    (with-current-buffer "*dsh-bridge-output*"
+      (should (equal (buffer-string) "orphan"))
+      (should (null dsh-bridge--view-content-session)))
+    (should (seq-some (lambda (m) (string-match-p "without a session id" m)) msgs))
+    (kill-buffer "*dsh-bridge-output*")))
+
 ;;; Turn navigation (M-p / M-n in the output buffer)
 
 ;; Navigation and view fixtures use turn records shaped like
@@ -1846,7 +1934,7 @@ a filled circle for an idle live session, a filled square for a running one,
 success: the fetch returns (200 . nil), clears the stale sessions cache, and
 empties the status tracker (a wiped roster must not linger)."
   (let ((dsh-bridge--sessions-cache '(((id . "old") (live . t))))
-        (dsh-bridge--session-status '(("old" . idle))))
+        (dsh-bridge--session-status '(("old" idle))))
     (cl-letf (((symbol-function 'dsh-bridge--request)
                (lambda (&rest _) (cons 200 (list (cons 'sessions nil))))))
       (let ((fetch (dsh-bridge--fetch-sessions)))
