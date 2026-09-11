@@ -1159,7 +1159,7 @@ joined by blank lines, without the divider lines — when the turn is cached."
       (dsh-bridge-view-mode)
       (setq-local dsh-bridge--view-content-session "s1")
       (let ((inhibit-read-only t))
-        (insert (dsh-bridge--view-turn-render turn)))
+        (insert (dsh-bridge-test--view-turn-render turn)))
       (setq-local dsh-bridge--view-turn (alist-get 'turn turn))
       (dsh-bridge-copy-reply)
       (should (equal (current-kill 0) "newest first\n\nnewest second")))))
@@ -1170,7 +1170,7 @@ is no longer in the cached turn list (e.g. after a compaction)."
   ;; The cache holds only turns 20 and 10; the view still shows turn 30.
   (let ((dsh-bridge--turns-cache
          (dsh-bridge-test--view-cache (cdr dsh-bridge-test--view-turns)))
-        (rendered (dsh-bridge--view-turn-render
+        (rendered (dsh-bridge-test--view-turn-render
                    (nth 0 dsh-bridge-test--view-turns))))
     (with-temp-buffer
       (dsh-bridge-view-mode)
@@ -1371,14 +1371,27 @@ The turn is open (running) unless ENDED-AT is given; REASON defaults to
               (cons 'epoch 0)
               (cons 'incremental nil))))
 
+;; The package renders a turn's body and terminal suffix separately (the
+;; incremental fill needs them apart), so the whole-turn render the tests
+;; assert against is composed here.
+
+(defun dsh-bridge-test--view-turn-render (turn &optional session-id)
+  "Buffer text for the whole TURN record, or \"\" for nil.
+A test-local composition of `dsh-bridge--view-turn-body' and
+`dsh-bridge--view-turn-suffix'."
+  (if (null turn)
+      ""
+    (concat (dsh-bridge--view-turn-body turn)
+            (dsh-bridge--view-turn-suffix turn session-id))))
+
 (defconst dsh-bridge-test--view-newest-rendered
-  (dsh-bridge--view-turn-render (nth 0 dsh-bridge-test--view-turns)))
+  (dsh-bridge-test--view-turn-render (nth 0 dsh-bridge-test--view-turns)))
 
 (defconst dsh-bridge-test--view-middle-rendered
-  (dsh-bridge--view-turn-render (nth 1 dsh-bridge-test--view-turns)))
+  (dsh-bridge-test--view-turn-render (nth 1 dsh-bridge-test--view-turns)))
 
 (defconst dsh-bridge-test--view-oldest-rendered
-  (dsh-bridge--view-turn-render (nth 2 dsh-bridge-test--view-turns)))
+  (dsh-bridge-test--view-turn-render (nth 2 dsh-bridge-test--view-turns)))
 
 (defun dsh-bridge-test--view-cache (turns &optional epoch)
   "A `dsh-bridge--turns-cache' alist for session \"s1\": TURNS (newest first)
@@ -1404,7 +1417,7 @@ after its last segment."
       (dsh-bridge-view-mode)
       (setq-local dsh-bridge--view-content-session "s1")
       (let ((inhibit-read-only t))
-        (insert (dsh-bridge--view-turn-render newest))
+        (insert (dsh-bridge-test--view-turn-render newest))
         (setq-local dsh-bridge--view-turn (alist-get 'turn newest)))
       (cl-letf (((symbol-function 'dsh-bridge--request)
                  (lambda (method path _payload)
@@ -1491,36 +1504,37 @@ turn ends cleanly after its last segment."
         (aborted (dsh-bridge-test--view-turn 50 5000000
                   (list (dsh-bridge-test--view-segment "partial" 5001000 1))
                   5001000 "aborted"))
-        (marker (dsh-bridge--view-running-marker)))
+        (marker dsh-bridge--view-running-marker))
     ;; Two segments, completed: rule-only boundary, no label, no footer.
-    (should (equal (dsh-bridge--view-turn-render multi) "a\n\n---\nb"))
+    (should (equal (dsh-bridge-test--view-turn-render multi) "a\n\n---\nb"))
     ;; A running turn ends with the marker after its last segment.
-    (should (equal (dsh-bridge--view-turn-render open)
+    (should (equal (dsh-bridge-test--view-turn-render open)
                    (concat "growing\n\n" marker)))
-    (should (equal (dsh-bridge--view-turn-render open-multi)
+    (should (equal (dsh-bridge-test--view-turn-render open-multi)
                    (concat "a\n\n---\nb\n\n" marker)))
     ;; The marker is propertized, so it reads as furniture, never model text.
-    (let ((rendered (dsh-bridge--view-turn-render open)))
+    (let ((rendered (dsh-bridge-test--view-turn-render open)))
       (should (text-property-any 0 (length rendered)
                                  'dsh-bridge-turn-marker t rendered))
       (should (eq (get-text-property 0 'face marker)
                   'dsh-bridge-view-marker-face)))
     ;; A completed turn — even an abnormal one — ends cleanly.
-    (should (equal (dsh-bridge--view-turn-render aborted) "partial"))
+    (should (equal (dsh-bridge-test--view-turn-render aborted) "partial"))
     ;; nil renders empty.
-    (should (equal (dsh-bridge--view-turn-render nil) ""))))
+    (should (equal (dsh-bridge-test--view-turn-render nil) ""))))
 
 (ert-deftest dsh-bridge-view-fill-append-preserves-point ()
-  "Refilling a growing turn preserves point: the running-turn marker at the
-end gives way to the next segment's `---', and point inside the earlier
-content survives.  Replacing the shown turn resets point."
-  (let ((one (dsh-bridge-test--view-turn 7 7000000
+  "Refilling a growing turn splices: point inside the earlier content
+survives, while point parked at the end follows the new tail.  Replacing the
+shown turn resets point."
+  (let* ((one (dsh-bridge-test--view-turn 7 7000000
               (list (dsh-bridge-test--view-segment "first" 7001000 1))))
         (two (dsh-bridge-test--view-turn 7 7000000
               (list (dsh-bridge-test--view-segment "first" 7001000 1)
                     (dsh-bridge-test--view-segment "second" 7002000 2))))
         (other (dsh-bridge-test--view-turn 8 8000000
-                (list (dsh-bridge-test--view-segment "other turn" 8001000 1)))))
+                (list (dsh-bridge-test--view-segment "other turn" 8001000 1))))
+        (dsh-bridge--turns-cache (dsh-bridge-test--view-cache (list two one))))
     (with-temp-buffer
       (dsh-bridge-view-mode)
       (dsh-bridge--view-fill "s1" one nil nil t)
@@ -1528,17 +1542,159 @@ content survives.  Replacing the shown turn resets point."
       (goto-char 3)
       (dsh-bridge--view-fill "s1" two nil nil t t)
       (should (equal (point) 3))
-      (should (equal (buffer-string) (dsh-bridge--view-turn-render two)))
-      ;; Point parked at the very end (behind the marker) clamps to the end
-      ;; of the older content rather than jumping into the appended segment.
+      (should (equal (buffer-string) (dsh-bridge-test--view-turn-render two)))
+      ;; Point parked at the very end follows the new tail rather than
+      ;; staying behind the appended segment.
       (goto-char (point-max))
-      (let ((core-end (1+ (length (dsh-bridge--view-strip-running-marker
-                                   (dsh-bridge--view-turn-render two))))))
-        (dsh-bridge--view-fill "s1" two nil nil t t)
-        (should (equal (point) core-end)))
+      (dsh-bridge--view-fill "s1" two nil nil t t)
+      (should (equal (point) (point-max)))
+      (should (equal (buffer-string) (dsh-bridge-test--view-turn-render two)))
       ;; A different turn is a swap, not an append: point goes to the top.
       (dsh-bridge--view-fill "s1" other nil nil t)
       (should (equal (point) (point-min))))))
+
+(ert-deftest dsh-bridge-view-fill-splices-and-tails ()
+  "An append leaves earlier text byte-identical and tails the window when
+point sits at the end; completion drops the terminal marker and its blank
+line without resetting point.  The spliced body always equals the reference
+render."
+  (let* ((seg1 (dsh-bridge-test--view-segment "first" 7001000 1))
+         (seg2 (dsh-bridge-test--view-segment "second" 7002000 2))
+         (open (dsh-bridge-test--view-turn 7 7000000 (list seg1)))
+         (two (dsh-bridge-test--view-turn 7 7000000 (list seg1 seg2)))
+         (done (dsh-bridge-test--view-turn 7 7000000 (list seg1 seg2) 7003000))
+         (dsh-bridge--turns-cache
+          (dsh-bridge-test--view-cache (list done two open))))
+    (with-temp-buffer
+      (dsh-bridge-view-mode)
+      (dsh-bridge--view-fill "s1" open nil nil t)
+      (setq-local dsh-bridge--view-follow t)
+      (goto-char (point-max))
+      (dsh-bridge--view-fill "s1" two nil nil t t)
+      (should (equal (buffer-string) (dsh-bridge-test--view-turn-render two "s1")))
+      (should (equal (point) (point-max)))
+      (should (equal (how-many "(continuing\\.\\.\\.)" (point-min) (point-max))
+                     1))
+      ;; A mid-body reader is untouched by the next append.
+      (goto-char 3)
+      (dsh-bridge--view-fill "s1" two nil nil t t)
+      (should (equal (point) 3))
+      ;; Completion drops the marker and its blank line, keeping the tail.
+      (goto-char (point-max))
+      (dsh-bridge--view-fill "s1" done nil nil t t)
+      (should (equal (buffer-string) (dsh-bridge-test--view-turn-render done "s1")))
+      (should (equal (point) (point-max)))
+      (should-not (text-property-any (point-min) (point-max)
+                                     'dsh-bridge-turn-marker t)))))
+
+(ert-deftest dsh-bridge-view-fill-falls-back-on-divergence ()
+  "Every provenance mismatch rebuilds the whole body instead of splicing.
+A text marker planted in the body survives a splice and collapses to
+`point-min' on a rebuild, which distinguishes the two."
+  (let* ((seg1 (dsh-bridge-test--view-segment "first" 7001000 1))
+         (seg2 (dsh-bridge-test--view-segment "second" 7002000 2))
+         (one (dsh-bridge-test--view-turn 7 7000000 (list seg1)))
+         (two (dsh-bridge-test--view-turn 7 7000000 (list seg1 seg2)))
+         (gap (dsh-bridge-test--view-turn 7 7000000 (list seg2)))
+         (other (dsh-bridge-test--view-turn 8 8000000 (list seg1)))
+         (dsh-bridge--turns-cache (dsh-bridge-test--view-cache (list two one))))
+    (with-temp-buffer
+      (dsh-bridge-view-mode)
+      (setq-local dsh-bridge--view-follow t)
+      (cl-labels ((refill (turn)
+                    (dsh-bridge--view-fill "s1" turn nil nil t t)
+                    (equal (buffer-string)
+                           (dsh-bridge-test--view-turn-render turn "s1"))))
+        ;; Control: equal epoch and a prefix -> splice keeps the marker.
+        (refill one)
+        (let ((probe (copy-marker 3)))
+          (should (refill two))
+          (should (equal (marker-position probe) 3))
+          (set-marker probe nil))
+        ;; Epoch changed -> rebuild.
+        (refill one)
+        (let ((probe (copy-marker 3))
+              (dsh-bridge--turns-cache
+               (dsh-bridge-test--view-cache (list two one) 1)))
+          (should (refill two))
+          (should (equal (marker-position probe) (point-min)))
+          (set-marker probe nil))
+        ;; Non-numeric epoch -> rebuild.
+        (refill one)
+        (let ((probe (copy-marker 3))
+              (dsh-bridge--turns-cache
+               (list (cons "s1" (cons nil (list two one))))))
+          (should (refill two))
+          (should (equal (marker-position probe) (point-min)))
+          (set-marker probe nil))
+        ;; A segment-key gap -> rebuild.
+        (refill one)
+        (let ((probe (copy-marker 3)))
+          (should (refill gap))
+          (should (equal (marker-position probe) (point-min)))
+          (set-marker probe nil))
+        ;; Buffer drift -> rebuild.
+        (refill one)
+        (let ((probe (copy-marker 3)))
+          (let ((inhibit-read-only t))
+            (goto-char (point-min))
+            (delete-char 1))
+          (should (refill two))
+          (should (equal (marker-position probe) (point-min)))
+          (set-marker probe nil))
+        ;; A different turn -> rebuild.
+        (refill one)
+        (let ((probe (copy-marker 3)))
+          (should (refill other))
+          (should (equal (marker-position probe) (point-min)))
+          (set-marker probe nil))))))
+
+(ert-deftest dsh-bridge-view-fill-provenance ()
+  "A record fill records the render provenance, a splice extends it, and the
+waiting placeholder clears it."
+  (let* ((seg1 (dsh-bridge-test--view-segment "first" 7001000 1))
+         (seg2 (dsh-bridge-test--view-segment "second" 7002000 2))
+         (one (dsh-bridge-test--view-turn 7 7000000 (list seg1)))
+         (two (dsh-bridge-test--view-turn 7 7000000 (list seg1 seg2)))
+         (dsh-bridge--turns-cache (dsh-bridge-test--view-cache (list two one))))
+    (with-temp-buffer
+      (dsh-bridge-view-mode)
+      (dsh-bridge--view-fill "s1" one nil nil t)
+      (let ((prov dsh-bridge--view-provenance))
+        (should (equal (plist-get prov :session) "s1"))
+        (should (equal (plist-get prov :epoch) 0))
+        (should (equal (plist-get prov :turn) 7))
+        (should (plist-get prov :open))
+        (should (equal (plist-get prov :keys) '((1 . 7001000))))
+        (should (equal (plist-get prov :body-length) 5))
+        (should (> (plist-get prov :tail-length) 0)))
+      (dsh-bridge--view-fill "s1" two nil nil t t)
+      (let ((prov dsh-bridge--view-provenance))
+        (should (equal (plist-get prov :keys)
+                       '((1 . 7001000) (2 . 7002000))))
+        (should (equal (plist-get prov :body-length)
+                       (length (dsh-bridge--view-turn-body two))))
+        (should (plist-get prov :open)))
+      ;; A waiting placeholder is not a reconcilable body.
+      (dsh-bridge--view-waiting-fill "s1" 7)
+      (should-not dsh-bridge--view-provenance))))
+
+(ert-deftest dsh-bridge-view-fill-follow-flip-tails ()
+  "A followed view flipping to a newer turn rebuilds and lands at the tail,
+not the top: the flip is a provenance-mismatch rebuild under follow."
+  (let* ((one (dsh-bridge-test--view-turn 7 7000000
+               (list (dsh-bridge-test--view-segment "first" 7001000 1))))
+         (newer (dsh-bridge-test--view-turn 8 8000000
+                  (list (dsh-bridge-test--view-segment "next" 8001000 1))))
+         (dsh-bridge--turns-cache (dsh-bridge-test--view-cache (list newer one))))
+    (with-temp-buffer
+      (dsh-bridge-view-mode)
+      (dsh-bridge--view-fill "s1" one nil nil t t)
+      (setq-local dsh-bridge--view-follow t)
+      (goto-char (point-min))
+      (dsh-bridge--view-fill "s1" newer nil nil t t)
+      (should (equal (buffer-string) (dsh-bridge-test--view-turn-render newer "s1")))
+      (should (equal (point) (point-max))))))
 
 ;;; The sessions list
 
@@ -2888,7 +3044,7 @@ newest) turn, so only a genuinely newer turn's content replaces it."
         (should (eq dsh-bridge--view-follow t))
         (should (equal dsh-bridge--view-waiting 2))
         (should (null dsh-bridge--view-turn))
-        (should (equal (buffer-string) (dsh-bridge--view-running-placeholder))))))
+        (should (equal (buffer-string) dsh-bridge--view-running-placeholder)))))
   (when (buffer-live-p (get-buffer "*dsh-bridge-output*"))
     (kill-buffer "*dsh-bridge-output*")))
 
@@ -2920,9 +3076,98 @@ its committed content is what the user should be watching."
         (should (null dsh-bridge--view-waiting))
         (should (equal dsh-bridge--view-turn 2))
         (should (equal (buffer-string)
-                       (dsh-bridge--view-turn-render running))))))
+                       (dsh-bridge-test--view-turn-render running))))))
   (when (buffer-live-p (get-buffer "*dsh-bridge-output*"))
     (kill-buffer "*dsh-bridge-output*")))
+
+(ert-deftest dsh-bridge-send-exit-shows-turn-finished-during-send ()
+  "A turn that commits (or finishes) while the blocking send is on the wire is
+shown rather than hidden behind a `(running...)' placeholder the waiting gate
+could never replace.  `--after-prompt-view' recognizes it as this send's turn
+by its `startedAt'."
+  (when (buffer-live-p (get-buffer "*dsh-bridge-output*"))
+    (kill-buffer "*dsh-bridge-output*"))
+  (with-temp-buffer
+    (dsh-bridge-prompt-mode)
+    (setq-local dsh-bridge--prompt-session "s1")
+    (let* ((sent-at 5000)
+           (finished (dsh-bridge-test--view-turn
+                      2 5001
+                      (list (dsh-bridge-test--view-segment "done"))
+                      5002))
+           (shown nil)
+           (dsh-bridge--turns-cache nil)
+           (dsh-bridge--session-status nil))
+      (cl-letf (((symbol-function 'pop-to-buffer) (lambda (&rest _) (setq shown t)))
+                ((symbol-function 'dsh-bridge--request)
+                 (lambda (_m _p _pl)
+                   (cons 200 (list (cons 'sessionId "s1")
+                                   (cons 'turns (list finished)))))))
+        (dsh-bridge--prompt-exit "s1" nil sent-at))
+      (should shown)
+      (with-current-buffer (get-buffer "*dsh-bridge-output*")
+        (should (equal dsh-bridge--view-content-session "s1"))
+        (should (eq dsh-bridge--view-follow t))
+        (should (null dsh-bridge--view-waiting))
+        (should (equal dsh-bridge--view-turn 2))
+        (should (equal (buffer-string)
+                       (dsh-bridge-test--view-turn-render finished "s1")))
+        (should (equal (point) (point-max))))))
+  (when (buffer-live-p (get-buffer "*dsh-bridge-output*"))
+    (kill-buffer "*dsh-bridge-output*")))
+
+(ert-deftest dsh-bridge-send-exit-waits-when-newest-turn-precedes-send ()
+  "A completed turn that began before the send is the abandoned turn: the view
+still gets the `(running...)' placeholder, and only a strictly newer turn may
+replace it (the regression guard for the fix above)."
+  (when (buffer-live-p (get-buffer "*dsh-bridge-output*"))
+    (kill-buffer "*dsh-bridge-output*"))
+  (with-temp-buffer
+    (dsh-bridge-prompt-mode)
+    (setq-local dsh-bridge--prompt-session "s1")
+    (let* ((sent-at 5000)
+           (previous (dsh-bridge-test--view-turn
+                      2 1000
+                      (list (dsh-bridge-test--view-segment "latest"))
+                      2000))
+           (shown nil)
+           (dsh-bridge--turns-cache nil)
+           (dsh-bridge--session-status nil))
+      (cl-letf (((symbol-function 'pop-to-buffer) (lambda (&rest _) (setq shown t)))
+                ((symbol-function 'dsh-bridge--request)
+                 (lambda (_m _p _pl)
+                   (cons 200 (list (cons 'sessionId "s1")
+                                   (cons 'turns (list previous)))))))
+        (dsh-bridge--prompt-exit "s1" nil sent-at))
+      (should shown)
+      (with-current-buffer (get-buffer "*dsh-bridge-output*")
+        (should (eq dsh-bridge--view-follow t))
+        (should (equal dsh-bridge--view-waiting 2))
+        (should (null dsh-bridge--view-turn))
+        (should (equal (buffer-string) dsh-bridge--view-running-placeholder)))))
+  (when (buffer-live-p (get-buffer "*dsh-bridge-output*"))
+    (kill-buffer "*dsh-bridge-output*")))
+
+(ert-deftest dsh-bridge-send-and-exit-passes-send-instant ()
+  "The success callback carries the send instant to `--prompt-exit', so
+`--after-prompt-view' can tell this send's turn from the abandoned one."
+  (dsh-bridge-test--kill-prompt-buffer)
+  (let ((captured 'unset)
+        (dsh-bridge-prompt-resend-confirm nil)
+        (dsh-bridge--prompt-session "s1"))
+    (with-current-buffer (get-buffer-create "*dsh-bridge-prompt*")
+      (dsh-bridge-prompt-mode)
+      (insert "hello")
+      (cl-letf (((symbol-function 'dsh-bridge-send-text)
+                 (lambda (_text &optional _session-id on-success _attachments)
+                   (when on-success (funcall on-success "s1"))))
+                ((symbol-function 'dsh-bridge--prompt-exit)
+                 (lambda (&rest args) (setq captured args))))
+        (dsh-bridge-send-and-exit))
+      (should (equal (car captured) "s1"))
+      (should (integerp (nth 2 captured)))
+      (should (> (nth 2 captured) 0)))
+    (dsh-bridge-test--kill-prompt-buffer)))
 
 (defun dsh-bridge-test--prompt-exit-two-windows (steal hint)
   "Set up a prompt window below a view window and run `dsh-bridge--prompt-exit'.
@@ -2947,7 +3192,7 @@ view buffer; the caller must unwind the window configuration."
     (set-window-buffer w2 prompt)
     (select-window w2)
     (cl-letf (((symbol-function 'dsh-bridge--after-prompt-view)
-               (lambda (_id)
+               (lambda (_id &optional _sent-at)
                  (when steal
                    ;; Mimic a process filter popping the view during the
                    ;; fetch: window selection moves, but the current buffer
@@ -3020,7 +3265,7 @@ selection moving during the send cannot strand the prompt on screen."
                        (save-current-buffer (pop-to-buffer view))
                        (funcall callback nil "{\"sessionId\":\"s1\"}" 200)))
                     ((symbol-function 'dsh-bridge--after-prompt-view)
-                     (lambda (_id) view)))
+                     (lambda (_id &optional _sent-at) view)))
             (with-current-buffer prompt
               (dsh-bridge-send-and-exit)))
           (should-not (get-buffer-window prompt))
@@ -3042,7 +3287,7 @@ the abandoned one; a fresh session (nothing abandoned) accepts any turn."
       (setq-local dsh-bridge--view-content-session "s1")
       (dsh-bridge--view-waiting-fill "s1" 2)
       ;; The placeholder is propertized furniture.
-      (should (equal (buffer-string) (dsh-bridge--view-running-placeholder)))
+      (should (equal (buffer-string) dsh-bridge--view-running-placeholder))
       (should (text-property-any (point-min) (point-max)
                                  'dsh-bridge-running t))
       (should (eq dsh-bridge--view-waiting 2))
@@ -3294,7 +3539,7 @@ even when newer turns have arrived mid-walk, and announces it."
       (dsh-bridge-view-mode)
       (setq-local dsh-bridge--view-content-session "s1")
       (let ((inhibit-read-only t))
-        (insert (dsh-bridge--view-turn-render newest-open))
+        (insert (dsh-bridge-test--view-turn-render newest-open))
         (setq-local dsh-bridge--view-turn (alist-get 'turn newest-open)))
       (setq-local dsh-bridge--view-turn-index 0)
       (cl-letf (((symbol-function 'message)
@@ -3304,7 +3549,7 @@ even when newer turns have arrived mid-walk, and announces it."
                    (cons 200 (list (cons 'sessionId "s1")
                                    (cons 'turns turns))))))
         (dsh-bridge-view-next-reply))
-      (should (equal (buffer-string) (dsh-bridge--view-turn-render newest-open)))
+      (should (equal (buffer-string) (dsh-bridge-test--view-turn-render newest-open)))
       (should (eq dsh-bridge--view-follow t))
       (should (null dsh-bridge--view-turn-index))
       (should (string-match-p "following the newest turn" msg)))))
@@ -3381,6 +3626,38 @@ response without a `turns' field (an error body) leaves the cache alone."
       (should (null (dsh-bridge--turns-cache-fetch "s1"))))
     (should (equal (dsh-bridge--turns-cache-turns "s1")
                    dsh-bridge-test--view-turns))))
+
+(ert-deftest dsh-bridge-turns-cache-store-ignores-stale-same-epoch-response ()
+  "A slow, out-of-order `/turns' response must not shrink the cache within an
+equal epoch: the visible turn list only grows, so an older newest turn is
+ignored (otherwise a later refill could revert a DSH-View to an older turn).
+A changed epoch, an unknown epoch, and an explicit empty list still replace."
+  (let* ((t1 (dsh-bridge-test--view-turn
+              1 1000 (list (dsh-bridge-test--view-segment "a" 1001 1))))
+         (t2 (dsh-bridge-test--view-turn
+              2 2000 (list (dsh-bridge-test--view-segment "b" 2001 1))))
+         (t3 (dsh-bridge-test--view-turn
+              3 3000 (list (dsh-bridge-test--view-segment "c" 3001 1))))
+         (turns (lambda () (dsh-bridge--turns-cache-turns "s1")))
+         (dsh-bridge--turns-cache nil))
+    (dsh-bridge--turns-cache-store "s1" (list t2 t1) 5)
+    ;; Stale same-epoch response: ignored.
+    (dsh-bridge--turns-cache-store "s1" (list t1) 5)
+    (should (equal (funcall turns) (list t2 t1)))
+    (should (equal (dsh-bridge--turns-cache-epoch "s1") 5))
+    ;; A newer same-epoch response still updates.
+    (dsh-bridge--turns-cache-store "s1" (list t3 t2 t1) 5)
+    (should (equal (funcall turns) (list t3 t2 t1)))
+    ;; A changed epoch replaces even with an older newest turn.
+    (dsh-bridge--turns-cache-store "s1" (list t1) 6)
+    (should (equal (funcall turns) (list t1)))
+    ;; A non-numeric epoch cannot anchor the guarantee: replace.
+    (dsh-bridge--turns-cache-store "s1" (list t3) nil)
+    (should (equal (funcall turns) (list t3)))
+    ;; An explicit empty list is still the documented known-empty snapshot.
+    (dsh-bridge--turns-cache-store "s1" nil 6)
+    (should (assoc "s1" dsh-bridge--turns-cache))
+    (should (null (funcall turns)))))
 
 ;;; Phase 2: incremental `/turns' fetch and cache merge (epoch + since)
 
@@ -3548,7 +3825,7 @@ arrived (new turns land at the head); landing on the newest resumes following."
       (setq-local dsh-bridge--view-content-session "s1")
       (let ((inhibit-read-only t))
         (erase-buffer)
-        (insert (dsh-bridge--view-turn-render shown))
+        (insert (dsh-bridge-test--view-turn-render shown))
         (setq-local dsh-bridge--view-turn (alist-get 'turn shown)))
       (setq-local dsh-bridge--view-turn-index nil)
       (cl-letf (((symbol-function 'dsh-bridge--request)
@@ -3556,7 +3833,7 @@ arrived (new turns land at the head); landing on the newest resumes following."
                    (cons 200 (list (cons 'sessionId "s1")
                                    (cons 'turns new-turns))))))
         (dsh-bridge-view-next-reply))
-      (should (equal (buffer-string) (dsh-bridge--view-turn-render newest-open)))
+      (should (equal (buffer-string) (dsh-bridge-test--view-turn-render newest-open)))
       ;; Reaching the new newest resumes following rather than pinning it.
       (should (eq dsh-bridge--view-follow t))
       (should (null dsh-bridge--view-turn-index)))
@@ -3579,11 +3856,11 @@ state (\"turn 0\") and announces it."
         (setq-local dsh-bridge--view-content-session "s1")
         (let ((inhibit-read-only t))
           (erase-buffer)
-          (insert (dsh-bridge--view-turn-render newest))
+          (insert (dsh-bridge-test--view-turn-render newest))
           (setq-local dsh-bridge--view-turn (alist-get 'turn newest)))
         (setq-local dsh-bridge--view-turn-index nil)
         (dsh-bridge-view-next-reply)
-        (should (equal (buffer-string) (dsh-bridge--view-turn-render newest)))
+        (should (equal (buffer-string) (dsh-bridge-test--view-turn-render newest)))
         (should (eq dsh-bridge--view-follow t))
         (should (null dsh-bridge--view-turn-index))
         (should (string-match-p "following the newest turn" msg)))
@@ -3747,7 +4024,7 @@ declares itself following (so the follow helper sees it)."
         (dsh-bridge--view-follow-enter)
         (should (eq dsh-bridge--view-follow t))
         (should (null dsh-bridge--view-turn-index))
-        (should (equal (buffer-string) (dsh-bridge--view-turn-render newest)))))
+        (should (equal (buffer-string) (dsh-bridge-test--view-turn-render newest)))))
     (when (buffer-live-p (get-buffer "*dsh-bridge-output*"))
       (kill-buffer "*dsh-bridge-output*"))))
 
@@ -3770,7 +4047,7 @@ declares itself following (so the follow helper sees it)."
         (setq-local dsh-bridge--view-follow t)
         (let ((inhibit-read-only t))
           (erase-buffer)
-          (insert (dsh-bridge--view-turn-render newest))
+          (insert (dsh-bridge-test--view-turn-render newest))
           (setq-local dsh-bridge--view-turn (alist-get 'turn newest)))
         ;; M-n while following is a no-op.
         (dsh-bridge-view-next-reply)
@@ -3779,7 +4056,7 @@ declares itself following (so the follow helper sees it)."
         ;; M-p leaves follow and steps one older.
         (dsh-bridge-view-previous-reply)
         (should-not dsh-bridge--view-follow)
-        (should (equal (buffer-string) (dsh-bridge--view-turn-render middle)))))
+        (should (equal (buffer-string) (dsh-bridge-test--view-turn-render middle)))))
     (when (buffer-live-p (get-buffer "*dsh-bridge-output*"))
       (kill-buffer "*dsh-bridge-output*"))))
 
@@ -3952,7 +4229,7 @@ round-trip) and no per-view request."
        '(((kind . "replies-changed") (sessionId . "s1"))))
       (should (= requests 1))
       (with-current-buffer "*dsh-bridge-output*"
-        (should (equal (buffer-string) (dsh-bridge--view-turn-render after)))))))
+        (should (equal (buffer-string) (dsh-bridge-test--view-turn-render after)))))))
 
 (ert-deftest dsh-bridge-replies-changed-refills-all-following-views ()
   "Every DSH-View buffer following the session is refilled, not just one; a
@@ -3987,9 +4264,9 @@ following view."
        '(((kind . "replies-changed") (sessionId . "s1"))))
       (should (= requests 1))
       (with-current-buffer "*dsh-bridge-output*"
-        (should (equal (buffer-string) (dsh-bridge--view-turn-render after))))
+        (should (equal (buffer-string) (dsh-bridge-test--view-turn-render after))))
       (with-current-buffer "*dsh-bridge-output-2*"
-        (should (equal (buffer-string) (dsh-bridge--view-turn-render after))))
+        (should (equal (buffer-string) (dsh-bridge-test--view-turn-render after))))
       (with-current-buffer "*dsh-bridge-output-3*"
         (should (equal (buffer-string) "browsing"))))
     (dolist (b '("*dsh-bridge-output*" "*dsh-bridge-output-2*"
@@ -4046,7 +4323,7 @@ the reply replaces the `(running...)' placeholder and the waiting state ends."
       (dsh-bridge-view-mode)
       (setq-local dsh-bridge--view-content-session "s1")
       (dsh-bridge--view-waiting-fill "s1" 2)
-      (should (equal (buffer-string) (dsh-bridge--view-running-placeholder))))
+      (should (equal (buffer-string) dsh-bridge--view-running-placeholder)))
     (cl-letf (((symbol-function 'dsh-bridge--call)
                (lambda (_method _path _payload callback)
                  (setq calls (1+ calls))
@@ -4118,7 +4395,7 @@ the abandoned one: a still-running abandoned turn (or nothing newer) keeps the
                     (list (dsh-bridge-test--view-segment "old" 2001000 1)))))))
       (dsh-bridge--view-follow-refill "s1"))
     (with-current-buffer "*dsh-bridge-output*"
-      (should (equal (buffer-string) (dsh-bridge--view-running-placeholder)))
+      (should (equal (buffer-string) dsh-bridge--view-running-placeholder))
       (should (equal dsh-bridge--view-waiting 2)))
     ;; Case 2: a newer turn (3) has started producing: it replaces the
     ;; placeholder and clears the waiting state.
@@ -4290,7 +4567,7 @@ and naming the live `dsh-bridge-answer' binding; completion drops the tail."
       (setq-local dsh-bridge--view-content-session "s1")
       (let ((dsh-bridge--pending-questions
              (dsh-bridge-test--pending-ask "s1" "Approve this plan?")))
-        (let ((rendered (dsh-bridge--view-turn-render open "s1")))
+        (let ((rendered (dsh-bridge-test--view-turn-render open "s1")))
           (should (string-prefix-p "progress\n\n" rendered))
           (should (string-match-p "Awaiting your response:" rendered))
           (should (string-match-p (regexp-quote "Approve this plan?") rendered))
@@ -4303,11 +4580,11 @@ and naming the live `dsh-bridge-answer' binding; completion drops the tail."
         ;; The same turn without a pending ask keeps the continuing marker.
         (let ((dsh-bridge--pending-questions nil))
           (should (string-match-p "(continuing\\.\\.\\.)"
-                                  (dsh-bridge--view-turn-render open "s1")))))
+                                  (dsh-bridge-test--view-turn-render open "s1")))))
       ;; A completed turn shows no tail even while a question is pending.
       (let ((dsh-bridge--pending-questions
              (dsh-bridge-test--pending-ask "s1" "Approve this plan?")))
-        (should (equal (dsh-bridge--view-turn-render done "s1") "progress"))))))
+        (should (equal (dsh-bridge-test--view-turn-render done "s1") "progress"))))))
 
 (ert-deftest dsh-bridge-view-awaiting-note-variants ()
   "The awaiting note leads with the question text, its count, or a fallback,

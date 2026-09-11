@@ -57,6 +57,9 @@ re-verification checklist.
   harness's own `packages/acp/acp`) already covers Emacs-as-primary-client.
 - **No live tail of assistant text.** Streaming every token into Emacs is
   DSH's job; Emacs gets turn-completion notices and on-demand turn fetches.
+  (The DSH-View does append each *committed* segment to a followed turn in
+  place and keeps the end in view; that is viewport behavior over the
+  existing per-reply notifications, not token streaming.)
 - **Observation is read-only; mutation is an explicit command.** Reads go
   through projections (`ctx.sessionQuery.observeSession(id, {projectionMode:
   'all'})` or `ctx.sessionProjections.stateOf`) so they never resume a cold

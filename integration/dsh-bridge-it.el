@@ -289,6 +289,9 @@ BODY runs with `dsh-bridge-it--fixture' set and `dsh-bridge-url' /
          ,@body)
      (when (get-buffer "*dsh-bridge-prompt*")
        (kill-buffer "*dsh-bridge-prompt*"))
+     ;; Drop the listener before the fixture dies, so a later test that boots
+     ;; its own fixture does not inherit a reconnect loop aimed at a dead port.
+     (dsh-bridge-notifications-stop)
      (dsh-bridge-it--kill-fixture)))
 
 (defun dsh-bridge-it--get (path)
@@ -365,6 +368,197 @@ the tag line."
                                     (equal (alist-get 'type block) "image"))
                                   blocks)))))
         (delete-file png)))))
+
+;;; Incremental DSH-View filling
+;;
+;; The unit suite (emacs/dsh-bridge-tests.el) pins the fill algorithm against
+;; synthetic turn records; these tests drive it through the real pipeline: a
+;; live mock turn commits segments one at a time, the plugin broadcasts
+;; `replies-changed', Emacs refreshes the turn cache and splices the view.  The
+;; mock parks the turn on an ask-user question after the first committed
+;; segment, which makes the one-segment state deterministic to observe.
+
+(defun dsh-bridge-it--notifications-start ()
+  "Connect the live notification listener to the current fixture.
+Stops a listener left latched to an earlier fixture first, so several
+fixture-booting tests can share one Emacs process."
+  (dsh-bridge-notifications-stop)
+  (dsh-bridge-notifications-start))
+
+(defun dsh-bridge-it--view (session-id)
+  "The live DSH-View buffer showing SESSION-ID, or nil."
+  (dsh-bridge--session-view session-id))
+
+(defun dsh-bridge-it--view-text (session-id)
+  "The text of SESSION-ID's live DSH-View buffer, or nil."
+  (let ((buffer (dsh-bridge-it--view session-id)))
+    (and buffer (with-current-buffer buffer (buffer-string)))))
+
+(defun dsh-bridge-it--view-provenance (session-id)
+  "SESSION-ID's DSH-View fill provenance plist, or nil."
+  (let ((buffer (dsh-bridge-it--view session-id)))
+    (and buffer (buffer-local-value 'dsh-bridge--view-provenance buffer))))
+
+(defun dsh-bridge-it--turn-render (turn session-id)
+  "Buffer text for the whole TURN record, or \"\" for nil.
+A local composition of the package's body and suffix helpers (the package
+renders a turn's body and terminal suffix separately for the incremental
+fill, so it has no whole-turn renderer)."
+  (if (null turn)
+      ""
+    (concat (dsh-bridge--view-turn-body turn)
+            (dsh-bridge--view-turn-suffix turn session-id))))
+
+(defun dsh-bridge-it--prompt-send (session-id text)
+  "Send TEXT to SESSION-ID through the real prompt-buffer flow.
+This is the `C-c C-c' path: it opens the DSH-View following the session and
+shows the `(running...)' placeholder, which is what makes the first committed
+reply tail."
+  (setq dsh-bridge-default-session session-id)
+  (dsh-bridge-prompt)
+  (insert text)
+  (dsh-bridge-send-and-exit))
+
+(defun dsh-bridge-it--answer-pending (session-id label)
+  "Answer SESSION-ID's pending ask-user question with option LABEL.
+Posts through the bridge's own `/answer' route — the settlement the question
+buffer's `C-c C-c' performs — so the turn can resume."
+  (let ((entry (dsh-bridge--pending-question session-id)))
+    (unless entry
+      (error "dsh-bridge-it: session %s has no pending question" session-id))
+    (let* ((questions (cdr entry))
+           (question-id (alist-get 'id (car questions))))
+      (dsh-bridge-it--post
+       "/dsh-bridge/answer"
+       (list (cons 'questionId (car entry))
+             (cons 'sessionId session-id)
+             (cons 'answers
+                   (vector (list (cons 'id question-id)
+                                 (cons 'selected (vector label))))))))))
+
+(ert-deftest dsh-bridge-it-incremental-fill-append ()
+  "A followed DSH-View splices a live turn's later segments in place.
+The mock commits \"First segment.\" and then parks the turn on an ask-user
+question, so the one-segment state is deterministic.  The test plants a
+marker inside the rendered body, answers, and proves the second segment and
+the completion furniture were spliced around it (a rebuild would collapse the
+marker).  It also pins the first-reply tail after `C-c C-c' and the recorded
+provenance against the live `/turns' epoch and `(step . time)' segments."
+  (dsh-bridge-it--with-fixture
+    (dsh-bridge-it--script-mock
+     (vector
+      (list :kind "tool-call" :name "ask_user_question"
+            :text "First segment."
+            :arguments (list :questions
+                             (vector (list :id "q1"
+                                           :question "Pause here"
+                                           :options (vector (list :label "Go"))))))
+      (list :kind "text" :text "Second segment.")))
+    (let ((session-id (dsh-bridge-it--create-session
+                       (expand-file-name "../" dsh-bridge-it--directory)))
+          probe)
+      (dsh-bridge-it--notifications-start)
+      (dsh-bridge-it--prompt-send session-id "Go.")
+      ;; The first committed segment refills the waiting view, which tails.
+      (should (dsh-bridge-it--wait
+               (lambda ()
+                 (let ((text (dsh-bridge-it--view-text session-id)))
+                   (and (dsh-bridge--session-awaiting-p session-id)
+                        text
+                        (string-match-p "First segment\\." text))))
+               30000))
+      (with-current-buffer (dsh-bridge-it--view session-id)
+        (should (string-match-p "Awaiting your response" (buffer-string)))
+        (should (equal (point) (point-max)))     ; the first reply tailed
+        (let ((prov dsh-bridge--view-provenance))
+          (should (equal (plist-get prov :turn) 1))
+          (should (numberp (plist-get prov :epoch)))
+          (should (equal (plist-get prov :epoch)
+                         (dsh-bridge--turns-cache-epoch session-id)))
+          (should (equal (length (plist-get prov :keys)) 1)))
+        ;; Plant a marker inside the rendered body; a rebuild collapses it.
+        (setq probe (copy-marker (+ (point-min) 4))))
+      (dsh-bridge-it--answer-pending session-id "Go")
+      ;; The turn resumes, commits its second segment, and completes.
+      (should (dsh-bridge-it--wait
+               (lambda ()
+                 (let ((text (dsh-bridge-it--view-text session-id))
+                       (prov (dsh-bridge-it--view-provenance session-id)))
+                   (and text
+                        (string-match-p "Second segment\\." text)
+                        (null (plist-get prov :open)))))
+               30000))
+      (with-current-buffer (dsh-bridge-it--view session-id)
+        (let* ((record (car (dsh-bridge--turns-cache-turns session-id)))
+               (prov dsh-bridge--view-provenance))
+          ;; Byte-identical to the reference render of the live record.
+          (should (equal (buffer-string)
+                         (dsh-bridge-it--turn-render record session-id)))
+          (should (equal (plist-get prov :keys)
+                         (mapcar (lambda (seg)
+                                   (cons (alist-get 'step seg)
+                                         (alist-get 'time seg)))
+                                 (alist-get 'segments record))))
+          (should-not (plist-get prov :open))
+          (should (equal (length (plist-get prov :keys)) 2))
+          (should (equal (point) (point-max)))
+          ;; The body was never rewritten: the planted marker stayed put.
+          (should (equal (marker-position probe) 5))
+          (should-not (text-property-any (point-min) (point-max)
+                                         'dsh-bridge-turn-marker t))))
+      (set-marker probe nil))))
+
+(ert-deftest dsh-bridge-it-incremental-fill-turn-swap ()
+  "A following DSH-View rebuilds onto a newer turn instead of splicing.
+After one completed turn, a second prompt's turn changes the shown record, so
+the fill falls back to a full re-render: a marker planted in the old body
+collapses, and the view lands at the new turn's tail."
+  (dsh-bridge-it--with-fixture
+    ;; The instant mock finishes this turn inside the blocking send;
+    ;; `--after-prompt-view' must show the completed turn rather than strand a
+    ;; `(running...)' placeholder (the regression this test pins).
+    (dsh-bridge-it--script-mock
+     (vector (list :kind "text" :text "Turn one.")))
+    (let ((session-id (dsh-bridge-it--create-session
+                       (expand-file-name "../" dsh-bridge-it--directory)))
+          probe)
+      (dsh-bridge-it--notifications-start)
+      (dsh-bridge-it--prompt-send session-id "One.")
+      (should (dsh-bridge-it--wait
+               (lambda ()
+                 (let ((text (dsh-bridge-it--view-text session-id))
+                       (prov (dsh-bridge-it--view-provenance session-id)))
+                   (and text
+                        (string-match-p "Turn one\\." text)
+                        (null (plist-get prov :open)))))
+               30000))
+      (with-current-buffer (dsh-bridge-it--view session-id)
+        (should (equal (plist-get dsh-bridge--view-provenance :turn) 1))
+        (setq probe (copy-marker (+ (point-min) 3))))
+      ;; A second prompt starts turn 2 while the view still follows turn 1:
+      ;; the newer record replaces the body wholesale.
+      (dsh-bridge-it--script-mock
+       (vector (list :kind "text" :text "Turn two.")))
+      (dsh-bridge-send-text "Two." session-id)
+      (should (dsh-bridge-it--wait
+               (lambda ()
+                 (let ((text (dsh-bridge-it--view-text session-id))
+                       (prov (dsh-bridge-it--view-provenance session-id)))
+                   (and text
+                        (string-match-p "Turn two\\." text)
+                        (null (plist-get prov :open))
+                        (equal (plist-get prov :turn) 2))))
+               30000))
+      (with-current-buffer (dsh-bridge-it--view session-id)
+        (let* ((record (car (dsh-bridge--turns-cache-turns session-id)))
+               (prov dsh-bridge--view-provenance))
+          (should (equal (plist-get prov :turn) 2))
+          (should (equal (buffer-string)
+                         (dsh-bridge-it--turn-render record session-id)))
+          (should (equal (point) (point-max)))
+          ;; The swap rebuilt the body, so the old marker collapsed.
+          (should (equal (marker-position probe) (point-min)))))
+      (set-marker probe nil))))
 
 (provide 'dsh-bridge-it)
 ;;; dsh-bridge-it.el ends here

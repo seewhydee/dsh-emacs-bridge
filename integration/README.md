@@ -74,7 +74,8 @@ integration/
 | `tests/session.spec.ts` | the read-only session report over the `sessionQuery` seam: live stats/token usage/model selection, 404 unknown (never created or resumed), 400 repeated `sessionId`, default target |
 | `tests/fork.spec.ts` | branching a completed-turn prefix through the `sessionController` seam: the `/turns` `endSeq` anchor, child lineage and inherited prefix, the omitted-`atSeq` fallback, and the failure taxonomy (unknown source, bad argument, open-turn anchor) |
 | `tests/attachments.spec.ts` | the path-based attachment seam through the real `ctx.attachments` store: image sniffing reaching the provider as an image block, a generic file projected to handle text, an attachment-only prompt, and the validation/count/byte-cap statuses |
-| `dsh-bridge-it.el` | the live-Emacs seats of the ask-user path, `C-c C-a` attachment staging plus send-time tag stripping, DSH-Describe rendering live host statistics, and turn branching |
+| `tests/turns-incremental.spec.ts` | the `/turns` epoch contract incremental DSH-View filling relies on: a running turn grows segment by segment under a stable epoch, the inclusive `since` fetch re-sends the boundary turn in full, and a stale epoch forces the full-list fallback |
+| `dsh-bridge-it.el` | the live-Emacs seats of the ask-user path, `C-c C-a` attachment staging plus send-time tag stripping, DSH-Describe rendering live host statistics, turn branching, and incremental DSH-View filling (in-place segment append with a surviving marker, first-reply tailing, and the newer-turn rebuild) |
 
 Known gap: no spec observes a **cold** (persisted-only) session, because the
 launcher always starts a fresh `DSH_HOME`; that needs a second host booted
