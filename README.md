@@ -95,10 +95,10 @@ replacing the path with the actual path to `dsh-bridge.el`:
 (load "/path/to/dsh-emacs-bridge/emacs/dsh-bridge.el")
 ```
 
-Optionally, you can also load the file `dsh-bridge-install.el`, which
-contains the `M-x dsh-bridge-install-plugin` and `M-x
-dsh-bridge-uninstall-plugin` commands.  If you installed the DSH
-plugin directly via the preceding section, you won't need this.
+Optionally, you can also load `dsh-bridge-install.el`, which contains
+the previously-mentioned `M-x dsh-bridge-install-plugin` command.  But
+if you installed the DSH plugin directly by following the steps in the
+preceding section, you probably won't need these.
 
 ## Usage
 

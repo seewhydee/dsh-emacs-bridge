@@ -25,6 +25,11 @@
 ;; `dsh-bridge-install-plugin' / `dsh-bridge-uninstall-plugin' are
 ;; autoloaded from here.
 
+;; During plugin installation, we must run the dsh executable.  By
+;; default, we try to find it automatically; if this does not work
+;; (usually because dsh is installed in a non-standard location),
+;; customize `dsh-bridge-dsh-command'.
+
 ;;; Code:
 
 (require 'dsh-bridge)
@@ -65,7 +70,8 @@ plugin.  Its value can be one of the following:
   (let ((npm (executable-find "npm"))
 		prefix)
 	(and npm
-		 (setq prefix (ignore-errors (car (process-lines npm "prefix" "-g"))))
+		 (setq prefix (ignore-errors
+						(car (process-lines npm "prefix" "-g"))))
 		 (not (string-empty-p prefix))
 		 (seq-some (lambda (f) (if (file-executable-p f) (list f)))
 				   ;; Candidate executables in npm's prefix dir
@@ -113,7 +119,8 @@ profile directory; the plugin counts as installed if it appears in
 		 manifest data)
 	(cond
 	 ((not (file-directory-p dir)) 'no-profile)
-	 ((and (file-readable-p (setq manifest (expand-file-name "package.json" dir)))
+	 ((and (file-readable-p
+			(setq manifest (expand-file-name "package.json" dir)))
 		   (setq data (with-temp-buffer
 						(insert-file-contents manifest)
 						(ignore-errors
@@ -352,5 +359,7 @@ restart \"dsh %s\" to complete unload"
 		(display-buffer buffer)
 		(user-error "dsh plugin remove failed")))))
 
+
 (provide 'dsh-bridge-install)
+
 ;;; dsh-bridge-install.el ends here

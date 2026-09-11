@@ -2612,22 +2612,16 @@ whole CLI to install a plugin for a DSH the user never set up."
       (dsh-bridge--ensure-plugin))
     (should offered)))
 
-(ert-deftest dsh-bridge-load-install-library-missing ()
-  "The install library is reported absent, without signaling, when unfindable.
-This is the optional-library contract: `dsh-bridge.el' must keep working when
-`dsh-bridge-install.el' is not installed."
-  (cl-letf (((symbol-function 'require) (lambda (&rest _) nil))
-            ((symbol-function 'locate-library) (lambda (&rest _) nil))
-            ((symbol-function 'symbol-file) (lambda (&rest _) nil)))
-    (should-not (dsh-bridge--load-install-library))))
-
 (ert-deftest dsh-bridge-ensure-plugin-no-install-library ()
-  "With the install library absent, diagnosis warns but does not offer."
+  "With the install library absent, diagnosis warns but does not offer.
+`dsh-bridge--ensure-plugin' loads the companion with `require' at diagnosis
+time; simulate absence by failing that load and leaving the diagnose entry
+point unbound."
   (let ((dsh-bridge--bridge-status-cache 'not-running)
         (dsh-bridge--plugin-diagnosed nil)
         (warned nil))
-    (cl-letf (((symbol-function 'dsh-bridge--load-install-library)
-               (lambda () nil))
+    (cl-letf (((symbol-function 'require) (lambda (&rest _) nil))
+              ((symbol-function 'dsh-bridge-install--diagnose) nil)
               ((symbol-function 'display-warning)
                (lambda (&rest args) (setq warned args)))
               ((symbol-function 'y-or-n-p)

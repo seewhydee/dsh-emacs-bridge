@@ -27,18 +27,13 @@
 ;; This lets you compose prompts and read DSH's replies within Emacs.
 
 ;; It is bundled with a plugin for DSH, which should be installed with
-;; \\`M-x dsh-bridge-install-plugin' before using the other commands.
-;; That command, and the rest of the plugin installation and diagnosis
-;; code, live in the optional companion library `dsh-bridge-install',
-;; which the package ships and loads on demand.
+;; before using the other commands.  The plugin can be installed by
+;; running \\`M-x dsh-bridge-install-plugin' (that command is in the
+;; `dsh-bridge-install' library, part of this Emacs package).  By
+;; default, this command tries to detect the dsh executable; if that
+;; does not work, customize `dsh-bridge-dsh-command'.
 
-;; During plugin installation, we must run the `dsh' executable;
-;; customize `dsh-bridge-dsh-command' (defined by that library) to
-;; specify how.  If this is nil (the default), the package tries to
-;; autodetect, but that may not work properly if `dsh' is installed in a
-;; non-standard location.
-
-;; The interactive entry points are:
+;; The interactive entry points for the DSH-Emacs bridge are:
 ;;
 ;; `dsh-bridge'					  - transient dispatcher
 ;; `dsh-bridge-list-sessions'	  - browse DSH sessions
@@ -389,22 +384,6 @@ pending ask-user question taking display precedence (awaiting > running > idle
 
 ;;; DSH bridge status and plugin diagnosis
 
-;; This library requires (i) a working DSH installation, and (ii) an
-;; installed DSH plugin, which manages the loopback interface for the
-;; data bridge between Emacs and DSH.
-
-;; Only installing or uninstalling the plugin needs to touch the actual
-;; DSH installation (running the `dsh' executable, reading the profile
-;; tree).  That code lives in the optional companion library
-;; `dsh-bridge-install', which the Emacs package ships but which this file
-;; never requires at load time.  With the library absent, every command
-;; here still works against an already-installed bridge, and the plugin
-;; check below degrades to a warning instead of offering an install.
-
-;; To help guide the user, `dsh-bridge--ensure-plugin' is called on
-;; common entry-points, and auto-detects the DSH installation and/or the
-;; DSH plugin.  If the plugin is missing, it offers to install it.
-
 (defvar dsh-bridge--bridge-status-cache nil
   "Cached DSH bridge interface state, or nil if not yet probed.
 Possible values are nil, `running', `not-running', `unreachable', and
@@ -454,28 +433,6 @@ Callers invoke this on a transport failure or a 401/404."
 (defvar dsh-bridge--plugin-diagnosed nil
   "Non-nil once the DSH plugin's problem has been diagnosed this session.")
 
-(defun dsh-bridge--install-library-file ()
-  "Return the bundled `dsh-bridge-install' library file, or nil.
-`locate-library' covers a normal load-path install; the sibling lookup
-covers a source checkout loaded by path with `emacs/' off load-path,
-mirroring `dsh-bridge--plugin-directory'."
-  (or (locate-library "dsh-bridge-install")
-	  (let ((main (or (locate-library "dsh-bridge")
-					  (symbol-file 'dsh-bridge--load-install-library 'defun))))
-		(and main
-			 (let ((candidate (expand-file-name
-							   "dsh-bridge-install.el"
-							   (file-name-directory main))))
-			   (and (file-exists-p candidate) candidate))))))
-
-(defun dsh-bridge--load-install-library ()
-  "Load the optional `dsh-bridge-install' library and return non-nil on success.
-Return nil when the library cannot be found; signal if it is found but
-fails to load."
-  (or (require 'dsh-bridge-install nil t)
-	  (let ((file (dsh-bridge--install-library-file)))
-		(and file (load file nil t)))))
-
 (defun dsh-bridge--warn-plugin-unavailable (state)
   "Warn that the DSH bridge plugin is missing or not loaded, from STATE.
 STATE is the `dsh-bridge--bridge-status' result.  This is the fallback
@@ -491,7 +448,11 @@ profile manifest cannot be inspected and no install can be offered."
 	((eq state 'unreachable)
 	 (format "dsh-bridge: no bridge is running at %s" dsh-bridge-url))
 	(t
-	 "dsh-bridge: DSH bridge plugin not loaded; install the bundled plugin or restart \"dsh web\""))))
+	 "dsh-bridge: DSH plugin not loaded; install it or restart \"dsh web\""))))
+
+;; To help guide the user, `dsh-bridge--ensure-plugin' is called on
+;; common entry-points, and auto-detects the DSH installation and/or
+;; the DSH plugin.  If the plugin is missing, it offers to install it.
 
 (declare-function dsh-bridge-install--diagnose "dsh-bridge-install")
 
@@ -512,7 +473,8 @@ install is offered."
 	 (dsh-bridge--plugin-diagnosed nil)
 	 (t
 	  (setq dsh-bridge--plugin-diagnosed t) ; bug user only once
-	  (if (dsh-bridge--load-install-library)
+	  (require 'dsh-bridge-install nil t)
+	  (if (functionp 'dsh-bridge-install--diagnose)
 		  (dsh-bridge-install--diagnose state)
 		(dsh-bridge--warn-plugin-unavailable state))))))
 
