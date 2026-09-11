@@ -78,7 +78,9 @@ integration/
 | `tests/ask-user.spec.ts` | the ask-user waterfall end to end (SSE frame, `/answer` settlement, pending-question replay) and the browser-draft stream never owning a question |
 | `tests/sessions.spec.ts` | create by `path` (new and already-known workspace), create by `workspaceId`, create-argument bounds, workspace rename/conflict/blank/unknown, session rename/archive/unknown |
 | `tests/session.spec.ts` | the read-only session report over the `sessionQuery` seam: live stats/token usage/model selection, 404 unknown (never created or resumed), 400 repeated `sessionId`, default target |
-| `dsh-bridge-it.el` | the live-Emacs seat of the ask-user path, and DSH-Describe rendering live host statistics |
+| `tests/fork.spec.ts` | branching a completed-turn prefix through the `sessionController` seam: the `/turns` `endSeq` anchor, child lineage and inherited prefix, the omitted-`atSeq` fallback, and the failure taxonomy (unknown source, bad argument, open-turn anchor) |
+| `tests/attachments.spec.ts` | the path-based attachment seam through the real `ctx.attachments` store: image sniffing reaching the provider as an image block, a generic file projected to handle text, an attachment-only prompt, and the validation/count/byte-cap statuses |
+| `dsh-bridge-it.el` | the live-Emacs seats of the ask-user path, `C-c C-a` attachment staging plus send-time tag stripping, DSH-Describe rendering live host statistics, and turn branching |
 
 Known gap: no spec observes a **cold** (persisted-only) session, because the
 launcher always starts a fresh `DSH_HOME`; that needs a second host booted

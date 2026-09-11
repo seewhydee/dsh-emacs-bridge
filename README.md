@@ -226,6 +226,7 @@ The following commands are available from the DSH-Prompt buffer:
 
 * `C-c C-c` — send the buffer as a prompt.  On success, bury the
   buffer and pop to the DSH-View for that session.
+* `C-c C-a` — attach a file to the prompt (see below).
 * `C-c C-d` — push the buffer to the DSH composer as a draft.
 * `C-c C-m` — set the model and reasoning effort.
 * `C-c C-s` — rebind the buffer to another session.
@@ -240,6 +241,49 @@ you must send the prompt first, or revert with `M-x revert-buffer`.
 
 When `markdown-mode` is installed, this buffer derives from it, so
 most markdown editing commands are also available.
+
+### Attaching files
+
+As in Message mode's `C-c C-a` (`mml-attach-file`), files are attached
+by inserting a tag line into the prompt buffer:
+
+```
+<#attachment filename="/home/you/screenshot.png">
+```
+
+* `C-c C-a` (`dsh-bridge-attach-file`) inserts a tag for a file you
+  choose.  In Dired, it attaches the marked files (or the file at
+  point) instead.
+* `M-x dsh-bridge-attach-buffer-file` attaches the file the invoking
+  buffer is visiting — the "send this file I am editing" workflow.
+* `M-x dsh-bridge-clear-attachments` removes every tag from the prompt.
+* Delete a tag line to detach that file.
+
+DSH reads each named file when the prompt is sent, stores its bytes in
+the content-addressed attachment store, and sends one message: images
+(PNG, JPEG, WebP, GIF) are detected from their bytes and shown to the
+model as images, while every other file becomes a read-only handle the
+model can open with its file tools.  A prompt made only of attachments
+is allowed.
+
+The tags are bridge furniture, not prompt text: they are stripped from
+the text before it is sent, ignored by the prompt history, and removed
+from the kept text after a successful send, so an immediate resend does
+not re-upload them.  Pushing a draft strips them too, with a message —
+composer drafts carry text only.  The header line shows `📎N` while the
+buffer holds N attachments.
+
+`dsh-bridge-send` (region/buffer send) honors tags too: tag lines inside
+the sent region (or buffer) are uploaded with the prompt and stripped
+from its text.  There the tags stay in the source buffer after a send,
+so re-sending the same region re-uploads the bytes — and any text you
+send that merely quotes the tag syntax (this section included) becomes a
+live attachment.
+
+Message mode's content-type, description and disposition prompts have
+no DSH equivalent: the host detects an image's type itself and derives
+the display name from the file name, and DSH has no description or
+disposition field.
 
 ### Answering ask-user questions
 
@@ -292,6 +336,19 @@ draft push fails with 409 when no browser client is subscribed.  The
 read-only session report and the `POST /dsh-bridge/fork` source read are
 the exceptions: each observes a cold session's persisted log without
 resuming it.
+
+`POST /dsh-bridge/send` also accepts an `attachments` list of absolute
+host-local paths and reads those files itself, so attachment bytes never
+travel through the 1 MiB JSON body.  This is within the same
+bearer-token trust boundary as every other route (a token holder can
+already mutate sessions and, through the model's tools, read files), but
+it is a route-level file read, so it is stated here.  The bridge and the
+DSH host must share a filesystem; a path the host cannot read is a 400.
+Attachment bytes are copied into the content-addressed store under
+`$DSH_HOME/attachments/v1` (images as normalized images, other files
+verbatim), and one prompt may carry at most 20 attachments and 200 MiB
+per file; the image store applies its own limits (20 MiB per image, 20
+images, 200 MiB of images) and reports violations as 413 or 400.
 
 ## License
 

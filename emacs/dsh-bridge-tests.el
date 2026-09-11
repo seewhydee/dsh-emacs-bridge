@@ -722,12 +722,16 @@ binds the compose keys plus fetch/set-session/list."
     (should (eq (car-safe header-line-format) :eval)))
   (should (eq (lookup-key dsh-bridge-prompt-mode-map (kbd "C-c C-c"))
               #'dsh-bridge-send-and-exit))
+  (should (eq (lookup-key dsh-bridge-prompt-mode-map (kbd "C-c C-a"))
+              #'dsh-bridge-attach-file))
   (should (eq (lookup-key dsh-bridge-prompt-mode-map (kbd "C-c C-d"))
               #'dsh-bridge-draft))
   (should (eq (lookup-key dsh-bridge-prompt-mode-map (kbd "C-c C-k"))
               #'dsh-bridge-erase-prompt))
   (should (eq (lookup-key dsh-bridge-prompt-mode-map (kbd "C-c C-f"))
               #'dsh-bridge-fetch))
+  (should (eq (lookup-key dsh-bridge-prompt-mode-map (kbd "C-c C-m"))
+              #'dsh-bridge-select-model))
   (should (eq (lookup-key dsh-bridge-prompt-mode-map (kbd "C-c C-s"))
               #'dsh-bridge-set-prompt-session))
   (should (eq (lookup-key dsh-bridge-prompt-mode-map (kbd "C-c C-l"))
@@ -4881,6 +4885,311 @@ Another session, an invisible report, or the option off does not."
                   ((symbol-function 'run-at-time)
                    (lambda (&rest _) (ert-fail "scheduled with the option off"))))
           (dsh-bridge--describe-maybe-refresh "s1"))))))
+
+;;; Attachments
+
+(defun dsh-bridge-test--temp-file (name content)
+  "Create a temporary file called NAME holding CONTENT; return its path."
+  (let ((file (make-temp-file (concat "dsh-bridge-" name))))
+    (with-temp-file file (insert content))
+    file))
+
+(defun dsh-bridge-test--kill-prompt-buffer ()
+  "Kill the shared DSH-Prompt buffer when it is live."
+  (let ((buffer (get-buffer "*dsh-bridge-prompt*")))
+    (when (buffer-live-p buffer) (kill-buffer buffer))))
+
+(ert-deftest dsh-bridge-attachment-format-roundtrip ()
+  "Tag values round-trip paths and names containing quotes and backslashes."
+  (let* ((path "/tmp/a \"quoted\" \\ file.png")
+         (name "weird \"name\"")
+         (tag (dsh-bridge--attachment-format path name))
+         (parsed (dsh-bridge--parse-attachments (concat tag "\nbody\n"))))
+    (should (equal (cdr parsed) (list (list :path path :name name))))
+    (should (equal (car parsed) "body\n"))))
+
+(ert-deftest dsh-bridge-parse-attachments-order-and-malformed ()
+  "Tag lines are extracted in order and removed from the text; a tag with a
+relative `filename' is malformed and stays as text."
+  (let* ((one (dsh-bridge--attachment-format "/tmp/one.txt"))
+         (two (dsh-bridge--attachment-format "/tmp/two.png" "shot.png"))
+         (parsed (dsh-bridge--parse-attachments
+                  (concat "lead\n" one "\nmiddle\n" two "\ntail\n"))))
+    (should (equal (cdr parsed)
+                   (list (list :path "/tmp/one.txt" :name nil)
+                         (list :path "/tmp/two.png" :name "shot.png"))))
+    (should (equal (car parsed) "lead\nmiddle\ntail\n")))
+  (let ((parsed (dsh-bridge--parse-attachments
+                 "<#attachment filename=\"rel.txt\">\nbody")))
+    (should (null (cdr parsed)))
+    (should (equal (car parsed) "<#attachment filename=\"rel.txt\">\nbody"))))
+
+(ert-deftest dsh-bridge-attach-file-inserts-tag ()
+  "`dsh-bridge-attach-file' inserts one tag line per attached file."
+  (dsh-bridge-test--kill-prompt-buffer)
+  (let ((file (dsh-bridge-test--temp-file "one.txt" "hello")))
+    (unwind-protect
+        (cl-letf (((symbol-function 'pop-to-buffer) (lambda (&rest _) nil)))
+          (with-temp-buffer
+            (dsh-bridge-prompt-mode)
+            (dsh-bridge-attach-file (list file))
+            (should (= (dsh-bridge--attachment-count) 1))
+            (should (string-match-p (regexp-quote file) (buffer-string)))))
+      (delete-file file)
+      (dsh-bridge-test--kill-prompt-buffer))))
+
+(ert-deftest dsh-bridge-attach-file-refuses-directory ()
+  "A directory is not an attachable file."
+  (dsh-bridge-test--kill-prompt-buffer)
+  (with-temp-buffer
+    (dsh-bridge-prompt-mode)
+    (should-error (dsh-bridge-attach-file (list temporary-file-directory))
+                  :type 'user-error))
+  (dsh-bridge-test--kill-prompt-buffer))
+
+(ert-deftest dsh-bridge-attach-file-dired-marks ()
+  "In Dired, the marked files are all attached."
+  (dsh-bridge-test--kill-prompt-buffer)
+  (let ((first (dsh-bridge-test--temp-file "dired-a.txt" "a"))
+        (second (dsh-bridge-test--temp-file "dired-b.txt" "b")))
+    (unwind-protect
+        (cl-letf (((symbol-function 'dired-get-marked-files)
+                   (lambda (&rest _) (list first second)))
+                  ((symbol-function 'pop-to-buffer) (lambda (&rest _) nil)))
+          (with-temp-buffer
+            (setq major-mode 'dired-mode)
+            (call-interactively #'dsh-bridge-attach-file))
+          (with-current-buffer "*dsh-bridge-prompt*"
+            (should (= (dsh-bridge--attachment-count) 2))))
+      (delete-file first)
+      (delete-file second)
+      (dsh-bridge-test--kill-prompt-buffer))))
+
+(ert-deftest dsh-bridge-attach-buffer-file-stages-visiting-file ()
+  "`dsh-bridge-attach-buffer-file' attaches the buffer's visited file."
+  (dsh-bridge-test--kill-prompt-buffer)
+  (let ((file (dsh-bridge-test--temp-file "visited.txt" "x")))
+    (unwind-protect
+        (cl-letf (((symbol-function 'pop-to-buffer) (lambda (&rest _) nil)))
+          (with-temp-buffer
+            (setq buffer-file-name file)
+            (dsh-bridge-attach-buffer-file))
+          (with-current-buffer "*dsh-bridge-prompt*"
+            (should (= (dsh-bridge--attachment-count) 1))
+            (should (string-match-p (regexp-quote file) (buffer-string)))))
+      (delete-file file)
+      (dsh-bridge-test--kill-prompt-buffer))))
+
+(ert-deftest dsh-bridge-attach-buffer-file-refuses-non-file ()
+  "A buffer that visits no file cannot attach one."
+  (with-temp-buffer
+    (should-error (dsh-bridge-attach-buffer-file) :type 'user-error)))
+
+(ert-deftest dsh-bridge-clear-attachments-removes-tags ()
+  "`dsh-bridge-clear-attachments' removes tag lines but keeps the text."
+  (dsh-bridge-test--kill-prompt-buffer)
+  (let ((file (dsh-bridge-test--temp-file "clear.txt" "x")))
+    (unwind-protect
+        (with-current-buffer (get-buffer-create "*dsh-bridge-prompt*")
+          (dsh-bridge-prompt-mode)
+          (insert "keep me\n")
+          (dsh-bridge--insert-attachment-tag file)
+          (dsh-bridge-clear-attachments)
+          (should (= (dsh-bridge--attachment-count) 0))
+          (should (equal (buffer-string) "keep me\n")))
+      (delete-file file)
+      (dsh-bridge-test--kill-prompt-buffer))))
+
+(ert-deftest dsh-bridge-send-and-exit-carries-attachments ()
+  "A send uploads the tag lines and strips them from the sent text; success
+removes them from the kept text."
+  (dsh-bridge-test--kill-prompt-buffer)
+  (let ((file (dsh-bridge-test--temp-file "shot.png" "pngbytes"))
+        (captured nil)
+        (dsh-bridge-prompt-resend-confirm nil)
+        (dsh-bridge--prompt-session "s1")
+        (dsh-bridge--last-sent nil))
+    (unwind-protect
+        (with-current-buffer (get-buffer-create "*dsh-bridge-prompt*")
+          (dsh-bridge-prompt-mode)
+          (insert "look at this\n")
+          (dsh-bridge--insert-attachment-tag file)
+          (cl-letf (((symbol-function 'dsh-bridge-send-text)
+                     (lambda (text &optional session-id on-success attachments)
+                       (setq captured (list text session-id attachments))
+                       (when on-success (funcall on-success "s1"))))
+                    ((symbol-function 'dsh-bridge--prompt-exit)
+                     (lambda (&rest _) nil)))
+            (dsh-bridge-send-and-exit))
+          (should (equal (car captured) "look at this\n"))
+          (should (equal (cadr captured) "s1"))
+          (should (equal (caddr captured) (list (list :path file :name nil))))
+          (should (= (dsh-bridge--attachment-count) 0))
+          (should (equal (buffer-string) "look at this\n")))
+      (delete-file file)
+      (dsh-bridge-test--kill-prompt-buffer))))
+
+(ert-deftest dsh-bridge-send-and-exit-attachment-only ()
+  "A prompt with no text but an attachment is allowed."
+  (dsh-bridge-test--kill-prompt-buffer)
+  (let ((file (dsh-bridge-test--temp-file "only.txt" "x"))
+        (captured 'uncalled)
+        (dsh-bridge-prompt-resend-confirm nil)
+        (dsh-bridge--prompt-session "s1"))
+    (unwind-protect
+        (with-current-buffer (get-buffer-create "*dsh-bridge-prompt*")
+          (dsh-bridge-prompt-mode)
+          (dsh-bridge--insert-attachment-tag file)
+          (cl-letf (((symbol-function 'dsh-bridge-send-text)
+                     (lambda (text &optional _session-id on-success _attachments)
+                       (setq captured text)
+                       (when on-success (funcall on-success "s1"))))
+                    ((symbol-function 'dsh-bridge--prompt-exit)
+                     (lambda (&rest _) nil)))
+            (dsh-bridge-send-and-exit))
+          (should (equal captured "")))
+      (delete-file file)
+      (dsh-bridge-test--kill-prompt-buffer))))
+
+(ert-deftest dsh-bridge-send-and-exit-empty-signals ()
+  "Neither text nor attachments is an error."
+  (with-temp-buffer
+    (dsh-bridge-prompt-mode)
+    (should-error (dsh-bridge-send-and-exit) :type 'user-error)))
+
+(ert-deftest dsh-bridge-send-and-exit-failure-keeps-attachments ()
+  "A failed send leaves the tag lines in place for a retry."
+  (dsh-bridge-test--kill-prompt-buffer)
+  (let ((file (dsh-bridge-test--temp-file "keep.txt" "x"))
+        (dsh-bridge-prompt-resend-confirm nil)
+        (dsh-bridge--prompt-session "s1"))
+    (unwind-protect
+        (with-current-buffer (get-buffer-create "*dsh-bridge-prompt*")
+          (dsh-bridge-prompt-mode)
+          (insert "text\n")
+          (dsh-bridge--insert-attachment-tag file)
+          (cl-letf (((symbol-function 'dsh-bridge-send-text)
+                     (lambda (&rest _) nil)))
+            (dsh-bridge-send-and-exit))
+          (should (= (dsh-bridge--attachment-count) 1)))
+      (delete-file file)
+      (dsh-bridge-test--kill-prompt-buffer))))
+
+(ert-deftest dsh-bridge-draft-strips-attachments ()
+  "A draft push drops the tag lines and pushes text only."
+  (dsh-bridge-test--kill-prompt-buffer)
+  (let ((file (dsh-bridge-test--temp-file "draft.txt" "x"))
+        (captured nil)
+        (dsh-bridge-default-session "s1"))
+    (unwind-protect
+        (with-temp-buffer
+          (dsh-bridge-prompt-mode)
+          (insert "text\n")
+          (dsh-bridge--insert-attachment-tag file)
+          (cl-letf (((symbol-function 'dsh-bridge-send-draft)
+                     (lambda (text &optional _session-id) (setq captured text)))
+                    ((symbol-function 'message) (lambda (&rest _) nil)))
+            (dsh-bridge-draft))
+          (should (equal captured "text\n")))
+      (delete-file file)
+      (dsh-bridge-test--kill-prompt-buffer))))
+
+(ert-deftest dsh-bridge-send-carries-tags ()
+  "`dsh-bridge-send' parses tag lines from its region or buffer."
+  (let ((file (dsh-bridge-test--temp-file "send.txt" "x"))
+        (captured nil)
+        (dsh-bridge-default-session "s1"))
+    (unwind-protect
+        (with-temp-buffer
+          (insert "text\n")
+          (dsh-bridge--insert-attachment-tag file)
+          (cl-letf (((symbol-function 'dsh-bridge-send-text)
+                     (lambda (text &optional _session-id _on-success attachments)
+                       (setq captured (list text attachments)))))
+            (dsh-bridge-send))
+          (should (equal (car captured) "text\n"))
+          (should (equal (cadr captured) (list (list :path file :name nil)))))
+      (delete-file file))))
+
+(ert-deftest dsh-bridge-send-attaches-only-tags-inside-region ()
+  "Sending a region attaches only the tag lines inside the region."
+  (let ((inside (dsh-bridge-test--temp-file "inside.txt" "i"))
+        (outside (dsh-bridge-test--temp-file "outside.txt" "o"))
+        (captured nil)
+        (dsh-bridge-default-session "s1"))
+    (unwind-protect
+        (with-temp-buffer
+          ;; Batch Emacs has Transient Mark mode off, and `use-region-p'
+          ;; requires it.
+          (transient-mark-mode 1)
+          (insert "lead\n")
+          (dsh-bridge--insert-attachment-tag outside)
+          (let ((start (point)) end)
+            (insert "body\n")
+            (dsh-bridge--insert-attachment-tag inside)
+            (setq end (point))
+            (insert "tail\n")
+            (set-mark start)
+            (goto-char end)
+            (setq mark-active t))
+          (cl-letf (((symbol-function 'dsh-bridge-send-text)
+                     (lambda (text &optional _session-id _on-success attachments)
+                       (setq captured (list text attachments)))))
+            (dsh-bridge-send))
+          (should (equal (car captured) "body\n"))
+          (should (equal (cadr captured) (list (list :path inside :name nil)))))
+      (delete-file inside)
+      (delete-file outside))))
+
+(ert-deftest dsh-bridge-attach-file-binds-invoking-session ()
+  "Attaching from a session-carrying buffer creates the prompt buffer
+bound to the invoking buffer's effective session, not to the default."
+  (dsh-bridge-test--kill-prompt-buffer)
+  (let ((file (dsh-bridge-test--temp-file "bind.txt" "x"))
+        (dsh-bridge-default-session nil))
+    (unwind-protect
+        (cl-letf (((symbol-function 'pop-to-buffer) (lambda (&rest _) nil)))
+          (with-temp-buffer
+            (setq major-mode 'dsh-bridge-view-mode)
+            (setq dsh-bridge--view-content-session "view-session-42")
+            (dsh-bridge-attach-file (list file)))
+          (with-current-buffer "*dsh-bridge-prompt*"
+            (should (equal dsh-bridge--prompt-session "view-session-42"))))
+      (delete-file file)
+      (dsh-bridge-test--kill-prompt-buffer))))
+
+(ert-deftest dsh-bridge-send-text-skips-history-for-attachment-only ()
+  "An attachment-only send records no history entry and leaves
+`dsh-bridge--last-sent' alone; a text send still records both."
+  (let ((dsh-bridge--session-status nil)
+        (dsh-bridge--sessions-cache nil)
+        (dsh-bridge--prompt-history nil)
+        (dsh-bridge--last-sent nil))
+    (cl-letf (((symbol-function 'dsh-bridge--call)
+               (lambda (_m _p _pl cb) (funcall cb nil "{\"sessionId\":\"s1\"}" 200)))
+              ((symbol-function 'dsh-bridge--status-event-render) #'ignore)
+              ((symbol-function 'message) #'ignore))
+      (dsh-bridge-send-text "" "s1" nil '((:path "/tmp/x.png" :name nil)))
+      (should (null dsh-bridge--prompt-history))
+      (should (null dsh-bridge--last-sent))
+      (dsh-bridge-send-text "hello" "s1")
+      (should (equal (cdr (assoc "s1" dsh-bridge--prompt-history)) '("hello")))
+      (should (equal (caar dsh-bridge--last-sent) "s1")))))
+
+(ert-deftest dsh-bridge-prompt-header-attachment-count ()
+  "The header shows a `📎N' segment only while tags are present."
+  (dsh-bridge-test--kill-prompt-buffer)
+  (let ((file (dsh-bridge-test--temp-file "hdr.txt" "x"))
+        (dsh-bridge--sessions-cache nil)
+        (dsh-bridge--session-status nil))
+    (unwind-protect
+        (with-temp-buffer
+          (dsh-bridge-prompt-mode)
+          (insert "text\n")
+          (should-not (string-match-p "📎" (dsh-bridge--prompt-header-line)))
+          (dsh-bridge--insert-attachment-tag file)
+          (should (string-match-p "📎1" (dsh-bridge--prompt-header-line))))
+      (delete-file file))))
 
 (provide 'dsh-bridge-tests)
 ;;; dsh-bridge-tests.el ends here

@@ -275,5 +275,96 @@ source as `parentSession' with `isSeeded' set."
           (should (dsh-bridge--session-awaiting-p session-id))))
     (dsh-bridge-it--kill-fixture)))
 
+(defmacro dsh-bridge-it--with-fixture (&rest body)
+  "Boot one fixture, bind the bridge globals, run BODY, then tear down.
+BODY runs with `dsh-bridge-it--fixture' set and `dsh-bridge-url' /
+`dsh-bridge-token-file' pointed at the fixture."
+  (declare (indent 0) (debug t))
+  `(unwind-protect
+       (let* ((facts (dsh-bridge-it--boot-fixture)))
+         (setq dsh-bridge-it--fixture facts)
+         (setq dsh-bridge-url (concat (dsh-bridge-it--url) "/dsh-bridge"))
+         (setq dsh-bridge-token-file
+               (expand-file-name "dsh-bridge-token" (alist-get 'dshHome facts)))
+         ,@body)
+     (when (get-buffer "*dsh-bridge-prompt*")
+       (kill-buffer "*dsh-bridge-prompt*"))
+     (dsh-bridge-it--kill-fixture)))
+
+(defun dsh-bridge-it--get (path)
+  "GET PATH on the fixture's base URL; return the parsed JSON alist, or nil."
+  (require 'url)
+  (let* ((url (concat (dsh-bridge-it--url) path))
+         (url-request-method "GET")
+         (url-request-extra-headers
+          (list (cons "Authorization" (concat "Bearer " (dsh-bridge-it--token)))))
+         (buffer (url-retrieve-synchronously url))
+         (raw nil))
+    (unwind-protect
+        (progn
+          (when (buffer-live-p buffer)
+            (setq raw (with-current-buffer buffer
+                        (goto-char (point-min))
+                        (re-search-forward "\r?\n\r?\n")
+                        (buffer-substring-no-properties (point) (point-max)))))
+          (when (and raw (not (string-empty-p raw)))
+            (dsh-bridge-it--parse-json raw)))
+      (when (buffer-live-p buffer) (kill-buffer buffer)))))
+
+(defconst dsh-bridge-it--png-1x1
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAACXBIWXMAAAPoAAAD6AG1e1JrAAAADUlEQVQImWP4z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg=="
+  "Base64 of a valid 1x1 PNG the attachment store's decoder accepts.")
+
+(ert-deftest dsh-bridge-it-attach-file ()
+  "The live-Emacs seat of attachments: attach a file in the prompt buffer,
+send, and prove the host staged it and stripped the tag.
+Drives the real `C-c C-a' machinery (`dsh-bridge-attach-file' plus the
+send-time tag parse) against the live fixture: the image must reach the
+provider as an image block, and the logged prompt text must no longer carry
+the tag line."
+  (dsh-bridge-it--with-fixture
+    (let ((png (make-temp-file "dsh-bridge-it" nil ".png")))
+      (unwind-protect
+          (progn
+            (with-temp-file png
+              (set-buffer-multibyte nil)
+              (insert (base64-decode-string dsh-bridge-it--png-1x1)))
+            (dsh-bridge-it--script-mock
+             (vector (list :kind "text" :text "Saw it.")))
+            (let ((session-id (dsh-bridge-it--create-session
+                               (expand-file-name "../" dsh-bridge-it--directory))))
+              (setq dsh-bridge-default-session session-id)
+              (dsh-bridge-prompt)
+              (insert "Look at this.\n")
+              (dsh-bridge-attach-file (list png))
+              (should (string-match-p "📎1" (dsh-bridge--prompt-header-line)))
+              (dsh-bridge-send-and-exit)
+              (should (dsh-bridge-it--wait-for-turns session-id 30000))
+              ;; The tag is stripped from the text the host logged (the
+              ;; newline that preceded the tag line remains part of the text).
+              ;; Scope to our own prompt: /prompts also carries the injected
+              ;; context messages, and AGENTS.md itself quotes the tag syntax.
+              (let* ((result (dsh-bridge--request
+                              "GET" (dsh-bridge--path "/prompts" session-id) nil))
+                     (prompts (alist-get 'prompts (cdr result)))
+                     (ours (seq-find (lambda (prompt)
+                                       (equal (string-trim prompt) "Look at this."))
+                                     prompts)))
+                (should ours)
+                (should-not (string-match-p "<#attachment" ours)))
+              ;; The image reached the mock provider as an image block.
+              (let* ((requests (alist-get 'requests
+                                          (dsh-bridge-it--get "/mock-llm/requests")))
+                     (blocks (seq-mapcat
+                              (lambda (request)
+                                (seq-mapcat (lambda (message)
+                                              (alist-get 'content message))
+                                            (alist-get 'messages request)))
+                              requests)))
+                (should (seq-some (lambda (block)
+                                    (equal (alist-get 'type block) "image"))
+                                  blocks)))))
+        (delete-file png)))))
+
 (provide 'dsh-bridge-it)
 ;;; dsh-bridge-it.el ends here

@@ -16,7 +16,7 @@
 ;; along with this program.	 If not, see <https://www.gnu.org/licenses/>.
 
 ;; Author: Chong Yidong <cyd@stupidchicken.com>
-;; Version: 0.9.0
+;; Version: 0.10.0
 ;; Package-Requires: ((emacs "29.1"))
 ;; Keywords: tools, convenience
 
@@ -76,7 +76,7 @@
 (require 'button)
 (require 'help-mode)
 
-(defconst dsh-bridge-version "0.9.0"
+(defconst dsh-bridge-version "0.10.0"
   "Version string for the DSH-Bridge package.
 This should match the version reported by the running DSH plugin.")
 
@@ -1722,13 +1722,20 @@ If walking through the prompt history, then:
 
 ;;; Text senders (internal)
 
-(defun dsh-bridge-send-text (text &optional session-id on-success)
+(defun dsh-bridge-send-text (text &optional session-id on-success attachments)
   "Send TEXT to the DSH session as a prompt.
 SESSION-ID overrides the effective session for this call only.
 If ON-SUCCESS is a function, it is called with SENT-SESSION-ID in the
-success branch of the send, after the history is recorded."
+success branch of the send, after the history is recorded.
+ATTACHMENTS, when non-nil, is a list of plists (:path PATH :name NAME)
+to upload with the prompt; PATH must be absolute."
   (let* ((target (or session-id (dsh-bridge--effective-session)))
 		 (payload (append (list (cons 'text text))
+						  (and attachments
+							   (list (cons 'attachments
+										   (vconcat
+											(mapcar #'dsh-bridge--attachment-payload
+													attachments)))))
 						  (and target (list (cons 'sessionId target))))))
 	(dsh-bridge--call "POST" "/send" payload
 	  (lambda (status body http-status)
@@ -1757,7 +1764,10 @@ success branch of the send, after the history is recorded."
 				(when (null target)
 				  ;; The host resolved last-active itself: record it.
 				  (dsh-bridge--record-last-resolved alist))
-				(dsh-bridge--prompt-history-record-send sent-id text))
+				;; An attachment-only send is not a recallable
+				;; history entry.
+				(unless (string-blank-p text)
+				  (dsh-bridge--prompt-history-record-send sent-id text)))
 			  (when (functionp on-success)
 				(funcall on-success sent-id))))))))))
 
@@ -1779,6 +1789,192 @@ SESSION-ID overrides the effective session for this call only."
 		   (t (message "dsh-bridge: draft pushed")
 			  (unless target
 				(dsh-bridge--record-last-resolved alist)))))))))
+
+;;; Attachments
+
+;; DSH attachments ride in the prompt buffer as MML-like tag lines, the same
+;; shape of UX `message-mode' gives MIME parts: `C-c C-a' inserts a tag at
+;; point, deleting the line detaches the file, and send strips the tags out
+;; of the prompt text and uploads the named files.  DSH has no MIME type,
+;; description or disposition field, so `mml-attach-file's type/description/
+;; disposition prompts have no analogue here: the host sniffs an image's type
+;; from its bytes and derives the display name from the file name.
+
+(defconst dsh-bridge--attachment-line-regexp
+  "^[ \t]*<#attachment\\([^\n]*\\)>[ \t]*\n?"
+  "Regexp matching one whole DSH attachment tag line.
+The first group captures the tag's attribute text.  The optional trailing
+newline makes the match a whole line, for stripping and counting.")
+
+(defun dsh-bridge--attachment-escape (value)
+  "Return VALUE escaped for a double-quoted attachment tag attribute."
+  (replace-regexp-in-string "[\"\\\\]" "\\\\\\&" value))
+
+(defun dsh-bridge--attachment-unescape (value)
+  "Return VALUE with attachment tag escapes resolved."
+  (replace-regexp-in-string "\\\\\\(.\\)" "\\1" value))
+
+(defun dsh-bridge--attachment-attribute (attributes key)
+  "Return KEY's unescaped value in ATTRIBUTES, or nil.
+ATTRIBUTES is the text inside one attachment tag; KEY is an attribute
+name such as \"filename\"."
+  (when (string-match (concat "\\(?:^\\|[ \t]\\)" (regexp-quote key)
+							  "=\"\\(\\(?:[^\"\\\\]\\|\\\\.\\)*\\)\"")
+					  attributes)
+	(dsh-bridge--attachment-unescape (match-string 1 attributes))))
+
+(defun dsh-bridge--attachment-format (path &optional name)
+  "Return the attachment tag for PATH, optionally named NAME.
+PATH and NAME are escaped for the double-quoted attribute values.  The
+result carries no trailing newline."
+  (concat "<#attachment filename=\"" (dsh-bridge--attachment-escape path) "\""
+		  (if (and (stringp name) (not (string-empty-p name)))
+			  (concat " name=\"" (dsh-bridge--attachment-escape name) "\"")
+			"")
+		  ">"))
+
+(defun dsh-bridge--parse-attachments (text)
+  "Return (CLEAN-TEXT . ATTACHMENTS) parsed from TEXT.
+ATTACHMENTS lists the tag lines with an absolute `filename' in order, as
+plists (:path PATH :name NAME).  Those lines are removed from
+CLEAN-TEXT; every other character of TEXT is preserved.  A tag-shaped
+line with no absolute `filename' is malformed and stays in CLEAN-TEXT."
+  (let ((position 0) (clean "") (attachments '()))
+	(while (string-match dsh-bridge--attachment-line-regexp text position)
+	  ;; Capture the outer match before `dsh-bridge--attachment-attribute'
+	  ;; runs its own `string-match' and clobbers the match data.
+	  (let* ((whole (match-string 0 text))
+			 (attributes (or (match-string 1 text) ""))
+			 (start (match-beginning 0))
+			 (end (match-end 0))
+			 (path (dsh-bridge--attachment-attribute attributes "filename"))
+			 (name (dsh-bridge--attachment-attribute attributes "name")))
+		(setq clean (concat clean (substring text position start)))
+		(if (and (stringp path) (file-name-absolute-p path))
+			(push (list :path path :name name) attachments)
+		  (setq clean (concat clean whole)))
+		(setq position end)))
+	(cons (concat clean (substring text position)) (nreverse attachments))))
+
+(defun dsh-bridge--attachment-payload (attachment)
+  "Return ATTACHMENT as the JSON alist entry for a `/send' attachment.
+ATTACHMENT is a plist (:path PATH :name NAME); a blank NAME is omitted."
+  (append (list (cons 'path (plist-get attachment :path)))
+		  (let ((name (plist-get attachment :name)))
+			(and (stringp name) (not (string-empty-p name))
+				 (list (cons 'name name))))))
+
+(defun dsh-bridge--insert-attachment-tag (path &optional name)
+  "Insert an attachment tag for PATH, optionally named NAME, at point."
+  (let ((tag (dsh-bridge--attachment-format path name)))
+	(insert (propertize tag
+						'face 'dsh-bridge-attachment-face
+						'font-lock-face 'dsh-bridge-attachment-face
+						'help-echo (format "DSH attachment: %s\nDelete this line to detach it."
+										   path)))
+	(insert "\n")))
+
+(defun dsh-bridge--remove-attachment-tags ()
+  "Remove every attachment tag line from the current buffer."
+  (let ((inhibit-read-only t))
+	(save-excursion
+	  (goto-char (point-min))
+	  (while (re-search-forward dsh-bridge--attachment-line-regexp nil t)
+		(replace-match "")))))
+
+(defun dsh-bridge--attachment-count ()
+  "Return the number of attachment tag lines in the current buffer."
+  (count-matches dsh-bridge--attachment-line-regexp (point-min) (point-max)))
+
+(defun dsh-bridge--prompt-buffer-live ()
+  "Return a live DSH-Prompt buffer, or nil."
+  (seq-find (lambda (buffer)
+			  (with-current-buffer buffer
+				(derived-mode-p 'dsh-bridge-prompt-mode)))
+			(buffer-list)))
+
+(defun dsh-bridge--prompt-buffer-for-attach ()
+  "Return the DSH-Prompt buffer attachments are inserted into.
+Reuse a live DSH-Prompt buffer as-is (its session binding and any draft
+text are left alone); otherwise create the shared prompt buffer bound to
+the invoking buffer's effective session.  Never erases."
+  (or (dsh-bridge--prompt-buffer-live)
+	  ;; Capture the invoking buffer's effective session before entering
+	  ;; the new prompt buffer: the affinity lives in the invoking
+	  ;; buffer's locals and is invisible from inside the new buffer.
+	  (let ((session (dsh-bridge--effective-session)))
+		(with-current-buffer (get-buffer-create "*dsh-bridge-prompt*")
+		  (dsh-bridge-prompt-mode)
+		  (dsh-bridge-set-prompt-session session)
+		  (current-buffer)))))
+
+(defun dsh-bridge--attach-paths (files)
+  "Validate and expand FILES; return the absolute paths, in order.
+Signal a `user-error' for anything that is not a regular file."
+  (mapcar (lambda (file)
+			(let ((expanded (expand-file-name file)))
+			  (unless (file-regular-p expanded)
+				(user-error "dsh-bridge: not a regular file: %s" file))
+			  expanded))
+		  files))
+
+;;;###autoload
+(defun dsh-bridge-attach-file (&optional files)
+  "Attach FILES to the DSH prompt, prompting when FILES is nil.
+Interactively, read one file; in Dired, attach the marked files (or the
+file at point) instead.  The prompt buffer is opened and one tag line per
+file is inserted, as `mml-attach-file' does in Message mode; delete a tag
+line to detach its file.  DSH detects an image's type from its bytes and
+has no MIME type, description or disposition field, so those Message
+prompts are deliberately absent."
+  (interactive
+   (list (if (derived-mode-p 'dired-mode)
+			 (dired-get-marked-files)
+		   (list (read-file-name "Attach file: " nil nil t)))))
+  (let* ((paths (dsh-bridge--attach-paths files))
+		 (prompt (dsh-bridge--prompt-buffer-for-attach))
+		 ;; In the prompt buffer, insert at point (as `mml-attach-file'
+		 ;; does); from anywhere else, append at the end.
+		 (at-point (eq (current-buffer) prompt)))
+	(with-current-buffer prompt
+	  (unless at-point (goto-char (point-max)))
+	  (unless (or (bobp) (bolp)) (insert "\n"))
+	  (dolist (path paths)
+		(dsh-bridge--insert-attachment-tag path)))
+	(pop-to-buffer prompt)
+	(message "dsh-bridge: attached %s"
+			 (mapconcat #'file-name-nondirectory paths ", "))))
+
+;;;###autoload
+(defun dsh-bridge-attach-buffer-file ()
+  "Attach the file visited by the current buffer to the DSH prompt.
+The DSH analogue of Message mode's attach-buffer: DSH carries files, so
+the visited file (not the buffer text) is attached."
+  (interactive)
+  (let ((file buffer-file-name))
+	(unless file
+	  (user-error "dsh-bridge: buffer %s is not visiting a file" (buffer-name)))
+	(let* ((prompt (dsh-bridge--prompt-buffer-for-attach))
+		   (at-point (eq (current-buffer) prompt)))
+	  (with-current-buffer prompt
+		(unless at-point (goto-char (point-max)))
+		(unless (or (bobp) (bolp)) (insert "\n"))
+		(dsh-bridge--insert-attachment-tag (expand-file-name file)))
+	  (pop-to-buffer prompt)
+	  (message "dsh-bridge: attached %s" (file-name-nondirectory file)))))
+
+;;;###autoload
+(defun dsh-bridge-clear-attachments ()
+  "Remove every attachment tag line from the DSH prompt buffer."
+  (interactive)
+  (let ((prompt (dsh-bridge--prompt-buffer-live)))
+	(unless prompt
+	  (user-error "dsh-bridge: no DSH-Prompt buffer"))
+	(with-current-buffer prompt
+	  (let ((count (dsh-bridge--attachment-count)))
+		(dsh-bridge--remove-attachment-tags)
+		(message "dsh-bridge: removed %d attachment%s"
+				 count (if (= count 1) "" "s"))))))
 
 ;;; Dispatcher layout
 
@@ -2654,15 +2850,25 @@ turn-following state."
 (defun dsh-bridge-send (&optional session-id)
   "Send the region, or the whole buffer, to the DSH session as a prompt.
 The session is the effective session of the current buffer; with a
-prefix argument, choose a session for this call only."
+prefix argument, choose a session for this call only.
+
+Attachment tag lines in the sent text (see `dsh-bridge-attach-file') are
+uploaded with the prompt and stripped from its text.  Sending a region
+attaches only the tags inside the region."
   (interactive (list (dsh-bridge--read-session-override "Send to session: ")))
-  (dsh-bridge-send-text (dsh-bridge--region-or-buffer) session-id))
+  (let ((parsed (dsh-bridge--parse-attachments (dsh-bridge--region-or-buffer))))
+	(dsh-bridge-send-text (car parsed) session-id nil (cdr parsed))))
 
 ;;;###autoload
 (defun dsh-bridge-send-and-exit ()
   "Send a DSH-Prompt buffer as a prompt, then bury it and switch away.
 This command must be called in a DSH-Prompt buffer.  Unlike
 `dsh-bridge-send', it always sends the entire buffer contents.
+
+Attachment tag lines (see `dsh-bridge-attach-file') are uploaded with
+the prompt and removed from the kept text on success, so an immediate
+resend does not re-upload them.  A prompt with no text but at least one
+attachment is allowed.
 
 If `dsh-bridge-prompt-resend-confirm' is non-nil and the text exactly
 matches the session's last-sent text, confirm first.
@@ -2672,11 +2878,16 @@ and bury the buffer (see `dsh-bridge--prompt-exit')."
   (interactive)
   (unless (eq major-mode 'dsh-bridge-prompt-mode)
 	(user-error "dsh-bridge: not a DSH-Prompt buffer"))
-  (let ((text (substring-no-properties (buffer-string)))
-		;; The buffer's binding, else the advisory id the send resolves to.
-		(guard-session (dsh-bridge--prompt-status-session)))
-	(if (string-empty-p text)
-		(user-error "dsh-bridge: no text to send")
+  (let* ((prompt-buffer (current-buffer))
+		 ;; Attachments are tag lines; strip them from the sent text.
+		 (parsed (dsh-bridge--parse-attachments
+				  (substring-no-properties (buffer-string))))
+		 (text (car parsed))
+		 (attachments (cdr parsed))
+		 ;; The buffer's binding, else the advisory id the send resolves to.
+		 (guard-session (dsh-bridge--prompt-status-session)))
+	(if (and (string-empty-p text) (null attachments))
+		(user-error "dsh-bridge: no text or attachments to send")
 	  ;; Guard against an identical re-send to the session.
 	  (when (and dsh-bridge-prompt-resend-confirm
 				 (equal text (car-safe
@@ -2688,10 +2899,17 @@ and bury the buffer (see `dsh-bridge--prompt-exit')."
 		(user-error "dsh-bridge: aborted"))
 	  ;; Capture the invoking window for `dsh-bridge--prompt-exit'.
 	  (let ((window (selected-window)))
-		(dsh-bridge-send-text text
-							  dsh-bridge--prompt-session
-							  (lambda (sent-id)
-								(dsh-bridge--prompt-exit sent-id window)))))))
+		(dsh-bridge-send-text
+		 text
+		 dsh-bridge--prompt-session
+		 (lambda (sent-id)
+		   ;; The attachments went out with this send; drop their tags from
+		   ;; the kept text so an immediate resend cannot re-upload them.
+		   (when attachments
+			 (with-current-buffer prompt-buffer
+			   (dsh-bridge--remove-attachment-tags)))
+		   (dsh-bridge--prompt-exit sent-id window))
+		 attachments)))))
 
 (defun dsh-bridge--prompt-blank ()
   "Erase the DSH-prompt buffer and reset its navigation state.
@@ -2770,7 +2988,10 @@ with `quit-window' to dismiss the prompt."
   "Send the region, or the whole buffer, to the DSH composer as a draft.
 Like `dsh-bridge-send', but nothing is submitted; the text lands in the
 composer for review.  With a prefix argument, choose a session for this call
-only.  Whole-buffer drafts confirm exactly like whole-buffer sends."
+only.  Whole-buffer drafts confirm exactly like whole-buffer sends.
+
+Composer drafts carry text only, so attachment tag lines are stripped
+from the pushed text (with a message) rather than uploaded."
   (interactive (list (dsh-bridge--read-session-override "Draft to session: ")))
   (let ((whole (not (use-region-p))))
 	(when (and whole buffer-read-only)
@@ -2781,7 +3002,10 @@ only.  Whole-buffer drafts confirm exactly like whole-buffer sends."
 					 (format "Send the whole %s buffer to DSH as a draft? "
 							 (buffer-name)))))
 	  (user-error "dsh-bridge: aborted"))
-	(dsh-bridge-send-draft (dsh-bridge--region-or-buffer) session-id)))
+	(let ((parsed (dsh-bridge--parse-attachments (dsh-bridge--region-or-buffer))))
+	  (when (cdr parsed)
+		(message "dsh-bridge: drafts do not carry attachments; pushing text only"))
+	  (dsh-bridge-send-draft (car parsed) session-id))))
 
 ;;;###autoload
 (defun dsh-bridge-fetch (&optional session-id same-window)
@@ -3860,11 +4084,12 @@ recomputes on the next redisplay)."
   "Return the header line for the DSH-Prompt buffer.
 Header line format:
 
- <status> <label>[ (k/n)][ · <model>][ · <ctx%>][ ✓ sent HH:MM]
+ <status> <label>[ (k/n)][ · <model>][ · <ctx%>][ · 📎N][ ✓ sent HH:MM]
 
 The model and context segments stay empty until their first successful
 fetch.  Editing the text clears the sent marker.  The `(k/n)' segment
-appears when walking the prompt history."
+appears when walking the prompt history, and `📎N' when the buffer
+carries N attachment tag lines."
   (let* ((session (dsh-bridge--prompt-status-session))
 		 (status (dsh-bridge--status-glyph session))
 		 (label (if session
@@ -3872,6 +4097,8 @@ appears when walking the prompt history."
 				  ""))
 		 (model (dsh-bridge--prompt-model-label session))
 		 (context (dsh-bridge--prompt-context-label session))
+		 (attached (let ((count (dsh-bridge--attachment-count)))
+					 (and (> count 0) (format "📎%d" count))))
 		 (sent (dsh-bridge--prompt-sent-marker session))
 		 (hist (dsh-bridge--prompt-history-position)))
 	;; The returned string is %-escaped (see `header-line-format'), so
@@ -3880,7 +4107,9 @@ appears when walking the prompt history."
 	 "%" "%%"
 	 (concat " " (if (string-empty-p status) label (concat status " " label))
 			 hist (and model (concat " · " model))
-			 (and context (concat " · " context)) sent))))
+			 (and context (concat " · " context))
+			 (and attached (concat " · " attached))
+			 sent))))
 
 (defun dsh-bridge--prompt-mode-setup ()
   "Common setup for `dsh-bridge-prompt-mode'."
@@ -3903,17 +4132,26 @@ into the mode metadata and the docstring generation calls `symbol-name' on it
 `C-c C-c' sends the whole buffer (as in Message mode, an active region
 is ignored) and, on success, buries the buffer (text survives,
 unmodified, for edit-and-resubmit; the window pops to a DSH-View buffer
-following the sent session).  `C-c C-d' pushes it as a composer
-draft, `C-c C-k' erases the buffer, `C-c C-f' fetches the effective
-session's latest turn, `C-c C-s' rebinds this buffer's session, `C-c C-l'
-lists sessions.  `M-p' and `M-n' walk the session's prompt history,
-recalling earlier prompts (the current draft is restored by `M-n' at the
-newest prompt); an edited history entry must be sent or reverted with
-`revert-buffer' before walking on.  The header shows the session's
-status glyph and a `✓ sent HH:MM' marker when the current text was just
-sent.  When the mode derives from markdown-mode, several markdown keys
-are shadowed by the bridge commands (C-c C-c, C-c C-d, C-c C-k, C-c C-s,
-C-c C-f, C-c C-l); the markdown commands stay reachable via the menu."
+following the sent session).  `C-c C-a' attaches a file, as
+`mml-attach-file' does in Message mode: it inserts an
+`<#attachment filename=\"...\">' tag line at point, uploading the file
+with the prompt and stripping the tag from the sent text.  Delete a tag
+line to detach its file; the header shows a `📎N' count while any
+remain.  DSH detects an image's type from its bytes and has no MIME
+type, description or disposition field, so Message mode's type and
+disposition prompts do not apply.  `C-c C-d' pushes the buffer as a
+composer draft (attachments are text-only there, so tags are stripped),
+`C-c C-k' erases the buffer, `C-c C-f' fetches the effective session's
+latest turn, `C-c C-m' changes the model, `C-c C-s' rebinds this
+buffer's session, `C-c C-l' lists sessions.  `M-p' and `M-n' walk the
+session's prompt history, recalling earlier prompts (the current draft
+is restored by `M-n' at the newest prompt); an edited history entry must
+be sent or reverted with `revert-buffer' before walking on.  The header
+shows the session's status glyph and a `✓ sent HH:MM' marker when the
+current text was just sent.  When the mode derives from markdown-mode,
+several markdown keys are shadowed by the bridge commands (C-c C-c,
+C-c C-a, C-c C-d, C-c C-k, C-c C-f, C-c C-m, C-c C-s, C-c C-l); the
+markdown commands stay reachable via the menu."
 	 (dsh-bridge--prompt-mode-setup)))
 
 ;; The map is created by whichever branch of the `if' runs; declare it here so
@@ -3925,6 +4163,7 @@ C-c C-f, C-c C-l); the markdown commands stay reachable via the menu."
   (dsh-bridge--define-prompt-mode text-mode))
 
 (define-key dsh-bridge-prompt-mode-map (kbd "C-c C-c") #'dsh-bridge-send-and-exit)
+(define-key dsh-bridge-prompt-mode-map (kbd "C-c C-a") #'dsh-bridge-attach-file)
 (define-key dsh-bridge-prompt-mode-map (kbd "C-c C-d") #'dsh-bridge-draft)
 (define-key dsh-bridge-prompt-mode-map (kbd "C-c C-k") #'dsh-bridge-erase-prompt)
 (define-key dsh-bridge-prompt-mode-map (kbd "C-c C-f") #'dsh-bridge-fetch)
@@ -3950,6 +4189,14 @@ C-c C-f, C-c C-l); the markdown commands stay reachable via the menu."
 	 :help "Send the region (or whole buffer) to the DSH composer as a draft"]
 	["Erase Prompt" dsh-bridge-erase-prompt
 	 :help "Clear the prompt buffer"]
+	"---"
+	["Attach File…" dsh-bridge-attach-file
+	 :help "Insert an attachment tag for a file (MML-style)"]
+	["Attach Buffer File" dsh-bridge-attach-buffer-file
+	 :help "Attach the file visited by the buffer that invoked this"]
+	["Clear Attachments" dsh-bridge-clear-attachments
+	 :active (> (dsh-bridge--attachment-count) 0)
+	 :help "Remove every attachment tag from this prompt"]
 	"---"
 	["Fetch Latest Turn" dsh-bridge-fetch
 	 :help "Fetch the effective session's latest turn"]
@@ -4044,6 +4291,13 @@ pin to write, and clearing has no host round-trip."
 (defface dsh-bridge-default-target-face
   '((t :inherit font-lock-keyword-face))
   "Face for the default-target session in the DSH-Sessions buffer."
+  :group 'dsh-bridge)
+
+(defface dsh-bridge-attachment-face
+  '((t :inherit font-lock-keyword-face))
+  "Face for DSH attachment tag lines in the DSH-Prompt buffer.
+The tag is bridge furniture, not prompt text; this face sets it apart from
+the words that will actually be sent."
   :group 'dsh-bridge)
 
 (defface dsh-bridge-untitled-face

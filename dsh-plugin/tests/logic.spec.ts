@@ -40,6 +40,11 @@ import {
   userPrompts,
   workspaceRefsBySession,
   workspaceTitleConflict,
+  attachmentErrorHttpStatus,
+  imageInputUnsupported,
+  MAX_ATTACHMENTS,
+  parseAttachmentRequests,
+  sniffImageMediaType,
   type LiveSessionLike,
   type AssistantTurn,
   type MessageLike,
@@ -974,5 +979,104 @@ describe('rpcArgsPayload', () => {
   it('wraps named args into the gateway payload', () => {
     expect(rpcArgsPayload({ request: { sessionId: 's1' } })).toEqual({ args: { request: { sessionId: 's1' } } })
     expect(rpcArgsPayload({})).toEqual({ args: {} })
+  })
+})
+
+describe('sniffImageMediaType', () => {
+  const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0])
+  const jpeg = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 0, 0])
+  const gif = new Uint8Array([0x47, 0x49, 0x46, 0x38, 0x39, 0x61])
+  const webp = new Uint8Array([0x52, 0x49, 0x46, 0x46, 0x20, 0, 0, 0, 0x57, 0x45, 0x42, 0x50])
+
+  it('recognizes the four accepted signatures', () => {
+    expect(sniffImageMediaType(png)).toBe('image/png')
+    expect(sniffImageMediaType(jpeg)).toBe('image/jpeg')
+    expect(sniffImageMediaType(gif)).toBe('image/gif')
+    expect(sniffImageMediaType(webp)).toBe('image/webp')
+  })
+
+  it('returns undefined for short, text, or RIFF-but-not-WEBP headers', () => {
+    expect(sniffImageMediaType(new Uint8Array([]))).toBeUndefined()
+    expect(sniffImageMediaType(new Uint8Array([0x89, 0x50]))).toBeUndefined()
+    expect(sniffImageMediaType(new TextEncoder().encode('not an image'))).toBeUndefined()
+    const riffWave = new Uint8Array([0x52, 0x49, 0x46, 0x46, 0x20, 0, 0, 0, 0x57, 0x41, 0x56, 0x45])
+    expect(sniffImageMediaType(riffWave)).toBeUndefined()
+  })
+
+  it('does not trust a file extension over content (the store rejects mismatch)', () => {
+    // A file named .png whose bytes are text is a verbatim file, not an image.
+    expect(sniffImageMediaType(new TextEncoder().encode('#!/bin/sh\n'))).toBeUndefined()
+  })
+})
+
+describe('parseAttachmentRequests', () => {
+  it('treats absent and null as an empty list', () => {
+    expect(parseAttachmentRequests(undefined)).toEqual({ ok: true, items: [] })
+    expect(parseAttachmentRequests(null)).toEqual({ ok: true, items: [] })
+    expect(parseAttachmentRequests([])).toEqual({ ok: true, items: [] })
+  })
+
+  it('keeps order and optional names', () => {
+    expect(parseAttachmentRequests([
+      { path: '/tmp/a.png' },
+      { path: '/tmp/b.rs', name: 'b.rs' },
+      { path: '/tmp/c', name: null },
+    ])).toEqual({
+      ok: true,
+      items: [{ path: '/tmp/a.png' }, { path: '/tmp/b.rs', name: 'b.rs' }, { path: '/tmp/c' }],
+    })
+  })
+
+  it('rejects malformed members with the offending index', () => {
+    const cases: Array<[unknown, string]> = [
+      ['not-an-array', 'attachments must be an array'],
+      [[null], 'attachments[0] must be an object'],
+      [[[]], 'attachments[0] must be an object'],
+      [[{}], 'attachments[0].path is required'],
+      [[{ path: '' }], 'attachments[0].path is required'],
+      [[{ path: 'relative/x' }], 'attachments[0].path must be absolute'],
+      [[{ path: `/tmp/a${String.fromCharCode(0)}b` }], 'attachments[0].path must not contain NUL'],
+      [[{ path: '/tmp/a', name: 7 }], 'attachments[0].name must be a string'],
+      [[{ path: '/tmp/a' }, { path: 'b' }], 'attachments[1].path must be absolute'],
+    ]
+    for (const [value, error] of cases) {
+      expect(parseAttachmentRequests(value)).toEqual({ ok: false, error })
+    }
+  })
+
+  it('rejects more than the count cap', () => {
+    const items = Array.from({ length: MAX_ATTACHMENTS + 1 }, (_v, i) => ({ path: `/tmp/${i}` }))
+    expect(parseAttachmentRequests(items)).toEqual({
+      ok: false,
+      error: `too many attachments (max ${MAX_ATTACHMENTS})`,
+    })
+    expect(parseAttachmentRequests(items.slice(0, MAX_ATTACHMENTS)).ok).toBe(true)
+  })
+})
+
+describe('imageInputUnsupported', () => {
+  it('only refuses when a list is stated and omits image', () => {
+    expect(imageInputUnsupported(undefined)).toBe(false)
+    expect(imageInputUnsupported(['text'])).toBe(true)
+    expect(imageInputUnsupported(['text', 'image'])).toBe(false)
+    expect(imageInputUnsupported(['image'])).toBe(false)
+  })
+})
+
+describe('attachmentErrorHttpStatus', () => {
+  it('maps size limits to 413 and content/count problems to 400', () => {
+    for (const code of ['IMAGES_TOO_LARGE', 'IMAGE_TOO_LARGE', 'IMAGE_TOO_MANY_PIXELS', 'IMAGE_DIMENSION_TOO_LARGE']) {
+      expect(attachmentErrorHttpStatus(code)).toBe(413)
+    }
+    for (const code of ['TOO_MANY_IMAGES', 'UNSUPPORTED_IMAGE_TYPE', 'INVALID_IMAGE', 'IMAGE_TYPE_MISMATCH']) {
+      expect(attachmentErrorHttpStatus(code)).toBe(400)
+    }
+  })
+
+  it('maps a file-incapable backend to 501 and storage faults to 500', () => {
+    expect(attachmentErrorHttpStatus('ATTACHMENT_FILES_UNSUPPORTED')).toBe(501)
+    for (const code of ['ATTACHMENT_WRITE_FAILED', 'ATTACHMENT_CORRUPT', 'ATTACHMENT_NOT_FOUND', 'SOMETHING_ELSE']) {
+      expect(attachmentErrorHttpStatus(code)).toBe(500)
+    }
   })
 })

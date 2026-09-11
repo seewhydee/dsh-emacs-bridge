@@ -89,13 +89,15 @@ Ordered by recommended sequence. Harness seams were verified against DSH
 - `/turns` turn records gain the closing assistant message's `messageId`
   (ratings) and the turn's end `seq` as `endSeq` (fork targeting).
 - The plugin's optional-service list gains `sessionQuery` (stats — **wired**:
-  candidate 1 landed it), `messageFeedback` (ratings), `goals` (goal
-  mutations), `sessionController`
-  (fork), `commands` (slash-command catalog, `/emacs`),
-  `permissionPresets`/`sandboxPolicy`/`approval` (permission display — none
-  of the three is a Typert Remote; the wire surface is the `permissions`
-  projection), and `serviceFor` on the `AgentPresetsService` face (plan
-  mode). All are read with `ctx.get` and must tolerate `undefined`.
+  candidate 1 landed it), `attachments` and `llm` (image/file prompts —
+  **wired**: candidate 11 landed them), `messageFeedback` (ratings), `goals`
+  (goal mutations), `sessionController`
+  (fork — **wired**: candidate 2), `commands` (slash-command catalog,
+  `/emacs`), `permissionPresets`/`sandboxPolicy`/`approval` (permission
+  display — none of the three is a Typert Remote; the wire surface is the
+  `permissions` projection), and `serviceFor` on the `AgentPresetsService`
+  face (plan mode). All are read with `ctx.get` and must tolerate
+  `undefined`.
 
 ### 1. Session stats in `describe-session` (read-only)
 
@@ -263,15 +265,39 @@ candidates above.
 
 ### 11. Attachments in `/send`
 
-- **Seam** — `UserMessage` content blocks include `image` and `file` blocks
-  whose bytes are owned by the content-addressed `attachments` store (one
-  more optional `ctx.get`); file blocks never reach the provider — request
-  assembly projects them to handle text. The bridge stages bytes through the
-  store and builds the multi-block message host-side. The web composer
-  submits file attachments as staged receipts (`CommandSubmitAttachment`);
-  mirror that flow rather than inventing a second one.
-- **UX** — "attach this buffer's file", dired-marked files, or an image from
-  the composer.
+**Implemented.**
+
+- **Transport** — path-based: `POST /dsh-bridge/send` takes an optional
+  `attachments: [{path, name?}]` of absolute host-local paths and the host
+  reads them, so bytes never cross the 1 MiB JSON body cap. Emacs and the DSH
+  host must share a filesystem; a raw-byte upload route for a containerized
+  host is a possible follow-up, deliberately not built.
+- **Seam** — the content-addressed `attachments` store (base bundle; one more
+  optional `ctx.get`), **not** the browser `fileUploads` receipt flow. This
+  *reverses* the original candidate's "mirror that flow rather than inventing
+  a second one": receipts guard an untrusted wire caller citing bytes it did
+  not upload, while the bridge is a trusted host plugin that can mint durable
+  refs directly (the harness's own subagent prompt does the same), and
+  `file-upload` is web-app-only whereas `attachment-local` is in the base
+  bundle. Images go through `saveImages`, files through `saveFileStream`;
+  content signatures (not extensions) decide which, since the store rejects a
+  mismatched declared type. Accepted parity deviations from `session/prompt`:
+  no `requestId` dedupe, no per-agent image-admission serialization, no
+  disposed-agent re-check, route-mapped errors instead of `session/agent-busy`.
+- **Text-only models** — the route pre-rejects an image with
+  `MODEL_DOES_NOT_SUPPORT_IMAGES` (optional `ctx.get('llm')` + the live
+  `modelSelection` projection; best-effort), mirroring the web UI.
+- **Caps** — 20 attachments and 200 MiB per file (bridge constants in
+  `logic.ts`), plus the store's own image limits.
+- **UX** — Message-mode-like in-buffer MML tags (`C-c C-a` /
+  `dsh-bridge-attach-file`, `dsh-bridge-attach-buffer-file`, dired marks), a
+  `📎N` header segment, and send-time stripping. Message mode's
+  type/description/disposition prompts have no DSH analogue. As a consequence
+  of the tag model, `dsh-bridge-send` (region/buffer send) also parses tags —
+  only those inside the sent region — rather than leaking them as literal
+  text or silently dropping them; this extends the original prompt-buffer-only
+  UX scope. The tags stay in the source buffer after such a send, so a repeat
+  region-send re-uploads the bytes.
 
 ### Cut / not planned
 

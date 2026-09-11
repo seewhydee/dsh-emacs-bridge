@@ -16,6 +16,7 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 import { timingSafeEqual } from 'node:crypto'
+import { isAbsolute } from 'node:path'
 
 /** One content block, narrowed to the fields the bridge reads. */
 export interface MessageBlockLike {
@@ -1279,4 +1280,147 @@ export function catalogModelName(
  */
 export function rpcArgsPayload(args: Record<string, unknown>): { args: Record<string, unknown> } {
   return { args }
+}
+
+// ---- Attachments (PLAN.md candidate 11) ----
+
+/** Image media types the version-one attachment path accepts. */
+export type BridgeImageMediaType = 'image/png' | 'image/jpeg' | 'image/webp' | 'image/gif'
+
+/** One requested attachment after wire validation. */
+export interface AttachmentRequest {
+  /** Absolute host-local path the host reads. */
+  path: string
+  /** Optional display name; the attachment store sanitizes it into the leaf name. */
+  name?: string
+}
+
+/** The outcome of {@link parseAttachmentRequests}. */
+export type AttachmentRequestsResult =
+  | { ok: true; items: AttachmentRequest[] }
+  | { ok: false; error: string }
+
+/**
+ * Bridge-imposed bound on one prompt's attachment count. Mirrors the store's
+ * default `maxImagesPerMessage`, and also bounds the file arm, which the
+ * harness leaves unbounded. Documented in README.
+ */
+export const MAX_ATTACHMENTS = 20
+
+/**
+ * Bridge-imposed per-file byte bound for the verbatim file arm. The image arm
+ * is bounded by the store's own `imageLimits`. Documented in README.
+ */
+export const MAX_ATTACHMENT_FILE_BYTES = 200 * 1024 * 1024
+
+/**
+ * Validate the `attachments` member of a `/send` body. Absent/`null` is an
+ * empty list; a bad member names the first offending index so Emacs can echo
+ * something useful. JSON `null` in `name` is treated as absent (json-encode
+ * writes a nil alist value as null).
+ */
+export function parseAttachmentRequests(value: unknown): AttachmentRequestsResult {
+  if (value === undefined || value === null) return { ok: true, items: [] }
+  if (!Array.isArray(value)) return { ok: false, error: 'attachments must be an array' }
+  if (value.length > MAX_ATTACHMENTS) {
+    return { ok: false, error: `too many attachments (max ${MAX_ATTACHMENTS})` }
+  }
+  const items: AttachmentRequest[] = []
+  for (let index = 0; index < value.length; index += 1) {
+    const raw = value[index]
+    if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+      return { ok: false, error: `attachments[${index}] must be an object` }
+    }
+    const record = raw as Record<string, unknown>
+    const path = record.path
+    if (typeof path !== 'string' || path === '') {
+      return { ok: false, error: `attachments[${index}].path is required` }
+    }
+    if (path.includes('\u0000')) {
+      return { ok: false, error: `attachments[${index}].path must not contain NUL` }
+    }
+    if (!isAbsolute(path)) {
+      return { ok: false, error: `attachments[${index}].path must be absolute` }
+    }
+    const name = record.name
+    if (name !== undefined && name !== null && typeof name !== 'string') {
+      return { ok: false, error: `attachments[${index}].name must be a string` }
+    }
+    items.push({
+      path,
+      ...(typeof name === 'string' && name !== '' ? { name } : {}),
+    })
+  }
+  return { ok: true, items }
+}
+
+/** Whether BYTES begins with the fixed SIGNATURE. */
+function startsWith(bytes: Uint8Array, signature: readonly number[]): boolean {
+  if (bytes.length < signature.length) return false
+  for (let index = 0; index < signature.length; index += 1) {
+    if (bytes[index] !== signature[index]) return false
+  }
+  return true
+}
+
+const PNG_SIGNATURE = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a] as const
+const JPEG_SIGNATURE = [0xff, 0xd8, 0xff] as const
+const GIF_SIGNATURE = [0x47, 0x49, 0x46, 0x38] as const
+const RIFF_SIGNATURE = [0x52, 0x49, 0x46, 0x46] as const
+const WEBP_TAG = [0x57, 0x45, 0x42, 0x50] as const
+
+/**
+ * Sniff one accepted image media type from the leading bytes of a file, or
+ * `undefined` when it is not one of the four signatures. Content, not the
+ * file name, decides: the store rejects a declared type that disagrees with
+ * the bytes (`IMAGE_TYPE_MISMATCH`).
+ */
+export function sniffImageMediaType(header: Uint8Array): BridgeImageMediaType | undefined {
+  if (startsWith(header, PNG_SIGNATURE)) return 'image/png'
+  if (startsWith(header, JPEG_SIGNATURE)) return 'image/jpeg'
+  if (startsWith(header, GIF_SIGNATURE)) return 'image/gif'
+  if (startsWith(header, RIFF_SIGNATURE)
+    && header.length >= 12
+    && startsWith(header.subarray(8), WEBP_TAG)) {
+    return 'image/webp'
+  }
+  return undefined
+}
+
+/**
+ * Whether a resolved model explicitly refuses image input. An undefined list
+ * means "unspecified", which every harness image gate treats as allowed.
+ */
+export function imageInputUnsupported(inputModalities: readonly string[] | undefined): boolean {
+  return inputModalities !== undefined && !inputModalities.includes('image')
+}
+
+const ATTACHMENT_SIZE_CODES: ReadonlySet<string> = new Set([
+  'IMAGES_TOO_LARGE',
+  'IMAGE_TOO_LARGE',
+  'IMAGE_TOO_MANY_PIXELS',
+  'IMAGE_DIMENSION_TOO_LARGE',
+])
+
+const ATTACHMENT_CALLER_CODES: ReadonlySet<string> = new Set([
+  'TOO_MANY_IMAGES',
+  'UNSUPPORTED_IMAGE_TYPE',
+  'INVALID_IMAGE_BASE64',
+  'INVALID_IMAGE',
+  'IMAGE_TYPE_MISMATCH',
+  'INVALID_FILE_BASE64',
+  'ATTACHMENT_PROJECTION_UNSUPPORTED',
+])
+
+/**
+ * HTTP status for an attachment store failure code: caller-correctable size
+ * limits are 413, caller-correctable content/count problems are 400, a
+ * backend that cannot store files at all is 501, and every other code
+ * (storage faults, unrecognized codes) is a server-side 500.
+ */
+export function attachmentErrorHttpStatus(code: string): 400 | 413 | 500 | 501 {
+  if (ATTACHMENT_SIZE_CODES.has(code)) return 413
+  if (ATTACHMENT_CALLER_CODES.has(code)) return 400
+  if (code === 'ATTACHMENT_FILES_UNSUPPORTED') return 501
+  return 500
 }
