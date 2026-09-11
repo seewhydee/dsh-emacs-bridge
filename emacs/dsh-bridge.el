@@ -1082,17 +1082,6 @@ to creation time, among live sessions).	 Display-only; never blocks."
 			(setq best-time t0)
 			(setq best (alist-get 'id s))))))))
 
-(defun dsh-bridge--prompt-status-session ()
-  "The session id the prompt buffer's status and `✓ sent' marker read.
-The buffer's binding, else the default target, else the resolved last-active
-id (advisory — display only).  `dsh-bridge--effective-session' returns nil for
-the last-active case, but a status/sent lookup needs a concrete id, so this
-widens the rule."
-  (or dsh-bridge--prompt-session
-	  dsh-bridge-default-session
-	  (car-safe dsh-bridge--last-resolved-active)
-	  (dsh-bridge--cache-last-active)))
-
 (defun dsh-bridge--dispatcher-header ()
   "Header string for the dispatcher: status plus the effective session.
 This has the format \"<status> <label>[<qualifier>]\", where the
@@ -2642,8 +2631,9 @@ and bury the buffer (see `dsh-bridge--prompt-exit')."
 				  (substring-no-properties (buffer-string))))
 		 (text (car parsed))
 		 (attachments (cdr parsed))
-		 ;; The buffer's binding, else the advisory id the send resolves to.
-		 (guard-session (dsh-bridge--prompt-status-session)))
+		 ;; Only an explicit binding (or the default target); a guessed last-active
+		 ;; id must not key the guard.
+		 (guard-session (dsh-bridge--effective-session)))
 	(if (and (string-empty-p text) (null attachments))
 		(user-error "dsh-bridge: no text or attachments to send")
 	  ;; Guard against an identical re-send to the session.
@@ -3734,24 +3724,33 @@ empty array, and a single-select custom answer never travels with a selection
 (defun dsh-bridge-answer ()
   "Open the pending ask-user question buffer for the session at hand.
 In a DSH-View / DSH-Prompt / DSH-Sessions buffer, answers the shown / point
-session; otherwise reports that no question is pending."
+session.  An unbound DSH-Prompt buffer (one following last-active) answers
+the only session with a pending question, and refuses to guess when several
+are pending.  Otherwise reports that no question is pending."
   (interactive)
-  (let* ((session (cond
-				  ((and (eq major-mode 'dsh-bridge-view-mode)
-						dsh-bridge--view-content-session)
-				   dsh-bridge--view-content-session)
-				  ((eq major-mode 'dsh-bridge-prompt-mode)
-				   (dsh-bridge--prompt-status-session))
-				  ((eq major-mode 'dsh-bridge-sessions-mode)
-				   (tabulated-list-get-id))))
-		 (entry (and session (dsh-bridge--pending-question session))))
-	(cond
-	 (entry
-	  (pop-to-buffer (dsh-bridge--question-buffer session (car entry) (cdr entry))))
-	 (session
-	  (message "dsh-bridge: session \"%s\" has no pending question"
-			   (dsh-bridge--session-label session)))
-	 (t (message "dsh-bridge: no pending question")))))
+  (let ((session (cond
+                  ((and (eq major-mode 'dsh-bridge-view-mode)
+                        dsh-bridge--view-content-session)
+                   dsh-bridge--view-content-session)
+                  ((eq major-mode 'dsh-bridge-prompt-mode)
+                   (dsh-bridge--effective-session))
+                  ((eq major-mode 'dsh-bridge-sessions-mode)
+                   (tabulated-list-get-id)))))
+    (unless session
+      (let ((pending (mapcar #'car dsh-bridge--pending-questions)))
+        (cond ((= (length pending) 1)
+               (setq session (car pending)))
+              ((> (length pending) 1)
+               (user-error "dsh-bridge: %d sessions have pending questions; pick one in DSH-Sessions"
+                           (length pending))))))
+    (let ((entry (and session (dsh-bridge--pending-question session))))
+      (cond
+       (entry
+        (pop-to-buffer (dsh-bridge--question-buffer session (car entry) (cdr entry))))
+       (session
+        (message "dsh-bridge: session \"%s\" has no pending question"
+                 (dsh-bridge--session-label session)))
+       (t (message "dsh-bridge: no pending question"))))))
 
 (defun dsh-bridge--define-question-mode ()
   "Define `dsh-bridge-question-mode'."
@@ -3861,7 +3860,10 @@ numbers are known."
 One request each, only when the session's entry is not already cached.  The
 requests are synchronous loopback (like the other prompt-open requests); a
 failure leaves the header segment empty until the next trigger."
-  (let ((session (dsh-bridge--prompt-status-session)))
+  (let ((session (or dsh-bridge--prompt-session
+					 dsh-bridge-default-session
+					 (car-safe dsh-bridge--last-resolved-active)
+					 (dsh-bridge--cache-last-active))))
     (when session
       (dsh-bridge--fetch-models session)
       (dsh-bridge--fetch-context session))))
@@ -3900,13 +3902,17 @@ Returns non-nil on success; the header re-renders on the next redisplay."
 
 (defun dsh-bridge-select-model ()
   "Change the model (and reasoning effort) of the prompt buffer's session.
+The buffer must be bound to a session (or `dsh-bridge-default-session' set):
+this command changes state, so it refuses to guess the last-active session.
 Picks from the host's live catalog via `completing-read' (`provider/model'
 candidates annotated with the display name), then posts the selection through
 the genuine `session.selectModel' handler — so the change applies to this
 session and persists as the default, exactly as the web UI does."
   (interactive)
-  (let* ((session-id (dsh-bridge--prompt-status-session))
-         (data (dsh-bridge--fetch-models session-id t)))
+  (let* ((session-id (dsh-bridge--effective-session))
+         (data (and session-id (dsh-bridge--fetch-models session-id t))))
+    (unless session-id
+      (user-error "dsh-bridge: no session selected; bind the prompt buffer (`C-c C-s') or set a default target"))
     (if (null data)
         (message "dsh-bridge: model catalog unavailable")
       (let* ((catalog (dsh-bridge--model-catalog data))
@@ -4146,7 +4152,10 @@ The model and context segments stay empty until their first successful
 fetch.  Editing the text clears the sent marker.  The `(k/n)' segment
 appears when walking the prompt history, and `📎N' when the buffer
 carries N attachment tag lines."
-  (let* ((session (dsh-bridge--prompt-status-session))
+  (let* ((session (or dsh-bridge--prompt-session
+					  dsh-bridge-default-session
+					  (car-safe dsh-bridge--last-resolved-active)
+					  (dsh-bridge--cache-last-active)))
 		 (status (dsh-bridge--status-glyph session))
 		 (label (if session
 					(dsh-bridge--session-link (dsh-bridge--session-label session) session)

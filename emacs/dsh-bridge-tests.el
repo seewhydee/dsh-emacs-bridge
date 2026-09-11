@@ -3028,6 +3028,27 @@ declining aborts, and edited text sends without asking."
         (should (null asked))
         (should (equal sent "hello!"))))))
 
+(ert-deftest dsh-bridge-send-and-exit-resend-guard-unbound ()
+  "An unbound prompt buffer does not key the guard on a guessed session.
+The send leaves a nil target to the host, so a cached last-active id must not
+decide whether the identical-text confirmation fires."
+  (let ((dsh-bridge-prompt-resend-confirm t)
+        (dsh-bridge-default-session nil)
+        (dsh-bridge--last-resolved-active '("s1" . "T"))
+        (dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t))))
+        (dsh-bridge--last-sent '(("s1" . ("hello" . 1234567.0))))
+        (asked nil) (sent nil))
+    (with-temp-buffer
+      (dsh-bridge-prompt-mode)
+      (cl-letf (((symbol-function 'dsh-bridge-send-text)
+                 (lambda (text &rest _) (setq sent text)))
+                ((symbol-function 'y-or-n-p)
+                 (lambda (&rest _) (setq asked t) nil)))
+        (insert "hello")
+        (dsh-bridge-send-and-exit)
+        (should-not asked)
+        (should (equal sent "hello"))))))
+
 (ert-deftest dsh-bridge-turn-reason-phrase ()
   "The turn-end reason kind maps to a truthful human verb."
   (let ((dsh-bridge--sessions-cache '(((id . "s1") (title . "T")))))
@@ -3448,7 +3469,8 @@ when the caches are empty."
 (ert-deftest dsh-bridge-select-model-annotation-separated ()
   "Model completion annotations are separated from the candidate by a space,
 and a model with no display name gets no annotation."
-  (let ((annotation nil))
+  (let ((annotation nil)
+        (dsh-bridge-default-session "s1"))
     (cl-letf (((symbol-function 'dsh-bridge--fetch-models)
                (lambda (&rest _)
                  '((current . ((provider . "p1") (model . "m1")))
@@ -3467,6 +3489,17 @@ and a model with no display name gets no annotation."
     (should annotation)
     (should (equal (funcall annotation "p1/m1") " M1"))
     (should (null (funcall annotation "p1/m2")))))
+
+(ert-deftest dsh-bridge-select-model-no-session-errors ()
+  "Changing state refuses to guess a last-active session.
+With no buffer binding and no default target, the command must error rather
+than post the change to whatever the advisory caches name."
+  (let ((dsh-bridge-default-session nil)
+        (dsh-bridge--last-resolved-active '("s1" . "T"))
+        (dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t)))))
+    (with-temp-buffer
+      (dsh-bridge-prompt-mode)
+      (should-error (dsh-bridge-select-model) :type 'user-error))))
 
 (ert-deftest dsh-bridge-fetch-context ()
   "fetch-context seeds the cache once and skips when cached."
@@ -4626,6 +4659,61 @@ and quotes the answer key from the real `dsh-bridge-answer' binding."
            (dsh-bridge-test--pending-ask "s1" "   ")))
       (should (string-match-p "view the question"
                               (dsh-bridge--view-awaiting-note "s1"))))))
+
+(ert-deftest dsh-bridge-answer-unbound-uses-unique-pending ()
+  "An unbound DSH-Prompt buffer answers the only pending question.
+The command must not guess a last-active session; with exactly one pending
+ask, that question is unambiguous, so it is used."
+  (let ((dsh-bridge-default-session nil)
+        (dsh-bridge--last-resolved-active '("s1" . "T"))
+        (dsh-bridge--pending-questions (dsh-bridge-test--pending-ask "s2" "Q?"))
+        (answered nil))
+    (with-temp-buffer
+      (dsh-bridge-prompt-mode)
+      (cl-letf (((symbol-function 'dsh-bridge--question-buffer)
+                 (lambda (session &rest _) (setq answered session) (current-buffer)))
+                ((symbol-function 'pop-to-buffer) (lambda (&rest _) nil)))
+        (dsh-bridge-answer))
+      (should (equal answered "s2")))))
+
+(ert-deftest dsh-bridge-answer-ambiguous-pending-errors ()
+  "With no explicit target and several pending questions, refuse to guess."
+  (let ((dsh-bridge-default-session nil)
+        (dsh-bridge--pending-questions
+         (append (dsh-bridge-test--pending-ask "s1" "One?")
+                 (dsh-bridge-test--pending-ask "s2" "Two?"))))
+    (with-temp-buffer
+      (dsh-bridge-prompt-mode)
+      (should-error (dsh-bridge-answer) :type 'user-error))))
+
+(ert-deftest dsh-bridge-answer-explicit-session-not-widened ()
+  "A view buffer's explicit session is respected, not replaced by a guess.
+Session s1 has no question while s2 does; the command must report s1's lack
+rather than answering s2's question."
+  (let ((dsh-bridge--pending-questions (dsh-bridge-test--pending-ask "s2" "Q?"))
+        (answered nil) (msg nil))
+    (with-temp-buffer
+      (dsh-bridge-view-mode)
+      (setq-local dsh-bridge--view-content-session "s1")
+      (cl-letf (((symbol-function 'dsh-bridge--question-buffer)
+                 (lambda (session &rest _) (setq answered session) (current-buffer)))
+                ((symbol-function 'message)
+                 (lambda (&rest args) (setq msg (apply #'format args)))))
+        (dsh-bridge-answer))
+      (should-not answered)
+      (should (string-match-p "no pending question" msg)))))
+
+(ert-deftest dsh-bridge-answer-unbound-no-pending ()
+  "An unbound prompt buffer with no pending question says so, without error."
+  (let ((dsh-bridge-default-session nil)
+        (dsh-bridge--pending-questions nil)
+        (msg nil))
+    (with-temp-buffer
+      (dsh-bridge-prompt-mode)
+      (cl-letf (((symbol-function 'message)
+                 (lambda (&rest args) (setq msg (apply #'format args)))))
+        (dsh-bridge-answer))
+      (should (string-match-p "no pending question" msg)))))
 
 (ert-deftest dsh-bridge-view-await-question-text-normalizes ()
   "Question text for the note is single-line, free of double quotes, and
