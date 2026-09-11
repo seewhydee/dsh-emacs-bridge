@@ -252,14 +252,10 @@ Set with the command `\\[dsh-bridge-set-default-target].")
   "Session ID for the DSH-Prompt buffer, or nil (default target).")
 
 (defvar dsh-bridge--last-resolved-active nil
-  "Cons (ID . LABEL) of the last-active DSH session, or nil.
-This is a cache for rendering last-active label and status indicators.
-
-ID is the session id that the running DeepSeek Harness (DSH) process
+  "Cons (ID . LABEL) of the session the host last resolved for us, or nil.
+This is an advisory display cache.  ID is the session id the host
 resolved as last-active for a request without an explicit session.
-
-LABEL is the session display label; see `dsh-bridge--session-label'.
-Its value may be nil if the request is still incomplete.")
+LABEL is the session display label.")
 
 (defvar dsh-bridge--view-content-session) ; forward declaration
 
@@ -624,7 +620,8 @@ SSE process filter."
 (defun dsh-bridge--notification-handle-events (events)
   "Dispatch decoded notification EVENTS received over the DSH bridge.
 Currently supported events are:
-- `turn-start': update status tracker, re-render, refresh DSH-View caches.
+- `turn-start': update status tracker, re-render, refresh DSH-View caches,
+  and drop a superseded resolved-last-active display cache.
 - `turn-complete': same as (i), and update session cache's `lastActive' slot.
 - `replies-changed': refresh the turn cache (a text-bearing assistant message
   was committed mid-turn; the frame's `turn' names the turn that grew).
@@ -642,6 +639,11 @@ Currently supported events are:
 	  (cond
 	   ((equal kind "turn-start")
 		(when id
+		  ;; Clear any recorded last-active resolution, since this
+		  ;; session is the host's newest activity.
+		  (and id dsh-bridge--last-resolved-active
+			   (not (equal (car dsh-bridge--last-resolved-active) id))
+			   (setq dsh-bridge--last-resolved-active nil))
 		  (dsh-bridge--status-set id 'running (alist-get 'time event))
 		  (dsh-bridge--status-event-render id)
 		  (dsh-bridge--models-event-refresh id)
@@ -1012,7 +1014,8 @@ which case return nil.  If ADD-FALLBACK-FACE is non-nil, apply
 
 (defvar dsh-bridge--session-link-map
   (let ((map (make-sparse-keymap)))
-    (define-key map [header-line mouse-1] #'dsh-bridge-describe-session-at-mouse)
+    (define-key map [header-line mouse-1]
+				#'dsh-bridge-describe-session-at-mouse)
     map)
   "Local keymap for clickable session labels in header lines.")
 
@@ -1124,11 +1127,11 @@ the last-active session (as a fallback)."
 (defun dsh-bridge--session-completion-table (choices)
   "Completion table over CHOICES, an alist of (STRING . SESSION).
 Entries whose cdr is nil (e.g. a pseudo-entry) get no annotation."
-  (let ((annots (mapcar (lambda (c)
-						  (and (cdr c)
-							   (cons (car c)
-									 (dsh-bridge--session-annotation (cdr c)))))
-						choices)))
+  (let ((annots '()))
+	(dolist (c choices)
+	  (when (cdr c)
+		(push (cons (car c) (dsh-bridge--session-annotation (cdr c)))
+			  annots)))
 	(lambda (string pred action)
 	  (if (eq action 'metadata)
 		  `(metadata (annotation-function .
@@ -1206,11 +1209,6 @@ Returns the chosen session id, or nil without a prefix argument (the caller
 then uses the effective session)."
   (when current-prefix-arg
 	(dsh-bridge--read-session-id prompt)))
-
-(defun dsh-bridge--warn-if-unknown-session (id)
-  "Check if session ID is unknown, and if so emit a warning."
-  (unless (dsh-bridge--session-for-id id)
-	(message "dsh-bridge: unknown session %s" id)))
 
 (defun dsh-bridge--record-last-resolved (alist)
   "Record the session ALIST the host resolved for a nil-target request.
@@ -4026,9 +4024,7 @@ shown in another window so the output stays visible."
 	 ((null id)
 	  (user-error "dsh-bridge: no session to reply to"))
 	 ((null (dsh-bridge--ensure-session-live id))
-	  ;; A failed resume already echoed the host's error; only an id
-	  ;; the cache does not know at all gets the not-known message.
-	  (dsh-bridge--warn-if-unknown-session id))
+	  (error "dsh-bridge: session \"%s\" is dead" id))
 	 (t
 	  (pop-to-buffer (dsh-bridge--prompt-buffer id)
 					 dsh-bridge-prompt-display-action)))))
@@ -4553,8 +4549,8 @@ failure (the host reports 404 unknown / 409 subagent-owned / 500 composition)."
   "Return non-nil when SESSION ID is live, resuming a cold session on demand.
 A saved (cold) session known to the session cache is resumed via
 `dsh-bridge--resume-session' (echoing \"resuming…\", and the host's error on
-failure); an id absent from the cache returns nil without a resume attempt,
-leaving the not-known report to the caller."
+failure); an id absent from the cache returns nil without a resume attempt.
+Callers treat a nil result as \"not usable\" and signal the error themselves."
   (let ((session (dsh-bridge--session-for-id id)))
 	(cond
 	 ((alist-get 'live session) t)
@@ -4574,22 +4570,20 @@ change the default target session."
 	  (pop-to-buffer-same-window (dsh-bridge--prompt-buffer id)
 								 dsh-bridge-prompt-display-action))
 	 (t
-	  ;; A failed resume already echoed the host's error; only an id
-	  ;; the cache does not know at all gets the not-known message.
-	  (dsh-bridge--warn-if-unknown-session id)))))
+	  (error "dsh-bridge: could not open session \"%s\"" id)))))
 
 (defun dsh-bridge-set-default-target-at-point ()
   "Set the default target to the session under point.
 A saved (cold) session is resumed first, so the target is live once bound."
   (interactive)
   (let ((id (tabulated-list-get-id)))
-	(if (null id)
-		(message "dsh-bridge: no session under point")
-	  (if (dsh-bridge--ensure-session-live id)
-		  (dsh-bridge-set-default-target id)
-		;; A failed resume already echoed the host's error; only an id the
-		;; cache does not know at all gets the not-known message.
-		(dsh-bridge--warn-if-unknown-session id)))))
+	(cond
+	 ((null id)
+	  (message "dsh-bridge: no session under point"))
+	 ((dsh-bridge--ensure-session-live id)
+	  (dsh-bridge-set-default-target id))
+	 (t
+	  (error "dsh-bridge: session \"%s\" is dead" id)))))
 
 (defun dsh-bridge-peek-session ()
   "In a DSH-Sesssions buffer, view the session under point in a DSH-View buffer."

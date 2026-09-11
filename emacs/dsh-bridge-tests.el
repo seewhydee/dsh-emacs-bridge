@@ -207,19 +207,6 @@ present iff the indicator style produces a glyph."
             (dsh-bridge-default-session "s1"))
         (should (string-equal (dsh-bridge--dispatcher-header) "T (default)"))))))
 
-(ert-deftest dsh-bridge-warn-if-unknown-session ()
-  "An unknown session emits the warning; a known session is silent."
-  (let ((msg nil))
-    (cl-letf (((symbol-function 'message)
-               (lambda (&rest args) (setq msg (apply #'format args)))))
-      (let ((dsh-bridge--sessions-cache nil))
-        (dsh-bridge--warn-if-unknown-session "s1"))
-      (should (string-match-p "unknown session s1" msg))
-      (setq msg nil)
-      (let ((dsh-bridge--sessions-cache '(((id . "s1") (title . "T")))))
-        (dsh-bridge--warn-if-unknown-session "s1"))
-      (should (null msg)))))
-
 (ert-deftest dsh-bridge-send-text-records-last-resolved ()
   "A nil-target send records the host-resolved session for display."
   (let ((dsh-bridge-default-session nil)
@@ -993,27 +980,29 @@ session and never touches the default target."
       (should (equal (car popped) (get-buffer-create "*dsh-bridge-prompt*")))
       (should (equal (cadr popped) dsh-bridge-prompt-display-action)))))
 
-(ert-deftest dsh-bridge-reply-not-live-message ()
-  "Reply to an unknown session gives the unknown-session message, no resume
-attempt."
+(ert-deftest dsh-bridge-reply-not-live-errors ()
+  "Reply to an unknown session refuses without a resume attempt.
+The id is absent from the cache, so no resume is tried and the command
+signals an error naming the dead session."
   (let ((dsh-bridge--sessions-cache nil)
-        (bound nil) (msg nil) (resumed nil))
+        (bound nil) (resumed nil) (caught nil))
     (with-temp-buffer
       (dsh-bridge-view-mode)
       (setq-local dsh-bridge--view-content-session "gone")
       (cl-letf (((symbol-function 'dsh-bridge--prompt-buffer)
                  (lambda (id) (setq bound id)))
                 ((symbol-function 'dsh-bridge--resume-session)
-                 (lambda (id) (setq resumed id) nil))
-                ((symbol-function 'message)
-                 (lambda (&rest args) (setq msg (apply #'format args)))))
-        (dsh-bridge-reply))
+                 (lambda (id) (setq resumed id) nil)))
+        (setq caught (should-error (dsh-bridge-reply) :type 'error)))
       (should (null bound))
       (should (null resumed))
-      (should (string-match-p "unknown session gone" msg)))))
+      (should (string-match-p "\"gone\" is dead"
+                              (error-message-string caught))))))
 
 (ert-deftest dsh-bridge-reply-resume-failure-keeps-host-message ()
-  "A failed resume's host error is not overwritten by the not-known message."
+  "A failed resume echoes the host's error, then the command signals.
+The host's reason is what the user sees first; the caller's own error must
+not be mistaken for the cause."
   (let ((dsh-bridge--sessions-cache '(((id . "saved-1") (live . nil))))
         (bound nil) (msg nil))
     (with-temp-buffer
@@ -1025,7 +1014,7 @@ attempt."
                  (lambda (_id) (message "dsh-bridge: HTTP 409: subagent-owned") nil))
                 ((symbol-function 'message)
                  (lambda (&rest args) (setq msg (apply #'format args)))))
-        (dsh-bridge-reply))
+        (should-error (dsh-bridge-reply) :type 'error))
       (should (null bound))
       (should (string-match-p "HTTP 409" msg)))))
 
@@ -1755,27 +1744,27 @@ untouched."
     (should (equal dsh-bridge-default-session "default"))
     (should popped)))
 
-(ert-deftest dsh-bridge-open-session-not-live-message ()
-  "RET on an unknown id reports the unknown-session message, with no resume
-attempt."
+(ert-deftest dsh-bridge-open-session-not-live-errors ()
+  "RET on an unknown id refuses without a resume attempt.
+The id is absent from the cache, so no resume is tried and the command
+signals an error naming the session."
   (let ((dsh-bridge--sessions-cache nil)
-        (bound nil) (msg nil) (resumed nil))
+        (bound nil) (resumed nil) (caught nil))
     (cl-letf (((symbol-function 'dsh-bridge--prompt-buffer)
                (lambda (id) (setq bound id)))
               ((symbol-function 'dsh-bridge--resume-session)
-               (lambda (id) (setq resumed id) nil))
-              ((symbol-function 'message)
-               (lambda (&rest args) (setq msg (apply #'format args)))))
+               (lambda (id) (setq resumed id) nil)))
       (with-temp-buffer
         (insert (propertize "gone row" 'tabulated-list-id "gone"))
         (goto-char (point-min))
-        (dsh-bridge-open-session)))
+        (setq caught (should-error (dsh-bridge-open-session) :type 'error))))
     (should (null bound))
     (should (null resumed))
-    (should (string-match-p "unknown session gone" msg))))
+    (should (string-match-p "\"gone\"" (error-message-string caught)))))
 
 (ert-deftest dsh-bridge-open-session-resume-failure-keeps-host-message ()
-  "RET on a saved row whose resume fails keeps the host's error message."
+  "RET on a saved row whose resume fails echoes the host's error, then signals.
+The host's reason is what the user sees first."
   (let ((dsh-bridge--sessions-cache '(((id . "saved-1") (live . nil))))
         (bound nil) (msg nil))
     (cl-letf (((symbol-function 'dsh-bridge--prompt-buffer)
@@ -1787,7 +1776,7 @@ attempt."
       (with-temp-buffer
         (insert (propertize "saved-1 row" 'tabulated-list-id "saved-1"))
         (goto-char (point-min))
-        (dsh-bridge-open-session)))
+        (should-error (dsh-bridge-open-session) :type 'error)))
     (should (null bound))
     (should (string-match-p "HTTP 409" msg))))
 
@@ -1820,6 +1809,26 @@ attempt."
         (goto-char (point-min))
         (dsh-bridge-set-default-target-at-point)))
     (should (equal dsh-bridge-default-session "live-1"))))
+
+(ert-deftest dsh-bridge-set-default-target-at-point-unknown-errors ()
+  "`t' on an id the cache does not know refuses with an error.
+No default target is set, and no resume is attempted."
+  (let ((dsh-bridge--sessions-cache nil)
+        (dsh-bridge-default-session nil)
+        (set nil) (resumed nil) (caught nil))
+    (cl-letf (((symbol-function 'dsh-bridge-set-default-target)
+               (lambda (id) (setq set id)))
+              ((symbol-function 'dsh-bridge--resume-session)
+               (lambda (id) (setq resumed id) nil)))
+      (with-temp-buffer
+        (insert (propertize "gone row" 'tabulated-list-id "gone"))
+        (goto-char (point-min))
+        (setq caught (should-error (dsh-bridge-set-default-target-at-point)
+                                   :type 'error))))
+    (should (null set))
+    (should (null resumed))
+    (should (null dsh-bridge-default-session))
+    (should (string-match-p "\"gone\" is dead" (error-message-string caught)))))
 
 (ert-deftest dsh-bridge-list-sessions-columns-and-marker ()
   "The session list shows marker/S/Session/Age/Workspace columns."
@@ -2930,6 +2939,31 @@ prematurely; the payload is decoded only at the point of consumption."
     (dsh-bridge--notification-handle-events
      '(((kind . "turn-complete") (sessionId . "s1") (reason . "completed"))))
     (should (eq (dsh-bridge--status-state "s1") 'idle))))
+
+(ert-deftest dsh-bridge-notification-turn-start-invalidates-resolved ()
+  "A turn-start in a different session drops the recorded resolution, so the
+display waterfall falls through to the freshly computed last-active session.
+A turn in the same session leaves the recorded answer in place."
+  (let ((dsh-bridge--last-resolved-active '("s1" . "T1"))
+        (dsh-bridge--sessions-cache
+         '(((id . "s1") (title . "T1") (live . t) (lastActive . 10))
+           ((id . "s2") (title . "T2") (live . t) (lastActive . 20))))
+        (dsh-bridge-default-session nil)
+        (dsh-bridge--session-status nil))
+    (cl-letf (((symbol-function 'run-at-time) #'ignore)
+              ((symbol-function 'dsh-bridge--status-event-render) #'ignore)
+              ((symbol-function 'dsh-bridge--models-event-refresh) #'ignore))
+      ;; Same session: the recorded resolution still answers.
+      (dsh-bridge--notification-handle-events
+       '(((kind . "turn-start") (sessionId . "s1"))))
+      (should (equal dsh-bridge--last-resolved-active '("s1" . "T1")))
+      ;; A turn in s2 supersedes it; the computed cache now names s2.
+      (dsh-bridge--notification-handle-events
+       '(((kind . "turn-start") (sessionId . "s2"))))
+      (should (null dsh-bridge--last-resolved-active))
+      (with-temp-buffer
+        (should (string-match-p "T2 (last active)"
+                                (dsh-bridge--dispatcher-header)))))))
 
 (ert-deftest dsh-bridge-view-position ()
   "The view position is newest-first (k/n) over the session's turns, at rest
