@@ -1,49 +1,37 @@
 # dsh-emacs-bridge integration testing
 
-Dev-only. This top-level folder is **never** staged into the Emacs package tar —
-`make package` stages from an explicit file list, so `integration/` is excluded
-by construction.
+This folder contains the integration tests for the dsh-emacs-bridge
+project.  These tests are developer-only, and do not get staged into
+the Emacs package tarball.
 
-## What it is
+The integration tests aim to provide broad coverage of user-visible
+features, including session creation, workspace management, ask-user
+interactions, file and image attachments, etc.  The intention is to
+detect problems that cannot be easily caught by the unit test suite
+(Vitest for DSH-side plugin logic, ERT for Elisp).
 
-A seam harness for the two seams none of the existing suites reach: Vitest
-covers the pure plugin logic and ERT covers elisp given canned frames, but
-nothing boots the **real plugin against a real host**. This framework does:
-
-- boots a live DSH `web` profile with the freshly built bridge plugin
-  (`make build`) and a mock LLM, mounted by absolute `--patch` path in a fresh
-  temp `DSH_HOME` (no install);
-- routes every session at the mock provider via `agent-default-model`, so no
-  real LLM call happens;
-- drives the plugin over real HTTP/SSE and asserts the frames and routes;
-- covers the ask-user seam end-to-end (the model calls `ask_user_question`
-  mid-turn; the bridge's `user-questions/request` waterfall answerer must
-  surface an `ask-user` SSE frame and settle the turn from `/answer`);
-- covers session creation and workspace management — create by path and by
-  workspace id, resolve-on-repeat-path, workspace-rename bounds, session
-  rename/archive — in `tests/sessions.spec.ts`.
-
-The mock, the launcher, and the vitest suites are the automated layer; the
-`.el` files are the batch ERT layer and the interactive UX runner.
-
-`make integration-test` is the pre-commit gate for host-plane (`dsh-plugin/src`)
-changes and the version-bump gate for the harness seams AGENTS.md lists. It is
-deliberately **not** part of `make test`, which stays unit-only and fast.
+The integration test suite boots a live DSH `web` profile with a
+freshly built bridge plugin (`make build`) and mock LLM, mounted by
+absolute `--patch` path in a fresh temp `DSH_HOME` (no install).  Each
+session is routed via `agent-default-model`, so no real LLM call
+happens, and the plugin is driven over HTTP/SSE.
 
 ## Prerequisites
 
-- A functioning `dsh` on PATH, **or** set `DSH_BRIDGE_DSH_COMMAND` to the dsh
-  command. For a harness-source checkout that is run with `tsx`, the command is
-  cwd-sensitive, so also set `DSH_BRIDGE_FIXTURE_CWD` to the harness root:
+- A `dsh` on PATH *or* appropriately-set `DSH_BRIDGE_DSH_COMMAND` and
+  `DSH_BRIDGE_FIXTURE_CWD` envvars.  For a development environment
+  using deepseek-harness sources in another directory, the latter can
+  be set like this:
   ```sh
   export DSH_BRIDGE_DSH_COMMAND='node --import /path/to/node_modules/tsx/dist/esm/index.mjs /path/to/apps/cli/src/bin.ts'
   export DSH_BRIDGE_FIXTURE_CWD=/path/to/deepseek-harness
   ```
-  The launcher spawns `<dsh> --profile web --patch <overlay>` and the harness
-  must carry the web bundle set (a checkout-only install does not).
-- `make build` has produced `dsh-plugin/lib/index.js` (the launcher mounts it by
-  absolute path).
-- Emacs 29.1+ for the ERT layer.
+  Note that the deepseek-harness must be already built.  The launcher
+  runs `<dsh> --profile web --patch <overlay>`, so the harness must
+  carry the web bundle set.
+- In the dsh-emacs-bridge sources, `make build` must have produced
+  `dsh-plugin/lib/index.js` (the launcher mounts it by absolute path).
+- Emacs 29.1+.
 
 ## Run
 
@@ -51,8 +39,14 @@ deliberately **not** part of `make test`, which stays unit-only and fast.
 make integration-test   # build + vitest seam specs + batch ERT
 ```
 
-`make test` stays unit-only and fast. Run a single suite with
-`node dsh-plugin/node_modules/vitest/vitest.mjs run --config integration/vitest.config.ts`.
+Run a single suite with `node dsh-plugin/node_modules/vitest/vitest.mjs run --config integration/vitest.config.ts`.
+
+Agents are instructed by AGENTS.md to run this automated integration
+test suite before committing changes to the DSH plugin, and/or changes
+warranting a version-bump.
+
+An ordinary `make test` only runs the fast unit tests, omitting these
+integration tests.
 
 ## Layout
 

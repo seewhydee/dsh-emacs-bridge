@@ -4550,6 +4550,106 @@ how to edit or clear it."
     (when (dsh-bridge--question-find-buffer "q1")
       (kill-buffer (dsh-bridge--question-find-buffer "q1")))))
 
+(ert-deftest dsh-bridge-question-fontification ()
+  "The ask-user buffer faces its structure: heading, question text, furniture,
+option labels, the selected mark, and the skip suffix.  Each face is set as
+both `face' and `font-lock-face' so it shows with font-lock off and survives a
+font-lock pass."
+  (let ((dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t)))))
+    (with-current-buffer
+        (dsh-bridge--question-buffer "s1" "q1"
+          '(( (id . "q1") (header . "Group") (question . "Go?")
+              (options . (((label . "Yes") (description . "sure"))
+                          ((label . "No")))) )))
+      (dolist (face '(dsh-bridge-question-heading-face
+                      dsh-bridge-question-text-face
+                      dsh-bridge-question-furniture-face
+                      dsh-bridge-question-option-face))
+        (should (text-property-any (point-min) (point-max) 'face face))
+        (should (text-property-any (point-min) (point-max) 'font-lock-face face)))
+      ;; Marking an option faces its box and label as selected.
+      (goto-char (point-min))
+      (re-search-forward "1\\. Yes")
+      (goto-char (line-beginning-position))
+      (dsh-bridge--question-toggle-at-point)
+      (should (string-match-p "\\[x\\] 1\\. Yes" (buffer-string)))
+      (goto-char (point-min))
+      (should (re-search-forward "\\[x\\]" nil t))
+      (should (eq (get-text-property (match-beginning 0) 'face)
+                  'dsh-bridge-question-selected-face))
+      ;; Skipping faces the suffix.
+      (dsh-bridge--question-skip)
+      (goto-char (point-min))
+      (should (re-search-forward "— skipped" nil t))
+      (should (eq (get-text-property (match-beginning 0) 'face)
+                  'dsh-bridge-question-skip-face)))
+    (when (dsh-bridge--question-find-buffer "q1")
+      (kill-buffer (dsh-bridge--question-find-buffer "q1")))))
+
+(ert-deftest dsh-bridge-question-banner-faces ()
+  "The resolution banner takes the face matching its outcome: sent, cancelled,
+or elsewhere/stale."
+  (let ((dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t))))
+        (cases '((sent . dsh-bridge-question-banner-sent-face)
+                 (cancelled . dsh-bridge-question-banner-cancelled-face)
+                 (elsewhere . dsh-bridge-question-banner-elsewhere-face)
+                 (stale . dsh-bridge-question-banner-elsewhere-face))))
+    (dolist (case cases)
+      (let* ((question-id (format "q-%s" (car case)))
+             (buffer (dsh-bridge--question-buffer
+                      "s1" question-id '(( (id . "q1") (question . "Go?") )))))
+        (with-current-buffer buffer
+          (dsh-bridge--question-mark-resolved question-id "A banner." (car case))
+          (should dsh-bridge--question-dead)
+          (should (eq (get-text-property (point-min) 'face) (cdr case))))
+        (kill-buffer buffer)))))
+
+(ert-deftest dsh-bridge-question-detail-fontification ()
+  "The `detail' block carries the detail face, and — when markdown-mode is
+installed — is fontified as Markdown over that block face."
+  (let ((dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t)))))
+    (with-current-buffer
+        (dsh-bridge--question-buffer "s1" "q1"
+          '(( (id . "q1") (question . "Execute?")
+              (detail . "## Plan\n\nSome **bold** step")
+              (intent . ((kind . "plan-review") (approve . "Approve")))
+              (options . (((label . "Approve")))) )))
+      (should (text-property-any (point-min) (point-max)
+                                 'face 'dsh-bridge-question-detail-face))
+      (when (require 'markdown-mode nil t)
+        (goto-char (point-min))
+        (should (re-search-forward "^## Plan" nil t))
+        ;; Markdown's own heading face wins over the block fallback.
+        (should-not (eq (get-text-property (match-beginning 0) 'face)
+                        'dsh-bridge-question-detail-face))))
+    (when (dsh-bridge--question-find-buffer "q1")
+      (kill-buffer (dsh-bridge--question-find-buffer "q1")))))
+
+(ert-deftest dsh-bridge-question-row-affordance ()
+  "Option and custom rows are mouse targets: `mouse-face', a `help-echo', and a
+keymap whose mouse-1 binding toggles the row under the click."
+  (let ((dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t)))))
+    (with-current-buffer
+        (dsh-bridge--question-buffer "s1" "q1"
+          '(( (id . "q1") (question . "Go?")
+              (options . (((label . "Yes")) ((label . "No")))) )))
+      (goto-char (point-min))
+      (should (re-search-forward "^  \\[ \\] 1\\. Yes" nil t))
+      (let ((row (line-beginning-position)))
+        (should (eq (get-text-property row 'mouse-face) 'highlight))
+        (should (string-match-p "toggle" (get-text-property row 'help-echo)))
+        (should (eq (lookup-key (get-text-property row 'keymap) [mouse-1])
+                    #'dsh-bridge--question-click))
+        ;; A synthetic click event at the row toggles it.  The posn window must
+        ;; actually show this buffer, as it would for a real click.
+        (save-window-excursion
+          (set-window-buffer (selected-window) (current-buffer))
+          (dsh-bridge--question-click
+           (list 'mouse-1 (list (selected-window) row)))))
+      (should (equal (cdr (assoc "q1" dsh-bridge--question-selection)) '("Yes"))))
+    (when (dsh-bridge--question-find-buffer "q1")
+      (kill-buffer (dsh-bridge--question-find-buffer "q1")))))
+
 ;;; Session report (DSH-Describe)
 
 (defun dsh-bridge-test--describe-report (id &optional extra)

@@ -3214,6 +3214,88 @@ auto-pop the question buffer on arrival (most users find that intrusive)."
   :type 'boolean
   :group 'dsh-bridge)
 
+(defcustom dsh-bridge-question-markdown t
+  "Whether to fontify an ask-user question's `detail' as Markdown.
+When non-nil and `markdown-mode' is installed, a plan-review question's
+plan is font-locked as GitHub-Flavored Markdown in the question buffer;
+otherwise the block carries only `dsh-bridge-question-detail-face'.
+Unlike `dsh-bridge-view-gfm', this is resolved when the buffer renders, so
+toggling it takes effect at the next render."
+  :type 'boolean
+  :group 'dsh-bridge)
+
+;; Question buffer faces ----------------------------------------------------
+
+(defface dsh-bridge-question-heading-face
+  '((t :inherit bold))
+  "Face for the ask-user buffer's headings.
+The waiting header line and each question's short `header' label."
+  :group 'dsh-bridge)
+
+(defface dsh-bridge-question-furniture-face
+  '((t :inherit shadow))
+  "Face for the ask-user buffer's chrome.
+Help prose, question numbering, option numbers, option descriptions, and
+the custom-row hint.  Keeping bridge furniture visually quiet lets the
+question text and its options carry the eye."
+  :group 'dsh-bridge)
+
+(defface dsh-bridge-question-text-face
+  '((t :inherit default))
+  "Face for a question's own text in the ask-user buffer."
+  :group 'dsh-bridge)
+
+(defface dsh-bridge-question-option-face
+  '((t :inherit font-lock-keyword-face))
+  "Face for an unmarked option label in the ask-user buffer."
+  :group 'dsh-bridge)
+
+(defface dsh-bridge-question-selected-face
+  '((t :inherit font-lock-constant-face))
+  "Face for a marked option — its `[x]' box and label — in the ask-user buffer."
+  :group 'dsh-bridge)
+
+(defface dsh-bridge-question-custom-value-face
+  '((t :inherit font-lock-string-face))
+  "Face for a typed custom answer in the ask-user buffer."
+  :group 'dsh-bridge)
+
+(defface dsh-bridge-question-detail-face
+  '((t :inherit font-lock-doc-face))
+  "Face for a question's `detail' block (a plan-review's plan).
+Markdown-fontified runs, when available, keep their own faces; this face
+covers the rest of the block."
+  :group 'dsh-bridge)
+
+(defface dsh-bridge-question-skip-face
+  '((t :inherit warning))
+  "Face for the \"— skipped\" marker on a skipped question."
+  :group 'dsh-bridge)
+
+(defface dsh-bridge-question-banner-sent-face
+  '((t :inherit success))
+  "Face for the ask-user banner when this Emacs sent the answer."
+  :group 'dsh-bridge)
+
+(defface dsh-bridge-question-banner-cancelled-face
+  '((t :inherit warning))
+  "Face for the ask-user banner when the question was cancelled or declined."
+  :group 'dsh-bridge)
+
+(defface dsh-bridge-question-banner-elsewhere-face
+  '((t :inherit shadow))
+  "Face for the ask-user banner when the question was resolved elsewhere.
+The web UI answered it, or the ask went away with its turn."
+  :group 'dsh-bridge)
+
+(defun dsh-bridge--question-banner-face-for (outcome)
+  "The banner face for resolution OUTCOME.
+OUTCOME is `sent', `cancelled', or anything else (`elsewhere', `stale')."
+  (pcase outcome
+	('sent 'dsh-bridge-question-banner-sent-face)
+	('cancelled 'dsh-bridge-question-banner-cancelled-face)
+	(_ 'dsh-bridge-question-banner-elsewhere-face)))
+
 ;; Question buffer state and lookup -----------------------------------------
 ;; (Defined before the registry maintenance below, which banners live buffers
 ;; via `dsh-bridge--question-mark-resolved'.)
@@ -3248,6 +3330,8 @@ question is open.  Set with `dsh-bridge--question-dead' by
 `dsh-bridge--question-mark-resolved' and re-emitted by
 `dsh-bridge--question-render', which also drops the now-false \"waiting for
 your answer\" header.")
+(defvar-local dsh-bridge--question-banner-face nil
+  "Face for `dsh-bridge--question-banner', chosen from the resolution outcome.")
 
 (defun dsh-bridge--question-find-buffer (question-id)
   "The live question buffer answering QUESTION-ID, or nil."
@@ -3257,14 +3341,16 @@ your answer\" header.")
 					 (equal dsh-bridge--question-id question-id))))
 			(buffer-list)))
 
-(defun dsh-bridge--question-mark-resolved (question-id message &optional bury)
+(defun dsh-bridge--question-mark-resolved (question-id message outcome &optional bury)
   "Mark QUESTION-ID's live buffer resolved, banner it with MESSAGE, and bury it.
-MESSAGE says what happened in the user's terms; BURY (the local-submit and
-local-decline paths) also removes the buffer from every window, matching how
-sending from DSH-Prompt exits.  A buffer already marked resolved is left alone,
-so the local settlement and the later SSE `ask-user-resolved' frame do not
-banner twice.  The buffer is re-rendered so the banner replaces the now-false
-\"waiting for your answer\" header rather than sitting above it."
+OUTCOME is `sent', `cancelled', `elsewhere', or `stale' and selects the
+banner's face.  MESSAGE says what happened in the user's terms; BURY (the
+local-submit and local-decline paths) also removes the buffer from every
+window, matching how sending from DSH-Prompt exits.  A buffer already marked
+resolved is left alone, so the local settlement and the later SSE
+`ask-user-resolved' frame do not banner twice.  The buffer is re-rendered so
+the banner replaces the now-false \"waiting for your answer\" header rather
+than sitting above it."
   (let ((buffer (dsh-bridge--question-find-buffer question-id)))
 	(when (and buffer
 			   (with-current-buffer buffer (not dsh-bridge--question-dead)))
@@ -3272,6 +3358,8 @@ banner twice.  The buffer is re-rendered so the banner replaces the now-false
 		(setq-local dsh-bridge--question-dead t)
 		(setq-local dsh-bridge--question-banner
 				  (or dsh-bridge--question-sent message))
+		(setq-local dsh-bridge--question-banner-face
+				  (dsh-bridge--question-banner-face-for outcome))
 		(dsh-bridge--question-render))
 	  (when bury
 		(bury-buffer buffer)))))
@@ -3284,7 +3372,7 @@ Defensive cleanup on `turn-complete': a turn that ended without a resolved
 frame cannot still be waiting on the user."
   (dolist (pending (cdr (assoc session-id dsh-bridge--pending-questions)))
 	(dsh-bridge--question-mark-resolved
-	 (car pending) "This question is no longer pending."))
+	 (car pending) "This question is no longer pending." 'stale))
   (setq dsh-bridge--pending-questions
 		(assoc-delete-all session-id dsh-bridge--pending-questions)))
 
@@ -3327,13 +3415,17 @@ elsewhere\" is only right when the buffer has no local submit on record."
 			  (assoc-delete-all session-id dsh-bridge--pending-questions)))))
   (dsh-bridge--status-event-render session-id)
   (dsh-bridge--view-await-refresh session-id)
-  (let ((buffer (dsh-bridge--question-find-buffer question-id)))
+  (let* ((buffer (dsh-bridge--question-find-buffer question-id))
+		 (sent (and buffer (buffer-local-value 'dsh-bridge--question-sent buffer))))
 	(dsh-bridge--question-mark-resolved
 	 question-id
-	 (or (and buffer (buffer-local-value 'dsh-bridge--question-sent buffer))
+	 (or sent
 		 (if (equal outcome "cancelled")
 			 "This question was cancelled."
-		   "This question was answered elsewhere (not in this buffer).")))))
+		   "This question was answered elsewhere (not in this buffer)."))
+	 (cond (sent 'sent)
+		   ((equal outcome "cancelled") 'cancelled)
+		   (t 'elsewhere)))))
 
 ;; The question buffer -------------------------------------------------------
 
@@ -3367,8 +3459,82 @@ with `q' and returning with `a' keeps any in-progress marks.  A name collision
 		  (setq-local dsh-bridge--question-dead nil)
 		  (setq-local dsh-bridge--question-sent nil)
 		  (setq-local dsh-bridge--question-banner nil)
+		  (setq-local dsh-bridge--question-banner-face nil)
 		  (dsh-bridge--question-render))
 		buffer))))
+
+;; Rendering helpers --------------------------------------------------------
+
+(defun dsh-bridge--question-propertize (string face)
+  "Return STRING carrying FACE as both `face' and `font-lock-face'.
+The buffer carries no `font-lock-defaults' of its own, so `face' is what
+shows; the `font-lock-face' copy survives if a user turns font-lock on."
+  (propertize string 'face face 'font-lock-face face))
+
+(defun dsh-bridge--question-add-face (start end face)
+  "Add FACE from START to END, leaving already-faced characters alone.
+Both `face' and `font-lock-face' are filled, so FACE shows with font-lock
+off and survives a font-lock pass.  Existing per-character faces win: the
+key specs `substitute-command-keys' produces, and markdown fontification."
+  (save-excursion
+	(goto-char start)
+	(while (< (point) end)
+	  (let ((next (next-single-property-change (point) 'face nil end)))
+		(unless (get-text-property (point) 'face)
+		  (put-text-property (point) next 'face face)
+		  (put-text-property (point) next 'font-lock-face face))
+		(goto-char next)))))
+
+(defvar dsh-bridge--question-detail-cache nil
+  "Hash table mapping a question `detail' string to its fontified copy.
+Nil until the first markdown render.")
+
+(defun dsh-bridge--question-fontify-detail (detail)
+  "Return DETAIL fontified as GitHub-Flavored Markdown when available.
+Gated by `dsh-bridge-question-markdown' and a loadable `markdown-mode';
+otherwise return DETAIL unchanged.  The result is cached because
+`dsh-bridge--question-render' re-runs on every option toggle."
+  (if (not (and dsh-bridge-question-markdown (require 'markdown-mode nil t)))
+	  detail
+	(setq dsh-bridge--question-detail-cache
+		  (or dsh-bridge--question-detail-cache
+			  (make-hash-table :test #'equal)))
+	(when (> (hash-table-count dsh-bridge--question-detail-cache) 64)
+	  (clrhash dsh-bridge--question-detail-cache))
+	(or (gethash detail dsh-bridge--question-detail-cache)
+		(puthash detail (dsh-bridge--question-fontify-detail-1 detail)
+				 dsh-bridge--question-detail-cache))))
+
+(defun dsh-bridge--question-fontify-detail-1 (detail)
+  "Fontify DETAIL with `gfm-view-mode' in a temporary buffer and return it."
+  (with-temp-buffer
+	(insert detail)
+	(let ((inhibit-read-only t))
+	  (delay-mode-hooks (gfm-view-mode))
+	  (font-lock-ensure)
+	  ;; Font lock writes `face'; mirror it onto `font-lock-face' so the
+	  ;; copied string keeps its faces in a buffer whose font-lock state may
+	  ;; differ from this temporary one's.
+	  (let ((position (point-min)))
+		(while (< position (point-max))
+		  (let ((next (next-single-property-change position 'face nil (point-max))))
+			(let ((face (get-text-property position 'face)))
+			  (when face
+				(put-text-property position next 'font-lock-face face)))
+			(setq position next)))))
+	(buffer-substring (point-min) (point-max))))
+
+;; Declared here and populated with its keys below, once the command it binds
+;; (`dsh-bridge--question-toggle-at-point') is defined.
+(defvar dsh-bridge--question-row-map)
+
+(defun dsh-bridge--question-add-row-affordance (start end help)
+  "Make the option or custom row from START to END mouse-clickable with HELP.
+RET and the number keys keep using the row's `dsh-bridge-option' /
+`dsh-bridge-option-custom' property; this only adds the pointing device."
+  (put-text-property start end 'mouse-face 'highlight)
+  (put-text-property start end 'help-echo help)
+  (put-text-property start end 'keymap dsh-bridge--question-row-map))
 
 (defun dsh-bridge--question-render ()
   "Populate the current question buffer from its state variables.
@@ -3377,33 +3543,43 @@ selection/custom/skipped state on every change, so markers can never drift.
 Every line of a question's block carries its question id as a text property,
 so point anywhere in the block identifies the question.  A resolved buffer
 renders its resolution banner in place of the \"waiting for your answer\"
-header."
+header.  Faces are attached here, as both `face' and `font-lock-face', because
+the buffer is rebuilt rather than font-locked in place."
   (let ((inhibit-read-only t))
 	(erase-buffer)
 	(if dsh-bridge--question-dead
 		;; The session is no longer waiting; the resolution banner, if any,
 		;; takes the header's place.
 		(when dsh-bridge--question-banner
-		  (insert (propertize dsh-bridge--question-banner 'face 'error) "\n"))
-	  (insert (propertize
+		  (insert (dsh-bridge--question-propertize
+				   dsh-bridge--question-banner
+				   (or dsh-bridge--question-banner-face
+					   'dsh-bridge-question-banner-elsewhere-face))
+				  "\n"))
+	  (insert (dsh-bridge--question-propertize
 			   (format "Session \"%s\" is waiting for your answer\n"
 					   (dsh-bridge--session-label dsh-bridge--question-session))
-			   'face 'bold)))
+			   'dsh-bridge-question-heading-face)))
 	;; The buffer itself must say how to work it: the mode docstring is not
 	;; visible, and the keys (RET selects, C-c C-c submits) are not guessable.
-	(insert (substitute-command-keys
-			 (concat
-			  "Mark an option with \\[dsh-bridge--question-toggle-at-point] "
-			  "or its number key.  To answer with free text, press "
-			  "\\[dsh-bridge--question-toggle-at-point] on the `c' row "
-			  "(or `c' anywhere in the question): the answer is read in the "
-			  "minibuffer, and an empty entry clears it.  On a single-choice "
-			  "question a custom answer replaces any marked option; on a "
-			  "multi-choice one it accompanies them.\n"
-			  "\\[dsh-bridge--question-skip] skips the question at point, "
-			  "\\[dsh-bridge--question-next] moves between questions.\n"
-			  "\\[dsh-bridge--question-submit] submits your answers, "
-			  "\\[dsh-bridge--question-decline] declines (cancels the tool call).\n\n")))
+	;; `substitute-command-keys' faces the key specs it substitutes; the prose
+	;; takes the furniture face only where those key faces are absent.
+	(let ((start (point)))
+	  (insert (substitute-command-keys
+			   (concat
+				"Mark an option with \\[dsh-bridge--question-toggle-at-point] "
+				"or its number key.  To answer with free text, press "
+				"\\[dsh-bridge--question-toggle-at-point] on the `c' row "
+				"(or `c' anywhere in the question): the answer is read in the "
+				"minibuffer, and an empty entry clears it.  On a single-choice "
+				"question a custom answer replaces any marked option; on a "
+				"multi-choice one it accompanies them.\n"
+				"\\[dsh-bridge--question-skip] skips the question at point, "
+				"\\[dsh-bridge--question-next] moves between questions.\n"
+				"\\[dsh-bridge--question-submit] submits your answers, "
+				"\\[dsh-bridge--question-decline] declines (cancels the tool call).\n\n")))
+	  (dsh-bridge--question-add-face
+	   start (point) 'dsh-bridge-question-furniture-face))
 	(let ((n 0)
 		  (total (length dsh-bridge--question-questions)))
 	  (dolist (question dsh-bridge--question-questions)
@@ -3418,28 +3594,56 @@ header."
 			   (block-start (point)))
 		  (when (> n 0) (insert "\n"))
 		  (cl-incf n)
-		  (insert (format "Question %d of %d%s\n\n" n total
-						  (if skipped " — skipped" "")))
+		  (insert (dsh-bridge--question-propertize
+				   (format "Question %d of %d" n total)
+				   'dsh-bridge-question-furniture-face))
+		  (when skipped
+			(insert (dsh-bridge--question-propertize
+					 " — skipped" 'dsh-bridge-question-skip-face)))
+		  (insert "\n\n")
 		  (when (and (stringp header) (not (string-empty-p header)))
-			(insert (propertize (concat header "\n") 'face 'bold)))
-		  (insert (format "%s\n" (or qtext "")))
+			(insert (dsh-bridge--question-propertize
+					 (concat header "\n") 'dsh-bridge-question-heading-face)))
+		  (insert (dsh-bridge--question-propertize
+				   (concat (or qtext "") "\n") 'dsh-bridge-question-text-face))
 		  ;; The reviewed artifact (a plan-review's plan markdown) must be
 		  ;; visible: deciding on it blind is worse than not surfacing it.
 		  (when (and (stringp detail) (not (string-empty-p detail)))
-			(insert "\n" detail "\n"))
+			(let ((start (point)))
+			  (insert "\n" (dsh-bridge--question-fontify-detail detail) "\n")
+			  (dsh-bridge--question-add-face
+			   start (point) 'dsh-bridge-question-detail-face)))
 		  (insert "\n")
 		  (let ((i 0))
 			(dolist (opt opts)
 			  (cl-incf i)
 			  (let* ((label (or (alist-get 'label opt) ""))
 					 (desc (alist-get 'description opt))
+					 (marked (member label selected))
 					 (start (point)))
-				(insert (format "  [%s] %d. %s%s\n"
-								(if (member label selected) "x" " ")
-								i label
-								(if (and (stringp desc) (not (string-empty-p desc)))
-									(concat " — " desc) "")))
-				(put-text-property start (1- (point)) 'dsh-bridge-option label))))
+				(insert "  "
+						(dsh-bridge--question-propertize
+						 (if marked "[x]" "[ ]")
+						 (if marked 'dsh-bridge-question-selected-face
+						   'dsh-bridge-question-furniture-face))
+						" "
+						(dsh-bridge--question-propertize
+						 (format "%d." i) 'dsh-bridge-question-furniture-face)
+						" "
+						(dsh-bridge--question-propertize
+						 label
+						 (if marked 'dsh-bridge-question-selected-face
+						   'dsh-bridge-question-option-face))
+						(if (and (stringp desc) (not (string-empty-p desc)))
+							(concat " "
+									(dsh-bridge--question-propertize
+									 (concat "— " desc)
+									 'dsh-bridge-question-furniture-face))
+						  "")
+						"\n")
+				(put-text-property start (1- (point)) 'dsh-bridge-option label)
+				(dsh-bridge--question-add-row-affordance
+				 start (1- (point)) "mouse-1: toggle this option"))))
 		  ;; The custom-answer row is always present (the web UI offers one per
 		  ;; question).  It is drawn as an action, not a checkbox: a `[ ]'
 		  ;; bracket here would read as "mark this to enable typing" even
@@ -3447,14 +3651,29 @@ header."
 		  ;; hint says where the text goes and how to change or clear it.
 		  (let* ((has-custom (and custom (not (string-empty-p custom))))
 				 (start (point)))
-			(insert (format "      c. %s %s\n"
-							(if has-custom
-								(concat "Custom answer: " custom)
-							  "Type a custom answer...")
-							(if has-custom
-								"(RET to edit; empty clears)"
-							  "(RET here or `c')")))
-			(put-text-property start (1- (point)) 'dsh-bridge-option-custom t))
+			(insert "      "
+					(dsh-bridge--question-propertize
+					 "c." 'dsh-bridge-question-furniture-face)
+					" "
+					(if has-custom
+						(concat
+						 (dsh-bridge--question-propertize
+						  (concat "Custom answer: " custom)
+						  'dsh-bridge-question-custom-value-face)
+						 " "
+						 (dsh-bridge--question-propertize
+						  "(RET to edit; empty clears)"
+						  'dsh-bridge-question-furniture-face))
+					  (concat
+					   (dsh-bridge--question-propertize
+						"Type a custom answer..." 'dsh-bridge-question-furniture-face)
+					   " "
+					   (dsh-bridge--question-propertize
+						"(RET here or `c')" 'dsh-bridge-question-furniture-face)))
+					"\n")
+			(put-text-property start (1- (point)) 'dsh-bridge-option-custom t)
+			(dsh-bridge--question-add-row-affordance
+			 start (1- (point)) "mouse-1: type a custom answer"))
 		  (put-text-property block-start (point) 'dsh-bridge-question-id qid))))
 	(goto-char (point-min))))
 
@@ -3536,6 +3755,26 @@ the marks (the harness's `matchesQuestions' wire rules)."
 	  (dsh-bridge--question-toggle-option
 	   qid (get-text-property (line-beginning-position) 'dsh-bridge-option)))
 	 (t (message "dsh-bridge: no option at point")))))
+
+(defun dsh-bridge--question-click (event)
+  "Toggle the option row, or prompt on the custom row, clicked in EVENT."
+  (interactive "e")
+  (let* ((position (event-start event))
+		 (window (posn-window position))
+		 (point (posn-point position)))
+	(when (and window (integer-or-marker-p point))
+	  (with-selected-window window
+		(save-excursion
+		  (goto-char point)
+		  (dsh-bridge--question-toggle-at-point))))))
+
+;; Populated here so the command exists before the keymap references it; the
+;; render function places this map on each option and custom row.
+(setq dsh-bridge--question-row-map
+	  (let ((map (make-sparse-keymap)))
+		(define-key map [mouse-1] #'dsh-bridge--question-click)
+		(define-key map [mouse-2] #'dsh-bridge--question-click)
+		map))
 
 (defun dsh-bridge--question-toggle-number ()
   "Toggle the Nth option of the question at point, N from the digit pressed."
@@ -3636,13 +3875,13 @@ empty array, and a single-select custom answer never travels with a selection
 				(message "dsh-bridge: already answered or cancelled")
 				(dsh-bridge--question-mark-resolved
 				 dsh-bridge--question-id
-				 "This question was already answered or cancelled." t))
+				 "This question was already answered or cancelled." 'elsewhere t))
 			   (accepted
 				(message "dsh-bridge: answer sent to \"%s\""
 						 (dsh-bridge--session-label dsh-bridge--question-session))
 				(dsh-bridge--question-mark-resolved
 				 dsh-bridge--question-id
-				 "Your answer was sent." t))
+				 "Your answer was sent." 'sent t))
 			   (t (message "dsh-bridge: answer not accepted%s"
 						   (if reason (concat ": " reason) "")))))))))))
 
@@ -3668,12 +3907,12 @@ empty array, and a single-select custom answer never travels with a selection
 			(message "dsh-bridge: question cancelled")
 			(dsh-bridge--question-mark-resolved
 			 dsh-bridge--question-id
-			 "You declined to answer; the question was cancelled." t))
+			 "You declined to answer; the question was cancelled." 'cancelled t))
 		   ((and reason (equal reason "not-pending"))
 			(message "dsh-bridge: already answered or cancelled")
 			(dsh-bridge--question-mark-resolved
 			 dsh-bridge--question-id
-			 "This question was already answered or cancelled." t))
+			 "This question was already answered or cancelled." 'elsewhere t))
 		   (t (message "dsh-bridge: decline not accepted%s"
 					   (if reason (concat ": " reason) "")))))))))
 
