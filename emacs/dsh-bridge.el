@@ -1043,7 +1043,7 @@ NOW is the reference time in seconds (default: the current time)."
 	 (t (format "%dy" (floor (/ secs (* 365 86400))))))))
 
 (defun dsh-bridge--workspace-label (session)
-  "Return workspace label for SESSION.
+  "Return the workspace label for SESSION.
 SESSION should be an alist; see `dsh-bridge--sessions-cache'.
 The workspace label is, in order of availability, the title, cwd
 basename, raw cwd, or an empty string."
@@ -1064,9 +1064,9 @@ If NODEFAULT is non-nil, return nil if there is no buffer-local session
 binding, without falling back on `dsh-bridge-default-session'."
   (let ((mode (with-current-buffer (or buffer (current-buffer))
 				major-mode)))
-	(or (cond ((eq major-mode 'dsh-bridge-prompt-mode) dsh-bridge--prompt-session)
-			  ((eq major-mode 'dsh-bridge-view-mode) dsh-bridge--view-content-session)
-			  ((eq major-mode 'dsh-bridge-describe-mode) dsh-bridge--describe-session)
+	(or (cond ((eq mode 'dsh-bridge-prompt-mode) dsh-bridge--prompt-session)
+			  ((eq mode 'dsh-bridge-view-mode) dsh-bridge--view-content-session)
+			  ((eq mode 'dsh-bridge-describe-mode) dsh-bridge--describe-session)
 			  (t nil))
 		(unless nodefault dsh-bridge-default-session))))
 
