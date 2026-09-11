@@ -648,19 +648,15 @@ Currently supported events are:
 		  (when dsh-bridge-turn-boundary-echo
 			(message "dsh-bridge: session \"%s\" is running..."
 					 (dsh-bridge--session-label id)))
-		  ;; A turn boundary is also when the turn list grows: refresh it now
-		  ;; so the View `(k/n)' counter tracks the live list during the turn,
-		  ;; not only after it completes.  Deferred like the turn-complete
-		  ;; refresh, to keep the SSE process filter non-blocking.
+		  ;; A turn boundary also grows the turn list, so refresh the
+		  ;; cache now so the header-line is immediately up to date.
 		  (run-at-time 0 nil #'dsh-bridge--view-turns-cache-refresh id)))
 	   ((equal kind "turn-complete")
 		(when id
 		  (dsh-bridge--status-set id 'idle)
 		  ;; Fold the turn's timestamp into the session cache.
 		  (dsh-bridge--session-update-last-active id (alist-get 'time event))
-		  ;; Defensive: a turn that ended without a resolved frame cannot still
-		  ;; be waiting on the user.  Clear before rendering, or the status
-		  ;; glyph would paint the just-stale `awaiting' state.
+		  ;; Avoid the header line showing the stale `awaiting' state.
 		  (dsh-bridge--ask-user-session-clear id)
 		  (dsh-bridge--status-event-render id)
 		  (dsh-bridge--models-event-refresh id)
@@ -668,10 +664,6 @@ Currently supported events are:
 		  (dsh-bridge--turn-complete-act id (alist-get 'reason event))))
 	   ((equal kind "replies-changed")
 		(when id
-		  ;; One deferred job per frame (`dsh-bridge--turns-changed'): the
-		  ;; turn-cache refresh and the following-view refill share it, so a
-		  ;; frame costs one `/turns' round-trip however many views follow the
-		  ;; session.
 		  (run-at-time 0 nil #'dsh-bridge--turns-changed id)))
 	   ((equal kind "context")
 		(let ((used (alist-get 'usedTokens event))
@@ -966,7 +958,7 @@ SESSION should be an alist; see `dsh-bridge--sessions-cache'."
 	(and (stringp title) (not (string-empty-p title)) title)))
 
 (defun dsh-bridge--session-for-id (id)
-  "Return the session data for session id ID, or nil.
+  "Return the session data for session ID, or nil.
 This is the `dsh-bridge--sessions-cache' entry with `id' matching ID.
 See `dsh-bridge--sessions-cache' for the session data format."
   (seq-find (lambda (s) (equal (alist-get 'id s) id))
@@ -984,17 +976,17 @@ before re-rendering the sessions list so the Age cell and sort order go live."
 
 (defun dsh-bridge--apply-session-directory (session-id cwd &optional buffer)
   "Set BUFFER's `default-directory' to SESSION-ID's workspace.
-CWD, when non-nil, overrides the sessions-cache lookup for SESSION-ID.	Leaves
-the directory alone when no cwd is known or BUFFER is not live.	 BUFFER is a
-buffer name or buffer, defaulting to the current buffer."
+If BUFFER is nil, act on the current buffer.  CWD, if non-nil, overrides
+the working directory stored in the sessions cache.  If there is no
+appropriate directory, do nothing."
   (let* ((buf (or buffer (current-buffer)))
 		 (dir cwd))
 	;; If CWD is not supplied, try filling it from session data.
 	(and (null dir) session-id
 		 (setq dir (alist-get 'cwd (dsh-bridge--session-for-id session-id))))
-	(when (and dir (buffer-live-p (get-buffer buf)))
-	  (with-current-buffer buf
-		(setq default-directory (file-name-as-directory dir))))))
+	(and dir (buffer-live-p (get-buffer buf))
+		 (with-current-buffer buf
+		   (setq default-directory (file-name-as-directory dir))))))
 
 (defun dsh-bridge--session-label (session &optional no-default add-fallback-face)
   "Return the display label for SESSION.
@@ -1065,22 +1057,18 @@ basename, raw cwd, or an empty string."
 
 ;;; Target helpers
 
-(defun dsh-bridge--buffer-session (&optional buffer)
-  "Buffer-local session affinity of BUFFER (default: the current buffer).
-The prompt buffer's binding, else the output buffer's shown session, else
-the session report's described session, else nil."
-  (with-current-buffer (or buffer (current-buffer))
-	(cond ((eq major-mode 'dsh-bridge-prompt-mode) dsh-bridge--prompt-session)
-		  ((eq major-mode 'dsh-bridge-view-mode) dsh-bridge--view-content-session)
-		  ((eq major-mode 'dsh-bridge-describe-mode) dsh-bridge--describe-session)
-		  (t nil))))
-
-(defun dsh-bridge--effective-session (&optional buffer)
+(defun dsh-bridge--effective-session (&optional buffer nodefault)
   "The session id BUFFER acts on, or nil for last-active.
-Buffer-local session, then the default target.	Every verb resolves its
-target with this one helper, so the precedence cannot drift."
-  (or (dsh-bridge--buffer-session buffer)
-	  dsh-bridge-default-session))
+If BUFFER is nil, it defaults to the current buffer.
+If NODEFAULT is non-nil, return nil if there is no buffer-local session
+binding, without falling back on `dsh-bridge-default-session'."
+  (let ((mode (with-current-buffer (or buffer (current-buffer))
+				major-mode)))
+	(or (cond ((eq major-mode 'dsh-bridge-prompt-mode) dsh-bridge--prompt-session)
+			  ((eq major-mode 'dsh-bridge-view-mode) dsh-bridge--view-content-session)
+			  ((eq major-mode 'dsh-bridge-describe-mode) dsh-bridge--describe-session)
+			  (t nil))
+		(unless nodefault dsh-bridge-default-session))))
 
 (defun dsh-bridge--cache-last-active ()
   "Return the cached id of the most recently active live session, or nil.
@@ -2967,7 +2955,7 @@ current buffer's session when the host omitted it.  When neither is
 known, the default buffer is used."
   (let* ((entry (car (last entries)))
 		 (entry-id (alist-get 'sessionId entry))
-		 (session-id (or entry-id (dsh-bridge--buffer-session)))
+		 (session-id (or entry-id (dsh-bridge--effective-session nil t)))
 		 (text (or (alist-get 'text entry) ""))
 		 (buf (if session-id (dsh-bridge--session-view session-id))))
 	(unless buf

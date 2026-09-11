@@ -5053,7 +5053,6 @@ parent-session link describes the parent."
   (dsh-bridge-test--with-describe nil
     (dsh-bridge-describe-session "s1")
     (with-current-buffer dsh-bridge-describe-buffer-name
-      (should (equal (dsh-bridge--buffer-session) "s1"))
       (should (equal (dsh-bridge--effective-session) "s1")))))
 
 (ert-deftest dsh-bridge-describe-session-id-button-copies ()
