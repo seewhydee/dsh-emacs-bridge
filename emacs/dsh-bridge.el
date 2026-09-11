@@ -90,6 +90,11 @@ This should match the version reported by the running DSH plugin.")
   "Connect Emacs to a DeepSeek Harness session."
   :group 'tools)
 
+;; The companion `dsh-bridge-install' library defines options in this group.
+;; Have Customize load it when the group is browsed; a plain `put' avoids
+;; pulling in `cus-edit' just to call `custom-add-load' at load time.
+(put 'dsh-bridge 'custom-loads '("dsh-bridge-install"))
+
 (defcustom dsh-bridge-url "http://127.0.0.1:3080/dsh-bridge"
   "Base URL for the `dsh-emacs-bridge' HTTP route."
   :type 'string

@@ -42,14 +42,14 @@ dsh-plugin/lib/index.js dsh-plugin/lib/client.js: $(PLUGIN_SRC) dsh-plugin/tsdow
 
 package: $(TAR)
 
-$(TAR): build emacs/dsh-bridge.el dsh-plugin/package.json dsh-plugin/cordis.patch.yml
+$(TAR): build emacs/dsh-bridge.el emacs/dsh-bridge-install.el dsh-plugin/package.json dsh-plugin/cordis.patch.yml
 	@grep -q '(defconst dsh-bridge-version "$(VERSION)"' emacs/dsh-bridge.el || \
 	  { echo "error: dsh-bridge-version defconst disagrees with the Version header ($(VERSION))"; exit 1; }
 	@grep -q '"version": "$(VERSION)"' dsh-plugin/package.json || \
 	  { echo "error: dsh-plugin/package.json version disagrees with the Version header ($(VERSION))"; exit 1; }
 	rm -rf .package
 	mkdir -p $(STAGE)/dsh-plugin/lib
-	cp emacs/dsh-bridge.el $(STAGE)/
+	cp emacs/dsh-bridge.el emacs/dsh-bridge-install.el $(STAGE)/
 	cp dsh-plugin/package.json dsh-plugin/cordis.patch.yml $(STAGE)/dsh-plugin/
 	sed -i 's/"version": "[^"]*"/"version": "$(VERSION)"/' $(STAGE)/dsh-plugin/package.json
 	cp dsh-plugin/lib/index.js dsh-plugin/lib/client.js $(STAGE)/dsh-plugin/lib/
@@ -63,6 +63,7 @@ $(TAR): build emacs/dsh-bridge.el dsh-plugin/package.json dsh-plugin/cordis.patc
 
 test:
 	cd dsh-plugin && pnpm test
+	emacs --batch -Q -L emacs --eval '(progn (require (quote dsh-bridge)) (when (featurep (quote dsh-bridge-install)) (error "dsh-bridge.el loaded the optional install library eagerly")))'
 	emacs --batch -L emacs -l emacs/dsh-bridge-tests.el \
 	      -f ert-run-tests-batch-and-exit
 

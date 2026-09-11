@@ -11,6 +11,8 @@ It consists of two components:
 
 - `dsh-plugin/` — a DeepSeek Harness plugin (`dsh-emacs-bridge`).
 - `emacs/dsh-bridge.el` — an Emacs package to interact with the harness.
+- `emacs/dsh-bridge-install.el` — its optional companion library for
+  installing and uninstalling the DSH plugin, loaded on demand.
 
 ## Installation
 
@@ -87,14 +89,16 @@ pnpm dsh web
 #### Install the Emacs library
 
 Put this in your Emacs init file (`~/.emacs.d/init.el` or `~/.emacs`),
-replacing the path with the actual path to `dsh-bridge.el`.
+replacing the path with the actual path to `dsh-bridge.el`:
 
 ```elisp
 (load "/path/to/dsh-emacs-bridge/emacs/dsh-bridge.el")
 ```
 
-Alternatively, copy `dsh-bridge.el` into your Emacs load-path and do
-`(require 'dsh-bridge)`.
+Optionally, you can also load the file `dsh-bridge-install.el`, which
+contains the `M-x dsh-bridge-install-plugin` and `M-x
+dsh-bridge-uninstall-plugin` commands.  If you installed the DSH
+plugin directly via the preceding section, you won't need this.
 
 ## Usage
 

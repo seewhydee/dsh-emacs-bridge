@@ -2636,6 +2636,13 @@ This is the optional-library contract: `dsh-bridge.el' must keep working when
     (should warned)
     (should (eq dsh-bridge--bridge-status-cache 'not-running))))
 
+(ert-deftest dsh-bridge-group-loads-install-library ()
+  "Browsing the `dsh-bridge' group makes Customize load the companion.
+The autoload cookies on the companion's defcustoms define the options, but
+`customize-group' only follows the group's `custom-loads' property to find
+them; this pins that hint."
+  (should (member "dsh-bridge-install" (get 'dsh-bridge 'custom-loads))))
+
 (ert-deftest dsh-bridge-plugin-install-state-tri-state ()
   "The profile probe distinguishes installed / not-installed / no-profile."
   (let ((dsh-bridge-profile "web")

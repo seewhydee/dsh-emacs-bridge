@@ -31,6 +31,7 @@
 
 ;;; Customize options
 
+;;;###autoload
 (defcustom dsh-bridge-dsh-command nil
   "How the DeepSeek Harness process (dsh) is invoked.
 This variable is used only when installing or uninstalling the DSH
@@ -51,6 +52,7 @@ plugin.  Its value can be one of the following:
 				 (repeat :tag "Argv list (verbatim)" string))
   :group 'dsh-bridge)
 
+;;;###autoload
 (defcustom dsh-bridge-profile "web"
   "DSH profile that `dsh-bridge-install-plugin' installs into."
   :type 'string

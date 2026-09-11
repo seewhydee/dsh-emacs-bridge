@@ -22,7 +22,8 @@ dsh-plugin/
   tsdown.client.config.ts browser build → CJS lib/client.js (replicates the harness client-artifact contract)
   tsconfig.json / vitest.config.ts
 emacs/
-  dsh-bridge.el           the whole Emacs package (single file)
+  dsh-bridge.el           the Emacs package (loopback interface; loads the companion on demand)
+  dsh-bridge-install.el   optional companion library: DSH plugin install/uninstall/diagnosis
   dsh-bridge-tests.el     ERT tests
 Makefile   build / package / test / clean
 README.md  user-facing install, usage, permissions and failure bounds
@@ -38,7 +39,7 @@ The `/dsh-bridge/*` route inventory is documented in the header comment of `dsh-
 |---|---|
 | npm package | `dsh-emacs-bridge` (unscoped) |
 | Cordis id (plugin row / HMR target) | `dsh-bridge` |
-| Emacs feature / file | `dsh-bridge` / `dsh-bridge.el`, prefix `dsh-bridge-` |
+| Emacs feature / file | `dsh-bridge` / `dsh-bridge.el`, plus the optional `dsh-bridge-install` / `dsh-bridge-install.el`; prefix `dsh-bridge-` |
 
 These names appear across README, Makefile, `package.json`, `cordis.patch.yml`, both source trees, and the `/status` identity route. Renaming one means updating every reference together.
 
@@ -97,7 +98,9 @@ Bump all three at once.
 
 ### Emacs package (`emacs/dsh-bridge.el`)
 
-- Single-file package, `lexical-binding: t`, feature `dsh-bridge`. All symbols use the `dsh-bridge-` prefix; internal helpers use `dsh-bridge--`.
+- Two libraries, `lexical-binding: t`.  `dsh-bridge.el` (feature `dsh-bridge`) is self-contained and works entirely over the loopback interface; `dsh-bridge-install.el` (feature `dsh-bridge-install`) is the optional companion that holds every definition which runs the `dsh` CLI or reads the DSH profile.  All symbols use the `dsh-bridge-` prefix; internal helpers use `dsh-bridge--`.
+- `dsh-bridge.el` must never `require` the companion at load time; it has to keep working when the companion file is absent.  The sole seam is `dsh-bridge--ensure-plugin`, which loads it on demand via `dsh-bridge--load-install-library` (with a sibling-file fallback for source checkouts) and delegates to `dsh-bridge-install--diagnose`, or warns via `dsh-bridge--warn-plugin-unavailable` when the library cannot be found.
+- Both files ship in the package tar and `make package` lists both explicitly.  The companion's two `defcustom`s and its `dsh-bridge-install-plugin` / `dsh-bridge-uninstall-plugin` carry `;;;###autoload` cookies, so Customize can reach the options (`customize-option`, saved values) before the library loads.  Cookies alone do not put the options in `M-x customize-group dsh-bridge`, though; `dsh-bridge.el` also sets the group's `custom-loads` to `"dsh-bridge-install"` (via `put`, not `custom-add-load`, to avoid loading `cus-edit`), which is what makes browsing the group load the companion and list them.  Keep both halves if the options move again.
 - User-tunable behavior is a `defcustom` in the `dsh-bridge` group; do not hardcode what should be configurable.
 - HTTP uses `url-retrieve` + `json.el`; the bearer token is read from the token file. SSE notifications use `make-network-process` with chunked decoding and reconnect-with-retry; keep the latched start/stop (`dsh-bridge-notifications-start` / `dsh-bridge-notifications-stop`) semantics intact.
 - Buffer modes derive from `gfm-view-mode` falling back to `special-mode` (DSH-View), `tabulated-list-mode` (DSH-Sessions), `markdown-mode` falling back to `text-mode` (DSH-Prompt), and `help-mode` (DSH-Describe, the read-only session report: one reusable buffer with `help-setup-xref`/`help-make-xrefs` navigation). The view/prompt fallbacks are chosen at load time via a conditional macro (`dsh-bridge--define-view-mode` / `dsh-bridge--define-prompt-mode`), driven by the `dsh-bridge-view-gfm` / `dsh-bridge-prompt-markdown` defcustoms. The dispatcher is a `transient-define-prefix`.
