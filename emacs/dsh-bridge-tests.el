@@ -4124,21 +4124,6 @@ re-renders the surfaces, and announces it."
     (should (equal rendered '("s1")))
     (should (string-match-p "prompt sent" msg))))
 
-(ert-deftest dsh-bridge-prompt-blank ()
-  "`dsh-bridge--prompt-blank' clears the prompt buffer and resets its navigation,
-so the next reply starts blank (the sent text remains in history)."
-  (with-current-buffer (get-buffer-create "*dsh-bridge-prompt*")
-    (dsh-bridge-prompt-mode)
-    (let ((inhibit-read-only t)) (insert "old prompt"))
-    (setq-local dsh-bridge--prompt-history-index 1)
-    (setq-local dsh-bridge--prompt-draft "draft")
-    (dsh-bridge--prompt-blank)
-    (should (equal (buffer-string) ""))
-    (should (null dsh-bridge--prompt-history-index))
-    (should (null dsh-bridge--prompt-draft))
-    (should-not (buffer-modified-p)))
-  (kill-buffer "*dsh-bridge-prompt*"))
-
 (ert-deftest dsh-bridge-prompt-buffer-confirms-before-erasing ()
   "Preparing a prompt buffer asks before erasing modified text, and
 silently erases unmodified text (e.g. kept from a previous send)."

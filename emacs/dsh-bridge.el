@@ -2978,16 +2978,6 @@ and bury the buffer (see `dsh-bridge--prompt-exit')."
 		   (dsh-bridge--prompt-exit sent-id window sent-at))
 		 attachments)))))
 
-(defun dsh-bridge--prompt-blank ()
-  "Erase the DSH-prompt buffer and reset its navigation state.
-Used to prepare the DSH-prompt buffer for a fresh prompt composition."
-  (when (eq major-mode 'dsh-bridge-prompt-mode)
-	(let ((inhibit-read-only t))
-	  (erase-buffer))
-	(setq-local dsh-bridge--prompt-history-index nil)
-	(setq-local dsh-bridge--prompt-draft nil)
-	(set-buffer-modified-p nil)))
-
 (defun dsh-bridge--after-prompt-view (session-id &optional sent-at)
   "Return a DSH-View buffer for SESSION-ID after a prompt.
 This sets up a DSH-VIEW buffer for the session in following state,
@@ -4293,7 +4283,11 @@ entry — is erased silently."
 	  (when (or (string-blank-p (buffer-string))
 				(not (buffer-modified-p))
 				(y-or-n-p "Erase the existing prompt text? "))
-		(dsh-bridge--prompt-blank))
+		(let ((inhibit-read-only t))
+		  (erase-buffer))
+		(setq-local dsh-bridge--prompt-history-index nil)
+		(setq-local dsh-bridge--prompt-draft nil)
+		(set-buffer-modified-p nil))
 	  (dsh-bridge-set-prompt-session session-id)
 	  (current-buffer))))
 
