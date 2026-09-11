@@ -79,10 +79,11 @@ re-verification checklist.
 
 ## Candidates
 
-Ordered by recommended sequence. Harness seams were verified against DSH
-0.1.5-alpha.1; the peer floor in `dsh-plugin/package.json` is pinned to match
-(node-semver prerelease rules exclude `0.1.5-alpha.1` from the old
-`^0.1.3-alpha.2` floor).
+Ordered by recommended sequence, but out-of-sequence implementation is
+acceptable based on user needs. Harness seams were verified against
+DSH 0.1.5-alpha.1; the peer floor in `dsh-plugin/package.json` is
+pinned to match (node-semver prerelease rules exclude `0.1.5-alpha.1`
+from the old `^0.1.3-alpha.2` floor).
 
 **Shared prerequisites.** Two small additions unlock several candidates:
 
@@ -99,9 +100,7 @@ Ordered by recommended sequence. Harness seams were verified against DSH
   face (plan mode). All are read with `ctx.get` and must tolerate
   `undefined`.
 
-### 1. Session stats in `describe-session` (read-only)
-
-**Implemented**.
+### 1. Session stats in `describe-session` (**Implemented**)
 
 Turn the current `D`/sessions-list details buffer into a real session report,
 and make it reachable without going through the sessions list.
@@ -250,9 +249,12 @@ candidates above.
   per-turn and per-session lists of modified paths resolved against the
   session cwd. Pin down the exact tool-event vocabulary (which events carry
   paths) at implementation time.
-- **UX** — a tabulated review buffer: `RET` opens the file, a prefix opens
-  `vc-diff` (or magit) for it; reachable from DSH-View and the transcript.
-  This is the "what did it just change" workflow the web UI cannot match.
+- **UX** — to be scoped out. The DSH-View buffer should contain a list
+  of changed files, clickable (with RET) to visit them.  Possibly
+  offer additional keybindings to view the files as a bundle, or a
+  diff of the changes (using VC package or something else?).  To do:
+  analyze existing Emacs packages for UX ideas, and offer something in
+  the same flavor.
 
 ### 10. Cross-session search
 
@@ -263,9 +265,7 @@ candidates above.
 - **UX** — an occur/grep-style results buffer; `RET` jumps to that session's
   transcript at the matching turn.
 
-### 11. Attachments in `/send`
-
-**Implemented.**
+### 11. Attachments in `/send` (**Implemented**)
 
 - **Transport** — path-based: `POST /dsh-bridge/send` takes an optional
   `attachments: [{path, name?}]` of absolute host-local paths and the host
