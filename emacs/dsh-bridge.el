@@ -1412,13 +1412,12 @@ success branch of the send, after the history is recorded.
 ATTACHMENTS, when non-nil, is a list of plists (:path PATH :name NAME)
 to upload with the prompt; PATH must be absolute."
   (let* ((target (or session-id (dsh-bridge--effective-session)))
-		 (payload (append (list (cons 'text text))
-						  (and attachments
-							   (list (cons 'attachments
-										   (vconcat
-											(mapcar #'dsh-bridge--attachment-payload
-													attachments)))))
-						  (and target (list (cons 'sessionId target))))))
+		 (payload `((text . ,text))))
+	(when target
+	  (push `(sessionId . ,target) payload))
+	(when attachments
+	  (push `(attachments . ,(dsh-bridge--attachment-payload attachments))
+			payload))
 	(dsh-bridge--call "POST" "/send" payload
 	  (lambda (status body http-status)
 		(let* ((alist (ignore-errors
@@ -1538,13 +1537,17 @@ line with no absolute `filename' is malformed and stays in CLEAN-TEXT."
 		(setq position end)))
 	(cons (concat clean (substring text position)) (nreverse attachments))))
 
-(defun dsh-bridge--attachment-payload (attachment)
-  "Return ATTACHMENT as the JSON alist entry for a `/send' attachment.
-ATTACHMENT is a plist (:path PATH :name NAME); a blank NAME is omitted."
-  (append (list (cons 'path (plist-get attachment :path)))
-		  (let ((name (plist-get attachment :name)))
-			(and (stringp name) (not (string-empty-p name))
-				 (list (cons 'name name))))))
+(defun dsh-bridge--attachment-payload (attachments)
+  "Return a vector of JSON alist entries from ATTACHMENTS, in order.
+ATTACHMENTS is a list of plists (:path PATH :name NAME); a blank NAME is
+omitted.  The vector makes `json-encode' serialize it directly as an array."
+  (vconcat
+   (mapcar (lambda (entry)
+	     (let ((name (plist-get entry :name)))
+	       (append `((path . ,(plist-get entry :path)))
+		       (and name (not (string-empty-p name))
+			    `((name . ,name))))))
+	   attachments)))
 
 (defun dsh-bridge--insert-attachment-tag (path &optional name)
   "Insert an attachment tag for PATH, optionally named NAME, at point."
@@ -4547,10 +4550,8 @@ failure (the host reports 404 unknown / 409 subagent-owned / 500 composition)."
 
 (defun dsh-bridge--ensure-session-live (id)
   "Return non-nil when SESSION ID is live, resuming a cold session on demand.
-A saved (cold) session known to the session cache is resumed via
-`dsh-bridge--resume-session' (echoing \"resuming…\", and the host's error on
-failure); an id absent from the cache returns nil without a resume attempt.
-Callers treat a nil result as \"not usable\" and signal the error themselves."
+A saved (cold) session known to the session cache is resumed; an id
+absent from the cache returns nil without a resume attempt."
   (let ((session (dsh-bridge--session-for-id id)))
 	(cond
 	 ((alist-get 'live session) t)

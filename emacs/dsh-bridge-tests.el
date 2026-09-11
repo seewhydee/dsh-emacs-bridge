@@ -5436,6 +5436,21 @@ relative `filename' is malformed and stays as text."
     (should (null (cdr parsed)))
     (should (equal (car parsed) "<#attachment filename=\"rel.txt\">\nbody"))))
 
+(ert-deftest dsh-bridge-attachment-payload-order-and-type ()
+  "The wire payload is a vector of alists in ATTACHMENTS order.
+A blank NAME is omitted rather than sent as an empty string."
+  (let ((payload (dsh-bridge--attachment-payload
+                  (list (list :path "/tmp/a.png" :name "A")
+                        (list :path "/tmp/b.txt")
+                        (list :path "/tmp/c.png" :name "C")))))
+    ;; A vector, so `json-encode' emits a JSON array: `json-encode-list'
+    ;; DWIMs a plain list of plists into an object.
+    (should (vectorp payload))
+    (should (equal (append payload nil)
+                   (list (list (cons 'path "/tmp/a.png") (cons 'name "A"))
+                         (list (cons 'path "/tmp/b.txt"))
+                         (list (cons 'path "/tmp/c.png") (cons 'name "C")))))))
+
 (ert-deftest dsh-bridge-attach-file-inserts-tag ()
   "`dsh-bridge-attach-file' inserts one tag line per attached file."
   (dsh-bridge-test--kill-prompt-buffer)
