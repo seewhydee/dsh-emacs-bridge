@@ -1484,7 +1484,7 @@ SESSION-ID overrides the effective session for this call only."
 (defconst dsh-bridge--attachment-line-regexp
   "^[ \t]*<#attachment\\([^\n]*\\)>[ \t]*\n?"
   "Regexp matching one whole DSH attachment tag line.
-The first group captures the tag's attribute text.  The optional trailing
+The first group captures the tag's attribute text.	The optional trailing
 newline makes the match a whole line, for stripping and counting.")
 
 (defun dsh-bridge--attachment-escape (value)
@@ -1543,20 +1543,22 @@ ATTACHMENTS is a list of plists (:path PATH :name NAME); a blank NAME is
 omitted.  The vector makes `json-encode' serialize it directly as an array."
   (vconcat
    (mapcar (lambda (entry)
-	     (let ((name (plist-get entry :name)))
-	       (append `((path . ,(plist-get entry :path)))
-		       (and name (not (string-empty-p name))
-			    `((name . ,name))))))
-	   attachments)))
+			 (let ((name (plist-get entry :name)))
+			   (append `((path . ,(plist-get entry :path)))
+					   (and name (not (string-empty-p name))
+							`((name . ,name))))))
+		   attachments)))
 
 (defun dsh-bridge--insert-attachment-tag (path &optional name)
   "Insert an attachment tag for PATH, optionally named NAME, at point."
   (let ((tag (dsh-bridge--attachment-format path name)))
-	(insert (propertize tag
-						'face 'dsh-bridge-attachment-face
-						'font-lock-face 'dsh-bridge-attachment-face
-						'help-echo (format "DSH attachment: %s\nDelete this line to detach it."
-										   path)))
+	(insert
+	 (propertize tag
+				 'face 'dsh-bridge-attachment-face
+				 'font-lock-face 'dsh-bridge-attachment-face
+				 'help-echo (format "DSH attachment: %s\n\
+Delete this line to detach it."
+									path)))
 	(insert "\n")))
 
 (defun dsh-bridge--remove-attachment-tags ()
