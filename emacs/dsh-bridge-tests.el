@@ -27,6 +27,10 @@
 (require 'cl-lib)
 (require 'dsh-bridge)
 
+;; The plugin install/uninstall code lives in the optional companion library;
+;; load it so the plugin-management tests below can drive it.
+(require 'dsh-bridge-install)
+
 ;;; Low-level HTTP plumbing
 
 (ert-deftest dsh-bridge-path-no-session ()
@@ -2607,6 +2611,30 @@ whole CLI to install a plugin for a DSH the user never set up."
               ((symbol-function 'message) (lambda (&rest _) nil)))
       (dsh-bridge--ensure-plugin))
     (should offered)))
+
+(ert-deftest dsh-bridge-load-install-library-missing ()
+  "The install library is reported absent, without signaling, when unfindable.
+This is the optional-library contract: `dsh-bridge.el' must keep working when
+`dsh-bridge-install.el' is not installed."
+  (cl-letf (((symbol-function 'require) (lambda (&rest _) nil))
+            ((symbol-function 'locate-library) (lambda (&rest _) nil))
+            ((symbol-function 'symbol-file) (lambda (&rest _) nil)))
+    (should-not (dsh-bridge--load-install-library))))
+
+(ert-deftest dsh-bridge-ensure-plugin-no-install-library ()
+  "With the install library absent, diagnosis warns but does not offer."
+  (let ((dsh-bridge--bridge-status-cache 'not-running)
+        (dsh-bridge--plugin-diagnosed nil)
+        (warned nil))
+    (cl-letf (((symbol-function 'dsh-bridge--load-install-library)
+               (lambda () nil))
+              ((symbol-function 'display-warning)
+               (lambda (&rest args) (setq warned args)))
+              ((symbol-function 'y-or-n-p)
+               (lambda (&rest _) (ert-fail "must not offer an install"))))
+      (dsh-bridge--ensure-plugin))
+    (should warned)
+    (should (eq dsh-bridge--bridge-status-cache 'not-running))))
 
 (ert-deftest dsh-bridge-plugin-install-state-tri-state ()
   "The profile probe distinguishes installed / not-installed / no-profile."
