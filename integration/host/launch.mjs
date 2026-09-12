@@ -129,8 +129,12 @@ export async function launch(options = {}) {
     renderOverlay({ dshHome: homeDir, bridgeEntry: BRIDGE_ENTRY, mockLlmEntry: MOCK_LLM_ENTRY, port, disable }),
   )
   const dshCmd = resolveDshCommand()
+  // Launcher flags come first (the CLI stops recognizing its own options at the
+  // first app flag), then the web app's `--no-open`: a headless fixture must
+  // never launch a browser on the machine running the tests.
   const args = [...dshCmd.slice(1), '--profile', 'web', '--patch', overlayPath]
   if (patch !== undefined) args.push('--patch', patch)
+  args.push('--no-open')
   const child = spawn(dshCmd[0], args, {
     cwd,
     env: { ...process.env, DSH_HOME: homeDir },

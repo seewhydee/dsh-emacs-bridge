@@ -27,8 +27,8 @@ happens, and the plugin is driven over HTTP/SSE.
   export DSH_BRIDGE_FIXTURE_CWD=/path/to/deepseek-harness
   ```
   Note that the deepseek-harness must be already built.  The launcher
-  runs `<dsh> --profile web --patch <overlay>`, so the harness must
-  carry the web bundle set.
+  runs `<dsh> --profile web --patch <overlay> --no-open`, so the harness
+  must carry the web bundle set and the fixture never opens a browser.
 - In the dsh-emacs-bridge sources, `make build` must have produced
   `dsh-plugin/lib/index.js` (the launcher mounts it by absolute path).
 - Emacs 29.1+.
