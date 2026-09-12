@@ -1589,6 +1589,8 @@ Signal a `user-error' for anything that is not a regular file."
 			  expanded))
 		  files))
 
+(declare-function dired-get-marked-files "dired")
+
 ;;;###autoload
 (defun dsh-bridge-attach-file (&optional files)
   "Attach FILES to the DSH prompt, prompting when FILES is nil.
@@ -2131,6 +2133,59 @@ to pop to the buffer using the same window.  Return the buffer."
 				 #'pop-to-buffer)
 			   buffer)
 	  buffer)))
+
+(defun dsh-bridge--exit-to-view (buffer &optional invoked-window)
+  "Select DSH-View BUFFER after an explicit user action.
+Reuse a window already displaying BUFFER; otherwise display BUFFER in the
+selected window, replacing the buffer the action was typed in.  When a
+window already displayed BUFFER, INVOKED-WINDOW -- the window the action
+came from -- is quit instead, so the old buffer does not linger on screen.
+Point is left at BUFFER's end so following replies splice in above it.
+Return BUFFER.  Only explicit user actions (sending a prompt, answering or
+declining a question) jump this way; an outcome learned from the host while
+the user did nothing (a question resolved elsewhere) is bannered in place."
+  (let* ((old (current-buffer))
+		 (old-window (or (and (window-live-p invoked-window)
+							  (eq (window-buffer invoked-window) old)
+							  invoked-window)
+						 (get-buffer-window old))))
+	;; A `display-buffer' action list of two functions needs the inner
+	;; list: `(FUNCTIONS . ALIST)' takes its car as the function list.
+	(pop-to-buffer buffer '((display-buffer-reuse-window display-buffer-same-window)))
+	(if (and old-window (window-live-p old-window)
+			 (eq (window-buffer old-window) old))
+		;; BUFFER kept its own window: dismiss the old buffer's window.
+		(quit-window nil old-window)
+	  ;; The selected window now shows BUFFER; bury the old buffer.
+	  (bury-buffer old))
+	(with-current-buffer buffer
+	  (goto-char (point-max)))
+	buffer))
+
+(defun dsh-bridge--view-for-session (session-id)
+  "Return SESSION-ID's DSH-View buffer, refreshed from its turn list.
+Reuse the session's view, else `*dsh-bridge-output*'.  Refresh the turn
+cache from GET /turns, fill the newest turn, and enter turn-following state
+while that turn is open.  Used when an explicit action resumes a session
+and the continuation must be collected in the view."
+  (let* ((path (dsh-bridge--path "/turns" session-id))
+		 (result (dsh-bridge--request "GET" path nil))
+		 (alist (cdr-safe result))
+		 (turns-pair (assoc 'turns alist))
+		 (turns (cdr-safe turns-pair))
+		 (buf (or (dsh-bridge--session-view session-id)
+				  (get-buffer-create "*dsh-bridge-output*"))))
+	(when turns-pair
+	  (dsh-bridge--turns-cache-store session-id turns (alist-get 'epoch alist)))
+	(with-current-buffer buf
+	  (dsh-bridge--view-fill session-id (car-safe turns) nil
+							 (alist-get 'cwd alist) t t)
+	  (when (and turns (dsh-bridge--view-turn-open-p (car-safe turns)))
+		(setq-local dsh-bridge--view-follow t))
+	  (setq-local dsh-bridge--view-waiting nil)
+	  (setq header-line-format (dsh-bridge--view-header-line))
+	  (dsh-bridge--view-ticker-ensure))
+	buf))
 
 (defun dsh-bridge--view-follow-refill (session-id)
   "Refill every DSH-View buffer following SESSION-ID with its newest turn.
@@ -2708,26 +2763,20 @@ Bury the DSH-Prompt buffer, keeping its contents (the sent text also
 stays in the prompt history; the next composition erases it, asking
 first only if it was edited further).
 
-If SENT-SESSION-ID is non-nil, pop to a DSH-View buffer showing that
-session in turn-following state.  WINDOW, if non-nil, is the window the
-send was invoked from; if still showing the prompt buffer, it is called
-with `quit-window' to dismiss the prompt.  SENT-AT, if non-nil, is the
-ms-epoch the prompt was sent; `dsh-bridge--after-prompt-view' uses it to
-recognize a turn that started (or even finished) during the send."
+If SENT-SESSION-ID is non-nil, show a DSH-View buffer for the session in
+turn-following state (see `dsh-bridge--exit-to-view'): a window already
+displaying that view is reused, else the view replaces the prompt in the
+invoking window.  WINDOW, if non-nil, is the window the send was invoked
+from.  SENT-AT, if non-nil, is the ms-epoch the prompt was sent;
+`dsh-bridge--after-prompt-view' uses it to recognize a turn that started
+(or even finished) during the send."
   (when (eq major-mode 'dsh-bridge-prompt-mode)
 	(set-buffer-modified-p nil)
 	(if (null sent-session-id)
 		(bury-buffer)
-	  (let ((buf (dsh-bridge--after-prompt-view sent-session-id sent-at))
-			(prompt-window (or (and (window-live-p window)
-									(eq (window-buffer window) (current-buffer))
-									window)
-							   (get-buffer-window (current-buffer)))))
-		;; We want to dismiss the prompt buffer/window and show the
-		;; view buffer, WITHOUT showing the view buffer in two
-		;; separate windows or keeping the prompt buffer on-screen.
-		(when prompt-window (quit-window nil prompt-window))
-		(pop-to-buffer buf)))))
+	  (dsh-bridge--exit-to-view
+	   (dsh-bridge--after-prompt-view sent-session-id sent-at)
+	   window))))
 
 ;;;###autoload
 (defun dsh-bridge-draft (&optional session-id)
@@ -3131,28 +3180,32 @@ your answer\" header.")
 					 (equal dsh-bridge--question-id question-id))))
 			(buffer-list)))
 
-(defun dsh-bridge--question-mark-resolved (question-id message outcome &optional bury)
-  "Mark QUESTION-ID's live buffer resolved, banner it with MESSAGE, and bury it.
+(defun dsh-bridge--question-mark-resolved (question-id message outcome)
+  "Mark QUESTION-ID's live buffer resolved and banner it with MESSAGE.
 OUTCOME is `sent', `cancelled', `elsewhere', or `stale' and selects the
-banner's face.  MESSAGE says what happened in the user's terms; BURY (the
-local-submit and local-decline paths) also removes the buffer from every
-window, matching how sending from DSH-Prompt exits.  A buffer already marked
-resolved is left alone, so the local settlement and the later SSE
-`ask-user-resolved' frame do not banner twice.  The buffer is re-rendered so
-the banner replaces the now-false \"waiting for your answer\" header rather
-than sitting above it."
+banner's face.  MESSAGE says what happened in the user's terms.  A buffer
+already marked resolved is left alone, so the local settlement and the
+later SSE `ask-user-resolved' frame do not banner twice.  The buffer is
+re-rendered so the banner replaces the now-false \"waiting for your
+answer\" header rather than sitting above it.  This performs no window
+management: an explicit submit/decline moves the user to the session's
+view separately (see `dsh-bridge--exit-to-view'), while an outcome learned
+from the host leaves the buffer on screen."
   (let ((buffer (dsh-bridge--question-find-buffer question-id)))
 	(when (and buffer
 			   (with-current-buffer buffer (not dsh-bridge--question-dead)))
 	  (with-current-buffer buffer
 		(setq-local dsh-bridge--question-dead t)
 		(setq-local dsh-bridge--question-banner
-				  (or dsh-bridge--question-sent message))
+				  ;; Only a local outcome repeats what this buffer did.
+				  ;; `elsewhere'/`stale' means some other surface (or no
+				  ;; one) settled it, so the descriptive MESSAGE is right.
+				  (if (memq outcome '(sent cancelled))
+					  (or dsh-bridge--question-sent message)
+					message))
 		(setq-local dsh-bridge--question-banner-face
 				  (dsh-bridge--question-banner-face-for outcome))
-		(dsh-bridge--question-render))
-	  (when bury
-		(bury-buffer buffer)))))
+		(dsh-bridge--question-render)))))
 
 ;; Registry maintenance ----------------------------------------------------
 
@@ -3637,7 +3690,13 @@ empty array, and a single-select custom answer never travels with a selection
 	(and (not failed) (nreverse answers))))
 
 (defun dsh-bridge--question-submit ()
-  "Validate and POST the answers for this question buffer."
+  "Validate and POST the answers for this question buffer.
+On acceptance the session resumes, so this buffer is bannered and the
+session's DSH-View is selected in turn-following state at its tail
+(`dsh-bridge--exit-to-view'): the continuation is collected where the
+prompt flow collects replies.  A question the host reports as already
+resolved is bannered in place, with no jump -- the user's action did not
+settle it."
   (interactive)
   (if dsh-bridge--question-dead
 	  (message "dsh-bridge: this question was already resolved")
@@ -3648,63 +3707,75 @@ empty array, and a single-select custom answer never travels with a selection
 		;; Record what this buffer did before the request leaves: the
 		;; resolved frame can outrun the POST's response (see the variable).
 		(setq dsh-bridge--question-sent "Your answer was sent.")
-		(dsh-bridge--call "POST" "/answer"
-		  (append (list (cons 'questionId dsh-bridge--question-id)
-						(cons 'sessionId dsh-bridge--question-session))
-				  (list (cons 'answers answers)))
-		  (lambda (status body http-status)
-			(let* ((alist (condition-case nil
-							(json-parse-string body :object-type 'alist)
-						  (error nil)))
-				   (reason (and alist (alist-get 'reason alist)))
-				   (accepted (and alist (alist-get 'accepted alist))))
-			  (cond
-			   ((and status (null accepted))
-				(message "dsh-bridge: %s" (dsh-bridge--error-message status http-status alist)))
-			   ((and reason (equal reason "not-pending"))
-				(message "dsh-bridge: already answered or cancelled")
-				(dsh-bridge--question-mark-resolved
-				 dsh-bridge--question-id
-				 "This question was already answered or cancelled." 'elsewhere t))
-			   (accepted
-				(message "dsh-bridge: answer sent to \"%s\""
-						 (dsh-bridge--session-label dsh-bridge--question-session))
-				(dsh-bridge--question-mark-resolved
-				 dsh-bridge--question-id
-				 "Your answer was sent." 'sent t))
-			   (t (message "dsh-bridge: answer not accepted%s"
-						   (if reason (concat ": " reason) "")))))))))))
+		;; Capture the window the answer was typed in, for the exit.
+		(let ((window (selected-window)))
+		  (dsh-bridge--call "POST" "/answer"
+			(append (list (cons 'questionId dsh-bridge--question-id)
+						  (cons 'sessionId dsh-bridge--question-session))
+					(list (cons 'answers answers)))
+			(lambda (status body http-status)
+			  (let* ((alist (condition-case nil
+							  (json-parse-string body :object-type 'alist)
+							(error nil)))
+					 (reason (and alist (alist-get 'reason alist)))
+					 (accepted (and alist (alist-get 'accepted alist))))
+				(cond
+				 ((and status (null accepted))
+				  (message "dsh-bridge: %s" (dsh-bridge--error-message status http-status alist)))
+				 ((and reason (equal reason "not-pending"))
+				  (message "dsh-bridge: already answered or cancelled")
+				  (dsh-bridge--question-mark-resolved
+				   dsh-bridge--question-id
+				   "This question was already answered or cancelled." 'elsewhere))
+				 (accepted
+				  (message "dsh-bridge: answer sent to \"%s\""
+						   (dsh-bridge--session-label dsh-bridge--question-session))
+				  (dsh-bridge--question-mark-resolved
+				   dsh-bridge--question-id
+				   "Your answer was sent." 'sent)
+				  (dsh-bridge--exit-to-view
+				   (dsh-bridge--view-for-session dsh-bridge--question-session)
+				   window))
+				 (t (message "dsh-bridge: answer not accepted%s"
+							 (if reason (concat ": " reason) ""))))))))))))
 
 (defun dsh-bridge--question-decline ()
-  "Tell the model we will not answer (cancels the ask_user_question tool call)."
+  "Tell the model we will not answer (cancels the ask_user_question tool call).
+On acceptance the cancelled session resumes, so the session's DSH-View is
+selected in turn-following state at its tail, exactly as for a submitted
+answer; an already-resolved question is bannered in place."
   (interactive)
   (if dsh-bridge--question-dead
 	  (message "dsh-bridge: this question was already resolved")
 	(setq dsh-bridge--question-sent
 		  "You declined to answer; the question was cancelled.")
-	(dsh-bridge--call "POST" "/answer"
-	  (list (cons 'questionId dsh-bridge--question-id)
-			(cons 'sessionId dsh-bridge--question-session)
-			(cons 'cancelled t))
-	  (lambda (_status body _http-status)
-		(let* ((alist (condition-case nil
-						(json-parse-string body :object-type 'alist)
-					  (error nil)))
-			   (reason (and alist (alist-get 'reason alist)))
-			   (accepted (and alist (alist-get 'accepted alist))))
-		  (cond
-		   (accepted
-			(message "dsh-bridge: question cancelled")
-			(dsh-bridge--question-mark-resolved
-			 dsh-bridge--question-id
-			 "You declined to answer; the question was cancelled." 'cancelled t))
-		   ((and reason (equal reason "not-pending"))
-			(message "dsh-bridge: already answered or cancelled")
-			(dsh-bridge--question-mark-resolved
-			 dsh-bridge--question-id
-			 "This question was already answered or cancelled." 'elsewhere t))
-		   (t (message "dsh-bridge: decline not accepted%s"
-					   (if reason (concat ": " reason) "")))))))))
+	(let ((window (selected-window)))
+	  (dsh-bridge--call "POST" "/answer"
+		(list (cons 'questionId dsh-bridge--question-id)
+			  (cons 'sessionId dsh-bridge--question-session)
+			  (cons 'cancelled t))
+		(lambda (_status body _http-status)
+		  (let* ((alist (condition-case nil
+						  (json-parse-string body :object-type 'alist)
+						(error nil)))
+				 (reason (and alist (alist-get 'reason alist)))
+				 (accepted (and alist (alist-get 'accepted alist))))
+			(cond
+			 (accepted
+			  (message "dsh-bridge: question cancelled")
+			  (dsh-bridge--question-mark-resolved
+			   dsh-bridge--question-id
+			   "You declined to answer; the question was cancelled." 'cancelled)
+			  (dsh-bridge--exit-to-view
+			   (dsh-bridge--view-for-session dsh-bridge--question-session)
+			   window))
+			 ((and reason (equal reason "not-pending"))
+			  (message "dsh-bridge: already answered or cancelled")
+			  (dsh-bridge--question-mark-resolved
+			   dsh-bridge--question-id
+			   "This question was already answered or cancelled." 'elsewhere))
+			 (t (message "dsh-bridge: decline not accepted%s"
+						 (if reason (concat ": " reason) ""))))))))))
 
 ;; The `a' (answer) key and the question mode --------------------------------
 
@@ -3747,9 +3818,11 @@ Read-only; mark options with `RET' or an option's number key.  Free text is
 entered in the minibuffer: press `RET' on the `c' row (or `c' anywhere in the
 question) to type a custom answer, and an empty entry clears it.  Skip the
 question at point with `C-c C-s'; move between questions with `TAB'.  `C-c C-c'
-submits the answer, `C-c C-k' declines (cancels the tool call), and `q' buries
-without answering (the question stays pending, and `a' reopens the buffer with
-any marks intact)."))
+submits the answer and `C-c C-k' declines (cancels the tool call); either
+resumes the session, so the session's DSH-View is shown in turn-following
+state at its tail, exactly as `C-c C-c' in DSH-Prompt shows the reply.
+`q' buries without answering (the question stays pending, and `a' reopens
+the buffer with any marks intact)."))
 (dsh-bridge--define-question-mode)
 
 (defvar dsh-bridge-question-mode-map)
@@ -3997,7 +4070,9 @@ compose→read loop."
   (pop-to-buffer (dsh-bridge--prompt-buffer (dsh-bridge--effective-session))))
 
 (defconst dsh-bridge-prompt-display-action
-  '(display-buffer-reuse-window display-buffer-below-selected)
+  ;; A `display-buffer' action takes its car as the function list, so two
+  ;; functions must be wrapped in an inner list.
+  '((display-buffer-reuse-window display-buffer-below-selected))
   "`display-buffer' action for opening the prompt buffer to reply.
 Reuse the prompt's window when already visible, else show it below the
 selected window, so the output buffer stays visible (cf. `flymake',

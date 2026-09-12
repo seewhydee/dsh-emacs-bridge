@@ -3358,6 +3358,60 @@ selection moving during the send cannot strand the prompt on screen."
       (dolist (b '("*dsh-bridge-output*" "*dsh-bridge-prompt*"))
         (when (buffer-live-p (get-buffer b)) (kill-buffer b))))))
 
+(ert-deftest dsh-bridge-exit-to-view-same-window ()
+  "With no window showing the view, the exit replaces the old buffer in the
+selected window (no split) and leaves point at the view's end, so following
+replies splice in above it."
+  (let ((config (current-window-configuration))
+        (view (get-buffer-create "*dsh-bridge-output*"))
+        (old (get-buffer-create "*dsh-bridge-exit-old*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer view
+            (insert "shown reply")
+            (dsh-bridge-view-mode))
+          (with-current-buffer old
+            (insert "old action buffer"))
+          (delete-other-windows)
+          (set-window-buffer (selected-window) old)
+          (set-buffer old)
+          (dsh-bridge--exit-to-view view)
+          (should (eq (window-buffer) view))
+          (should (= (length (window-list)) 1))
+          (should-not (get-buffer-window old))
+          (should (equal (point) (point-max))))
+      (set-window-configuration config)
+      (dolist (b (list view old))
+        (when (buffer-live-p b) (kill-buffer b))))))
+
+(ert-deftest dsh-bridge-exit-to-view-reuses-and-quits ()
+  "With the view already shown in another window, that window is selected and
+the window the action came from is quit, so the old buffer does not linger."
+  (let ((config (current-window-configuration))
+        (view (get-buffer-create "*dsh-bridge-output*"))
+        (old (get-buffer-create "*dsh-bridge-exit-old*"))
+        w1 w2)
+    (unwind-protect
+        (progn
+          (with-current-buffer view
+            (insert "shown reply")
+            (dsh-bridge-view-mode))
+          (with-current-buffer old
+            (insert "old action buffer"))
+          (delete-other-windows)
+          (setq w1 (selected-window))
+          (set-window-buffer w1 view)
+          (setq w2 (split-window w1 nil 'below))
+          (set-window-buffer w2 old)
+          (select-window w2)
+          (with-current-buffer old
+            (dsh-bridge--exit-to-view view w2))
+          (should (eq (window-buffer) view))
+          (should-not (get-buffer-window old)))
+      (set-window-configuration config)
+      (dolist (b (list view old))
+        (when (buffer-live-p b) (kill-buffer b))))))
+
 (ert-deftest dsh-bridge-view-waiting-state ()
   "The waiting state shows the `(running...)' placeholder, has no `(k/n)'
 position (it is not a turn), and accepts only content from a turn newer than
@@ -4573,12 +4627,14 @@ copy silently instead of duplicating the registry entry."
 
 (ert-deftest dsh-bridge-ask-user-resolved ()
   "A resolved frame retires the pending question and banners the question buffer.
-The banner stands on its own line, and the resolved buffer no longer claims the
-session is waiting for an answer."
+The banner stands on its own line, the resolved buffer no longer claims the
+session is waiting for an answer, and nothing jumps: the user did not act."
   (let ((dsh-bridge--pending-questions nil)
         (dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t)))))
     (cl-letf (((symbol-function 'message) (lambda (&rest _) nil))
-              ((symbol-function 'dsh-bridge--status-event-render) #'ignore))
+              ((symbol-function 'dsh-bridge--status-event-render) #'ignore)
+              ((symbol-function 'dsh-bridge--exit-to-view)
+               (lambda (&rest _) (ert-fail "a resolved-elsewhere frame must not jump"))))
       (dsh-bridge--ask-user-arrive "s1" "q1" '(( (id . "q1") (question . "Go?") )))
       (dsh-bridge--ask-user-resolved "s1" "q1" "answered"))
     (with-current-buffer (get-buffer "*dsh-bridge-question: T*")
@@ -4595,7 +4651,8 @@ session is waiting for an answer."
 buffer with what this buffer did — the answer was sent here, not elsewhere —
 and the late callback settling afterwards does not banner a second time."
   (let ((dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t))))
-        (pending-cb nil))
+        (pending-cb nil)
+        (exited nil))
     (with-current-buffer
         (dsh-bridge--question-buffer "s1" "q1"
           '(( (id . "q1") (question . "Go?") (options . (((label . "Yes")))) )))
@@ -4606,22 +4663,28 @@ and the late callback settling afterwards does not banner a second time."
       ;; The POST is in flight: capture its callback without calling it, the
       ;; way a slow response leaves it while the SSE frame arrives.
       (cl-letf (((symbol-function 'dsh-bridge--call)
-                 (lambda (_m _p _payload cb) (setq pending-cb cb))))
-        (dsh-bridge--question-submit))
-      (should (functionp pending-cb))
-      ;; The host's resolved frame lands before the response does.
-      (dsh-bridge--ask-user-resolved "s1" "q1" "answered")
-      (should dsh-bridge--question-dead)
-      (should-not (string-match-p "answered elsewhere" (buffer-string)))
-      (should (string-match-p "\\`Your answer was sent\\.\n" (buffer-string)))
-      (should-not (string-match-p "is waiting for your answer" (buffer-string)))
-      ;; A re-render of the resolved buffer keeps the banner and the header out.
-      (dsh-bridge--question-rerender-at-point)
-      (should (string-match-p "\\`Your answer was sent\\.\n" (buffer-string)))
-      (should-not (string-match-p "is waiting for your answer" (buffer-string)))
-      ;; The response callback settling afterwards must not banner again.
-      (funcall pending-cb nil "{\"accepted\":true}" 200)
-      (should (equal (how-many "Your answer was sent\\." (point-min) (point-max)) 1)))
+                 (lambda (_m _p _payload cb) (setq pending-cb cb)))
+                ((symbol-function 'dsh-bridge--view-for-session)
+                 (lambda (session-id) (cons 'view session-id)))
+                ((symbol-function 'dsh-bridge--exit-to-view)
+                 (lambda (buffer &optional _window) (setq exited buffer))))
+        (dsh-bridge--question-submit)
+        (should (functionp pending-cb))
+        ;; The host's resolved frame lands before the response does.
+        (dsh-bridge--ask-user-resolved "s1" "q1" "answered")
+        (should dsh-bridge--question-dead)
+        (should-not (string-match-p "answered elsewhere" (buffer-string)))
+        (should (string-match-p "\\`Your answer was sent\\.\n" (buffer-string)))
+        (should-not (string-match-p "is waiting for your answer" (buffer-string)))
+        ;; A re-render of the resolved buffer keeps the banner and the header out.
+        (dsh-bridge--question-rerender-at-point)
+        (should (string-match-p "\\`Your answer was sent\\.\n" (buffer-string)))
+        (should-not (string-match-p "is waiting for your answer" (buffer-string)))
+        ;; The response callback settling afterwards must not banner again, and
+        ;; now performs the explicit exit to the session's view.
+        (funcall pending-cb nil "{\"accepted\":true}" 200)
+        (should (equal (how-many "Your answer was sent\\." (point-min) (point-max)) 1))
+        (should (equal exited '(view . "s1")))))
     (when (dsh-bridge--question-find-buffer "q1")
       (kill-buffer (dsh-bridge--question-find-buffer "q1")))))
 
@@ -4822,11 +4885,11 @@ the buffer for the same question keeps the marks (bury-then-return flow)."
 (ert-deftest dsh-bridge-question-validate-and-submit ()
   "Submission POSTs alist-shaped answers to /dsh-bridge/answer — the wire shape
 the apiproxy validates (regression: plist-style lists encode as junk JSON).  An
-accepted submit banners the buffer as sent and buries it, like sending from
-DSH-Prompt."
+accepted submit banners the buffer as sent and exits to the session's view,
+like sending from DSH-Prompt."
   (let ((dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t))))
         (posted nil)
-        (buried nil))
+        (exited nil))
     (with-current-buffer
         (dsh-bridge--question-buffer "s1" "q1"
           '(( (id . "q1") (question . "Go?") (options . (((label . "Yes")) ((label . "No")))) )))
@@ -4840,17 +4903,70 @@ DSH-Prompt."
                  (lambda (_m _p payload cb)
                    (setq posted payload)
                    (funcall cb nil "{\"accepted\":true}" 200)))
-                ((symbol-function 'bury-buffer)
-                 (lambda (&optional buffer) (setq buried (or buffer (current-buffer))))))
+                ((symbol-function 'dsh-bridge--view-for-session)
+                 (lambda (session-id) (cons 'view session-id)))
+                ((symbol-function 'dsh-bridge--exit-to-view)
+                 (lambda (buffer &optional window) (setq exited (list buffer window)))))
         (dsh-bridge--question-submit))
       (should (equal (alist-get 'questionId posted) "q1"))
       (should (equal (alist-get 'sessionId posted) "s1"))
       (should (equal (json-encode (list (cons 'answers (alist-get 'answers posted))))
                      "{\"answers\":[{\"id\":\"q1\",\"selected\":[\"Yes\"]}]}"))
-      ;; An accepted submit retires the buffer and buries it.
+      ;; An accepted submit retires the buffer and exits to its session's view,
+      ;; carrying the window the answer was typed in.
       (should dsh-bridge--question-dead)
-      (should (eq buried (current-buffer)))
-      (should (string-match-p "Your answer was sent\\." (buffer-string))))
+      (should (string-match-p "Your answer was sent\\." (buffer-string)))
+      (should (equal (car exited) '(view . "s1")))
+      (should (window-live-p (cadr exited))))
+    (when (dsh-bridge--question-find-buffer "q1")
+      (kill-buffer (dsh-bridge--question-find-buffer "q1")))))
+
+(ert-deftest dsh-bridge-question-decline-shows-view ()
+  "An accepted decline banners the buffer and exits to the session's view too:
+cancelling the tool call resumes the model exactly as answering does."
+  (let ((dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t))))
+        (posted nil)
+        (exited nil))
+    (with-current-buffer
+        (dsh-bridge--question-buffer "s1" "q1"
+          '(( (id . "q1") (question . "Go?") (options . (((label . "Yes")))) )))
+      (cl-letf (((symbol-function 'dsh-bridge--call)
+                 (lambda (_m _p payload cb)
+                   (setq posted payload)
+                   (funcall cb nil "{\"accepted\":true}" 200)))
+                ((symbol-function 'dsh-bridge--view-for-session)
+                 (lambda (session-id) (cons 'view session-id)))
+                ((symbol-function 'dsh-bridge--exit-to-view)
+                 (lambda (buffer &optional _window) (setq exited buffer))))
+        (dsh-bridge--question-decline))
+      (should (equal (alist-get 'cancelled posted) t))
+      (should dsh-bridge--question-dead)
+      (should (string-match-p "You declined to answer" (buffer-string)))
+      (should (equal exited '(view . "s1"))))
+    (when (dsh-bridge--question-find-buffer "q1")
+      (kill-buffer (dsh-bridge--question-find-buffer "q1")))))
+
+(ert-deftest dsh-bridge-question-not-pending-stays-put ()
+  "A submit the host reports as already resolved banners where it is: the
+user's action did not settle the question, so no jump happens."
+  (let ((dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t))))
+        (exited nil))
+    (with-current-buffer
+        (dsh-bridge--question-buffer "s1" "q1"
+          '(( (id . "q1") (question . "Go?") (options . (((label . "Yes")))) )))
+      (goto-char (point-min))
+      (re-search-forward "1\\. Yes")
+      (goto-char (line-beginning-position))
+      (dsh-bridge--question-toggle-at-point)
+      (cl-letf (((symbol-function 'dsh-bridge--call)
+                 (lambda (_m _p _payload cb)
+                   (funcall cb nil "{\"accepted\":false,\"reason\":\"not-pending\"}" 200)))
+                ((symbol-function 'dsh-bridge--exit-to-view)
+                 (lambda (&rest _) (setq exited t))))
+        (dsh-bridge--question-submit))
+      (should dsh-bridge--question-dead)
+      (should (string-match-p "already answered or cancelled" (buffer-string)))
+      (should-not exited))
     (when (dsh-bridge--question-find-buffer "q1")
       (kill-buffer (dsh-bridge--question-find-buffer "q1")))))
 

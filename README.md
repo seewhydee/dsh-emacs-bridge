@@ -229,7 +229,10 @@ DSH-Prompt buffer is already bound to that session, it is reused.
 The following commands are available from the DSH-Prompt buffer:
 
 * `C-c C-c` — send the buffer as a prompt.  On success, bury the
-  buffer and pop to the DSH-View for that session.
+  buffer and land on the DSH-View for that session: a window already
+  showing that view is reused (the prompt window is dismissed),
+  otherwise the view replaces the prompt in its window.  Point goes to
+  the view's end so the reply is collected as it streams.
 * `C-c C-a` — attach a file to the prompt (see below).
 * `C-c C-d` — push the buffer to the DSH composer as a draft.
 * `C-c C-m` — set the model and reasoning effort.
@@ -302,6 +305,15 @@ number key, or `c` to write a freeform answer via the minibuffer.
 
 To submit the answers, type `C-c C-c`.  Alternatively, type `C-c C-k`
 to decline the query, canceling the tool call.
+
+Either way the session resumes, so Emacs then shows the session's
+DSH-View in turn-following state, with point at the end so the new
+reply is collected as it arrives — the same landing as `C-c C-c` in
+the DSH-Prompt buffer.  A window already displaying that DSH-View is
+reused and the question window is dismissed; otherwise the DSH-View
+replaces the question buffer in its window.  If the question was
+already answered from another surface, nothing jumps: the buffer just
+shows a banner saying so.
 
 ### Sending text from DSH to Emacs
 
