@@ -1402,8 +1402,8 @@ If walking through the prompt history, then:
 SESSION-ID overrides the effective session for this call only.
 If ON-SUCCESS is a function, it is called with SENT-SESSION-ID in the
 success branch of the send, after the history is recorded.
-ATTACHMENTS, when non-nil, is a list of plists (:path PATH :name NAME)
-to upload with the prompt; PATH must be absolute."
+ATTACHMENTS, when non-nil, is a list of plists (:path PATH) to upload
+with the prompt; PATH must be absolute."
   (let* ((target (or session-id (dsh-bridge--effective-session)))
 		 (payload `((text . ,text))))
 	(when target
@@ -1435,7 +1435,7 @@ to upload with the prompt; PATH must be absolute."
 				(dsh-bridge--status-set sent-id 'running)
 				(dsh-bridge--status-event-render sent-id)
 				(message "dsh-bridge: prompt sent")
-				(when (null target)
+				(unless target
 				  ;; The host resolved last-active itself: record it.
 				  (dsh-bridge--record-last-resolved alist))
 				;; An attachment-only send is not a recallable
@@ -1494,24 +1494,20 @@ name such as \"filename\"."
 	(replace-regexp-in-string "\\\\\\(.\\)" "\\1"
 							  (match-string 1 attributes))))
 
-(defun dsh-bridge--attachment-format (path &optional name)
-  "Return the attachment tag for PATH, optionally named NAME.
-PATH and NAME are escaped for the double-quoted attribute values.  The
-result carries no trailing newline."
+(defun dsh-bridge--attachment-format (path)
+  "Return the attachment tag for PATH.
+PATH is escaped for the double-quoted attribute value.  The result
+carries no trailing newline."
   (concat "<#attachment filename=\""
 		  (dsh-bridge--attachment-escape path)
-		  "\""
-		  (if (dsh-bridge--normalized-string name)
-			  (concat " name=\"" (dsh-bridge--attachment-escape name) "\"")
-			"")
-		  ">"))
+		  "\">"))
 
 (defun dsh-bridge--parse-attachments (text)
   "Return (CLEAN-TEXT . ATTACHMENTS) parsed from TEXT.
 ATTACHMENTS lists the tag lines with an absolute `filename' in order, as
-plists (:path PATH :name NAME).  Those lines are removed from
-CLEAN-TEXT; every other character of TEXT is preserved.  A tag-shaped
-line with no absolute `filename' is malformed and stays in CLEAN-TEXT."
+plists (:path PATH).  Those lines are removed from CLEAN-TEXT; every
+other character of TEXT is preserved.  A tag-shaped line with no
+absolute `filename' is malformed and stays in CLEAN-TEXT."
   (let ((position 0) (clean "") (attachments '()))
 	(while (string-match dsh-bridge--attachment-line-regexp text position)
 	  ;; Capture the outer match before `dsh-bridge--attachment-attribute'
@@ -1520,30 +1516,26 @@ line with no absolute `filename' is malformed and stays in CLEAN-TEXT."
 			 (attributes (or (match-string 1 text) ""))
 			 (start (match-beginning 0))
 			 (end (match-end 0))
-			 (path (dsh-bridge--attachment-attribute attributes "filename"))
-			 (name (dsh-bridge--attachment-attribute attributes "name")))
+			 (path (dsh-bridge--attachment-attribute attributes "filename")))
 		(setq clean (concat clean (substring text position start)))
 		(if (and (stringp path) (file-name-absolute-p path))
-			(push (list :path path :name name) attachments)
+			(push (list :path path) attachments)
 		  (setq clean (concat clean whole)))
 		(setq position end)))
 	(cons (concat clean (substring text position)) (nreverse attachments))))
 
 (defun dsh-bridge--attachment-payload (attachments)
   "Return a vector of JSON alist entries from ATTACHMENTS, in order.
-ATTACHMENTS is a list of plists (:path PATH :name NAME); a blank NAME is
-omitted.  The vector makes `json-encode' serialize it directly as an array."
+ATTACHMENTS is a list of plists (:path PATH).  The vector makes
+`json-encode' serialize it directly as an array."
   (vconcat
    (mapcar (lambda (entry)
-			 (let ((name (plist-get entry :name)))
-			   (append `((path . ,(plist-get entry :path)))
-					   (and name (not (string-empty-p name))
-							`((name . ,name))))))
+			 `((path . ,(plist-get entry :path))))
 		   attachments)))
 
-(defun dsh-bridge--insert-attachment-tag (path &optional name)
-  "Insert an attachment tag for PATH, optionally named NAME, at point."
-  (let ((tag (dsh-bridge--attachment-format path name)))
+(defun dsh-bridge--insert-attachment-tag (path)
+  "Insert an attachment tag for PATH at point."
+  (let ((tag (dsh-bridge--attachment-format path)))
 	(insert
 	 (propertize tag
 				 'face 'dsh-bridge-attachment-face

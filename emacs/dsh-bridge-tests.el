@@ -5409,24 +5409,23 @@ Another session, an invisible report, or the option off does not."
     (when (buffer-live-p buffer) (kill-buffer buffer))))
 
 (ert-deftest dsh-bridge-attachment-format-roundtrip ()
-  "Tag values round-trip paths and names containing quotes and backslashes."
+  "Tag values round-trip paths containing quotes and backslashes."
   (let* ((path "/tmp/a \"quoted\" \\ file.png")
-         (name "weird \"name\"")
-         (tag (dsh-bridge--attachment-format path name))
+         (tag (dsh-bridge--attachment-format path))
          (parsed (dsh-bridge--parse-attachments (concat tag "\nbody\n"))))
-    (should (equal (cdr parsed) (list (list :path path :name name))))
+    (should (equal (cdr parsed) (list (list :path path))))
     (should (equal (car parsed) "body\n"))))
 
 (ert-deftest dsh-bridge-parse-attachments-order-and-malformed ()
   "Tag lines are extracted in order and removed from the text; a tag with a
 relative `filename' is malformed and stays as text."
   (let* ((one (dsh-bridge--attachment-format "/tmp/one.txt"))
-         (two (dsh-bridge--attachment-format "/tmp/two.png" "shot.png"))
+         (two (dsh-bridge--attachment-format "/tmp/two.png"))
          (parsed (dsh-bridge--parse-attachments
                   (concat "lead\n" one "\nmiddle\n" two "\ntail\n"))))
     (should (equal (cdr parsed)
-                   (list (list :path "/tmp/one.txt" :name nil)
-                         (list :path "/tmp/two.png" :name "shot.png"))))
+                   (list (list :path "/tmp/one.txt")
+                         (list :path "/tmp/two.png"))))
     (should (equal (car parsed) "lead\nmiddle\ntail\n")))
   (let ((parsed (dsh-bridge--parse-attachments
                  "<#attachment filename=\"rel.txt\">\nbody")))
@@ -5434,19 +5433,18 @@ relative `filename' is malformed and stays as text."
     (should (equal (car parsed) "<#attachment filename=\"rel.txt\">\nbody"))))
 
 (ert-deftest dsh-bridge-attachment-payload-order-and-type ()
-  "The wire payload is a vector of alists in ATTACHMENTS order.
-A blank NAME is omitted rather than sent as an empty string."
+  "The wire payload is a vector of path alists in ATTACHMENTS order."
   (let ((payload (dsh-bridge--attachment-payload
-                  (list (list :path "/tmp/a.png" :name "A")
+                  (list (list :path "/tmp/a.png")
                         (list :path "/tmp/b.txt")
-                        (list :path "/tmp/c.png" :name "C")))))
+                        (list :path "/tmp/c.png")))))
     ;; A vector, so `json-encode' emits a JSON array: `json-encode-list'
     ;; DWIMs a plain list of plists into an object.
     (should (vectorp payload))
     (should (equal (append payload nil)
-                   (list (list (cons 'path "/tmp/a.png") (cons 'name "A"))
+                   (list (list (cons 'path "/tmp/a.png"))
                          (list (cons 'path "/tmp/b.txt"))
-                         (list (cons 'path "/tmp/c.png") (cons 'name "C")))))))
+                         (list (cons 'path "/tmp/c.png")))))))
 
 (ert-deftest dsh-bridge-attach-file-inserts-tag ()
   "`dsh-bridge-attach-file' inserts one tag line per attached file."
@@ -5547,7 +5545,7 @@ removes them from the kept text."
             (dsh-bridge-send-and-exit))
           (should (equal (car captured) "look at this\n"))
           (should (equal (cadr captured) "s1"))
-          (should (equal (caddr captured) (list (list :path file :name nil))))
+          (should (equal (caddr captured) (list (list :path file))))
           (should (= (dsh-bridge--attachment-count) 0))
           (should (equal (buffer-string) "look at this\n")))
       (delete-file file)
@@ -5632,7 +5630,7 @@ removes them from the kept text."
                        (setq captured (list text attachments)))))
             (dsh-bridge-send))
           (should (equal (car captured) "text\n"))
-          (should (equal (cadr captured) (list (list :path file :name nil)))))
+          (should (equal (cadr captured) (list (list :path file)))))
       (delete-file file))))
 
 (ert-deftest dsh-bridge-send-attaches-only-tags-inside-region ()
@@ -5661,7 +5659,7 @@ removes them from the kept text."
                        (setq captured (list text attachments)))))
             (dsh-bridge-send))
           (should (equal (car captured) "body\n"))
-          (should (equal (cadr captured) (list (list :path inside :name nil)))))
+          (should (equal (cadr captured) (list (list :path inside)))))
       (delete-file inside)
       (delete-file outside))))
 
@@ -5693,7 +5691,7 @@ bound to the invoking buffer's effective session, not to the default."
                (lambda (_m _p _pl cb) (funcall cb nil "{\"sessionId\":\"s1\"}" 200)))
               ((symbol-function 'dsh-bridge--status-event-render) #'ignore)
               ((symbol-function 'message) #'ignore))
-      (dsh-bridge-send-text "" "s1" nil '((:path "/tmp/x.png" :name nil)))
+      (dsh-bridge-send-text "" "s1" nil '((:path "/tmp/x.png")))
       (should (null dsh-bridge--prompt-history))
       (should (null dsh-bridge--last-sent))
       (dsh-bridge-send-text "hello" "s1")
