@@ -164,11 +164,9 @@ can also toggle visibility via `dsh-bridge-toggle-archived-sessions'."
   "How the session status appears in header lines and the sessions list.
 The value should be one of the following:
 
-- `emoji': 🟢/🟡/⚪ for idle/running/unknown.  This is the default, but
-  may not be supported on all terminals.
-- `geometric': ●/■/? for idle/running/unknown, with the first two glyphs
-  colored green/amber.
-- `text': ✓/…/? for idle/running/unknown.
+- `emoji': 💬/🟢/🟡/⚪ for asking/idle/running/unknown.
+- `geometric': ◌/●/■/? for asking/idle/running/unknown.
+- `text': A/I/R/? for asking/idle/running/unknown.
 - `none': hide the indicator entirely."
   :type '(choice (const :tag "Emojis" emoji)
 				 (const :tag "Geometric glyphs" geometric)
@@ -346,10 +344,6 @@ on `unknown'.  No active retrieval is done.  See
         (and row (if (alist-get 'running row) 'running 'idle))
         'unknown)))
 
-(defun dsh-bridge--session-awaiting-p (session-id)
-  "Whether SESSION-ID has a live ask-user question pending."
-  (and session-id (assoc session-id dsh-bridge--pending-questions)))
-
 (defun dsh-bridge--pending-question (session-id)
   "The (QUESTION-ID . QUESTIONS) entry for SESSION-ID's pending ask, or nil."
   (let ((entry (and session-id (assoc session-id dsh-bridge--pending-questions))))
@@ -362,24 +356,27 @@ pending ask-user question taking display precedence (awaiting > running > idle
 > unknown)."
   (if (eq dsh-bridge-status-indicator 'none)
       ""
-    (let* ((awaiting (dsh-bridge--session-awaiting-p session-id))
-           (state (dsh-bridge--status-state session-id))
-           (char
-			(if awaiting
-				(pcase dsh-bridge-status-indicator
-                  ('geometric "◌") ('emoji "⏳") (_ "!"))
-              (pcase dsh-bridge-status-indicator
-                ('geometric (pcase state ('idle "●")  ('running "■")  (_ "?")))
-                ('emoji (pcase state ('idle "🟢") ('running "🟡") (_ "⚪")))
-                (_ (pcase state ('idle "✓")  ('running "…")  (_ "?"))))))
-           (face
-			(cond
-			 (awaiting 'dsh-bridge-status-awaiting-face)
-			 (state
-			  (pcase state
-                ('idle    'dsh-bridge-status-idle-face)
-                ('running 'dsh-bridge-status-running-face)
-                (_        'dsh-bridge-status-unknown-face))))))
+    (let* ((state (if (and session-id
+						   (assoc session-id dsh-bridge--pending-questions))
+					  'asking
+					(dsh-bridge--status-state session-id)))
+		   (char
+			(pcase dsh-bridge-status-indicator
+			  ('emoji
+			   (pcase state
+				 ('asking "💬") ('idle "🟢") ('running "🟡") (_ "⚪")))
+			  ('geometric
+			   (pcase state
+				 ('asking "◌") ('idle "●")  ('running "■")  (_ "?")))
+			  (_
+			   (pcase state
+				 ('asking "A") ('idle "I")  ('running "R")  (_ "?")))))
+		   (face
+			(pcase state
+			  ('asking  'dsh-bridge-status-running-face)
+			  ('idle    'dsh-bridge-status-idle-face)
+			  ('running 'dsh-bridge-status-running-face)
+			  (_        'dsh-bridge-status-unknown-face))))
       (propertize char 'face face))))
 
 ;;; DSH bridge status and plugin diagnosis
@@ -1946,7 +1943,7 @@ when a body renders before it."
 	 ;; blank-line separator; `new' and an empty body sit flush.
 	 (if (and (consp turn) (alist-get 'segments turn)) "\n\n" "")
 	 (cond
-	  ((and session-id (dsh-bridge--session-awaiting-p session-id))
+	  ((and session-id (assoc session-id dsh-bridge--pending-questions))
 	   (dsh-bridge--view-awaiting-note session-id))
 	  ((eq turn 'new)
 	   dsh-bridge--view-running-placeholder)
@@ -2252,7 +2249,8 @@ turn-following marker appear while the shown session runs."
 		 (label (dsh-bridge--session-link (dsh-bridge--session-label id) id))
 		 (context (and id (dsh-bridge--prompt-context-label id)))
 		 (elapsed (and id (dsh-bridge--view-elapsed-label id)))
-		 (await (and id (dsh-bridge--session-awaiting-p id) " · awaiting your answer"))
+		 (await (and id (assoc id dsh-bridge--pending-questions)
+					 " · waiting for answer"))
 		 (time (if dsh-bridge--view-received-at
 				   (format-time-string
 					"%H:%M:%S" (/ dsh-bridge--view-received-at 1000))
@@ -3008,10 +3006,9 @@ note instead.  A no-op for sessions no view shows in either state."
 
 (defcustom dsh-bridge-question-auto-pop nil
   "Whether an arriving ask-user question pops to its question buffer.
-When nil (the default), an ask is announced in the echo area and via the `⏳
-awaiting' status glyph; the user answers it with `a' (in the DSH-View or
-DSH-Sessions buffer) or by opening the question buffer directly.  Enable to
-auto-pop the question buffer on arrival (most users find that intrusive)."
+When nil (the default), an ask is announced in the echo area and the
+DSH-View buffer, and the user must run ``\\[dsh-bridge-answer]' to
+answer it.  If non-nil, pop to the question buffer on arrival."
   :type 'boolean
   :group 'dsh-bridge)
 
