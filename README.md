@@ -323,6 +323,12 @@ replaces the question buffer in its window.  If the question was
 already answered from another surface, nothing jumps: the buffer just
 shows a banner saying so.
 
+The view's tail then names what you did (for example, `(You answered
+“Go” — continuing…)`) in place of the usual `(continuing...)` marker,
+so the wait is explained rather than silently blank.  The note gives
+way to the next reply as soon as one arrives, and disappears when the
+turn ends; set `dsh-bridge-view-answer-echo` to nil to suppress it.
+
 ### Sending text from DSH to Emacs
 
 The DSH plugin adds a "Send to Emacs" button that lets you push

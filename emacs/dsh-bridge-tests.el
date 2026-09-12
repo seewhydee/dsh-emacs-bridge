@@ -4944,6 +4944,156 @@ and quotes the answer key from the real `dsh-bridge-answer' binding."
       (should (string-match-p "view the question"
                               (dsh-bridge--view-awaiting-note "s1"))))))
 
+(ert-deftest dsh-bridge-view-answer-summary-shapes ()
+  "The answered note names selected labels and custom text in order, and
+falls back to the generic phrase for a question skipped with nothing to say."
+  (should (equal (dsh-bridge--view-answer-summary
+                  (list (list (cons 'id "q1") (cons 'selected ["Go"]))))
+                 "You answered “Go”"))
+  (should (equal (dsh-bridge--view-answer-summary
+                  (list (list (cons 'id "q1") (cons 'selected ["A" "B"]))
+                        (list (cons 'id "q2") (cons 'selected []) (cons 'custom "x"))))
+                 "You answered “A, B, x”"))
+  (should (equal (dsh-bridge--view-answer-summary
+                  (list (list (cons 'id "q1") (cons 'selected []))))
+                 "You answered")))
+
+(ert-deftest dsh-bridge-view-answer-note-tail ()
+  "After an ask is answered, a running turn's tail names the answer instead
+of `(continuing...)'.  The park's next committed segment, a completed turn,
+and the option being off all drop the note."
+  (let* ((seg1 (dsh-bridge-test--view-segment "progress" 7001000 1))
+         (seg2 (dsh-bridge-test--view-segment "more" 7002000 2))
+         (open (dsh-bridge-test--view-turn 7 7000000 (list seg1)))
+         (grown (dsh-bridge-test--view-turn 7 7000000 (list seg1 seg2)))
+         (done (dsh-bridge-test--view-turn 7 7000000 (list seg1) 8000000 "completed"))
+         (dsh-bridge--turns-cache (dsh-bridge-test--view-cache (list open)))
+         (dsh-bridge--view-answer-notes nil)
+         (dsh-bridge--pending-questions nil))
+    (with-temp-buffer
+      (dsh-bridge-view-mode)
+      (setq-local dsh-bridge--view-content-session "s1")
+      (dsh-bridge--view-answer-note-record "s1" "You answered “Go”")
+      (let ((rendered (dsh-bridge-test--view-turn-render open "s1")))
+        (should (string-prefix-p "progress\n\n" rendered))
+        (should (string-match-p "You answered “Go”" rendered))
+        (should (string-match-p "continuing…" rendered))
+        (should-not (string-match-p "(continuing\\.\\.\\.)" rendered))
+        (should (text-property-any 0 (length rendered)
+                                   'dsh-bridge-answered t rendered))
+        (should (text-property-any 0 (length rendered)
+                                   'dsh-bridge-turn-marker t rendered)))
+      ;; The recorded segment baseline retires the note on its own, with no
+      ;; notification frame: a new segment no longer matches.
+      (let ((rendered (dsh-bridge-test--view-turn-render grown "s1")))
+        (should-not (string-match-p "You answered" rendered))
+        (should (string-match-p "(continuing\\.\\.\\.)" rendered)))
+      ;; A completed turn ends cleanly, note or not.
+      (should (equal (dsh-bridge-test--view-turn-render done "s1") "progress"))
+      ;; A note recorded before any segment existed shows in the waiting
+      ;; placeholder slot, where the turn list has nothing to match against.
+      (let ((dsh-bridge--turns-cache nil))
+        (dsh-bridge--view-answer-note-record "s1" "You answered “Go”")
+        (should (string-match-p "You answered"
+                                (dsh-bridge--view-turn-suffix 'new "s1"))))
+      ;; The option suppresses the note entirely.
+      (let ((dsh-bridge-view-answer-echo nil))
+        (should (string-match-p "(continuing\\.\\.\\.)"
+                                (dsh-bridge-test--view-turn-render open "s1")))))))
+
+(ert-deftest dsh-bridge-view-answer-note-cleared-by-frames ()
+  "A turn boundary, a committed reply, a completed turn, and a fresh question
+each retire the answered note from the session registry."
+  (let ((dsh-bridge--view-answer-notes nil)
+        (dsh-bridge--session-status nil)
+        (dsh-bridge--pending-questions nil))
+    (cl-letf (((symbol-function 'run-at-time) (lambda (&rest _) nil))
+              ((symbol-function 'dsh-bridge--status-event-render) #'ignore)
+              ((symbol-function 'dsh-bridge--models-event-refresh) #'ignore)
+              ((symbol-function 'dsh-bridge--view-turns-cache-refresh) #'ignore)
+              ((symbol-function 'dsh-bridge--turn-complete-act) #'ignore)
+              ((symbol-function 'dsh-bridge--ask-user-arrive) #'ignore)
+              ((symbol-function 'dsh-bridge--view-await-refresh) #'ignore))
+      (cl-labels ((fire (frame)
+                    (setq dsh-bridge--view-answer-notes
+                          '(("s1" :baseline :unknown :text "You answered")))
+                    (dsh-bridge--notification-handle-events (list frame))
+                    (should-not (assoc "s1" dsh-bridge--view-answer-notes))))
+        (fire '((kind . "turn-start") (sessionId . "s1")))
+        (fire '((kind . "replies-changed") (sessionId . "s1")))
+        (fire '((kind . "turn-complete") (sessionId . "s1")))
+        (fire '((kind . "ask-user") (sessionId . "s1") (questionId . "q1")
+                (questions . (((id . "q1") (question . "Q?"))))))))))
+
+(ert-deftest dsh-bridge-view-fill-splices-under-answer-note ()
+  "A growing turn still splices while the answered note is active: the note
+self-retires on the new segment and the earlier body stays byte-identical."
+  (let* ((seg1 (dsh-bridge-test--view-segment "first" 7001000 1))
+         (seg2 (dsh-bridge-test--view-segment "second" 7002000 2))
+         (open (dsh-bridge-test--view-turn 7 7000000 (list seg1)))
+         (grown (dsh-bridge-test--view-turn 7 7000000 (list seg1 seg2)))
+         (dsh-bridge--turns-cache (dsh-bridge-test--view-cache (list open)))
+         (dsh-bridge--view-answer-notes nil)
+         (dsh-bridge--pending-questions nil)
+         probe)
+    (with-temp-buffer
+      (dsh-bridge-view-mode)
+      (setq-local dsh-bridge--view-follow t)
+      (dsh-bridge--view-fill "s1" open nil nil t)
+      (dsh-bridge--view-answer-note-record "s1" "You answered “Go”")
+      (dsh-bridge--view-fill "s1" open nil nil t t)
+      (should (string-match-p "You answered" (buffer-string)))
+      (setq probe (copy-marker 3))
+      (goto-char (point-max))
+      (dsh-bridge--view-fill "s1" grown nil nil t t)
+      ;; The splice rewrote only the tail: the mid-body marker survived.
+      (should (equal (marker-position probe) 3))
+      (set-marker probe nil)
+      (should (equal (buffer-string)
+                     (dsh-bridge-test--view-turn-render grown "s1")))
+      (should-not (string-match-p "You answered" (buffer-string))))))
+
+(ert-deftest dsh-bridge-question-answer-note-records-and-clears ()
+  "An accepted submit or decline records the view's answered note, naming the
+selected label; a submit the host does not accept leaves no note behind."
+  (let ((dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t))))
+        (dsh-bridge--view-answer-notes nil)
+        (dsh-bridge--turns-cache nil))
+    (cl-labels ((answer (qid decline-p body)
+                  (with-current-buffer
+                      (dsh-bridge--question-buffer
+                       "s1" qid
+                       (list (list (cons 'id qid) (cons 'question "Go?")
+                                   (cons 'options (list (list (cons 'label "Yes")))))))
+                    (goto-char (point-min))
+                    (re-search-forward "1\\. Yes")
+                    (goto-char (line-beginning-position))
+                    (dsh-bridge--question-toggle-at-point)
+                    (cl-letf (((symbol-function 'dsh-bridge--call)
+                               (lambda (_m _p _payload cb) (funcall cb nil body 200)))
+                              ((symbol-function 'dsh-bridge--view-for-session)
+                               (lambda (session-id)
+                                 (get-buffer-create
+                                  (format "*dsh-bridge-test-view-%s*" session-id))))
+                              ((symbol-function 'dsh-bridge--exit-to-view)
+                               (lambda (buffer &optional _window) buffer)))
+                      (if decline-p
+                          (dsh-bridge--question-decline)
+                        (dsh-bridge--question-submit))))))
+      (answer "q1" nil "{\"accepted\":true}")
+      (should (equal (plist-get (cdr (assoc "s1" dsh-bridge--view-answer-notes)) :text)
+                     "You answered “Yes”"))
+      ;; The optimistic note is dropped when the host did not settle it.
+      (answer "q2" nil "{\"accepted\":false,\"reason\":\"not-pending\"}")
+      (should-not (assoc "s1" dsh-bridge--view-answer-notes))
+      ;; A decline records its own note.
+      (answer "q3" t "{\"accepted\":true}")
+      (should (equal (plist-get (cdr (assoc "s1" dsh-bridge--view-answer-notes)) :text)
+                     "You declined to answer")))
+    (dolist (qid '("q1" "q2" "q3"))
+      (when (dsh-bridge--question-find-buffer qid)
+        (kill-buffer (dsh-bridge--question-find-buffer qid))))))
+
 (ert-deftest dsh-bridge-answer-unbound-uses-unique-pending ()
   "An unbound DSH-Prompt buffer answers the only pending question.
 The command must not guess a last-active session; with exactly one pending

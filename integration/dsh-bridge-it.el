@@ -508,6 +508,60 @@ provenance against the live `/turns' epoch and `(step . time)' segments."
                                          'dsh-bridge-turn-marker t))))
       (set-marker probe nil))))
 
+(ert-deftest dsh-bridge-it-answer-note-splices-into-view ()
+  "Answering from the question buffer leaves a note in the DSH-View.
+The mock asks after its first segment and then hangs, so the continuation
+never arrives: the view must name the answer in the terminal furniture slot
+instead of the bare `(continuing...)' marker, which is what explains the wait."
+  (dsh-bridge-it--with-fixture
+    (dsh-bridge-it--script-mock
+     (vector
+      (list :kind "tool-call" :name "ask_user_question"
+            :text "First segment."
+            :arguments (list :questions
+                             (vector (list :id "q1"
+                                           :question "Pause here"
+                                           :options (vector (list :label "Go"))))))
+      (list :kind "hang")))
+    (let ((session-id (dsh-bridge-it--create-session
+                       (expand-file-name "../" dsh-bridge-it--directory))))
+      (dsh-bridge-it--notifications-start)
+      (dsh-bridge-it--prompt-send session-id "Go.")
+      ;; Wait until the parked turn is on screen awaiting the answer.
+      (should (dsh-bridge-it--wait
+               (lambda ()
+                 (let ((text (dsh-bridge-it--view-text session-id)))
+                   (and (assoc session-id dsh-bridge--pending-questions)
+                        text
+                        (string-match-p "First segment\\." text))))
+               30000))
+      ;; Answer through the real question buffer (the `C-c C-c' path).  The
+      ;; bridge mints the question id, so read it from the pending registry
+      ;; rather than assuming the asker's own id.
+      (let ((question-id (caar (cdr (assoc session-id dsh-bridge--pending-questions)))))
+        (with-current-buffer (dsh-bridge-it--view session-id)
+          (dsh-bridge-answer))
+        (with-current-buffer (dsh-bridge--question-find-buffer question-id)
+          (should (eq major-mode 'dsh-bridge-question-mode))
+          (goto-char (point-min))
+          (re-search-forward "1\\. Go")
+          (goto-char (line-beginning-position))
+          (dsh-bridge--question-toggle-at-point)
+          (dsh-bridge--question-submit))
+        ;; The turn hangs, so the note itself is the terminal furniture.
+        (should (dsh-bridge-it--wait
+                 (lambda ()
+                   (let ((text (dsh-bridge-it--view-text session-id)))
+                     (and text (string-match-p "You answered" text))))
+                 15000))
+        (with-current-buffer (dsh-bridge-it--view session-id)
+          (should (string-match-p "You answered “Go”" (buffer-string)))
+          (should-not (string-match-p "(continuing\\.\\.\\.)" (buffer-string)))
+          (should (text-property-any (point-min) (point-max)
+                                     'dsh-bridge-answered t)))
+        (when (dsh-bridge--question-find-buffer question-id)
+          (kill-buffer (dsh-bridge--question-find-buffer question-id)))))))
+
 (ert-deftest dsh-bridge-it-incremental-fill-turn-swap ()
   "A following DSH-View rebuilds onto a newer turn instead of splicing.
 After one completed turn, a second prompt's turn changes the shown record, so

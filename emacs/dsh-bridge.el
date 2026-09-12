@@ -229,6 +229,16 @@ brief echo area message; see `dsh-bridge--view-displayed-p'."
   :type 'boolean
   :group 'dsh-bridge)
 
+(defcustom dsh-bridge-view-answer-echo t
+  "Whether a DSH-View says why a turn is continuing after you answer.
+When non-nil, answering or declining an ask-user question leaves a short
+note in the terminal furniture slot (where \"(continuing...)\" would be)
+naming the answer, so the view records that the continuation follows your
+reply.  The note disappears as soon as the turn commits its next reply
+segment, or when the turn ends."
+  :type 'boolean
+  :group 'dsh-bridge)
+
 (defcustom dsh-bridge-prompt-resend-confirm t
   "Whether to guard against duplicate prompting in the DSH-Prompt buffer.
 If non-nil, when `\\[dsh-bridge-send-and-exit]' is called with the
@@ -317,6 +327,15 @@ display cache to show the active model in DSH-prompt buffers.")
 (defvar dsh-bridge--pending-questions nil
   "Alist of \"ask-user\" questions pending in DSH sessions.
 Each entry has the form (SESSION-ID . ((QUESTION-ID . QUESTIONS) ...)).")
+
+(defvar dsh-bridge--view-answer-notes nil
+  "Alist of (SESSION-ID . PLIST) notes recorded when the user resolves an ask.
+PLIST carries `:text', the one-line note to show, and `:baseline', the
+`(STEP . TIME)' identity of the answered turn's last segment at answer time
+(or the symbol `:unknown' when the turn list had not been cached).  While the
+shown turn's last segment still matches the baseline, the note replaces the
+terminal \"(continuing...)\" furniture; a new segment, a new turn, or the
+turn's end retires it.  See `dsh-bridge--view-answer-note'.")
 
 (defvar dsh-bridge--session-context nil
   "Alist storing the token and context window usage in DSH sessions.
@@ -655,6 +674,8 @@ Currently supported events are:
 	  (cond
 	   ((equal kind "turn-start")
 		(when id
+		  ;; A new turn retires any answered note left by the last one.
+		  (dsh-bridge--view-answer-note-clear id)
 		  ;; Clear any recorded last-active resolution, since this
 		  ;; session is the host's newest activity.
 		  (and id dsh-bridge--last-resolved-active
@@ -671,6 +692,7 @@ Currently supported events are:
 		  (run-at-time 0 nil #'dsh-bridge--view-turns-cache-refresh id)))
 	   ((equal kind "turn-complete")
 		(when id
+		  (dsh-bridge--view-answer-note-clear id)
 		  (dsh-bridge--status-set id 'idle)
 		  ;; Fold the turn's timestamp into the session cache.
 		  (dsh-bridge--session-update-last-active id (alist-get 'time event))
@@ -682,6 +704,11 @@ Currently supported events are:
 		  (dsh-bridge--turn-complete-act id (alist-get 'reason event))))
 	   ((equal kind "replies-changed")
 		(when id
+		  ;; The first text segment after an answer retires its note; the
+		  ;; refill below then splices the segment in under the usual
+		  ;; marker.  The note's segment baseline does the same check, so a
+		  ;; missed frame only delays the refresh, never strands the note.
+		  (dsh-bridge--view-answer-note-clear id)
 		  (run-at-time 0 nil #'dsh-bridge--turns-changed id)))
 	   ((equal kind "context")
 		(let ((used (alist-get 'usedTokens event))
@@ -697,6 +724,9 @@ Currently supported events are:
 		(let ((question-id (alist-get 'questionId event))
 			  (questions (alist-get 'questions event)))
 		  (when (and id question-id questions)
+			;; A fresh question owns the terminal slot; drop any answered
+			;; note so it cannot resurface behind the awaiting note.
+			(dsh-bridge--view-answer-note-clear id)
 			(dsh-bridge--ask-user-arrive id question-id questions))))
 	   ((equal kind "ask-user-resolved")
 		(when (and id (alist-get 'questionId event))
@@ -1895,6 +1925,83 @@ do next."
 		'dsh-bridge-turn-marker t
 		'dsh-bridge-awaiting t)))
 
+(defun dsh-bridge--view-answer-summary (answers)
+  "A one-line summary of ANSWERS for the answered note, or nil.
+ANSWERS is the wire-shaped answer list built by
+`dsh-bridge--question-validate' (each entry `(id selected custom?)', with
+`selected' a vector of labels).  Free-text answers and selected labels are
+named in order; a question resolved with nothing to show (a skip) yields
+the generic phrase rather than an empty quotation."
+  (let (parts)
+	(dolist (answer answers)
+	  (let ((custom (alist-get 'custom answer)))
+		(dolist (label (append (alist-get 'selected answer) nil))
+		  (when (dsh-bridge--normalized-string label) (push label parts)))
+		(when (dsh-bridge--normalized-string custom) (push custom parts))))
+	(setq parts (nreverse parts))
+	(cond
+	 ((null parts) "You answered")
+	 ((null (cdr parts)) (format "You answered \u201c%s\u201d" (car parts)))
+	 (t (format "You answered \u201c%s\u201d" (mapconcat #'identity parts ", "))))))
+
+(defun dsh-bridge--view-answer-note-record (session-id text)
+  "Record TEXT as SESSION-ID's answered note.
+The baseline is the parked turn's last segment identity, so the note
+self-retires on the next committed segment even if the `replies-changed'
+frame is missed.  The turn list is cached only while a view has been
+refreshed, so an uncached session records `:unknown' and relies on the
+frame handlers alone."
+  (let* ((turns (dsh-bridge--turns-cache-turns session-id))
+		 (newest (car-safe turns))
+		 (last (and newest (dsh-bridge--view-turn-open-p newest)
+					(car (last (alist-get 'segments newest)))))
+		 (baseline (if last (dsh-bridge--view-segment-key last) :unknown)))
+	(setq dsh-bridge--view-answer-notes
+		  (cons (cons session-id (list :baseline baseline :text text))
+				(assoc-delete-all session-id dsh-bridge--view-answer-notes)))))
+
+(defun dsh-bridge--view-answer-note-clear (session-id)
+  "Retire SESSION-ID's answered note, if one is recorded."
+  (when (assoc session-id dsh-bridge--view-answer-notes)
+	(setq dsh-bridge--view-answer-notes
+		  (assoc-delete-all session-id dsh-bridge--view-answer-notes))))
+
+(defun dsh-bridge--view-answer-note (session-id turn)
+  "The active answered-note text for SESSION-ID and TURN, or nil.
+TURN is the rendered turn record or `new'.  The note applies only while
+TURN is still open and has not gained a segment since the answer, so it is
+shown exactly during the wait it explains.  A `:unknown' baseline (the
+turn list was not cached when the question was answered) matches any open
+turn and relies on the notification handlers to retire it."
+  (when (and dsh-bridge-view-answer-echo session-id)
+	(let* ((note (cdr (assoc session-id dsh-bridge--view-answer-notes)))
+		   (baseline (plist-get note :baseline))
+		   (text (plist-get note :text)))
+	  (cond
+	   ((null note) nil)
+	   ((eq turn 'new)
+		;; Waiting for the first committed reply: only a note recorded
+		;; before any segment existed can still be current.
+		(and (eq baseline :unknown) text))
+	   ((and (consp turn) (dsh-bridge--view-turn-open-p turn))
+		(let* ((segments (alist-get 'segments turn))
+			   (last (car (last segments)))
+			   (key (and last (dsh-bridge--view-segment-key last))))
+		  (and (or (eq baseline :unknown) (equal baseline key)) text)))
+	   (t nil)))))
+
+(defun dsh-bridge--view-answered-note (text)
+  "The terminal DSH-View furniture line for TEXT, an answered note.
+TEXT is the raw note phrase; the result is parenthesized, given the
+continuation suffix, and propertized as furniture, exactly as the awaiting
+note is, so it is never mistaken for model text and satisfies the
+open-turn provenance check."
+  (propertize (concat "(" text " \u2014 continuing\u2026)")
+			  'face 'dsh-bridge-view-answered-face
+			  'font-lock-face 'dsh-bridge-view-answered-face
+			  'dsh-bridge-turn-marker t
+			  'dsh-bridge-answered t))
+
 (defun dsh-bridge--view-waiting-accept-p (turn-number)
   "Whether content from TURN-NUMBER may replace the waiting placeholder.
 A waiting view shows `(running...)' until a turn *newer* than the abandoned
@@ -1936,9 +2043,10 @@ TURN is a turn record, `new' while a just-sent turn waits for its first
 committed reply, or nil for no turn at all.
 
 A completed turn (or nil) has an empty suffix.  Otherwise the suffix is
-an ask-user awaiting note, the running placeholder for `new', or the
-running marker for an open turn — preceded by a blank-line separator
-when a body renders before it."
+an answered note (the user just resolved an ask), an ask-user awaiting
+note, the running placeholder for `new', or the running marker for an
+open turn — preceded by a blank-line separator when a body renders before
+it."
   (cond
    ((null turn)
 	"")
@@ -1951,13 +2059,19 @@ when a body renders before it."
 	 ;; text-less assistant messages), so a rendered body takes the
 	 ;; blank-line separator; `new' and an empty body sit flush.
 	 (if (and (consp turn) (alist-get 'segments turn)) "\n\n" "")
-	 (cond
-	  ((and session-id (assoc session-id dsh-bridge--pending-questions))
-	   (dsh-bridge--view-awaiting-note session-id))
-	  ((eq turn 'new)
-	   dsh-bridge--view-running-placeholder)
-	  (t
-	   dsh-bridge--view-running-marker))))))
+	 (let ((answered (and session-id
+						  (dsh-bridge--view-answer-note session-id turn))))
+	   (cond
+		;; A fresh question owns the slot: the awaiting note supersedes
+		;; an answered note for the same parked turn.
+		((and session-id (assoc session-id dsh-bridge--pending-questions))
+		 (dsh-bridge--view-awaiting-note session-id))
+		(answered
+		 (dsh-bridge--view-answered-note answered))
+		((eq turn 'new)
+		 dsh-bridge--view-running-placeholder)
+		(t
+		 dsh-bridge--view-running-marker)))))))
 
 (defun dsh-bridge--view-segment-key (segment)
   "The identity of SEGMENT: its `(STEP . TIME)' pair."
@@ -3758,6 +3872,12 @@ settle it."
 		;; Record what this buffer did before the request leaves: the
 		;; resolved frame can outrun the POST's response (see the variable).
 		(setq dsh-bridge--question-sent "Your answer was sent.")
+		;; The view explains why it continues once this answer lands;
+		;; recorded pre-POST for the same race, and dropped on every
+		;; branch that fails to settle the question.
+		(dsh-bridge--view-answer-note-record
+		 dsh-bridge--question-session
+		 (dsh-bridge--view-answer-summary answers))
 		;; Capture the window the answer was typed in, for the exit.
 		(let ((window (selected-window)))
 		  (dsh-bridge--call "POST" "/answer"
@@ -3772,8 +3892,10 @@ settle it."
 					 (accepted (and alist (alist-get 'accepted alist))))
 				(cond
 				 ((and status (null accepted))
+				  (dsh-bridge--view-answer-note-clear dsh-bridge--question-session)
 				  (message "dsh-bridge: %s" (dsh-bridge--error-message status http-status alist)))
 				 ((and reason (equal reason "not-pending"))
+				  (dsh-bridge--view-answer-note-clear dsh-bridge--question-session)
 				  (message "dsh-bridge: already answered or cancelled")
 				  (dsh-bridge--question-mark-resolved
 				   dsh-bridge--question-id
@@ -3787,7 +3909,8 @@ settle it."
 				  (dsh-bridge--exit-to-view
 				   (dsh-bridge--view-for-session dsh-bridge--question-session)
 				   window))
-				 (t (message "dsh-bridge: answer not accepted%s"
+				 (t (dsh-bridge--view-answer-note-clear dsh-bridge--question-session)
+					(message "dsh-bridge: answer not accepted%s"
 							 (if reason (concat ": " reason) ""))))))))))))
 
 (defun dsh-bridge--question-decline ()
@@ -3800,6 +3923,9 @@ answer; an already-resolved question is bannered in place."
 	  (message "dsh-bridge: this question was already resolved")
 	(setq dsh-bridge--question-sent
 		  "You declined to answer; the question was cancelled.")
+	;; The view explains the continuation exactly as for a submitted answer.
+	(dsh-bridge--view-answer-note-record
+	 dsh-bridge--question-session "You declined to answer")
 	(let ((window (selected-window)))
 	  (dsh-bridge--call "POST" "/answer"
 		(list (cons 'questionId dsh-bridge--question-id)
@@ -3821,12 +3947,14 @@ answer; an already-resolved question is bannered in place."
 			   (dsh-bridge--view-for-session dsh-bridge--question-session)
 			   window))
 			 ((and reason (equal reason "not-pending"))
+			  (dsh-bridge--view-answer-note-clear dsh-bridge--question-session)
 			  (message "dsh-bridge: already answered or cancelled")
 			  (dsh-bridge--question-mark-resolved
 			   dsh-bridge--question-id
 			   "This question was already answered or cancelled." 'elsewhere))
-			 (t (message "dsh-bridge: decline not accepted%s"
-						 (if reason (concat ": " reason) ""))))))))))
+			 (t (dsh-bridge--view-answer-note-clear dsh-bridge--question-session)
+				(message "dsh-bridge: decline not accepted%s"
+						(if reason (concat ": " reason) ""))))))))))
 
 ;; The `a' (answer) key and the question mode --------------------------------
 
@@ -4513,6 +4641,14 @@ quiet so it never reads as part of the reply."
   "Face for the \"Awaiting your response…\" note at the end of a running turn.
 Shown while the session is parked on an ask-user question, so the note stands
 out from the quiet `(continuing...)' marker it replaces."
+  :group 'dsh-bridge)
+
+(defface dsh-bridge-view-answered-face
+  '((t :inherit shadow :italic t))
+  "Face for the \"You answered…\" note at the end of a running turn.
+Shown briefly after you resolve an ask-user question, explaining why the
+turn is continuing; it replaces the `(continuing...)' marker it supersedes,
+so it stays quiet like that marker rather than competing with the reply."
   :group 'dsh-bridge)
 
 (defun dsh-bridge--default-target-marker (session)
