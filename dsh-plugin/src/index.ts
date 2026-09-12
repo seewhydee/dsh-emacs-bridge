@@ -199,9 +199,19 @@ interface ProjectionSnapshotLike {
  * Minimal face of the optional `sessionProjectionCache` service. Read via
  * `ctx.get` — a profile without the cache simply yields undefined and the
  * bridge falls back to a read-handle log fold for cold titles.
+ *
+ * `inheritedEventCount` completes the checkpoint identity and is required by
+ * the service (it validates the value as a `SessionLogOffset` and refuses an
+ * unseeded header with a nonzero cut). The bridge only knows an exact cut for
+ * an unseeded header, so `coldSessionTitle` passes 0 there and skips the cache
+ * for seeded (forked) headers, mirroring the harness's own list projection.
  */
 interface ProjectionCacheService {
-  cachedSnapshot(meta: SessionHeader): ProjectionSnapshotLike | undefined
+  cachedSnapshot(
+    meta: SessionHeader,
+    inheritedEventCount: number,
+    keys?: readonly string[],
+  ): ProjectionSnapshotLike | undefined
 }
 
 /**
@@ -1242,18 +1252,30 @@ export function apply(ctx: Context): void {
    * the cache is absent, or its row lacks the title key, read the log through
    * a read handle and fold `session/title` events directly. Fail-soft: a
    * title is a display nicety and must never hide the session row.
-   */  async function coldSessionTitle(
+   *
+   * A seeded (forked) header's checkpoint identity needs the exact inherited
+   * prefix length, which is Session state rather than header metadata; the
+   * cache is trusted only for unseeded headers (the harness's list projection
+   * takes the same shortcut), and a seeded one falls through to the log read.
+   * The cache read is itself guarded: an API drift there must degrade to the
+   * log fold, not reject the caller's whole cold listing.
+   */
+  async function coldSessionTitle(
     cache: ProjectionCacheService | undefined,
     persistence: SessionPersistenceService,
     header: SessionHeader,
   ): Promise<string | null> {
-    const snapshot = cache?.cachedSnapshot(header)
-    if (snapshot !== undefined) {
-      const title = snapshot.values.title
-      if (typeof title === 'string' && title !== '') return title
-      // The title key is present with a null value: the session has no title
-      // yet, and a cold log is immutable, so it cannot acquire one. No read.
-      if (Object.hasOwn(snapshot.values, 'title')) return null
+    try {
+      const snapshot = header.isSeeded ? undefined : cache?.cachedSnapshot(header, 0)
+      if (snapshot !== undefined) {
+        const title = snapshot.values.title
+        if (typeof title === 'string' && title !== '') return title
+        // The title key is present with a null value: the session has no title
+        // yet, and a cold log is immutable, so it cannot acquire one. No read.
+        if (Object.hasOwn(snapshot.values, 'title')) return null
+      }
+    } catch {
+      // Fall through to the log read: a cache fault is not a listing fault.
     }
     try {
       const handle = await persistence.open(String(header.id), 'read')
@@ -1270,20 +1292,22 @@ export function apply(ctx: Context): void {
   /** Merge live sessions with persisted headers via the pure merge logic. */
   async function listSessions(): Promise<SessionRow[]> {
     const cache = ctx.get('sessionProjectionCache') as ProjectionCacheService | undefined
-    let persisted: SessionHeaderLike[] = []
+    // Persistence listing is auxiliary to the live view; a backend failure must
+    // not hide the sessions that are actually running now. Title folding is a
+    // separate, per-row fail-soft step so one bad lookup cannot hide a row.
+    let snapshots: readonly { header: SessionHeader }[] = []
     try {
-      const snapshots = await sessionPersistence.list()
-      persisted = await Promise.all(snapshots.map(async ({ header }): Promise<SessionHeaderLike> => ({
-        id: String(header.id),
-        cwd: header.cwd,
-        createdAt: header.createdAt,
-        origin: header.origin,
-        title: header.origin === 'subagent' ? null : await coldSessionTitle(cache, sessionPersistence, header),
-      })))
+      snapshots = await sessionPersistence.list()
     } catch {
-      // Persistence listing is auxiliary to the live view; a backend failure
-      // must not hide the sessions that are actually running now.
+      // Cold rows are dropped; live rows still serve.
     }
+    const persisted = await Promise.all(snapshots.map(async ({ header }): Promise<SessionHeaderLike> => ({
+      id: String(header.id),
+      cwd: header.cwd,
+      createdAt: header.createdAt,
+      origin: header.origin,
+      title: header.origin === 'subagent' ? null : await coldSessionTitle(cache, sessionPersistence, header),
+    })))
     const rows = mergeSessionRows(targetableSessions(), persisted)
     const workspaceRegistry = ctx.get('workspaceRegistry') as WorkspaceRegistryService | undefined
     const workspaceBySession = workspaceRefsBySession(workspaceRegistry?.list() ?? [])

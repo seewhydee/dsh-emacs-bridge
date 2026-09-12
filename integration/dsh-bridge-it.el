@@ -269,10 +269,10 @@ source as `parentSession' with `isSeeded' set."
           ;; With the current bug this never populates, so the wait fails and the
           ;; test reproduces the report.
           (should (dsh-bridge-it--wait
-                   (lambda () (dsh-bridge--session-awaiting-p session-id))
+                   (lambda () (assoc session-id dsh-bridge--pending-questions))
                    15000))
           ;; The session is awaiting, not continuing.
-          (should (dsh-bridge--session-awaiting-p session-id))))
+          (should (assoc session-id dsh-bridge--pending-questions))))
     (dsh-bridge-it--kill-fixture)))
 
 (defmacro dsh-bridge-it--with-fixture (&rest body)
@@ -463,7 +463,7 @@ provenance against the live `/turns' epoch and `(step . time)' segments."
       (should (dsh-bridge-it--wait
                (lambda ()
                  (let ((text (dsh-bridge-it--view-text session-id)))
-                   (and (dsh-bridge--session-awaiting-p session-id)
+                   (and (assoc session-id dsh-bridge--pending-questions)
                         text
                         (string-match-p "First segment\\." text))))
                30000))

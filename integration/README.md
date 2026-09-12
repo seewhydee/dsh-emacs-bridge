@@ -72,15 +72,15 @@ integration/
 | `tests/ask-user.spec.ts` | the ask-user waterfall end to end (SSE frame, `/answer` settlement, pending-question replay) and the browser-draft stream never owning a question |
 | `tests/sessions.spec.ts` | create by `path` (new and already-known workspace), create by `workspaceId`, create-argument bounds, workspace rename/conflict/blank/unknown, session rename/archive/unknown |
 | `tests/session.spec.ts` | the read-only session report over the `sessionQuery` seam: live stats/token usage/model selection, 404 unknown (never created or resumed), 400 repeated `sessionId`, default target |
+| `tests/cold-sessions.spec.ts` | the persisted-only roster: a session from a previous boot (two hosts sharing one `dshHome`) is listed cold with its durable title and observed by the report's cold arm |
 | `tests/fork.spec.ts` | branching a completed-turn prefix through the `sessionController` seam: the `/turns` `endSeq` anchor, child lineage and inherited prefix, the omitted-`atSeq` fallback, and the failure taxonomy (unknown source, bad argument, open-turn anchor) |
 | `tests/attachments.spec.ts` | the path-based attachment seam through the real `ctx.attachments` store: image sniffing reaching the provider as an image block, a generic file projected to handle text, an attachment-only prompt, and the validation/count/byte-cap statuses |
 | `tests/turns-incremental.spec.ts` | the `/turns` epoch contract incremental DSH-View filling relies on: a running turn grows segment by segment under a stable epoch, the inclusive `since` fetch re-sends the boundary turn in full, and a stale epoch forces the full-list fallback |
 | `dsh-bridge-it.el` | the live-Emacs seats of the ask-user path, `C-c C-a` attachment staging plus send-time tag stripping, DSH-Describe rendering live host statistics, turn branching, and incremental DSH-View filling (in-place segment append with a surviving marker, first-reply tailing, and the newer-turn rebuild) |
 
-Known gap: no spec observes a **cold** (persisted-only) session, because the
-launcher always starts a fresh `DSH_HOME`; that needs a second host booted
-against the same home (the launcher's `dshHome` option is the hook). The
-describe route's cold arm is therefore covered by unit tests only.
+`tests/cold-sessions.spec.ts` boots a second host against a persisted
+`dshHome` (the launcher's `dshHome` option) to cover the cold roster; the
+describe route's cold arm is exercised there too.
 
 ## Mock LLM
 
