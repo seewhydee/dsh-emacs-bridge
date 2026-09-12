@@ -1876,28 +1876,83 @@ The host's reason is what the user sees first."
   "A completed turn record for the RET dispatch tests.")
 
 (ert-deftest dsh-bridge-visit-session-history-both ()
-  "By default an idle session with output shows the view, then its prompt below."
+  "By default an idle session with output puts the prompt in this window and
+the view in another window (else below the prompt), selecting the prompt."
   (let ((alist (list (cons 'sessionId "s1") (cons 'cwd "/w")
-					 (cons 'turns (list dsh-bridge-test--complete-turn))))
-		(dsh-bridge-session-ret-history 'both)
-		(events nil))
-	(cl-letf (((symbol-function 'dsh-bridge--pending-question) (lambda (_id) nil))
-			  ((symbol-function 'dsh-bridge--ensure-session-live) (lambda (_id) t))
-			  ((symbol-function 'dsh-bridge--session-turns) (lambda (_id) alist))
-			  ((symbol-function 'dsh-bridge--view-for-session)
-			   (lambda (_id &optional _alist) 'view-buffer))
-			  ((symbol-function 'dsh-bridge--show-session-view)
-			   (lambda (buffer) (push (list 'view buffer) events)))
-			  ((symbol-function 'dsh-bridge--prompt-buffer)
-			   (lambda (_id) 'prompt-buffer))
-			  ((symbol-function 'pop-to-buffer)
-			   (lambda (buffer &optional action)
-				 (push (list 'prompt buffer action) events))))
-	  (dsh-bridge-test--visit-session "s1"))
-	(should (equal (nreverse events)
-				   (list (list 'view 'view-buffer)
-						 (list 'prompt 'prompt-buffer
-							   dsh-bridge-prompt-display-action))))))
+		     (cons 'turns (list dsh-bridge-test--complete-turn))))
+	(view (get-buffer-create "*dsh-bridge-test-both-view*"))
+	(dsh-bridge-session-ret-history 'both)
+	(events nil))
+    (unwind-protect
+	(progn
+	  (cl-letf (((symbol-function 'dsh-bridge--pending-question) (lambda (_id) nil))
+		    ((symbol-function 'dsh-bridge--ensure-session-live) (lambda (_id) t))
+		    ((symbol-function 'dsh-bridge--session-turns) (lambda (_id) alist))
+		    ((symbol-function 'dsh-bridge--view-for-session)
+		     (lambda (_id &optional _alist) view))
+		    ((symbol-function 'dsh-bridge--prompt-buffer)
+		     (lambda (_id) 'prompt-buffer))
+		    ((symbol-function 'pop-to-buffer)
+		     (lambda (buffer &optional action)
+		       (push (list 'prompt buffer action) events)))
+		    ((symbol-function 'display-buffer)
+		     (lambda (buffer &optional action)
+		       (push (list 'view buffer action) events))))
+	    (dsh-bridge-test--visit-session "s1"))
+	  ;; The prompt is shown first, in the window under point; the view
+	  ;; then goes to a different window (or below), leaving the prompt
+	  ;; selected.
+	  (should (equal (nreverse events)
+			 (list (list 'prompt 'prompt-buffer
+				     '((display-buffer-reuse-window
+					display-buffer-same-window)))
+			       (list 'view view
+				     dsh-bridge--session-ret-both-action)))))
+      (when (buffer-live-p view) (kill-buffer view)))))
+
+(ert-deftest dsh-bridge-visit-session-both-reuses-the-idle-window ()
+  "`both' gives the prompt the launcher's window and the view the one the
+launcher left behind, so the frame keeps two usable windows."
+  (let ((config (current-window-configuration))
+        (view (get-buffer-create "*dsh-bridge-output*"))
+        (prompt (get-buffer-create "*dsh-bridge-prompt*"))
+        (sessions (get-buffer-create "*dsh-bridge-test-sessions*"))
+        (work (get-buffer-create "*dsh-bridge-test-work*"))
+        (dsh-bridge-session-ret-history 'both)
+        (alist (list (cons 'sessionId "s1") (cons 'cwd "/w")
+                     (cons 'turns (list dsh-bridge-test--complete-turn))))
+        work-window sessions-window)
+    (unwind-protect
+        (progn
+          (delete-other-windows)
+          (setq work-window (selected-window))
+          (set-window-buffer work-window work)
+          ;; The frame `dsh-bridge-list-sessions' leaves behind: the work
+          ;; buffer beside the sessions list, with the list selected.
+          (split-window-right)
+          (other-window 1)
+          (setq sessions-window (selected-window))
+          (set-window-buffer sessions-window sessions)
+          (cl-letf (((symbol-function 'dsh-bridge--pending-question)
+                     (lambda (_id) nil))
+                    ((symbol-function 'dsh-bridge--ensure-session-live)
+                     (lambda (_id) t))
+                    ((symbol-function 'dsh-bridge--session-turns)
+                     (lambda (_id) alist))
+                    ((symbol-function 'dsh-bridge--view-for-session)
+                     (lambda (_id &optional _alist) view))
+                    ((symbol-function 'dsh-bridge--prompt-buffer)
+                     (lambda (_id) prompt)))
+            (dsh-bridge-test--visit-session "s1"))
+          ;; Two windows: the prompt where the launcher was, the view in the
+          ;; window the launcher left, rather than the old nested split.
+          (should (= (length (window-list)) 2))
+          (should (eq (get-buffer-window prompt) sessions-window))
+          (should (eq (get-buffer-window view) work-window))
+          (should (eq (window-buffer (selected-window)) prompt)))
+      (set-window-configuration config)
+      (dolist (b (list view prompt sessions work))
+        (when (buffer-live-p b) (kill-buffer b))))))
 
 (ert-deftest dsh-bridge-visit-session-history-view-only ()
   "`dsh-bridge-session-ret-history' = view shows only the view."

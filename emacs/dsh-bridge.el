@@ -162,8 +162,9 @@ can also toggle visibility via `dsh-bridge-toggle-archived-sessions'."
 
 (defcustom dsh-bridge-session-ret-history 'both
   "What RET does on an idle session that already has output.
-`both' (the default) shows the session's DSH-View and opens its prompt
-below it, selecting the prompt, ready to continue the conversation.
+`both' (the default) puts the prompt in the window the DSH-Sessions
+buffer occupied and the view in another window -- else below the prompt --
+selecting the prompt, ready to continue the conversation.
 `view' only shows the DSH-View (like `\\[dsh-bridge-peek-session]');
 `prompt' only opens the prompt (like `\\[dsh-bridge-open-session]').
 
@@ -4829,6 +4830,21 @@ change the default target session."
 	 (t
 	  (error "dsh-bridge: could not open session \"%s\"" id)))))
 
+(defconst dsh-bridge--session-ret-both-action
+  ;; A `display-buffer' action takes its car as the function list, so the
+  ;; action functions must be wrapped in an inner list.
+  '((display-buffer-reuse-window display-buffer-use-some-window
+                                 display-buffer-below-selected)
+    (inhibit-same-window . t))
+  "`display-buffer' action placing RET's DSH-View when the prompt shares it.
+`dsh-bridge-visit-session' gives the prompt the selected window -- the one
+the DSH-Sessions buffer occupied -- so the view has to go elsewhere: reuse
+its own window, then any other existing window, and only split below the
+prompt as a last resort.
+`inhibit-same-window' is essential: without it
+`display-buffer-use-some-window' reuses the selected prompt window when it
+is the only one, replacing the prompt instead of splitting.")
+
 (defun dsh-bridge-visit-session ()
   "Do the next thing for the session under point in a DSH-Sessions buffer.
 - Waiting on an ask-user question: open its answer buffer
@@ -4837,7 +4853,9 @@ change the default target session."
   with point at the end, exactly as the prompt flow collects a reply.
 - Idle with no output yet: open a prompt in the same window.
 - Idle with output: per `dsh-bridge-session-ret-history' -- by default
-  show the DSH-View and open its prompt below it, selecting the prompt.
+  the prompt takes this window (the one the DSH-Sessions buffer occupied)
+  and the DSH-View goes to another window, else below the prompt,
+  selecting the prompt.
 
 The session is resumed first when it is saved (cold).  The default target
 is not changed."
@@ -4867,10 +4885,15 @@ is not changed."
 		 ((eq dsh-bridge-session-ret-history 'view)
 		  (dsh-bridge--show-session-view (dsh-bridge--view-for-session id alist)))
 		 (t
-		  ;; `both': the view above, its prompt below, prompt selected.
-		  (dsh-bridge--show-session-view (dsh-bridge--view-for-session id alist))
+		  ;; `both': the prompt takes this window -- the one the
+		  ;; DSH-Sessions buffer occupied -- while the view goes to
+		  ;; another window, else below the prompt.
 		  (pop-to-buffer (dsh-bridge--prompt-buffer id)
-						 dsh-bridge-prompt-display-action))))))))
+						 '((display-buffer-reuse-window display-buffer-same-window)))
+		  (let ((view (dsh-bridge--view-for-session id alist)))
+			(display-buffer view dsh-bridge--session-ret-both-action)
+			(with-current-buffer view
+			  (goto-char (point-max)))))))))))
 
 (defun dsh-bridge-set-default-target-at-point ()
   "Set the default target to the session under point.
