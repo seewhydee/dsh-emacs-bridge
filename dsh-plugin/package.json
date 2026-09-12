@@ -1,6 +1,6 @@
 {
   "name": "dsh-emacs-bridge",
-  "version": "0.10.0",
+  "version": "0.11.0",
   "private": true,
   "description": "Two-way bridge between Emacs and a running DeepSeek Harness session.",
   "license": "GPL-3.0",

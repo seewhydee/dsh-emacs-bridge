@@ -147,8 +147,15 @@ amber when running, `?` when unknown — obeying
 The following commands are available from the DSH-Sessions buffer:
 
 * `q` — quit the window and bury the buffer.
+* `RET` — do the next thing for the session at point.  If it is waiting
+  on an ask-user question, open the answer buffer; if it is running, show
+  the DSH-View and follow the turn; if it has no output yet, open a
+  DSH-Prompt; otherwise show the DSH-View with its prompt below, ready to
+  continue (customize `dsh-bridge-session-ret-history` for view-only or
+  prompt-only).
+* `r` — open a DSH-Prompt buffer for the session at point.
 * `f` — fetch the last output for the session at point into a DSH-View buffer.
-* `r` or `RET` — open a DSH-Prompt buffer for the session at point.
+* `a` — answer a pending ask-user question for the session at point.
 * `t` — set the session at point as the default target.
 * `u` — clear the default target.
 * `v` — toggle whether archived sessions are shown (hidden by default).
@@ -220,11 +227,12 @@ spawn the source's agent as a side effect.
 ### DSH-Prompt buffer
 
 This buffer is used to compose a prompt, or reply, for a DSH session.
-It is opened by `r`/`RET` from the DSH-Sessions buffer, and `r` from
-the transient menu or DSH-View buffer.  The session affected is
-determined by how this buffer was invoked; for instance, `r` from a
-DSH-View buffer opens a prompt for the same session.  If a renamed
-DSH-Prompt buffer is already bound to that session, it is reused.
+It is opened by `r` from the DSH-Sessions buffer (or by `RET` there when
+the session has no output yet), and `r` from the transient menu or
+DSH-View buffer.  The session affected is determined by how this buffer
+was invoked; for instance, `r` from a DSH-View buffer opens a prompt for
+the same session.  If a renamed DSH-Prompt buffer is already bound to
+that session, it is reused.
 
 The following commands are available from the DSH-Prompt buffer:
 

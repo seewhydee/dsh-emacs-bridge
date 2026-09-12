@@ -32,10 +32,11 @@ for the Elisp) plus the `integration/` seam harness.
 - **Client plugin**: "Send to Emacs" assistant action, composer-draft push,
   token auto-vend.
 - **Emacs package**: transient dispatcher; tabulated session list
-  (open/resume, rename, archive, create, workspace rename, peek/describe);
-  per-turn DSH-View with `M-p`/`M-n`, follow mode and GFM rendering; DSH-Prompt
-  composer with prompt history and model selection; SSE consumer with
-  reconnect; plugin install/diagnosis.
+  (RET "next thing" dispatch, open/resume, rename, archive, create,
+  workspace rename, peek/describe); per-turn DSH-View with `M-p`/`M-n`,
+  follow mode and GFM rendering; DSH-Prompt composer with prompt history
+  and model selection; SSE consumer with reconnect; plugin
+  install/diagnosis.
 - **Session report** (candidate 1):
   `GET /dsh-bridge/session` reads one session through `ctx.sessionQuery`
   (live or cold, never resuming) and returns identity/lineage plus

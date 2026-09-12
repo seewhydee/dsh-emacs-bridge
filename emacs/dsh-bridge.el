@@ -16,7 +16,7 @@
 ;; along with this program.	 If not, see <https://www.gnu.org/licenses/>.
 
 ;; Author: Chong Yidong <cyd@stupidchicken.com>
-;; Version: 0.10.0
+;; Version: 0.11.0
 ;; Package-Requires: ((emacs "29.1"))
 ;; Keywords: tools, convenience
 
@@ -75,7 +75,7 @@
 (require 'button)
 (require 'help-mode)
 
-(defconst dsh-bridge-version "0.10.0"
+(defconst dsh-bridge-version "0.11.0"
   "Version string for the DSH-Bridge package.
 This should match the version reported by the running DSH plugin.")
 
@@ -158,6 +158,21 @@ identified by their title and workspace."
 The default is to hide them, similar to the DSH web interface.  The user
 can also toggle visibility via `dsh-bridge-toggle-archived-sessions'."
   :type 'boolean
+  :group 'dsh-bridge)
+
+(defcustom dsh-bridge-session-ret-history 'both
+  "What RET does on an idle session that already has output.
+`both' (the default) shows the session's DSH-View and opens its prompt
+below it, selecting the prompt, ready to continue the conversation.
+`view' only shows the DSH-View (like `\\[dsh-bridge-peek-session]');
+`prompt' only opens the prompt (like `\\[dsh-bridge-open-session]').
+
+Sessions that are running, waiting on an ask-user question, or have no
+output yet are dispatched by state regardless of this option; see
+`dsh-bridge-visit-session'."
+  :type '(choice (const :tag "Show the view and open the prompt" both)
+				 (const :tag "Show the view only" view)
+				 (const :tag "Open the prompt only" prompt))
   :group 'dsh-bridge)
 
 (defcustom dsh-bridge-status-indicator 'emoji
@@ -2162,30 +2177,66 @@ the user did nothing (a question resolved elsewhere) is bannered in place."
 	  (goto-char (point-max)))
 	buffer))
 
-(defun dsh-bridge--view-for-session (session-id)
+(defun dsh-bridge--session-turns (session-id)
+  "Return SESSION-ID's parsed \"GET /turns\" response, or nil.
+Echoes the host's error and returns nil when the request fails.  The
+response carries the live `running' flag and the folded `turns' list; the
+host resumes a cold session as part of resolving the target."
+  (let* ((result (dsh-bridge--request
+				  "GET" (dsh-bridge--path "/turns" session-id) nil))
+		 (status (car result))
+		 (alist (cdr result)))
+	(cond
+	 ((null status)
+	  (message "dsh-bridge: request failed (is `dsh web' running?)")
+	  nil)
+	 ((>= status 400)
+	  (message "dsh-bridge: %s"
+			   (or (alist-get 'error alist) (format "HTTP %s" status)))
+	  nil)
+	 (t alist))))
+
+(defun dsh-bridge--view-for-session (session-id &optional alist)
   "Return SESSION-ID's DSH-View buffer, refreshed from its turn list.
-Reuse the session's view, else `*dsh-bridge-output*'.  Refresh the turn
-cache from GET /turns, fill the newest turn, and enter turn-following state
-while that turn is open.  Used when an explicit action resumes a session
-and the continuation must be collected in the view."
-  (let* ((path (dsh-bridge--path "/turns" session-id))
-		 (result (dsh-bridge--request "GET" path nil))
-		 (alist (cdr-safe result))
+Reuse the session's view, else `*dsh-bridge-output*'.  ALIST, when
+non-nil, is an already-fetched \"GET /turns\" response; otherwise one is
+fetched.  Refresh the turn cache, fill the newest turn, and enter
+turn-following state while that turn is open or running.  A running
+session with no committed turn yet shows the running placeholder.  Used
+when an explicit action resumes a session and the continuation must be
+collected in the view."
+  (let* ((alist (or alist (dsh-bridge--session-turns session-id)))
 		 (turns-pair (assoc 'turns alist))
 		 (turns (cdr-safe turns-pair))
+		 (running (eq (alist-get 'running alist) t))
 		 (buf (or (dsh-bridge--session-view session-id)
 				  (get-buffer-create "*dsh-bridge-output*"))))
 	(when turns-pair
 	  (dsh-bridge--turns-cache-store session-id turns (alist-get 'epoch alist)))
 	(with-current-buffer buf
-	  (dsh-bridge--view-fill session-id (car-safe turns) nil
-							 (alist-get 'cwd alist) t t)
-	  (when (and turns (dsh-bridge--view-turn-open-p (car-safe turns)))
-		(setq-local dsh-bridge--view-follow t))
-	  (setq-local dsh-bridge--view-waiting nil)
-	  (setq header-line-format (dsh-bridge--view-header-line))
-	  (dsh-bridge--view-ticker-ensure))
+	  (if (and running (null turns))
+		  ;; The turn has started but committed nothing: show the same
+		  ;; placeholder the prompt flow uses, and follow.
+		  (dsh-bridge--view-waiting-fill session-id nil (alist-get 'cwd alist))
+		(dsh-bridge--view-fill session-id (car-safe turns) nil
+							   (alist-get 'cwd alist) t t)
+		(setq-local dsh-bridge--view-waiting nil)
+		(when (or running (and turns (dsh-bridge--view-turn-open-p (car-safe turns))))
+		  (setq-local dsh-bridge--view-follow t))
+		(setq header-line-format (dsh-bridge--view-header-line))
+		(dsh-bridge--view-ticker-ensure)))
 	buf))
+
+(defun dsh-bridge--show-session-view (buffer)
+  "Show DSH-View BUFFER, reusing its window else replacing this one.
+Unlike `dsh-bridge--exit-to-view', the current buffer's window is left
+alone when BUFFER is already displayed: the DSH-Sessions launcher stays on
+screen, and `q' from the view restores it when this window was reused.
+Point is left at BUFFER's end for tail-following."
+  (pop-to-buffer buffer '((display-buffer-reuse-window display-buffer-same-window)))
+  (with-current-buffer buffer
+	(goto-char (point-max)))
+  buffer)
 
 (defun dsh-bridge--view-follow-refill (session-id)
   "Refill every DSH-View buffer following SESSION-ID with its newest turn.
@@ -4511,24 +4562,29 @@ Archived sessions are hidden unless `dsh-bridge--sessions-archived-p' (or
 
 (define-derived-mode dsh-bridge-sessions-mode tabulated-list-mode "DSH-Sessions"
   "Major mode for browsing DSH sessions.
-`RET' or `r' opens the session under point (resuming a saved session on demand;
-the default target is untouched), `t' sets the default target to the row's
+`RET' does the next thing for the session under point (resuming a saved
+session on demand; the default target is untouched): it opens the answer
+buffer when the session is waiting on a question, shows the DSH-View and
+follows the turn when it is running, opens a prompt when it has no output
+yet, and otherwise shows the DSH-View with its prompt below (see
+`dsh-bridge-visit-session' and `dsh-bridge-session-ret-history').  `r' opens
+just a prompt for the session, `t' sets the default target to the row's
 session (also resuming saved sessions), `u' clears the default target, `f'
-peeks the session's latest turn, `v' toggles archived-session visibility, `R'
-renames the session, `d' archives it (one-way), `+' creates a session (possibly
-in a new workspace), `W' renames the row's workspace, `w' copies the session id
-under point, `D' describes the session, `g' re-fetches the list, `S' sorts by
-column (inherited).	 `p' is previous-line (the tabulated-list convention; no
-bridge command uses bare `p' — reply/open is `r' everywhere, `RET' here as
-well).	Column legend: `*' = the default target session; the `S' (state) column
-shows a session's live status, a filled circle that is green when idle and
-amber when running (`?' when unknown; cold sessions are always unknown),
-obeying `dsh-bridge-status-indicator' and updating live from the bridge's turn
+peeks the session's latest turn, `a' answers a pending question, `v' toggles
+archived-session visibility, `R' renames the session, `d' archives it
+(one-way), `+' creates a session (possibly in a new workspace), `W' renames
+the row's workspace, `w' copies the session id under point, `D' describes the
+session, `g' re-fetches the list, `S' sorts by column (inherited).	 `p' is
+previous-line (the tabulated-list convention; reply/open is `r' everywhere).
+Column legend: `*' = the default target session; the `S' (state) column shows
+a session's live status, a filled circle that is green when idle and amber
+when running (`?' when unknown; cold sessions are always unknown), obeying
+`dsh-bridge-status-indicator' and updating live from the bridge's turn
 notifications."
   (setq-local dsh-bridge--sessions-archived-p dsh-bridge-sessions-show-archived))
 
 (define-key dsh-bridge-sessions-mode-map (kbd "RET")
-			#'dsh-bridge-open-session)
+			#'dsh-bridge-visit-session)
 (define-key dsh-bridge-sessions-mode-map (kbd "r")
 			#'dsh-bridge-open-session)
 (define-key dsh-bridge-sessions-mode-map (kbd "t")
@@ -4557,7 +4613,9 @@ notifications."
 (easy-menu-define dsh-bridge-sessions-menu dsh-bridge-sessions-mode-map
   "Menu bar menu for the `*dsh-bridge-sessions*' buffer."
   '("DSH Bridge"
-	["Open Session" dsh-bridge-open-session
+	["Visit Session (Next Thing)" dsh-bridge-visit-session
+	 :help "Answer the pending question, watch the running turn, or open the view/prompt"]
+	["Open Prompt" dsh-bridge-open-session
 	 :help "Bind the prompt buffer to the session under point and open it"]
 	["Set Default Target" dsh-bridge-set-default-target-at-point
 	 :help "Set the default target to the session under point"]
@@ -4629,10 +4687,54 @@ change the default target session."
 	 ((null id)
 	  (message "dsh-bridge: no session under point"))
 	 ((dsh-bridge--ensure-session-live id)
-	  (pop-to-buffer-same-window (dsh-bridge--prompt-buffer id)
-								 dsh-bridge-prompt-display-action))
+	  ;; Same window: `pop-to-buffer-same-window' takes no display action
+	  ;; (its second argument is NORECORD), which is what `r' wants here.
+	  (pop-to-buffer-same-window (dsh-bridge--prompt-buffer id)))
 	 (t
 	  (error "dsh-bridge: could not open session \"%s\"" id)))))
+
+(defun dsh-bridge-visit-session ()
+  "Do the next thing for the session under point in a DSH-Sessions buffer.
+- Waiting on an ask-user question: open its answer buffer
+  (`dsh-bridge-answer' does the work for the row).
+- Running a turn: show the session's DSH-View in turn-following state,
+  with point at the end, exactly as the prompt flow collects a reply.
+- Idle with no output yet: open a prompt in the same window.
+- Idle with output: per `dsh-bridge-session-ret-history' -- by default
+  show the DSH-View and open its prompt below it, selecting the prompt.
+
+The session is resumed first when it is saved (cold).  The default target
+is not changed."
+  (interactive)
+  (let ((id (tabulated-list-get-id)))
+	(cond
+	 ((null id)
+	  (message "dsh-bridge: no session under point"))
+	 ((dsh-bridge--pending-question id)
+	  ;; `dsh-bridge-answer' resolves the row's session itself.
+	  (dsh-bridge-answer))
+	 ((not (dsh-bridge--ensure-session-live id))
+	  (error "dsh-bridge: could not open session \"%s\"" id))
+	 (t
+	  (let* ((alist (dsh-bridge--session-turns id))
+			 (turns-pair (and alist (assoc 'turns alist)))
+			 (turns (cdr-safe turns-pair))
+			 (running (eq (alist-get 'running alist) t)))
+		(cond
+		 ((null alist))				; the request already echoed the error
+		 ((or running (and turns (dsh-bridge--view-turn-open-p (car-safe turns))))
+		  (dsh-bridge--show-session-view (dsh-bridge--view-for-session id alist)))
+		 ((null turns)
+		  (pop-to-buffer-same-window (dsh-bridge--prompt-buffer id)))
+		 ((eq dsh-bridge-session-ret-history 'prompt)
+		  (pop-to-buffer-same-window (dsh-bridge--prompt-buffer id)))
+		 ((eq dsh-bridge-session-ret-history 'view)
+		  (dsh-bridge--show-session-view (dsh-bridge--view-for-session id alist)))
+		 (t
+		  ;; `both': the view above, its prompt below, prompt selected.
+		  (dsh-bridge--show-session-view (dsh-bridge--view-for-session id alist))
+		  (pop-to-buffer (dsh-bridge--prompt-buffer id)
+						 dsh-bridge-prompt-display-action))))))))
 
 (defun dsh-bridge-set-default-target-at-point ()
   "Set the default target to the session under point.
