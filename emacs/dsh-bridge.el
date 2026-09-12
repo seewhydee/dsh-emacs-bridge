@@ -240,6 +240,10 @@ the synchronous request never runs inside the SSE process filter."
   :type 'boolean
   :group 'dsh-bridge)
 
+(defun dsh-bridge--normalized-string (str)
+  "Return STR if it is a non-empty string, else nil."
+  (and (stringp str) (not (string-empty-p str)) str))
+
 ;;; Session tracking
 
 (defvar dsh-bridge-default-session nil
@@ -953,12 +957,6 @@ checking STATUS for a failed request."
 
 ;;; Session labels
 
-(defun dsh-bridge--session-title (session)
-  "Return the title for SESSION, or nil if there is no title.
-SESSION should be an alist; see `dsh-bridge--sessions-cache'."
-  (let ((title (alist-get 'title session)))
-	(and (stringp title) (not (string-empty-p title)) title)))
-
 (defun dsh-bridge--session-for-id (id)
   "Return the session data for session ID, or nil.
 This is the `dsh-bridge--sessions-cache' entry with `id' matching ID.
@@ -999,18 +997,17 @@ If the session has no title, use the session ID as fallback.  As a final
 fallback, use \"[Untitled Session]\" unless NO-DEFAULT is supplied, in
 which case return nil.  If ADD-FALLBACK-FACE is non-nil, apply
 `dsh-bridge-untitled-face' as a face property for any fallback string."
-  (let ((alist (if (stringp session)
-				   (dsh-bridge--session-for-id session)
-				 session)))
-	(or (and alist (dsh-bridge--session-title alist))
-		(let ((fallback (or (if (stringp session)
-								session
-							  (alist-get 'id session))
+  (let* ((alist (if (stringp session)
+					(dsh-bridge--session-for-id session)
+				  session))
+		 (title (alist-get 'title alist)))
+	(or (dsh-bridge--normalized-string title)
+		(let ((fallback (or (dsh-bridge--normalized-string session)
+							(alist-get 'id session)
 							(unless no-default "[Untitled Session]"))))
-		  (and add-fallback-face (stringp fallback)
-			   (setq fallback
-					 (propertize fallback 'face 'dsh-bridge-untitled-face)))
-		  fallback))))
+		  (if (and add-fallback-face (stringp fallback))
+			  (propertize fallback 'face 'dsh-bridge-untitled-face)
+			fallback)))))
 
 (defvar dsh-bridge--session-link-map
   (let ((map (make-sparse-keymap)))
@@ -1023,13 +1020,13 @@ which case return nil.  If ADD-FALLBACK-FACE is non-nil, apply
   "Return STRING propertized as a clickable describe link for SESSION-ID.
 A nil or empty STRING, or a nil SESSION-ID, is returned unchanged, so a
 header line without a bound session stays plain text."
-  (if (or (null session-id) (not (stringp string)) (string-empty-p string))
-	  string
-	(propertize string
-				'mouse-face 'highlight
-				'help-echo "mouse-1: describe this session"
-				'dsh-bridge-session-id session-id
-				'keymap dsh-bridge--session-link-map)))
+  (if (and session-id (dsh-bridge--normalized-string string))
+	  (propertize string
+				  'mouse-face 'highlight
+				  'help-echo "mouse-1: describe this session"
+				  'dsh-bridge-session-id session-id
+				  'keymap dsh-bridge--session-link-map)
+	string))
 
 (defun dsh-bridge--relative-age (ts &optional now)
   "Return a compact relative age string for ms-epoch timestamp TS.
@@ -1050,8 +1047,7 @@ NOW is the reference time in seconds (default: the current time)."
 SESSION should be an alist; see `dsh-bridge--sessions-cache'.
 The workspace label is, in order of availability, the title, cwd
 basename, raw cwd, or an empty string."
-  (or (let ((ws (alist-get 'workspace session)))
-		(and (stringp ws) (not (string-empty-p ws)) ws))
+  (or (dsh-bridge--normalized-string (alist-get 'workspace session))
 	  (let ((cwd (alist-get 'cwd session)))
 		(and (stringp cwd) (not (string-empty-p cwd))
 			 (let ((base (file-name-nondirectory (directory-file-name cwd))))
@@ -1109,7 +1105,7 @@ the last-active session (as a fallback)."
 	  (setq label (concat (dsh-bridge--session-label id) " (last active)"))))
 	(unless label (setq label ""))
 	(let ((status (and id (dsh-bridge--status-glyph id))))
-	  (if (and status (not (string-empty-p status)))
+	  (if (dsh-bridge--normalized-string status)
 		  ;; The transient menu leaves point at point-min; add a space
 		  ;; to avoid overlapping the cursor with the status glyph.
 		  (concat " " status " " label)
@@ -1491,10 +1487,6 @@ newline makes the match a whole line, for stripping and counting.")
   "Return VALUE escaped for a double-quoted attachment tag attribute."
   (replace-regexp-in-string "[\"\\\\]" "\\\\\\&" value))
 
-(defun dsh-bridge--attachment-unescape (value)
-  "Return VALUE with attachment tag escapes resolved."
-  (replace-regexp-in-string "\\\\\\(.\\)" "\\1" value))
-
 (defun dsh-bridge--attachment-attribute (attributes key)
   "Return KEY's unescaped value in ATTRIBUTES, or nil.
 ATTRIBUTES is the text inside one attachment tag; KEY is an attribute
@@ -1502,14 +1494,17 @@ name such as \"filename\"."
   (when (string-match (concat "\\(?:^\\|[ \t]\\)" (regexp-quote key)
 							  "=\"\\(\\(?:[^\"\\\\]\\|\\\\.\\)*\\)\"")
 					  attributes)
-	(dsh-bridge--attachment-unescape (match-string 1 attributes))))
+	(replace-regexp-in-string "\\\\\\(.\\)" "\\1"
+							  (match-string 1 attributes))))
 
 (defun dsh-bridge--attachment-format (path &optional name)
   "Return the attachment tag for PATH, optionally named NAME.
 PATH and NAME are escaped for the double-quoted attribute values.  The
 result carries no trailing newline."
-  (concat "<#attachment filename=\"" (dsh-bridge--attachment-escape path) "\""
-		  (if (and (stringp name) (not (string-empty-p name)))
+  (concat "<#attachment filename=\""
+		  (dsh-bridge--attachment-escape path)
+		  "\""
+		  (if (dsh-bridge--normalized-string name)
 			  (concat " name=\"" (dsh-bridge--attachment-escape name) "\"")
 			"")
 		  ">"))
@@ -5009,7 +5004,7 @@ failure reason, never a fake zero."
 					(or (dsh-bridge--error-message nil status alist)
 						"request failed or timed out")))
 		 (title (or (dsh-bridge--describe-string (alist-get 'title report))
-					(dsh-bridge--session-title session)
+					(dsh-bridge--normalized-string (alist-get 'title session))
 					"[Untitled Session]"))
 		 (live (if report (eq (alist-get 'live report) t)
 				 (and session (alist-get 'live session))))
