@@ -1881,7 +1881,7 @@ the view in another window (else below the prompt), selecting the prompt."
   (let ((alist (list (cons 'sessionId "s1") (cons 'cwd "/w")
 		     (cons 'turns (list dsh-bridge-test--complete-turn))))
 	(view (get-buffer-create "*dsh-bridge-test-both-view*"))
-	(dsh-bridge-session-ret-history 'both)
+	(dsh-bridge-session-default-visit-action 'both)
 	(events nil))
     (unwind-protect
 	(progn
@@ -1918,7 +1918,7 @@ launcher left behind, so the frame keeps two usable windows."
         (prompt (get-buffer-create "*dsh-bridge-prompt*"))
         (sessions (get-buffer-create "*dsh-bridge-test-sessions*"))
         (work (get-buffer-create "*dsh-bridge-test-work*"))
-        (dsh-bridge-session-ret-history 'both)
+        (dsh-bridge-session-default-visit-action 'both)
         (alist (list (cons 'sessionId "s1") (cons 'cwd "/w")
                      (cons 'turns (list dsh-bridge-test--complete-turn))))
         work-window sessions-window)
@@ -1955,10 +1955,10 @@ launcher left behind, so the frame keeps two usable windows."
         (when (buffer-live-p b) (kill-buffer b))))))
 
 (ert-deftest dsh-bridge-visit-session-history-view-only ()
-  "`dsh-bridge-session-ret-history' = view shows only the view."
+  "`dsh-bridge-session-default-visit-action' = view shows only the view."
   (let ((alist (list (cons 'sessionId "s1") (cons 'cwd "/w")
 					 (cons 'turns (list dsh-bridge-test--complete-turn))))
-		(dsh-bridge-session-ret-history 'view)
+		(dsh-bridge-session-default-visit-action 'view)
 		(shown nil) (prompted nil))
 	(cl-letf (((symbol-function 'dsh-bridge--pending-question) (lambda (_id) nil))
 			  ((symbol-function 'dsh-bridge--ensure-session-live) (lambda (_id) t))
@@ -1974,10 +1974,10 @@ launcher left behind, so the frame keeps two usable windows."
 	(should-not prompted)))
 
 (ert-deftest dsh-bridge-visit-session-history-prompt-only ()
-  "`dsh-bridge-session-ret-history' = prompt shows only the prompt."
+  "`dsh-bridge-session-default-visit-action' = prompt shows only the prompt."
   (let ((alist (list (cons 'sessionId "s1") (cons 'cwd "/w")
 					 (cons 'turns (list dsh-bridge-test--complete-turn))))
-		(dsh-bridge-session-ret-history 'prompt)
+		(dsh-bridge-session-default-visit-action 'prompt)
 		(popped nil) (shown nil))
 	(cl-letf (((symbol-function 'dsh-bridge--pending-question) (lambda (_id) nil))
 			  ((symbol-function 'dsh-bridge--ensure-session-live) (lambda (_id) t))
