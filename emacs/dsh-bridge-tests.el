@@ -1907,7 +1907,7 @@ the view in another window (else below the prompt), selecting the prompt."
 				     '((display-buffer-reuse-window
 					display-buffer-same-window)))
 			       (list 'view view
-				     dsh-bridge--session-ret-both-action)))))
+				     dsh-bridge--display-both-action)))))
       (when (buffer-live-p view) (kill-buffer view)))))
 
 (ert-deftest dsh-bridge-visit-session-both-reuses-the-idle-window ()

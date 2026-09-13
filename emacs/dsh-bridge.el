@@ -898,13 +898,9 @@ code or nil, and ALIST is the decoded JSON body or nil."
   "Decode JSON BODY as an alist, or nil when it is not a JSON object.
 Arrays decode as lists (the async callback counterpart of `dsh-bridge--request',
 whose JSON options this mirrors), and JSON null/false become nil."
-  (condition-case nil
-      (json-parse-string body
-						 :object-type 'alist
-						 :array-type 'list
-						 :null-object nil
-						 :false-object nil)
-    (error nil)))
+  (ignore-errors
+	(json-parse-string body :object-type 'alist :array-type 'list
+					   :null-object nil :false-object nil)))
 
 (defun dsh-bridge--call (method path payload callback)
   "Perform METHOD request to PATH on the DeepSeek Harness bridge.
@@ -4255,7 +4251,7 @@ compose→read loop."
 (defconst dsh-bridge-prompt-display-action
   ;; A `display-buffer' action takes its car as the function list, so two
   ;; functions must be wrapped in an inner list.
-  '((display-buffer-reuse-window display-buffer-below-selected))
+  '((display-buffer-reuse-window display-buffer-pop-up-window))
   "`display-buffer' action for opening the prompt buffer to reply.
 Reuse the prompt's window when already visible, else show it below the
 selected window, so the output buffer stays visible (cf. `flymake',
@@ -4833,7 +4829,7 @@ change the default target session."
 	 (t
 	  (error "dsh-bridge: could not open session \"%s\"" id)))))
 
-(defconst dsh-bridge--session-ret-both-action
+(defconst dsh-bridge--display-both-action
   ;; A `display-buffer' action takes its car as the function list, so the
   ;; action functions must be wrapped in an inner list.
   '((display-buffer-reuse-window display-buffer-use-some-window
@@ -4894,7 +4890,7 @@ is not changed."
 		  (pop-to-buffer (dsh-bridge--prompt-buffer id)
 						 '((display-buffer-reuse-window display-buffer-same-window)))
 		  (let ((view (dsh-bridge--view-for-session id alist)))
-			(display-buffer view dsh-bridge--session-ret-both-action)
+			(display-buffer view dsh-bridge--display-both-action)
 			(with-current-buffer view
 			  (goto-char (point-max)))))))))))
 
