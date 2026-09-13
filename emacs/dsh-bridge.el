@@ -1992,23 +1992,12 @@ open-turn provenance check."
 			  'dsh-bridge-turn-marker t
 			  'dsh-bridge-answered t))
 
-(defun dsh-bridge--view-waiting-accept-p (turn-number)
-  "Whether content from TURN-NUMBER may replace the waiting placeholder.
-Nil when no placeholder is up.  A waiting view shows `(running...)' until a
-turn *newer* than the pre-send one produces text; when nothing was showing
-(a fresh session), any turn does."
-  (and dsh-bridge--view-waiting
-       (numberp turn-number)
-       (or (eq dsh-bridge--view-waiting t)
-           (> turn-number dsh-bridge--view-waiting))))
-
 (defun dsh-bridge--view-waiting-fill (session-id base &optional cwd)
   "Put the current DSH-View for SESSION-ID into the waiting state at BASE.
 BASE is the pre-send turn number whose content was showing before the send
 (nil for nothing).  The buffer shows the running placeholder (or the awaiting
 note if a question is already pending) and turns on following; automatic
-refills replace it only with a newer turn
-(see `dsh-bridge--view-waiting-accept-p').  CWD, when non-nil, sets the
+refills replace it only with a newer turn.  CWD, when non-nil, sets the
 buffer's workspace directory."
   ;; The fill clears the waiting state; set it afterwards so the placeholder
   ;; stays up.
@@ -2347,32 +2336,22 @@ Point is left at BUFFER's end for tail-following."
 
 (defun dsh-bridge--view-follow-refill (session-id)
   "Refill every DSH-View buffer following SESSION-ID with its newest turn.
-Called (deferred, right after `dsh-bridge--view-turns-cache-refresh') when a
-`replies-changed' notification event arrives over the notification connection;
-a no-op when no view showing SESSION-ID is turn-following.  Reads the caller's
-single cache refresh — no further request — and refills each following view
-from the newest cached turn record.  The fill is append-style (preserving
-point when the shown turn merely grew a segment); when a newer turn has
-started, the view flips to it.  A view in the waiting state (a prompt was
-just sent, `dsh-bridge--view-waiting') accepts only content from a turn newer
-than the pre-send one; anything else keeps the `(running...)' placeholder.
-The refill passes no CWD, so `dsh-bridge--apply-session-directory' falls back
-to the sessions cache (the old `/output'-based fill supplied the cwd from the
-response)."
-  (when (seq-find (lambda (buf)
-                    (with-current-buffer buf
-                      (bound-and-true-p dsh-bridge--view-follow)))
-                  (dsh-bridge--session-views session-id))
-    (let* ((turns (dsh-bridge--turns-cache-turns session-id))
-           (newest (car-safe turns)))
-      (when newest
-        (dolist (buf (dsh-bridge--session-views session-id))
-          (with-current-buffer buf
-            (when (and dsh-bridge--view-follow
-                       (not (and dsh-bridge--view-waiting
-                                 (not (dsh-bridge--view-waiting-accept-p
-                                       (alist-get 'turn newest))))))
-              (dsh-bridge--view-fill session-id newest nil nil t t))))))))
+This function is called right after a `replies-changed' notification
+event arrives.  It updates using the cached turn data only, without
+performing any further network request."
+  (let* ((turns (dsh-bridge--turns-cache-turns session-id))
+		 (newest (car-safe turns))
+		 (turn (alist-get 'turn newest)))
+	(dolist (buf (dsh-bridge--session-views session-id))
+	  (with-current-buffer buf
+		(and newest
+			 dsh-bridge--view-follow
+			 ;; If the buffer is being prepped for a new turn, drop
+			 ;; any update arriving (somehow) for earlier turns.
+			 (or (memq dsh-bridge--view-waiting '(nil t))
+				 (and (numberp turn)
+					  (> turn dsh-bridge--view-waiting)))
+			 (dsh-bridge--view-fill session-id newest nil nil t t))))))
 
 (defun dsh-bridge--turns-changed (session-id)
   "Handle one `replies-changed' frame for SESSION-ID, deferred.
@@ -5679,56 +5658,55 @@ its newest turn — the `(continuing...)' marker disappears now that `endedAt'
 is known, so the completed turn ends cleanly (point is preserved when the
 content merely changed in place)."
   (pcase-let ((`(,status ,body ,http-status)
-			   (dsh-bridge--http "GET" (dsh-bridge--path "/turns" session-id) nil)))
+			   (dsh-bridge--http "GET"
+								 (dsh-bridge--path "/turns" session-id) nil)))
 	(let* ((alist (dsh-bridge--parse-json-body body))
-			 (err (dsh-bridge--error-message status http-status alist)))
-		(if err
-			(when (eq http-status 404)
-			  ;; Forget SESSION-ID's tracked status.
-			  (setq dsh-bridge--session-status
-					(assoc-delete-all session-id dsh-bridge--session-status)))
-		  (let* ((shown-id (or (alist-get 'sessionId alist) session-id))
-				 (turns-pair (assoc 'turns alist))
-				 (turns (cdr turns-pair))
-				 (views (dsh-bridge--session-views shown-id)))
-			;; Field presence, not truthiness: an explicit empty `turns'
-			;; list (no turns, e.g. after a full compaction) replaces the
-			;; stale cache entry, and the response's `epoch' is recorded
-			;; for later incremental fetches.
-			(when turns-pair
-			  (dsh-bridge--turns-cache-store shown-id turns
-											 (alist-get 'epoch alist)))
-			;; Only refill if a view still shows this session and the user
-			;; has not started turn-cycling since the event (the cycling
-			;; check at event time does not cover the timer delay).
-			(when (and views
-					   (not (seq-some #'dsh-bridge--view-cycling-p views)))
-			  ;; Seed the tracker only when the response carries `running';
-			  ;; JSON `false' decodes to nil, `true' to t (see
-			  ;; `dsh-bridge--parse-json-body') — compare against t, never
-			  ;; truthiness.
-			  (let ((running-pair (assoc 'running alist)))
-				(when running-pair
-				  (dsh-bridge--status-set shown-id
-										  (if (eq (cdr running-pair) t)
-											  'running 'idle))))
-			  ;; One `/turns' fetch serves every refilled view.
-			  (let ((newest (car-safe turns)))
-				(dolist (buf views)
-				  (with-current-buffer buf
-					(if dsh-bridge--view-waiting
-						;; A sent turn just completed.  A newer turn's content
-						;; would have refilled the view already via
-						;; `replies-changed'; here, accept only genuinely
-						;; newer content, else the turn was textless — clear
-						;; to blank (idle) rather than resurrecting the
-						;; pre-send turn.
-						(if (dsh-bridge--view-waiting-accept-p
-							 (and newest (alist-get 'turn newest)))
-							(dsh-bridge--view-fill shown-id newest nil nil t t)
-						  (dsh-bridge--view-fill shown-id nil nil nil t))
-					  (when newest
-						(dsh-bridge--view-fill shown-id newest nil nil t t))))))))))))
+		   (err (dsh-bridge--error-message status http-status alist)))
+	  (if err
+		  (when (eq http-status 404)
+			;; Forget SESSION-ID's tracked status.
+			(setq dsh-bridge--session-status
+				  (assoc-delete-all session-id dsh-bridge--session-status)))
+		(let* ((shown-id (or (alist-get 'sessionId alist) session-id))
+			   (turns-pair (assoc 'turns alist))
+			   (turns (cdr turns-pair))
+			   (views (dsh-bridge--session-views shown-id))
+			   (newest (car-safe turns))
+			   (turn (alist-get 'turn newest))
+			   (running-pair (assoc 'running alist)))
+		  ;; An empty `turns' list (no turns, e.g. after compaction)
+		  ;; replaces the stale cache entry, and the response's
+		  ;; `epoch' is recorded for later incremental fetches.
+		  (when turns-pair
+			(dsh-bridge--turns-cache-store shown-id turns
+										   (alist-get 'epoch alist)))
+		  ;; Seed the tracker only when the response carries
+		  ;; `running'; JSON `false' decodes to nil, `true' to t.
+		  (when running-pair
+			(dsh-bridge--status-set shown-id
+									(if (eq (cdr running-pair) t)
+										'running 'idle)))
+		  ;; Update DSH-View buffer(s).
+		  (dolist (buf views)
+			(with-current-buffer buf
+			  (cond
+			   ;; Don't refill if turn-cycling.
+			   ((dsh-bridge--view-cycling-p))
+			   ;; If there are already segments, continue filling.
+			   ((null dsh-bridge--view-waiting)
+				(when newest
+				  (dsh-bridge--view-fill shown-id newest nil nil t t)))
+			   ;; If the buffer is being prepped for a fresh turn,
+			   ;; insert the new segment if it's for the new turn.
+			   ((and newest
+					 (or (eq dsh-bridge--view-waiting t)
+						 (and (numberp turn)
+							  (> turn dsh-bridge--view-waiting))))
+				(dsh-bridge--view-fill shown-id newest nil nil t t))
+			   ;; Otherwise the content is not the new turn's (or
+			   ;; there is none): blank the view to idle.
+			   (t
+				(dsh-bridge--view-fill shown-id nil nil nil t))))))))))
 
 ;;;###autoload
 (defun dsh-bridge-list-sessions ()

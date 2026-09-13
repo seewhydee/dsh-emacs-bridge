@@ -3710,8 +3710,10 @@ the window the action came from is quit, so the old buffer does not linger."
 
 (ert-deftest dsh-bridge-view-waiting-state ()
   "The waiting state shows the `(running...)' placeholder, has no `(k/n)'
-position (it is not a turn), and accepts only content from a turn newer than
-the pre-send one; a fresh session (nothing was showing) accepts any turn."
+position (it is not a turn), and is ended by a content fill.  The acceptance
+gate is a per-buffer decision, not a helper: it is covered at the caller level
+by `dsh-bridge-view-follow-refill-waiting-gate' and
+`dsh-bridge-turn-complete-refetch-waiting-newer'."
   (let ((dsh-bridge--session-status nil)
         (dsh-bridge--pending-questions nil)
         (dsh-bridge--turns-cache (dsh-bridge-test--view-cache
@@ -3728,23 +3730,16 @@ the pre-send one; a fresh session (nothing was showing) accepts any turn."
       (should (eq dsh-bridge--view-follow t))
       ;; Not a turn, so no position segment.
       (should (equal (dsh-bridge--view-turn-position) ""))
-      (should-not (string-match-p "(latest/" (format "%s" header-line-format)))
-      ;; Newer content is accepted; the pre-send turn's own is not.
-      (should (dsh-bridge--view-waiting-accept-p 3))
-      (should-not (dsh-bridge--view-waiting-accept-p 2))
-      (should-not (dsh-bridge--view-waiting-accept-p nil)))
-    ;; A fresh session (nothing was showing) accepts any turn.
+      (should-not (string-match-p "(latest/" (format "%s" header-line-format))))
+    ;; A fresh session (nothing was showing) records the fresh marker, which
+    ;; a content fill then ends.
     (with-temp-buffer
       (dsh-bridge-view-mode)
       (setq-local dsh-bridge--view-content-session "s1")
       (dsh-bridge--view-waiting-fill "s1" nil)
       (should (eq dsh-bridge--view-waiting t))
-      (should (dsh-bridge--view-waiting-accept-p 1))
-      ;; Rendering content ends the placeholder; the gate is then inert
-      ;; instead of comparing a turn against nil.
       (dsh-bridge--view-fill "s1" nil nil nil t)
-      (should (null dsh-bridge--view-waiting))
-      (should-not (dsh-bridge--view-waiting-accept-p 1)))))
+      (should (null dsh-bridge--view-waiting)))))
 
 (ert-deftest dsh-bridge-view-waiting-awaiting-note ()
   "A waiting view with a pending ask-user question shows the awaiting note
@@ -4845,7 +4840,9 @@ resurrecting the pre-send turn: `(running...)' gives way to nothing."
 (ert-deftest dsh-bridge-view-follow-refill-waiting-gate ()
   "A waiting view is refilled by `replies-changed' only with a turn newer than
 the pre-send one: a still-running pre-send turn (or nothing newer) keeps the
-`(running...)' placeholder and the waiting state; a newer turn replaces it."
+`(running...)' placeholder and the waiting state; a newer turn replaces it.
+A fresh waiting view (no pre-send turn) accepts any committed turn but keeps
+the placeholder when the cache holds none."
   (let ((dsh-bridge--session-status nil)
         (dsh-bridge--turns-cache nil))
     ;; Case 1: the cache's newest is still the pre-send turn 2 (open, no new
@@ -4875,6 +4872,28 @@ the pre-send one: a still-running pre-send turn (or nothing newer) keeps the
         (should (equal (buffer-string) "fresh\n\n(continuing...)"))
         (should (null dsh-bridge--view-waiting))
         (should (string-match-p "latest/1" (format "%s" header-line-format)))))
+    ;; Case 3: a fresh session (waiting `t', no pre-send turn) accepts the
+    ;; first committed turn — there is no turn number to compare against.
+    (with-current-buffer "*dsh-bridge-output*"
+      (dsh-bridge--view-waiting-fill "s1" nil)
+      (should (eq dsh-bridge--view-waiting t)))
+    (let ((dsh-bridge--turns-cache
+           (dsh-bridge-test--view-cache
+            (list (dsh-bridge-test--view-turn 1 1000000
+                    (list (dsh-bridge-test--view-segment "first" 1001000 1)))))))
+      (dsh-bridge--view-follow-refill "s1"))
+    (with-current-buffer "*dsh-bridge-output*"
+      (should (equal (buffer-string) "first\n\n(continuing...)"))
+      (should (null dsh-bridge--view-waiting)))
+    ;; Case 4: a fresh session with no committed turn has nothing to accept:
+    ;; the placeholder survives (the guard requires a turn record).
+    (with-current-buffer "*dsh-bridge-output*"
+      (dsh-bridge--view-waiting-fill "s1" nil))
+    (let ((dsh-bridge--turns-cache (dsh-bridge-test--view-cache nil)))
+      (dsh-bridge--view-follow-refill "s1"))
+    (with-current-buffer "*dsh-bridge-output*"
+      (should (equal (buffer-string) dsh-bridge--view-running-placeholder))
+      (should (eq dsh-bridge--view-waiting t)))
     (when (buffer-live-p (get-buffer "*dsh-bridge-output*"))
       (kill-buffer "*dsh-bridge-output*"))))
 
