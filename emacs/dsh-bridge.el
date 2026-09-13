@@ -295,6 +295,11 @@ LABEL is the session display label.")
 (defconst dsh-bridge-describe-buffer-name "*dsh-bridge-describe*"
   "Buffer name of the read-only DSH session report.")
 
+(defconst dsh-bridge-prompt-buffer-name "*dsh-bridge-prompt*"
+  "The name of the shared DSH-Prompt buffer.
+This name is used whenever we need to create a new DSH-Prompt buffer;
+see the function `dsh-bridge--prompt-buffer'.")
+
 (defvar dsh-bridge--sessions-cache nil
   "Cache of DeepSeek Harness session data.
 The value is a list where each item corresponds to one DSH session,
@@ -1251,9 +1256,9 @@ Advisory display cache only (see `dsh-bridge--last-resolved-active')."
 
 ;; The prompt history functionality is tied to DSH-Prompt buffers, for
 ;; which the buffer-local variable `dsh-bridge--prompt-session' tracks
-;; the DSH session.  By default, there is one global DSH-Prompt buffer
-;; (*dsh-bridge-prompt*), but we try to ensure things work even if the
-;; user sets up multiple buffers (e.g., by renaming).
+;; the DSH session.  At present, there is one global DSH-Prompt buffer
+;; (`dsh-bridge-prompt-buffer-name'), but we try to ensure things work
+;; even if the user sets up multiple buffers (e.g., by renaming).
 
 (defvar dsh-bridge--prompt-history nil
   "Alist of (SESSION-ID . PROMPTS) for DSH prompt history.
@@ -1580,28 +1585,6 @@ Delete this line to detach it."
   "Return the number of attachment tag lines in the current buffer."
   (count-matches dsh-bridge--attachment-line-regexp (point-min) (point-max)))
 
-(defun dsh-bridge--prompt-buffer-live ()
-  "Return a live DSH-Prompt buffer, or nil."
-  (seq-find (lambda (buffer)
-			  (with-current-buffer buffer
-				(derived-mode-p 'dsh-bridge-prompt-mode)))
-			(buffer-list)))
-
-(defun dsh-bridge--prompt-buffer-for-attach ()
-  "Return the DSH-Prompt buffer attachments are inserted into.
-Reuse a live DSH-Prompt buffer as-is (its session binding and any draft
-text are left alone); otherwise create the shared prompt buffer bound to
-the invoking buffer's effective session.  Never erases."
-  (or (dsh-bridge--prompt-buffer-live)
-	  ;; Capture the invoking buffer's effective session before entering
-	  ;; the new prompt buffer: the affinity lives in the invoking
-	  ;; buffer's locals and is invisible from inside the new buffer.
-	  (let ((session (dsh-bridge--effective-session)))
-		(with-current-buffer (get-buffer-create "*dsh-bridge-prompt*")
-		  (dsh-bridge-prompt-mode)
-		  (dsh-bridge-set-prompt-session session)
-		  (current-buffer)))))
-
 (defun dsh-bridge--attach-paths (files)
   "Validate and expand FILES; return the absolute paths, in order.
 Signal a `user-error' for anything that is not a regular file."
@@ -1628,7 +1611,13 @@ prompts are deliberately absent."
 			 (dired-get-marked-files)
 		   (list (read-file-name "Attach file: " nil nil t)))))
   (let* ((paths (dsh-bridge--attach-paths files))
-		 (prompt (dsh-bridge--prompt-buffer-for-attach))
+		 ;; In a DSH-Prompt buffer, attach to that buffer (even one the
+		 ;; user renamed); from anywhere else, use the prompt buffer for
+		 ;; the invoking buffer's effective session.
+		 (prompt (or (and (eq major-mode 'dsh-bridge-prompt-mode)
+						  (current-buffer))
+					 (dsh-bridge--prompt-buffer
+					  (dsh-bridge--effective-session))))
 		 ;; In the prompt buffer, insert at point (as `mml-attach-file'
 		 ;; does); from anywhere else, append at the end.
 		 (at-point (eq (current-buffer) prompt)))
@@ -1650,7 +1639,10 @@ the visited file (not the buffer text) is attached."
   (let ((file buffer-file-name))
 	(unless file
 	  (user-error "dsh-bridge: buffer %s is not visiting a file" (buffer-name)))
-	(let* ((prompt (dsh-bridge--prompt-buffer-for-attach))
+	(let* ((prompt (or (and (eq major-mode 'dsh-bridge-prompt-mode)
+							(current-buffer))
+					   (dsh-bridge--prompt-buffer
+						(dsh-bridge--effective-session))))
 		   (at-point (eq (current-buffer) prompt)))
 	  (with-current-buffer prompt
 		(unless at-point (goto-char (point-max)))
@@ -1661,16 +1653,14 @@ the visited file (not the buffer text) is attached."
 
 ;;;###autoload
 (defun dsh-bridge-clear-attachments ()
-  "Remove every attachment tag line from the DSH prompt buffer."
+  "Remove every attachment tag line from this DSH-Prompt buffer."
   (interactive)
-  (let ((prompt (dsh-bridge--prompt-buffer-live)))
-	(unless prompt
-	  (user-error "dsh-bridge: no DSH-Prompt buffer"))
-	(with-current-buffer prompt
-	  (let ((count (dsh-bridge--attachment-count)))
-		(dsh-bridge--remove-attachment-tags)
-		(message "dsh-bridge: removed %d attachment%s"
-				 count (if (= count 1) "" "s"))))))
+  (unless (eq major-mode 'dsh-bridge-prompt-mode)
+	(user-error "dsh-bridge: not a DSH-Prompt buffer"))
+  (let ((count (dsh-bridge--attachment-count)))
+	(dsh-bridge--remove-attachment-tags)
+	(message "dsh-bridge: removed %d attachment%s"
+			 count (if (= count 1) "" "s"))))
 
 ;;; Dispatcher layout
 
@@ -2903,8 +2893,10 @@ successfully sent to the DSH bridge, with SENT-SESSION-ID as the
 host-reported session id to which the prompt was delivered.
 
 Bury the DSH-Prompt buffer, keeping its contents (the sent text also
-stays in the prompt history; the next composition erases it, asking
-first only if it was edited further).
+stays in the prompt history).  The text is marked unmodified, so the
+next composition erases it silently — an unsent draft, by contrast, is
+kept when composing for the same session (see
+`dsh-bridge--prompt-buffer').
 
 If SENT-SESSION-ID is non-nil, show a DSH-View buffer for the session in
 turn-following state (see `dsh-bridge--exit-to-view'): a window already
@@ -4174,40 +4166,55 @@ session and persists as the default, exactly as the web UI does."
                  session-id provider (alist-get 'id model-entry) effort)))))))))
 
 ;;;###autoload
-(defun dsh-bridge--prompt-buffer (&optional session-id)
-  "Prepare and return a DSH-Prompt buffer for a new composition.
-If SESSION-ID is non-nil and a live buffer in `dsh-bridge-prompt-mode'
-is bound to that session, reuse it.  Otherwise, use a buffer named
-`*dsh-bridge-prompt*', creating it if necessary.  The chosen buffer is
-bound to SESSION-ID; a nil SESSION-ID clears any existing binding, so
-the buffer follows the default target (or last-active session).
+(defun dsh-bridge--prompt-buffer (session-id)
+  "Prepare and return a DSH-Prompt buffer for SESSION-ID.
+SESSION-ID is a session id string, or nil for the last-active session.
 
-If the buffer holds modified text (an unsent draft, or text edited
-further after a send), ask for confirmation before erasing it; a
-\"no\" answer keeps the text, which then targets SESSION-ID.
-Unmodified text — kept from a previous send, or a pristine history
-entry — is erased silently."
-  (let ((oldbuf (when session-id
-				  (seq-find (lambda (b)
-							  (with-current-buffer b
-								(and (eq major-mode 'dsh-bridge-prompt-mode)
-									 (equal dsh-bridge--prompt-session
-											session-id))))
-							(buffer-list)))))
-	(with-current-buffer (or oldbuf
-							 (get-buffer-create "*dsh-bridge-prompt*"))
+A live buffer in `dsh-bridge-prompt-mode' bound to SESSION-ID is
+preferred; otherwise, use the buffer named
+`dsh-bridge-prompt-buffer-name', creating it if necessary.  The chosen
+buffer is bound to SESSION-ID.
+
+Whether the buffer's text carries over depends on whether it has been
+processed.  Unmodified text — kept from a previous send, or a pristine
+history entry — has already been processed and is erased silently, for
+this session as for any other, so a fresh composition starts empty (and
+kept text cannot be resent to the wrong session).  Modified text is an
+unsent draft: it is kept when it belongs to SESSION-ID; for another
+session it is erased only after confirmation, and declining signals an
+error, leaving the buffer untouched."
+  (let* ((pred (lambda (b)
+				 (and (eq (buffer-local-value 'major-mode b)
+						  'dsh-bridge-prompt-mode)
+					  (equal (buffer-local-value 'dsh-bridge--prompt-session b)
+							 session-id))))
+		 (buffer (or (and session-id (seq-find pred (buffer-list)))
+					 (get-buffer-create dsh-bridge-prompt-buffer-name))))
+	(with-current-buffer buffer
 	  (unless (eq major-mode 'dsh-bridge-prompt-mode)
 		(dsh-bridge-prompt-mode))
-	  (when (or (string-blank-p (buffer-string))
-				(not (buffer-modified-p))
-				(y-or-n-p "Erase the existing prompt text? "))
+	  (when (and (not (= (buffer-size) 0))
+				 (or (not (buffer-modified-p))
+					 (not (equal dsh-bridge--prompt-session session-id))))
+		;; The text does not carry over to the new composition.
+		;; Unmodified text has already been processed (sent, or a
+		;; pristine history entry) and is erased silently.  Modified
+		;; text is an unsent draft, and we are only here when it
+		;; belongs to another session: ask before discarding it.
+		(when (and (buffer-modified-p)
+				   (not (save-window-excursion
+						  (display-buffer-same-window buffer nil)
+						  (y-or-n-p
+						   (format "Buffer %s has an unsent prompt for another session.  \
+Discard it? " (buffer-name))))))
+		  (user-error "dsh-bridge: prompt buffer has an unsent prompt"))
 		(let ((inhibit-read-only t))
 		  (erase-buffer))
 		(setq-local dsh-bridge--prompt-history-index nil)
 		(setq-local dsh-bridge--prompt-draft nil)
 		(set-buffer-modified-p nil))
-	  (dsh-bridge-set-prompt-session session-id)
-	  (current-buffer))))
+	  (dsh-bridge-set-prompt-session session-id))
+	buffer))
 
 ;;;###autoload
 (defun dsh-bridge-prompt ()
@@ -4215,11 +4222,15 @@ entry — is erased silently."
 The buffer is bound to the effective session of the current buffer (its
 binding, else the default target, else last-active), so \\`r' from a
 DSH-View or DSH-Sessions buffer continues that session's conversation.
-The buffer starts as a fresh composition: text kept from a previous
-send is erased silently, while an unsent or further-edited draft is
-erased only after confirmation.  Earlier sent prompts stay in the
-prompt history,
-reachable with \\`M-p' / \\`M-n'.  \\<dsh-bridge-prompt-mode-map>\
+
+A DSH-Prompt buffer already bound to that session is preferred.  Text
+kept from a previous send (or a pristine history entry) is erased
+silently, so the composition starts fresh; an unsent draft for the
+session is kept.  An unsent draft for another session is erased only
+after confirmation; declining leaves the buffer untouched and aborts
+the command.  Earlier sent prompts stay in the prompt history,
+reachable with \\`M-p' / \\`M-n'.
+\\<dsh-bridge-prompt-mode-map>\
 \\[dsh-bridge-send-and-exit] sends and buries the buffer,
 \\[dsh-bridge-fetch] fetches the session's latest turn, closing the
 compose→read loop."

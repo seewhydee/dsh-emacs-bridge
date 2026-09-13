@@ -4570,33 +4570,62 @@ re-renders the surfaces, and announces it."
     (should (equal rendered '("s1")))
     (should (string-match-p "prompt sent" msg))))
 
-(ert-deftest dsh-bridge-prompt-buffer-confirms-before-erasing ()
-  "Preparing a prompt buffer asks before erasing modified text, and
-silently erases unmodified text (e.g. kept from a previous send)."
+(ert-deftest dsh-bridge-prompt-buffer-same-session-keeps-draft ()
+  "Preparing a prompt buffer for the session it is already bound to
+keeps an unsent draft (modified text) without asking, but silently
+erases text kept from a previous send (unmodified, already processed),
+so a fresh composition starts empty."
+  (when (get-buffer "*dsh-bridge-prompt*")
+    (kill-buffer "*dsh-bridge-prompt*"))
+  (cl-letf (((symbol-function 'dsh-bridge--refresh-prompt-metadata) #'ignore)
+            ((symbol-function 'y-or-n-p) (lambda (_) (error "should not ask"))))
+    (with-current-buffer (dsh-bridge--prompt-buffer "s1")
+      (insert "unsent text"))
+    ;; An unsent (modified) draft is kept.
+    (should (eq (dsh-bridge--prompt-buffer "s1")
+                (get-buffer "*dsh-bridge-prompt*")))
+    (with-current-buffer "*dsh-bridge-prompt*"
+      (should (equal (buffer-string) "unsent text"))
+      (set-buffer-modified-p nil))
+    ;; Text kept from a previous send (unmodified) is erased.
+    (dsh-bridge--prompt-buffer "s1")
+    (with-current-buffer "*dsh-bridge-prompt*"
+      (should (equal (buffer-string) ""))))
+  (kill-buffer "*dsh-bridge-prompt*"))
+
+(ert-deftest dsh-bridge-prompt-buffer-other-session-erase-rules ()
+  "Preparing the shared prompt buffer for another session erases its
+text: silently when unmodified (kept from a previous send, so it cannot
+be resent to the wrong session), and only after confirmation when it is
+an unsent draft; declining signals a `user-error' and leaves the buffer
+untouched."
   (when (get-buffer "*dsh-bridge-prompt*")
     (kill-buffer "*dsh-bridge-prompt*"))
   (cl-letf (((symbol-function 'dsh-bridge--refresh-prompt-metadata) #'ignore))
     (with-current-buffer (dsh-bridge--prompt-buffer "s1")
-      (insert "unsent text"))
-    ;; Answering "no" keeps the modified text.
-    (cl-letf (((symbol-function 'y-or-n-p) (lambda (_) nil)))
-      (dsh-bridge--prompt-buffer "s1"))
+      (insert "kept from a previous send")
+      (set-buffer-modified-p nil))
+    ;; Unmodified text is erased without asking, and the buffer rebinds.
+    (cl-letf (((symbol-function 'y-or-n-p)
+               (lambda (_) (error "should not ask"))))
+      (dsh-bridge--prompt-buffer "s2"))
     (with-current-buffer "*dsh-bridge-prompt*"
-      (should (equal (buffer-string) "unsent text")))
-    ;; Answering "yes" erases it.
+      (should (equal (buffer-string) ""))
+      (should (equal dsh-bridge--prompt-session "s2"))
+      (insert "unsent text for s2"))
+    ;; An unsent draft asks; answering "no" signals a user-error and
+    ;; keeps the text and the binding.
+    (cl-letf (((symbol-function 'y-or-n-p) (lambda (_) nil)))
+      (should-error (dsh-bridge--prompt-buffer "s1") :type 'user-error))
+    (with-current-buffer "*dsh-bridge-prompt*"
+      (should (equal (buffer-string) "unsent text for s2"))
+      (should (equal dsh-bridge--prompt-session "s2")))
+    ;; Answering "yes" erases and rebinds.
     (cl-letf (((symbol-function 'y-or-n-p) (lambda (_) t)))
       (dsh-bridge--prompt-buffer "s1"))
     (with-current-buffer "*dsh-bridge-prompt*"
-      (should (equal (buffer-string) "")))
-    ;; Unmodified text is erased without asking.
-    (with-current-buffer "*dsh-bridge-prompt*"
-      (insert "kept from a previous send")
-      (set-buffer-modified-p nil))
-    (cl-letf (((symbol-function 'y-or-n-p)
-               (lambda (_) (error "should not ask"))))
-      (dsh-bridge--prompt-buffer "s1"))
-    (with-current-buffer "*dsh-bridge-prompt*"
-      (should (equal (buffer-string) ""))))
+      (should (equal (buffer-string) ""))
+      (should (equal dsh-bridge--prompt-session "s1"))))
   (kill-buffer "*dsh-bridge-prompt*"))
 
 (ert-deftest dsh-bridge-prompt-buffer-reuses-renamed-buffer ()
