@@ -3399,7 +3399,7 @@ decide whether the identical-text confirmation fires."
   "The send-and-exit success branch shows the output buffer in turn-following
 state (rather than burying): the user lands on the live view after sending.
 The just-sent prompt has not committed any content yet, so the view is erased
-to the `(running...)' placeholder and remembers the abandoned (previous
+to the `(running...)' placeholder and remembers the pre-send (previous
 newest) turn, so only a genuinely newer turn's content replaces it."
   (when (buffer-live-p (get-buffer "*dsh-bridge-output*"))
     (kill-buffer "*dsh-bridge-output*"))
@@ -3497,7 +3497,7 @@ by its `startedAt'."
     (kill-buffer "*dsh-bridge-output*")))
 
 (ert-deftest dsh-bridge-send-exit-waits-when-newest-turn-precedes-send ()
-  "A completed turn that began before the send is the abandoned turn: the view
+  "A completed turn that began before the send is the pre-send turn: the view
 still gets the `(running...)' placeholder, and only a strictly newer turn may
 replace it (the regression guard for the fix above)."
   (when (buffer-live-p (get-buffer "*dsh-bridge-output*"))
@@ -3530,7 +3530,7 @@ replace it (the regression guard for the fix above)."
 
 (ert-deftest dsh-bridge-send-and-exit-passes-send-instant ()
   "The success callback carries the send instant to `--prompt-exit', so
-`--after-prompt-view' can tell this send's turn from the abandoned one."
+`--after-prompt-view' can tell this send's turn from the pre-send one."
   (dsh-bridge-test--kill-prompt-buffer)
   (let ((captured 'unset)
         (dsh-bridge-prompt-resend-confirm nil)
@@ -3711,7 +3711,7 @@ the window the action came from is quit, so the old buffer does not linger."
 (ert-deftest dsh-bridge-view-waiting-state ()
   "The waiting state shows the `(running...)' placeholder, has no `(k/n)'
 position (it is not a turn), and accepts only content from a turn newer than
-the abandoned one; a fresh session (nothing abandoned) accepts any turn."
+the pre-send one; a fresh session (nothing was showing) accepts any turn."
   (let ((dsh-bridge--session-status nil)
         (dsh-bridge--pending-questions nil)
         (dsh-bridge--turns-cache (dsh-bridge-test--view-cache
@@ -3729,17 +3729,22 @@ the abandoned one; a fresh session (nothing abandoned) accepts any turn."
       ;; Not a turn, so no position segment.
       (should (equal (dsh-bridge--view-turn-position) ""))
       (should-not (string-match-p "(latest/" (format "%s" header-line-format)))
-      ;; Newer content is accepted; the abandoned turn's own is not.
+      ;; Newer content is accepted; the pre-send turn's own is not.
       (should (dsh-bridge--view-waiting-accept-p 3))
       (should-not (dsh-bridge--view-waiting-accept-p 2))
       (should-not (dsh-bridge--view-waiting-accept-p nil)))
-    ;; A fresh session (nothing abandoned) accepts any turn.
+    ;; A fresh session (nothing was showing) accepts any turn.
     (with-temp-buffer
       (dsh-bridge-view-mode)
       (setq-local dsh-bridge--view-content-session "s1")
       (dsh-bridge--view-waiting-fill "s1" nil)
       (should (eq dsh-bridge--view-waiting t))
-      (should (dsh-bridge--view-waiting-accept-p 1)))))
+      (should (dsh-bridge--view-waiting-accept-p 1))
+      ;; Rendering content ends the placeholder; the gate is then inert
+      ;; instead of comparing a turn against nil.
+      (dsh-bridge--view-fill "s1" nil nil nil t)
+      (should (null dsh-bridge--view-waiting))
+      (should-not (dsh-bridge--view-waiting-accept-p 1)))))
 
 (ert-deftest dsh-bridge-view-waiting-awaiting-note ()
   "A waiting view with a pending ask-user question shows the awaiting note
@@ -4774,7 +4779,7 @@ once for all of them."
 
 (ert-deftest dsh-bridge-turn-complete-refetch-waiting-newer ()
   "A view waiting on a just-sent prompt accepts the completion refetch's
-content when the completed turn is genuinely newer than the abandoned one:
+content when the completed turn is genuinely newer than the pre-send one:
 the reply replaces the `(running...)' placeholder and the waiting state ends."
   (let ((dsh-bridge--session-status nil)
         (dsh-bridge--turns-cache nil)
@@ -4799,7 +4804,7 @@ the reply replaces the `(running...)' placeholder and the waiting state ends."
       (dsh-bridge--turn-complete-refetch "s1")
       (should (= calls 1))
       (with-current-buffer "*dsh-bridge-output*"
-        ;; Turn 3 is newer than the abandoned turn 2: accepted.
+        ;; Turn 3 is newer than the pre-send turn 2: accepted.
         (should (equal (buffer-string) "the reply"))
         (should (equal dsh-bridge--view-turn 3))
         (should (null dsh-bridge--view-waiting))))
@@ -4809,7 +4814,7 @@ the reply replaces the `(running...)' placeholder and the waiting state ends."
 (ert-deftest dsh-bridge-turn-complete-refetch-waiting-textless-blanks ()
   "When the sent turn completes without producing any newer content, the
 completion refetch clears the waiting view to blank (idle) rather than
-resurrecting the abandoned turn: `(running...)' gives way to nothing."
+resurrecting the pre-send turn: `(running...)' gives way to nothing."
   (let ((dsh-bridge--session-status nil)
         (dsh-bridge--turns-cache nil))
     (with-current-buffer (get-buffer-create "*dsh-bridge-output*")
@@ -4839,11 +4844,11 @@ resurrecting the abandoned turn: `(running...)' gives way to nothing."
 
 (ert-deftest dsh-bridge-view-follow-refill-waiting-gate ()
   "A waiting view is refilled by `replies-changed' only with a turn newer than
-the abandoned one: a still-running abandoned turn (or nothing newer) keeps the
+the pre-send one: a still-running pre-send turn (or nothing newer) keeps the
 `(running...)' placeholder and the waiting state; a newer turn replaces it."
   (let ((dsh-bridge--session-status nil)
         (dsh-bridge--turns-cache nil))
-    ;; Case 1: the cache's newest is still the abandoned turn 2 (open, no new
+    ;; Case 1: the cache's newest is still the pre-send turn 2 (open, no new
     ;; content committed): the placeholder survives the refill.
     (with-current-buffer (get-buffer-create "*dsh-bridge-output*")
       (dsh-bridge-view-mode)
@@ -4858,15 +4863,18 @@ the abandoned one: a still-running abandoned turn (or nothing newer) keeps the
       (should (equal (buffer-string) dsh-bridge--view-running-placeholder))
       (should (equal dsh-bridge--view-waiting 2)))
     ;; Case 2: a newer turn (3) has started producing: it replaces the
-    ;; placeholder and clears the waiting state.
+    ;; placeholder and clears the waiting state.  The header's position is
+    ;; computed after the placeholder ends, so `(k/n)' appears immediately
+    ;; rather than only on the next ticker repaint.
     (let ((dsh-bridge--turns-cache
            (dsh-bridge-test--view-cache
             (list (dsh-bridge-test--view-turn 3 3000000
                     (list (dsh-bridge-test--view-segment "fresh" 3001000 1)))))))
-      (dsh-bridge--view-follow-refill "s1"))
-    (with-current-buffer "*dsh-bridge-output*"
-      (should (equal (buffer-string) "fresh\n\n(continuing...)"))
-      (should (null dsh-bridge--view-waiting)))
+      (dsh-bridge--view-follow-refill "s1")
+      (with-current-buffer "*dsh-bridge-output*"
+        (should (equal (buffer-string) "fresh\n\n(continuing...)"))
+        (should (null dsh-bridge--view-waiting))
+        (should (string-match-p "latest/1" (format "%s" header-line-format)))))
     (when (buffer-live-p (get-buffer "*dsh-bridge-output*"))
       (kill-buffer "*dsh-bridge-output*"))))
 

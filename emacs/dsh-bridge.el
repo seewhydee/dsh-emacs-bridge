@@ -1775,14 +1775,28 @@ controls whether to re-enter it automatically whenever the DSH-View
 buffer is showing a session's latest turn.")
 
 (defvar-local dsh-bridge--view-waiting nil
-  "While non-nil, the DSH-View shows the running placeholder: the user has
-just sent a prompt and the first reply of the new turn has not been committed
-yet.  The value is the abandoned turn number whose content was showing before
-the send (t when nothing was showing), so automatic refills only replace the
-placeholder with a turn *newer* than the abandoned one — a textless new turn
-must never resurrect the old content.  Set by `dsh-bridge--view-fill-waiting';
-cleared when content arrives, on manual navigation/fetch, or when the sent
-turn completes without text.")
+  "How this DSH-View's post-send placeholder is gated, or nil when none is up.
+Non-nil while the buffer shows the placeholder for a turn that has started
+but not committed its first text segment: `(running...)', or the ask-user
+awaiting note if that turn asks before producing any text.  The value bounds
+what may end the placeholder:
+
+- a turn number N is the pre-send turn that was showing when the placeholder
+  went up.  Only a turn numbered greater than N may replace it, because the
+  turn cache still names that pre-send turn while the new one is textless, so
+  a naive refill would re-show already-seen content as the new reply.
+- `t' means no turn was showing (a fresh session), so any turn qualifies.
+
+The placeholder is not a turn, so `dsh-bridge--view-turn-position'
+contributes no `(k/n)' segment while it is up; the bound is enforced by
+`dsh-bridge--view-waiting-accept-p'.
+
+Set by `dsh-bridge--view-waiting-fill', which sets it after the
+`dsh-bridge--view-fill' it calls has cleared it.  Cleared by
+`dsh-bridge--view-fill' itself, so any path that renders content ends the
+placeholder and no caller has to remember; `dsh-bridge--view-follow-enter'
+clears explicitly as well because its refill is skipped when the turn cache
+is empty.")
 
 (defvar-local dsh-bridge--view-provenance nil
   "How this DSH-View buffer was last rendered, or nil if unknown.
@@ -1991,20 +2005,24 @@ open-turn provenance check."
 
 (defun dsh-bridge--view-waiting-accept-p (turn-number)
   "Whether content from TURN-NUMBER may replace the waiting placeholder.
-A waiting view shows `(running...)' until a turn *newer* than the abandoned
-one produces text; when nothing was abandoned (fresh session), any turn does."
-  (and (numberp turn-number)
+Nil when no placeholder is up.  A waiting view shows `(running...)' until a
+turn *newer* than the pre-send one produces text; when nothing was showing
+(a fresh session), any turn does."
+  (and dsh-bridge--view-waiting
+       (numberp turn-number)
        (or (eq dsh-bridge--view-waiting t)
            (> turn-number dsh-bridge--view-waiting))))
 
 (defun dsh-bridge--view-waiting-fill (session-id base &optional cwd)
   "Put the current DSH-View for SESSION-ID into the waiting state at BASE.
-BASE is the abandoned turn number whose content was showing before the send
+BASE is the pre-send turn number whose content was showing before the send
 (nil for nothing).  The buffer shows the running placeholder (or the awaiting
 note if a question is already pending) and turns on following; automatic
 refills replace it only with a newer turn
 (see `dsh-bridge--view-waiting-accept-p').  CWD, when non-nil, sets the
 buffer's workspace directory."
+  ;; The fill clears the waiting state; set it afterwards so the placeholder
+  ;; stays up.
   (dsh-bridge--view-fill session-id nil nil cwd t)
   (setq-local dsh-bridge--view-waiting (or base t))
   (setq-local dsh-bridge--view-follow t)
@@ -2120,7 +2138,7 @@ state, the segment reads `(latest/n)' instead.
 This function uses the turns cache only, and does no synchronous I/O."
   (if dsh-bridge--view-waiting
       ;; Waiting for the first reply: the placeholder is not a turn, so no
-      ;; position (the cache may still hold the abandoned turn).
+      ;; position (the cache may still hold the pre-send turn).
       ""
     (let ((session dsh-bridge--view-content-session))
       (if (and session (dsh-bridge--turns-cache-turns session))
@@ -2185,8 +2203,9 @@ Also ensures the header's elapsed ticker runs if the session is live.
 Announces the state change, since the only other feedback is the header's `⤓'
 marker."
   (let ((turns (dsh-bridge--view-turns-refresh t)))
-    ;; Explicitly entering follow shows whatever is newest; a leftover waiting
-    ;; state must not gate it.
+    ;; Entering follow by hand ends any waiting state.  Kept explicit even
+    ;; though `dsh-bridge--view-fill' also clears it, because the refill
+    ;; below is skipped when the turn cache is empty.
     (setq-local dsh-bridge--view-waiting nil)
     (setq-local dsh-bridge--view-follow t)
     (setq-local dsh-bridge--view-turn-index nil)
@@ -2242,8 +2261,7 @@ to pop to the buffer using the same window.  Return the buffer."
 		  (setq-local dsh-bridge--view-follow t))
 		;; Re-set header after the follow flag so `⤓' marker is right.
 		(setq header-line-format (dsh-bridge--view-header-line))
-		(dsh-bridge--view-ticker-ensure)
-		(setq-local dsh-bridge--view-waiting nil))
+		(dsh-bridge--view-ticker-ensure))
 	  (funcall (if same-window
 				   #'pop-to-buffer-same-window
 				 #'pop-to-buffer)
@@ -2321,7 +2339,6 @@ collected in the view."
 		  (dsh-bridge--view-waiting-fill session-id nil (alist-get 'cwd alist))
 		(dsh-bridge--view-fill session-id (car-safe turns) nil
 							   (alist-get 'cwd alist) t t)
-		(setq-local dsh-bridge--view-waiting nil)
 		(when (or running (and turns (dsh-bridge--view-turn-open-p (car-safe turns))))
 		  (setq-local dsh-bridge--view-follow t))
 		(setq header-line-format (dsh-bridge--view-header-line))
@@ -2349,7 +2366,7 @@ from the newest cached turn record.  The fill is append-style (preserving
 point when the shown turn merely grew a segment); when a newer turn has
 started, the view flips to it.  A view in the waiting state (a prompt was
 just sent, `dsh-bridge--view-waiting') accepts only content from a turn newer
-than the abandoned one; anything else keeps the `(running...)' placeholder.
+than the pre-send one; anything else keeps the `(running...)' placeholder.
 The refill passes no CWD, so `dsh-bridge--apply-session-directory' falls back
 to the sessions cache (the old `/output'-based fill supplied the cwd from the
 response)."
@@ -2366,8 +2383,7 @@ response)."
                        (not (and dsh-bridge--view-waiting
                                  (not (dsh-bridge--view-waiting-accept-p
                                        (alist-get 'turn newest))))))
-              (dsh-bridge--view-fill session-id newest nil nil t t)
-              (setq-local dsh-bridge--view-waiting nil))))))))
+              (dsh-bridge--view-fill session-id newest nil nil t t))))))))
 
 (defun dsh-bridge--turns-changed (session-id)
   "Handle one `replies-changed' frame for SESSION-ID, deferred.
@@ -2733,7 +2749,6 @@ state (`dsh-bridge--view-waiting')."
 						 nil nil t)
   (setq-local dsh-bridge--view-turn-index index)
   (setq-local dsh-bridge--view-follow nil)
-  (setq-local dsh-bridge--view-waiting nil)
   (setq header-line-format (dsh-bridge--view-header-line))
   (dsh-bridge--view-ticker-ensure))
 
@@ -2880,7 +2895,7 @@ non-nil, is the ms-epoch at which the prompt was sent."
 		   ;; started.  It may already carry text — or have completed outright —
 		   ;; by the time the blocking POST returns, in which case the waiting
 		   ;; placeholder could never be replaced: its gate rejects any turn not
-		   ;; strictly newer than the abandoned one, and the abandoned one would
+		   ;; strictly newer than the pre-send one, and the pre-send one would
 		   ;; be this very turn.
 		   (sent-turn (and sent-at newest
 						   (>= (or (alist-get 'startedAt newest) 0)
@@ -2894,7 +2909,6 @@ non-nil, is the ms-epoch at which the prompt was sent."
 			(progn
 			  (dsh-bridge--view-fill session-id newest nil
 									 (alist-get 'cwd alist) t t)
-			  (setq-local dsh-bridge--view-waiting nil)
 			  (goto-char (point-max)))
 		  ;; Otherwise, populate with a "running..." message.
 		  (dsh-bridge--view-waiting-fill
@@ -3044,7 +3058,11 @@ fallback — lands at the end when the view is following and PRESERVE-POINT
 was given, otherwise at the top.
 
 The DSH-View buffer's turn-following state is preserved when refilling
-the same session, and dropped when the shown session changes."
+the same session, and dropped when the shown session changes.  Filling
+also ends the buffer's post-send waiting state
+(`dsh-bridge--view-waiting'), so callers that render content need not
+clear it themselves, and the header computed below already carries the
+settled `(k/n)' position."
   (unless (eq major-mode 'dsh-bridge-view-mode)
     (dsh-bridge-view-mode))
   (add-hook 'kill-buffer-hook #'dsh-bridge--view-ticker-ensure-later nil t)
@@ -3053,6 +3071,11 @@ the same session, and dropped when the shown session changes."
     (setq-local dsh-bridge--view-content-session session-id)
     (unless (equal session-id old)
       (setq-local dsh-bridge--view-follow nil)))
+  ;; Rendering content ends the placeholder.  Clearing before the header is
+  ;; computed (below) means an accepted refill shows its position at once
+  ;; rather than waiting for the next ticker repaint; `--view-waiting-fill'
+  ;; re-sets the state after its own fill.
+  (setq-local dsh-bridge--view-waiting nil)
   (setq-local dsh-bridge--view-received-at received-at)
   (setq-local dsh-bridge--view-turn-index nil)
   (setq-local dsh-bridge--view-turn
@@ -3144,9 +3167,7 @@ known, the default buffer is used."
 	(unless entry-id
 	  (message "dsh-bridge: message received without a session id"))
 	(with-current-buffer buf
-	  (dsh-bridge--view-fill session-id text (alist-get 'ts entry))
-	  ;; A pushed message supersedes any waiting placeholder.
-	  (setq-local dsh-bridge--view-waiting nil))
+	  (dsh-bridge--view-fill session-id text (alist-get 'ts entry)))
 	buf))
 
 (defun dsh-bridge--view-await-refresh (session-id)
@@ -5712,14 +5733,11 @@ content merely changed in place)."
 						;; `replies-changed'; here, accept only genuinely
 						;; newer content, else the turn was textless — clear
 						;; to blank (idle) rather than resurrecting the
-						;; abandoned turn.
+						;; pre-send turn.
 						(if (dsh-bridge--view-waiting-accept-p
 							 (and newest (alist-get 'turn newest)))
-							(progn
-							  (dsh-bridge--view-fill shown-id newest nil nil t t)
-							  (setq-local dsh-bridge--view-waiting nil))
-						  (dsh-bridge--view-fill shown-id nil nil nil t)
-						  (setq-local dsh-bridge--view-waiting nil))
+							(dsh-bridge--view-fill shown-id newest nil nil t t)
+						  (dsh-bridge--view-fill shown-id nil nil nil t))
 					  (when newest
 						(dsh-bridge--view-fill shown-id newest nil nil t t))))))))))))
 
