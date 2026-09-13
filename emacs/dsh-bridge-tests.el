@@ -6054,6 +6054,60 @@ relative `filename' is malformed and stays as text."
       (delete-file file)
       (dsh-bridge-test--kill-prompt-buffer))))
 
+(ert-deftest dsh-bridge-attachment-tag-search-recognizes ()
+  "The font-lock matcher recognizes exactly the parser's tag shape.
+A well-formed tag line matches and leaves group 1 on the tag text; a
+relative `filename' and a tag embedded in prose do not."
+  (with-temp-buffer
+    (insert "<#attachment filename=\"/tmp/one.txt\">\n"
+            "<#attachment filename=\"relative.txt\">\n"
+            "prose <#attachment filename=\"/tmp/two.txt\">\n"
+            "  <#attachment filename=\"/tmp/three.txt\">\n")
+    (goto-char (point-min))
+    (should (dsh-bridge--attachment-tag-search (point-max)))
+    (should (equal (match-string 1) "<#attachment filename=\"/tmp/one.txt\">"))
+    (goto-char (match-end 0))
+    (should (dsh-bridge--attachment-tag-search (point-max)))
+    (should (equal (match-string 1) "<#attachment filename=\"/tmp/three.txt\">"))
+    (goto-char (match-end 0))
+    (should-not (dsh-bridge--attachment-tag-search (point-max)))))
+
+(ert-deftest dsh-bridge-attachment-tag-font-lock ()
+  "An attachment tag is font-locked exactly while it is recognizable.
+The highlight carries `rear-nonsticky', so typing after the tag does not
+inherit the face, and editing the tag out of shape (or a relative
+`filename') drops the highlight."
+  (with-temp-buffer
+    (dsh-bridge-prompt-mode)
+    (font-lock-mode 1)
+    (dsh-bridge--insert-attachment-tag "/tmp/locked.txt")
+    (font-lock-ensure)
+    (should (eq (get-text-property (point-min) 'face)
+                'dsh-bridge-attachment-face))
+    (should (get-text-property (point-min) 'rear-nonsticky))
+    ;; Text typed at the end of the tag line does not inherit the face.
+    (goto-char (1- (point-max)))
+    (let ((last-command-event ?Z)) (self-insert-command 1))
+    (should-not (get-text-property (1- (point)) 'face))
+    ;; A hand-typed tag is highlighted too: the text is the source of truth.
+    (erase-buffer)
+    (insert "<#attachment filename=\"/tmp/typed.txt\">\n")
+    (font-lock-ensure)
+    (should (eq (get-text-property (point-min) 'face)
+                'dsh-bridge-attachment-face))
+    ;; Clobbering the tag clears the highlight on the next fontification.
+    (goto-char (point-min))
+    (let ((inhibit-read-only t)) (delete-char 1))
+    (font-lock-ensure)
+    (should-not (text-property-any (point-min) (point-max)
+                                   'face 'dsh-bridge-attachment-face))
+    ;; A relative filename is not a recognisable tag, so it is not highlighted.
+    (erase-buffer)
+    (insert "<#attachment filename=\"relative.txt\">\n")
+    (font-lock-ensure)
+    (should-not (text-property-any (point-min) (point-max)
+                                   'face 'dsh-bridge-attachment-face))))
+
 (ert-deftest dsh-bridge-attach-file-refuses-directory ()
   "A directory is not an attachable file."
   (dsh-bridge-test--kill-prompt-buffer)

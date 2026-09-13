@@ -1503,10 +1503,11 @@ SESSION-ID overrides the effective session for this call only."
 ;; host handles its own type detection.
 
 (defconst dsh-bridge--attachment-line-regexp
-  "^[ \t]*<#attachment\\([^\n]*\\)>[ \t]*\n?"
+  "^[ \t]*\\(<#attachment\\([^\n]*\\)>\\)[ \t]*\n?"
   "Regexp matching one whole DSH attachment tag line.
-The first group captures the tag's attribute text.	The optional trailing
-newline makes the match a whole line, for stripping and counting.")
+The first group captures the tag text and the second its attribute text.
+The optional trailing newline makes the match a whole line, for stripping
+and counting.")
 
 (defun dsh-bridge--attachment-escape (value)
   "Return VALUE escaped for a double-quoted attachment tag attribute."
@@ -1541,7 +1542,7 @@ absolute `filename' is malformed and stays in CLEAN-TEXT."
 	  ;; Capture the outer match before `dsh-bridge--attachment-attribute'
 	  ;; runs its own `string-match' and clobbers the match data.
 	  (let* ((whole (match-string 0 text))
-			 (attributes (or (match-string 1 text) ""))
+			 (attributes (or (match-string 2 text) ""))
 			 (start (match-beginning 0))
 			 (end (match-end 0))
 			 (path (dsh-bridge--attachment-attribute attributes "filename")))
@@ -1551,6 +1552,26 @@ absolute `filename' is malformed and stays in CLEAN-TEXT."
 		  (setq clean (concat clean whole)))
 		(setq position end)))
 	(cons (concat clean (substring text position)) (nreverse attachments))))
+
+(defun dsh-bridge--attachment-tag-search (limit)
+  "Font-lock matcher for the next recognized attachment tag before LIMIT.
+A tag is recognized exactly when `dsh-bridge--parse-attachments' would
+extract it: a line beginning (after indentation) with
+`<#attachment ...>' whose `filename' attribute is an absolute path.  Set
+the match data so group 1 spans the tag text, and leave point after the
+line.  Return non-nil when a tag was found."
+  (let (found)
+	(while (and (not found)
+				(re-search-forward dsh-bridge--attachment-line-regexp limit t))
+	  ;; `dsh-bridge--attachment-attribute' clobbers the match data, so
+	  ;; reinstate the line match once the tag is known to be well formed.
+	  (let ((data (match-data)))
+		(let ((path (dsh-bridge--attachment-attribute
+					 (or (match-string 2) "") "filename")))
+		  (when (and (stringp path) (file-name-absolute-p path))
+			(set-match-data data)
+			(setq found t)))))
+	found))
 
 (defun dsh-bridge--attachment-payload (attachments)
   "Return a vector of JSON alist entries from ATTACHMENTS, in order.
@@ -1562,16 +1583,14 @@ ATTACHMENTS is a list of plists (:path PATH).  The vector makes
 		   attachments)))
 
 (defun dsh-bridge--insert-attachment-tag (path)
-  "Insert an attachment tag for PATH at point."
-  (let ((tag (dsh-bridge--attachment-format path)))
-	(insert
-	 (propertize tag
-				 'face 'dsh-bridge-attachment-face
-				 'font-lock-face 'dsh-bridge-attachment-face
-				 'help-echo (format "DSH attachment: %s\n\
-Delete this line to detach it."
-									path)))
-	(insert "\n")))
+  "Insert an attachment tag for PATH at point.
+The tag is plain text.  Highlighting and recognition both key off the
+`<#attachment filename=\"...\">' shape (see
+`dsh-bridge--attachment-tag-search'), so editing the tag out of shape
+makes the highlight disappear: the highlight is the affordance that the
+tag will still be attached."
+  (insert (dsh-bridge--attachment-format path))
+  (insert "\n"))
 
 (defun dsh-bridge--remove-attachment-tags ()
   "Remove every attachment tag line from the current buffer."
@@ -4407,7 +4426,13 @@ carries N attachment tag lines."
 (defun dsh-bridge--prompt-mode-setup ()
   "Common setup for `dsh-bridge-prompt-mode'."
   (setq-local header-line-format '(:eval (dsh-bridge--prompt-header-line)))
-  (setq-local revert-buffer-function #'dsh-bridge--revert-prompt-buffer))
+  (setq-local revert-buffer-function #'dsh-bridge--revert-prompt-buffer)
+  (font-lock-add-keywords
+   nil
+   '((dsh-bridge--attachment-tag-search
+      (1 '(face dsh-bridge-attachment-face
+              rear-nonsticky t)
+         t)))))
 
 (declare-function markdown-mode "markdown-mode")
 (declare-function dsh-bridge-prompt-mode "dsh-bridge")
