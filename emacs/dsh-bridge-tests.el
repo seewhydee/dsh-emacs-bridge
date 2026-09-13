@@ -90,6 +90,57 @@
 (ert-deftest dsh-bridge-error-message-success ()
   (should (equal (dsh-bridge--error-message nil 200 '((ok . t))) nil)))
 
+(defmacro dsh-bridge-test--with-http (retrieve &rest body)
+  "Run BODY with the HTTP plumbing stubbed for `dsh-bridge--http'.
+RETRIEVE replaces `url-retrieve-synchronously'; `dsh-bridge--parse-response'
+reports a 200 with the JSON body `{\"ok\":true}'; the plugin check and the
+SSE listener are disabled."
+  (declare (indent 1))
+  `(cl-letf (((symbol-function 'url-retrieve-synchronously) ,retrieve)
+             ((symbol-function 'dsh-bridge--parse-response)
+              (lambda (_buffer) (cons 200 "{\"ok\":true}")))
+             ((symbol-function 'dsh-bridge--ensure-plugin) #'ignore)
+             ((symbol-function 'dsh-bridge-notifications-start) #'ignore))
+     ,@body))
+
+(ert-deftest dsh-bridge-http-success ()
+  "`--http' returns (nil BODY STATUS), and `--request' parses the body
+into the (STATUS . ALIST) pair."
+  (dsh-bridge-test--with-http
+      (lambda (&rest _) (generate-new-buffer " *dsh-bridge-test-http*"))
+    (should (equal (dsh-bridge--http "GET" "/x" nil)
+                   (list nil "{\"ok\":true}" 200)))
+    (should (equal (dsh-bridge--request "GET" "/x" nil)
+                   (cons 200 '((ok . t)))))))
+
+(ert-deftest dsh-bridge-http-timeout ()
+  "A nil retrieval becomes a timeout: an `:error' plist for `--http', and
+(nil . nil) for `--request'."
+  (dsh-bridge-test--with-http (lambda (&rest _) nil)
+    (should (equal (dsh-bridge--http "GET" "/x" nil)
+                   (list '(:error "request timed out") nil nil)))
+    (should (equal (dsh-bridge--request "GET" "/x" nil) (cons nil nil)))))
+
+(ert-deftest dsh-bridge-http-signaled-error-is-not-a-signal ()
+  "A signaled retrieval error becomes an `:error' plist, and `--request'
+reports (nil . nil) instead of letting the signal escape."
+  (dsh-bridge-test--with-http (lambda (&rest _) (error "boom"))
+    (should (equal (dsh-bridge--http "GET" "/x" nil)
+                   (list '(:error "boom") nil nil)))
+    (should (equal (dsh-bridge--request "GET" "/x" nil) (cons nil nil)))))
+
+(ert-deftest dsh-bridge-http-401-clears-status-cache ()
+  "A 401/404 response clears the cached bridge status, for both wrappers."
+  (let ((dsh-bridge--bridge-status-cache 'running))
+    (cl-letf (((symbol-function 'url-retrieve-synchronously)
+               (lambda (&rest _) (generate-new-buffer " *dsh-bridge-test-http*")))
+              ((symbol-function 'dsh-bridge--parse-response)
+               (lambda (_buffer) (cons 401 "")))
+              ((symbol-function 'dsh-bridge--ensure-plugin) #'ignore)
+              ((symbol-function 'dsh-bridge-notifications-start) #'ignore))
+      (should (equal (dsh-bridge--request "GET" "/x" nil) (cons 401 nil)))
+      (should (null dsh-bridge--bridge-status-cache)))))
+
 ;;; Targeting: the effective-session rule and the default target
 
 (ert-deftest dsh-bridge-effective-session-default-only ()
@@ -211,9 +262,9 @@ present iff the indicator style produces a glyph."
   "A nil-target send records the host-resolved session for display."
   (let ((dsh-bridge-default-session nil)
         (dsh-bridge--last-resolved-active nil))
-    (cl-letf (((symbol-function 'dsh-bridge--call)
-               (lambda (_method _path payload callback)
-                 (funcall callback nil
+    (cl-letf (((symbol-function 'dsh-bridge--http)
+               (lambda (_method _path payload)
+                 (list nil
                           "{\"ok\":true,\"sessionId\":\"s1\",\"title\":\"T\"}"
                           200))))
       (dsh-bridge-send-text "hello"))
@@ -225,9 +276,9 @@ present iff the indicator style produces a glyph."
 recorded."
   (let ((dsh-bridge-default-session "s1")
         (dsh-bridge--last-resolved-active nil))
-    (cl-letf (((symbol-function 'dsh-bridge--call)
-               (lambda (_method _path payload callback)
-                 (funcall callback nil
+    (cl-letf (((symbol-function 'dsh-bridge--http)
+               (lambda (_method _path payload)
+                 (list nil
                           "{\"ok\":true,\"sessionId\":\"s1\",\"title\":\"T\"}"
                           200))))
       (dsh-bridge-send-text "hello"))
@@ -244,9 +295,9 @@ neither, the send is still reported but no session state is touched."
         (dsh-bridge--last-sent nil)
         (sent 'uncalled)
         (msg nil))
-    (cl-letf (((symbol-function 'dsh-bridge--call)
-               (lambda (_method _path _payload callback)
-                 (funcall callback nil "{\"ok\":true}" 200)))
+    (cl-letf (((symbol-function 'dsh-bridge--http)
+               (lambda (_method _path _payload)
+                 (list nil "{\"ok\":true}" 200)))
               ((symbol-function 'message)
                (lambda (&rest args) (setq msg (apply #'format args)))))
       (dsh-bridge-send-text "hello" nil (lambda (id) (setq sent id))))
@@ -259,9 +310,9 @@ neither, the send is still reported but no session state is touched."
         (dsh-bridge--session-status nil)
         (sent 'uncalled)
         (msg nil))
-    (cl-letf (((symbol-function 'dsh-bridge--call)
-               (lambda (_method _path _payload callback)
-                 (funcall callback nil "{\"ok\":true}" 200)))
+    (cl-letf (((symbol-function 'dsh-bridge--http)
+               (lambda (_method _path _payload)
+                 (list nil "{\"ok\":true}" 200)))
               ((symbol-function 'message)
                (lambda (&rest args) (setq msg (apply #'format args)))))
       (dsh-bridge-send-text "hello" nil (lambda (id) (setq sent id))))
@@ -317,9 +368,9 @@ neither, the send is still reported but no session state is touched."
   "send-draft POSTs the text (and the effective session) to /draft."
   (let ((captured nil)
         (dsh-bridge-default-session "s1"))
-    (cl-letf (((symbol-function 'dsh-bridge--call)
-               (lambda (method path payload _callback)
-                 (setq captured (list method path payload)))))
+    (cl-letf (((symbol-function 'dsh-bridge--http)
+               (lambda (method path payload)
+                 (setq captured (list method path payload)) nil)))
       (dsh-bridge-send-draft "hello"))
     (should (equal (car captured) "POST"))
     (should (equal (cadr captured) "/draft"))
@@ -330,9 +381,9 @@ neither, the send is still reported but no session state is touched."
   "An explicit session override beats the default target in the /draft payload."
   (let ((captured nil)
         (dsh-bridge-default-session "pin"))
-    (cl-letf (((symbol-function 'dsh-bridge--call)
-               (lambda (method path payload _callback)
-                 (setq captured (list method path payload)))))
+    (cl-letf (((symbol-function 'dsh-bridge--http)
+               (lambda (method path payload)
+                 (setq captured (list method path payload)) nil)))
       (dsh-bridge-send-draft "hello" "override"))
     (should (equal (cadr captured) "/draft"))
     (should (equal (cdr (assoc 'sessionId (caddr captured))) "override"))))
@@ -341,8 +392,8 @@ neither, the send is still reported but no session state is touched."
   "A successful draft push leaves the prompt buffer alone; the buffer is
 blanked when a new composition starts, not when a draft is sent."
   (let ((dsh-bridge-default-session "s1"))
-    (cl-letf (((symbol-function 'dsh-bridge--call)
-               (lambda (_m _p _pl cb) (funcall cb nil "{\"sessionId\":\"s1\"}" 200))))
+    (cl-letf (((symbol-function 'dsh-bridge--http)
+               (lambda (_m _p _pl) (list nil "{\"sessionId\":\"s1\"}" 200))))
       (with-current-buffer (get-buffer-create "*dsh-bridge-prompt*")
         (dsh-bridge-prompt-mode)
         (insert "prompt text")
@@ -362,9 +413,9 @@ blanked when a new composition starts, not when a draft is sent."
   "An explicit session override beats the default target in the /send payload."
   (let ((captured nil)
         (dsh-bridge-default-session "pin"))
-    (cl-letf (((symbol-function 'dsh-bridge--call)
-               (lambda (_method _path payload _callback)
-                 (setq captured payload))))
+    (cl-letf (((symbol-function 'dsh-bridge--http)
+               (lambda (_method _path payload)
+                 (setq captured payload) nil)))
       (dsh-bridge-send-text "hi" "override"))
     (should (equal (cdr (assoc 'sessionId captured)) "override"))))
 
@@ -372,9 +423,9 @@ blanked when a new composition starts, not when a draft is sent."
   "With neither a default target nor an override, no sessionId key is sent."
   (let ((captured nil)
         (dsh-bridge-default-session nil))
-    (cl-letf (((symbol-function 'dsh-bridge--call)
-               (lambda (_method _path payload _callback)
-                 (setq captured payload))))
+    (cl-letf (((symbol-function 'dsh-bridge--http)
+               (lambda (_method _path payload)
+                 (setq captured payload) nil)))
       (dsh-bridge-send-text "hi"))
     (should (equal (cdr (assoc 'text captured)) "hi"))
     (should (null (assoc 'sessionId captured)))))
@@ -386,9 +437,9 @@ blanked when a new composition starts, not when a draft is sent."
       (insert "before region after")
       (goto-char 8)
       (set-mark (point-max))
-      (cl-letf (((symbol-function 'dsh-bridge--call)
-                 (lambda (_method _path payload _callback)
-                   (setq captured payload)))
+      (cl-letf (((symbol-function 'dsh-bridge--http)
+                 (lambda (_method _path payload)
+                   (setq captured payload) nil))
                 ;; The guard must not fire for a region send.
                 ((symbol-function 'y-or-n-p)
                  (lambda (&rest _) (error "dsh-bridge: guard asked for a region"))))
@@ -400,9 +451,9 @@ blanked when a new composition starts, not when a draft is sent."
   (let ((asked nil) captured)
     (with-temp-buffer
       (insert "whole")
-      (cl-letf (((symbol-function 'dsh-bridge--call)
-                 (lambda (_method _path payload _callback)
-                   (setq captured payload)))
+      (cl-letf (((symbol-function 'dsh-bridge--http)
+                 (lambda (_method _path payload)
+                   (setq captured payload) nil))
                 ((symbol-function 'y-or-n-p)
                  (lambda (&rest _) (setq asked t) t)))
         (dsh-bridge-send)))
@@ -414,9 +465,9 @@ blanked when a new composition starts, not when a draft is sent."
   (let ((asked nil) captured)
     (with-temp-buffer
       (insert "whole")
-      (cl-letf (((symbol-function 'dsh-bridge--call)
-                 (lambda (_method _path payload _callback)
-                   (setq captured payload)))
+      (cl-letf (((symbol-function 'dsh-bridge--http)
+                 (lambda (_method _path payload)
+                   (setq captured payload) nil))
                 ((symbol-function 'y-or-n-p)
                  (lambda (&rest _) (setq asked t) t)))
         (dsh-bridge-draft)))
@@ -431,9 +482,9 @@ blanked when a new composition starts, not when a draft is sent."
       (dsh-bridge-view-mode)
       (goto-char 7)
       (set-mark (point-max))
-      (cl-letf (((symbol-function 'dsh-bridge--call)
-                 (lambda (_method _path payload _callback)
-                   (setq captured payload))))
+      (cl-letf (((symbol-function 'dsh-bridge--http)
+                 (lambda (_method _path payload)
+                   (setq captured payload) nil)))
         (dsh-bridge-send)))
     (should (equal (cdr (assoc 'text captured)) "beta"))))
 
@@ -452,9 +503,9 @@ call only, leaving the default target untouched."
                  (lambda () (cons 200 '(((id . "live-1") (live . t))))))
                 ((symbol-function 'completing-read)
                  (lambda (_prompt _table &rest _) "live-1"))
-                ((symbol-function 'dsh-bridge--call)
-                 (lambda (_method _path payload _callback)
-                   (setq captured payload))))
+                ((symbol-function 'dsh-bridge--http)
+                 (lambda (_method _path payload)
+                   (setq captured payload) nil)))
         (call-interactively #'dsh-bridge-send)))
     (should (equal (cdr (assoc 'sessionId captured)) "live-1"))
     (should (equal (cdr (assoc 'text captured)) "text"))
@@ -467,18 +518,18 @@ call only, leaving the default target untouched."
 current buffer has no session of its own."
   (let ((dsh-bridge-default-session "s1")
         (captured nil))
-    (cl-letf (((symbol-function 'dsh-bridge--call)
-               (lambda (_method path _payload _callback)
-                 (setq captured path))))
+    (cl-letf (((symbol-function 'dsh-bridge--http)
+               (lambda (_method path _payload)
+                 (setq captured path) nil)))
       (dsh-bridge-fetch))
     (should (equal captured "/turns?sessionId=s1"))))
 
 (ert-deftest dsh-bridge-fetch-populates-output ()
   "Fetch writes the newest turn into *dsh-bridge-output* in `dsh-bridge-view-mode'."
   (let ((dsh-bridge-default-session "s1"))
-    (cl-letf (((symbol-function 'dsh-bridge--call)
-               (lambda (_method _path _payload callback)
-                 (funcall callback nil
+    (cl-letf (((symbol-function 'dsh-bridge--http)
+               (lambda (_method _path _payload)
+                 (list nil
                           (concat "{\"sessionId\":\"s1\",\"turns\":["
                                   "{\"turn\":2,\"startedAt\":1000,\"endedAt\":2000,\"reason\":\"completed\",\"segments\":["
                                   "{\"text\":\"reply text\",\"time\":1000000,\"step\":1}]}]}")
@@ -502,9 +553,9 @@ current buffer has no session of its own."
   "A peek/override fetch labels the output buffer with the content's session,
 not the default target."
   (let ((dsh-bridge-default-session "s1"))
-    (cl-letf (((symbol-function 'dsh-bridge--call)
-               (lambda (_method _path _payload callback)
-                 (funcall callback nil
+    (cl-letf (((symbol-function 'dsh-bridge--http)
+               (lambda (_method _path _payload)
+                 (list nil
                           (concat "{\"sessionId\":\"s2\",\"turns\":["
                                   "{\"turn\":3,\"startedAt\":1000,\"endedAt\":2000,\"reason\":\"completed\",\"segments\":["
                                   "{\"text\":\"other reply\",\"time\":1000000,\"step\":1}]}]}")
@@ -533,9 +584,9 @@ so the check must compare against t, not truthiness (a regression: a
                             'idle)))
     (let ((dsh-bridge-default-session "s1")
           (dsh-bridge--session-status nil))
-      (cl-letf (((symbol-function 'dsh-bridge--call)
-                 (lambda (_method _path _payload callback)
-                   (funcall callback nil (car case) 200)))
+      (cl-letf (((symbol-function 'dsh-bridge--http)
+                 (lambda (_method _path _payload)
+                   (list nil (car case) 200)))
                 ((symbol-function 'dsh-bridge--request)
                  (lambda (&rest _) (cons nil nil))))
         (dsh-bridge-fetch "s1"))
@@ -546,9 +597,9 @@ so the check must compare against t, not truthiness (a regression: a
   "A fetch whose newest turn is still running turns on following: the view
 then grows in place as further segments commit."
   (let ((dsh-bridge-default-session "s1"))
-    (cl-letf (((symbol-function 'dsh-bridge--call)
-               (lambda (_method _path _payload callback)
-                 (funcall callback nil
+    (cl-letf (((symbol-function 'dsh-bridge--http)
+               (lambda (_method _path _payload)
+                 (list nil
                           (concat "{\"sessionId\":\"s1\",\"running\":true,\"turns\":["
                                   "{\"turn\":5,\"startedAt\":1000,\"segments\":["
                                   "{\"text\":\"partial reply\",\"time\":1000000,\"step\":1}]}]}")
@@ -570,9 +621,9 @@ then grows in place as further segments commit."
 (ert-deftest dsh-bridge-fetch-idle-turn-stays-snapshot ()
   "A fetch of a completed (idle) newest turn does not turn on following."
   (let ((dsh-bridge-default-session "s1"))
-    (cl-letf (((symbol-function 'dsh-bridge--call)
-               (lambda (_method _path _payload callback)
-                 (funcall callback nil
+    (cl-letf (((symbol-function 'dsh-bridge--http)
+               (lambda (_method _path _payload)
+                 (list nil
                           (concat "{\"sessionId\":\"s1\",\"running\":false,\"turns\":["
                                   "{\"turn\":5,\"startedAt\":1000,\"endedAt\":2000,\"reason\":\"completed\",\"segments\":["
                                   "{\"text\":\"final reply\",\"time\":1000000,\"step\":1}]}]}")
@@ -591,9 +642,9 @@ cache entry, including the shown newest turn, so the position count and
 later incremental requests see every turn."
   (let ((dsh-bridge-default-session "s1")
         (dsh-bridge--turns-cache nil))
-    (cl-letf (((symbol-function 'dsh-bridge--call)
-               (lambda (_method _path _payload callback)
-                 (funcall callback nil
+    (cl-letf (((symbol-function 'dsh-bridge--http)
+               (lambda (_method _path _payload)
+                 (list nil
                           (concat "{\"sessionId\":\"s1\",\"running\":false,\"turns\":["
                                   "{\"turn\":3,\"startedAt\":1000,\"endedAt\":2000,\"reason\":\"completed\",\"segments\":["
                                   "{\"text\":\"newest\",\"time\":1000000,\"step\":1}]},"
@@ -615,9 +666,9 @@ explicit target is not the host's resolution, so nothing is recorded."
   (dolist (case (list (cons nil t) (cons "s1" nil)))
     (let ((dsh-bridge-default-session (car case))
           (dsh-bridge--last-resolved-active nil))
-      (cl-letf (((symbol-function 'dsh-bridge--call)
-                 (lambda (_method _path _payload callback)
-                   (funcall callback nil
+      (cl-letf (((symbol-function 'dsh-bridge--http)
+                 (lambda (_method _path _payload)
+                   (list nil
                             "{\"sessionId\":\"s1\",\"title\":\"T\",\"turns\":[]}"
                             200)))
                 ((symbol-function 'dsh-bridge--request)
@@ -632,9 +683,9 @@ explicit target is not the host's resolution, so nothing is recorded."
   "A `/turns' response without a sessionId is a protocol error: the view is
 not opened and no guessed target is used."
   (let ((dsh-bridge-default-session "s1"))
-    (cl-letf (((symbol-function 'dsh-bridge--call)
-               (lambda (_method _path _payload callback)
-                 (funcall callback nil "{\"turns\":[]}" 200))))
+    (cl-letf (((symbol-function 'dsh-bridge--http)
+               (lambda (_method _path _payload)
+                 (list nil "{\"turns\":[]}" 200))))
       (should-error (dsh-bridge-fetch) :type 'error))))
 
 (ert-deftest dsh-bridge-apply-session-directory ()
@@ -654,9 +705,9 @@ not opened and no guessed target is used."
 (ert-deftest dsh-bridge-fetch-sets-output-directory ()
   "Fetch sets the output buffer's default-directory to the session cwd."
   (let ((dsh-bridge-default-session "s1"))
-    (cl-letf (((symbol-function 'dsh-bridge--call)
-               (lambda (_method _path _payload callback)
-                 (funcall callback nil
+    (cl-letf (((symbol-function 'dsh-bridge--http)
+               (lambda (_method _path _payload)
+                 (list nil
                           (concat "{\"sessionId\":\"s1\",\"cwd\":\"/w/sess1\","
                                   "\"turns\":[{\"turn\":2,\"startedAt\":1000,\"endedAt\":2000,\"reason\":\"completed\","
                                   "\"segments\":[{\"text\":\"reply\",\"time\":1000000,\"step\":1}]}]}")
@@ -897,9 +948,9 @@ draft when the entry shown is pristine."
   "A successful send records the prompt into the session history cache."
   (let ((dsh-bridge-default-session "s1")
         (dsh-bridge--prompt-history nil))
-    (cl-letf (((symbol-function 'dsh-bridge--call)
-               (lambda (_method _path payload callback)
-                 (funcall callback nil
+    (cl-letf (((symbol-function 'dsh-bridge--http)
+               (lambda (_method _path payload)
+                 (list nil
                           "{\"ok\":true,\"sessionId\":\"s1\",\"title\":\"T\"}"
                           200))))
       (dsh-bridge-send-text "hello"))
@@ -1462,9 +1513,9 @@ after its last segment."
 and the view is bound to the fetched turn's number."
   (let ((dsh-bridge-default-session "s1")
         (dsh-bridge--turns-cache nil))
-    (cl-letf (((symbol-function 'dsh-bridge--call)
-               (lambda (_method _path _payload callback)
-                 (funcall callback nil
+    (cl-letf (((symbol-function 'dsh-bridge--http)
+               (lambda (_method _path _payload)
+                 (list nil
                           (concat "{\"sessionId\":\"s1\",\"turns\":["
                                   "{\"turn\":2,\"startedAt\":1000,\"endedAt\":2000,\"reason\":\"completed\",\"segments\":["
                                   "{\"text\":\"fresh\",\"time\":1000000,\"step\":1}]}]}")
@@ -3588,11 +3639,11 @@ selection moving during the send cannot strand the prompt on screen."
           (setq w2 (split-window w1 nil 'below))
           (set-window-buffer w2 prompt)
           (select-window w2)
-          (cl-letf (((symbol-function 'dsh-bridge--call)
-                     (lambda (_method _path _payload callback)
+          (cl-letf (((symbol-function 'dsh-bridge--http)
+                     (lambda (_method _path _payload)
                        ;; Steal selection during the POST, then answer.
                        (save-current-buffer (pop-to-buffer view))
-                       (funcall callback nil "{\"sessionId\":\"s1\"}" 200)))
+                       (list nil "{\"sessionId\":\"s1\"}" 200)))
                     ((symbol-function 'dsh-bridge--after-prompt-view)
                      (lambda (_id &optional _sent-at) view)))
             (with-current-buffer prompt
@@ -4507,8 +4558,8 @@ re-renders the surfaces, and announces it."
         (dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t))))
         (msg nil)
         (rendered nil))
-    (cl-letf (((symbol-function 'dsh-bridge--call)
-               (lambda (_m _p _pl cb) (funcall cb nil "{\"sessionId\":\"s1\"}" 200)))
+    (cl-letf (((symbol-function 'dsh-bridge--http)
+               (lambda (_m _p _pl) (list nil "{\"sessionId\":\"s1\"}" 200)))
               ((symbol-function 'message)
                (lambda (&rest args) (setq msg (apply #'format args))))
               ((symbol-function 'dsh-bridge--status-event-render)
@@ -4670,10 +4721,10 @@ once for all of them."
       (setq-local dsh-bridge--view-content-session "s1")
       (setq-local dsh-bridge--view-follow t)
       (let ((inhibit-read-only t)) (erase-buffer) (insert "old-2")))
-    (cl-letf (((symbol-function 'dsh-bridge--call)
-               (lambda (_method _path _payload callback)
+    (cl-letf (((symbol-function 'dsh-bridge--http)
+               (lambda (_method _path _payload)
                  (setq fetches (1+ fetches))
-                 (funcall callback nil
+                 (list nil
                           (concat "{\"sessionId\":\"s1\",\"turns\":["
                                   "{\"turn\":7,\"startedAt\":7000000,"
                                   "\"endedAt\":7003000,\"reason\":\"completed\","
@@ -4704,10 +4755,10 @@ the reply replaces the `(running...)' placeholder and the waiting state ends."
       (setq-local dsh-bridge--view-content-session "s1")
       (dsh-bridge--view-waiting-fill "s1" 2)
       (should (equal (buffer-string) dsh-bridge--view-running-placeholder)))
-    (cl-letf (((symbol-function 'dsh-bridge--call)
-               (lambda (_method _path _payload callback)
+    (cl-letf (((symbol-function 'dsh-bridge--http)
+               (lambda (_method _path _payload)
                  (setq calls (1+ calls))
-                 (funcall callback nil
+                 (list nil
                           (concat "{\"sessionId\":\"s1\",\"turns\":["
                                   "{\"turn\":3,\"startedAt\":3000000,"
                                   "\"endedAt\":3009000,\"reason\":\"completed\","
@@ -4738,9 +4789,9 @@ resurrecting the abandoned turn: `(running...)' gives way to nothing."
       (dsh-bridge--view-waiting-fill "s1" 2))
     ;; The response still names turn 2 as newest: no newer content was ever
     ;; committed, so the turn was textless.
-    (cl-letf (((symbol-function 'dsh-bridge--call)
-               (lambda (_method _path _payload callback)
-                 (funcall callback nil
+    (cl-letf (((symbol-function 'dsh-bridge--http)
+               (lambda (_method _path _payload)
+                 (list nil
                           (concat "{\"sessionId\":\"s1\",\"turns\":["
                                   "{\"turn\":2,\"startedAt\":2000000,"
                                   "\"endedAt\":2009000,\"reason\":\"completed\","
@@ -4894,9 +4945,8 @@ session is waiting for an answer, and nothing jumps: the user did not act."
 (ert-deftest dsh-bridge-ask-user-resolved-after-local-submit ()
   "A resolved frame that outruns the submit POST's own response banners the
 buffer with what this buffer did — the answer was sent here, not elsewhere —
-and the late callback settling afterwards does not banner a second time."
+and the late response settling afterwards does not banner a second time."
   (let ((dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t))))
-        (pending-cb nil)
         (exited nil))
     (with-current-buffer
         (dsh-bridge--question-buffer "s1" "q1"
@@ -4905,18 +4955,17 @@ and the late callback settling afterwards does not banner a second time."
       (re-search-forward "1\\. Yes")
       (goto-char (line-beginning-position))
       (dsh-bridge--question-toggle-at-point)
-      ;; The POST is in flight: capture its callback without calling it, the
-      ;; way a slow response leaves it while the SSE frame arrives.
-      (cl-letf (((symbol-function 'dsh-bridge--call)
-                 (lambda (_m _p _payload cb) (setq pending-cb cb)))
+      ;; The POST is in flight: the host's resolved frame can outrun the
+      ;; response, so the stub emits the frame before the request returns.
+      (cl-letf (((symbol-function 'dsh-bridge--http)
+                 (lambda (_m _p _payload)
+                   (dsh-bridge--ask-user-resolved "s1" "q1" "answered")
+                   (list nil "{\"accepted\":true}" 200)))
                 ((symbol-function 'dsh-bridge--view-for-session)
                  (lambda (session-id) (cons 'view session-id)))
                 ((symbol-function 'dsh-bridge--exit-to-view)
                  (lambda (buffer &optional _window) (setq exited buffer))))
         (dsh-bridge--question-submit)
-        (should (functionp pending-cb))
-        ;; The host's resolved frame lands before the response does.
-        (dsh-bridge--ask-user-resolved "s1" "q1" "answered")
         (should dsh-bridge--question-dead)
         (should-not (string-match-p "answered elsewhere" (buffer-string)))
         (should (string-match-p "\\`Your answer was sent\\.\n" (buffer-string)))
@@ -4925,9 +4974,8 @@ and the late callback settling afterwards does not banner a second time."
         (dsh-bridge--question-rerender-at-point)
         (should (string-match-p "\\`Your answer was sent\\.\n" (buffer-string)))
         (should-not (string-match-p "is waiting for your answer" (buffer-string)))
-        ;; The response callback settling afterwards must not banner again, and
-        ;; now performs the explicit exit to the session's view.
-        (funcall pending-cb nil "{\"accepted\":true}" 200)
+        ;; The response settling afterwards must not banner again, and now
+        ;; performs the explicit exit to the session's view.
         (should (equal (how-many "Your answer was sent\\." (point-min) (point-max)) 1))
         (should (equal exited '(view . "s1")))))
     (when (dsh-bridge--question-find-buffer "q1")
@@ -5124,8 +5172,8 @@ selected label; a submit the host does not accept leaves no note behind."
                     (re-search-forward "1\\. Yes")
                     (goto-char (line-beginning-position))
                     (dsh-bridge--question-toggle-at-point)
-                    (cl-letf (((symbol-function 'dsh-bridge--call)
-                               (lambda (_m _p _payload cb) (funcall cb nil body 200)))
+                    (cl-letf (((symbol-function 'dsh-bridge--http)
+                               (lambda (_m _p _payload) (list nil body 200)))
                               ((symbol-function 'dsh-bridge--view-for-session)
                                (lambda (session-id)
                                  (get-buffer-create
@@ -5294,10 +5342,10 @@ like sending from DSH-Prompt."
       (dsh-bridge--question-toggle-at-point)
       (should (equal (dsh-bridge--question-validate)
                      (list (list (cons 'id "q1") (cons 'selected (vector "Yes"))))))
-      (cl-letf (((symbol-function 'dsh-bridge--call)
-                 (lambda (_m _p payload cb)
+      (cl-letf (((symbol-function 'dsh-bridge--http)
+                 (lambda (_m _p payload)
                    (setq posted payload)
-                   (funcall cb nil "{\"accepted\":true}" 200)))
+                   (list nil "{\"accepted\":true}" 200)))
                 ((symbol-function 'dsh-bridge--view-for-session)
                  (lambda (session-id) (cons 'view session-id)))
                 ((symbol-function 'dsh-bridge--exit-to-view)
@@ -5325,10 +5373,10 @@ cancelling the tool call resumes the model exactly as answering does."
     (with-current-buffer
         (dsh-bridge--question-buffer "s1" "q1"
           '(( (id . "q1") (question . "Go?") (options . (((label . "Yes")))) )))
-      (cl-letf (((symbol-function 'dsh-bridge--call)
-                 (lambda (_m _p payload cb)
+      (cl-letf (((symbol-function 'dsh-bridge--http)
+                 (lambda (_m _p payload)
                    (setq posted payload)
-                   (funcall cb nil "{\"accepted\":true}" 200)))
+                   (list nil "{\"accepted\":true}" 200)))
                 ((symbol-function 'dsh-bridge--view-for-session)
                  (lambda (session-id) (cons 'view session-id)))
                 ((symbol-function 'dsh-bridge--exit-to-view)
@@ -5353,9 +5401,9 @@ user's action did not settle the question, so no jump happens."
       (re-search-forward "1\\. Yes")
       (goto-char (line-beginning-position))
       (dsh-bridge--question-toggle-at-point)
-      (cl-letf (((symbol-function 'dsh-bridge--call)
-                 (lambda (_m _p _payload cb)
-                   (funcall cb nil "{\"accepted\":false,\"reason\":\"not-pending\"}" 200)))
+      (cl-letf (((symbol-function 'dsh-bridge--http)
+                 (lambda (_m _p _payload)
+                   (list nil "{\"accepted\":false,\"reason\":\"not-pending\"}" 200)))
                 ((symbol-function 'dsh-bridge--exit-to-view)
                  (lambda (&rest _) (setq exited t))))
         (dsh-bridge--question-submit))
@@ -6198,8 +6246,8 @@ bound to the invoking buffer's effective session, not to the default."
         (dsh-bridge--sessions-cache nil)
         (dsh-bridge--prompt-history nil)
         (dsh-bridge--last-sent nil))
-    (cl-letf (((symbol-function 'dsh-bridge--call)
-               (lambda (_m _p _pl cb) (funcall cb nil "{\"sessionId\":\"s1\"}" 200)))
+    (cl-letf (((symbol-function 'dsh-bridge--http)
+               (lambda (_m _p _pl) (list nil "{\"sessionId\":\"s1\"}" 200)))
               ((symbol-function 'dsh-bridge--status-event-render) #'ignore)
               ((symbol-function 'message) #'ignore))
       (dsh-bridge-send-text "" "s1" nil '((:path "/tmp/x.png")))

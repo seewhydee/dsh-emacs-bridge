@@ -896,21 +896,20 @@ code or nil, and ALIST is the decoded JSON body or nil."
 
 (defun dsh-bridge--parse-json-body (body)
   "Decode JSON BODY as an alist, or nil when it is not a JSON object.
-Arrays decode as lists (the async callback counterpart of `dsh-bridge--request',
-whose JSON options this mirrors), and JSON null/false become nil."
+Arrays decode as lists, and JSON null/false become nil."
   (ignore-errors
 	(json-parse-string body :object-type 'alist :array-type 'list
 					   :null-object nil :false-object nil)))
 
-(defun dsh-bridge--call (method path payload callback)
-  "Perform METHOD request to PATH on the DeepSeek Harness bridge.
+(defun dsh-bridge--http (method path payload)
+  "Send a METHOD request to PATH via synchronous HTTP.
 PAYLOAD is an alist encoded as JSON (for POST) or nil (for GET).
-CALLBACK is invoked with (status body-string HTTP-STATUS), where STATUS is nil
-on a completed request (whatever the HTTP status) or an `:error' plist on a
-transport failure/timeout.	Uses `url-retrieve-synchronously': a request here
-is a short loopback round-trip, and the async `url-retrieve' path reports
-process-sentinel failures (such as the bug#23750 \"Multibyte text in HTTP
-request\" error) only via `message', which made them hard to diagnose."
+
+The return value is a list (URL-STATUS BODY HTTP-STATUS), where:
+- URL-STATUS is nil on a completed request (whatever the HTTP status) or
+  an `:error' plist on a transport failure/timeout.
+- BODY is the raw UTF-8 response body (\"\" if the response has none).
+- HTTP-STATUS is the response status code, or nil if none was received."
   ;; Start the notification listener before the plugin check:
   ;; `dsh-bridge--ensure-plugin' can diagnose or error, and the status
   ;; tracker must hear `turn-start'/'turn-complete' regardless.
@@ -920,53 +919,38 @@ request\" error) only via `message', which made them hard to diagnose."
 		(url-request-data
 		 (and payload (encode-coding-string (json-encode payload) 'utf-8)))
 		(url-request-extra-headers (dsh-bridge--extra-headers payload)))
-	(let ((buf nil)
-		  (err nil))
+	(let (buf err)
 	  (condition-case e
 		  (setq buf (url-retrieve-synchronously (concat dsh-bridge-url path)
 												t nil dsh-bridge-timeout))
 		(error (setq err e)))
 	  (cond
-	   (err (dsh-bridge--note-request-failure)
-			(funcall callback (list :error (error-message-string err)) nil nil))
-	   ((null buf) (dsh-bridge--note-request-failure)
-		(funcall callback '(:error "request timed out") nil nil))
+	   (err
+		(dsh-bridge--note-request-failure)
+		`((:error ,(error-message-string err)) nil nil))
+	   ((null buf)
+		(dsh-bridge--note-request-failure)
+		'((:error "request timed out") nil nil))
 	   (t
 		(let* ((response (dsh-bridge--parse-response buf))
-			   (http-status (car response)))
+			   (http-status (car response))
+			   (body (cdr response)))
 		  (kill-buffer buf)
 		  (when (memq http-status '(401 404))
 			(dsh-bridge--note-request-failure))
-		  (funcall callback nil (cdr response) http-status)))))))
+		  (list nil body http-status)))))))
 
 (defun dsh-bridge--request (method path payload)
-  "Perform METHOD request to PATH and return (STATUS . ALIST).
-STATUS is the HTTP status code, or nil on transport failure.  ALIST is the
-decoded JSON object (JSON null/false become nil, arrays become lists), or nil
-when the body is not a JSON object."
-  ;; Start the listener before the plugin check (see `dsh-bridge--call').
-  (dsh-bridge-notifications-start t)
-  (dsh-bridge--ensure-plugin)
-  (let ((url-request-method method)
-		(url-request-data
-		 (and payload (encode-coding-string (json-encode payload) 'utf-8)))
-		(url-request-extra-headers (dsh-bridge--extra-headers payload)))
-	(let ((buf (url-retrieve-synchronously (concat dsh-bridge-url path)
-										   t nil dsh-bridge-timeout)))
-	  (if (null buf)
-		  (progn (dsh-bridge--note-request-failure) (cons nil nil))
-		(let* ((response (dsh-bridge--parse-response buf))
-			   (status (car response))
-			   (alist (ignore-errors
-						(json-parse-string (cdr response)
-										   :object-type 'alist
-										   :array-type 'list
-										   :null-object nil
-										   :false-object nil))))
-		  (kill-buffer buf)
-		  (when (memq status '(401 404))
-			(dsh-bridge--note-request-failure))
-		  (cons status alist))))))
+  "Send a synchronous METHOD request to PATH, and return (STATUS . ALIST).
+STATUS is the HTTP status code, or nil on transport failure.
+ALIST is the decoded JSON object (with JSON null/false turned into nil,
+and arrays into lists), or nil if the body is not a JSON object.  Any
+transport failure is reported as (nil . nil)."
+  (pcase-let ((`(,url-status ,body ,http-status)
+			   (dsh-bridge--http method path payload)))
+	(if url-status
+		(cons nil nil)
+	  (cons http-status (dsh-bridge--parse-json-body body)))))
 
 (defun dsh-bridge--fetch-sessions ()
   "Fetch the DSH session roster and return (STATUS . SESSIONS).
@@ -1456,39 +1440,39 @@ with the prompt; PATH must be absolute."
 	(when attachments
 	  (push `(attachments . ,(dsh-bridge--attachment-payload attachments))
 			payload))
-	(dsh-bridge--call "POST" "/send" payload
-	  (lambda (status body http-status)
-		(let* ((alist (ignore-errors
-						(json-parse-string body :object-type 'alist)))
-			   (err (dsh-bridge--error-message status http-status alist)))
-		  (cond
-		   (err (message "dsh-bridge: %s" err))
-		   ((null alist)
-			(message "dsh-bridge: unreadable response: %s" body))
-		   (t
-			;; The session id in the response is authoritative,
-			;; falling back to the requested target.  When neither
-			;; names a session, the prompt is still reported as sent,
-			;; but no session state is recorded or rendered.
-			(let ((sent-id (or (alist-get 'sessionId alist) target)))
-			  (if (null sent-id)
-				  (message "dsh-bridge: prompt sent, but host reported no session")
-				;; Optimistically mark the session as running so the
-				;; header and sessions row flip immediately.  The SSE
-				;; `turn-start' round-trip usually arrives shortly.  A
-				;; turn that fails to start is corrected later.
-				(dsh-bridge--status-set sent-id 'running)
-				(dsh-bridge--status-event-render sent-id)
-				(message "dsh-bridge: prompt sent")
-				(unless target
-				  ;; The host resolved last-active itself: record it.
-				  (dsh-bridge--record-last-resolved alist))
-				;; An attachment-only send is not a recallable
-				;; history entry.
-				(unless (string-blank-p text)
-				  (dsh-bridge--prompt-history-record-send sent-id text)))
-			  (when (functionp on-success)
-				(funcall on-success sent-id))))))))))
+	(pcase-let ((`(,status ,body ,http-status)
+				 (dsh-bridge--http "POST" "/send" payload)))
+	  (let* ((alist (ignore-errors
+					  (json-parse-string body :object-type 'alist)))
+			 (err (dsh-bridge--error-message status http-status alist)))
+		(cond
+		 (err (message "dsh-bridge: %s" err))
+		 ((null alist)
+		  (message "dsh-bridge: unreadable response: %s" body))
+		 (t
+		  ;; The session id in the response is authoritative,
+		  ;; falling back to the requested target.  When neither
+		  ;; names a session, the prompt is still reported as sent,
+		  ;; but no session state is recorded or rendered.
+		  (let ((sent-id (or (alist-get 'sessionId alist) target)))
+			(if (null sent-id)
+				(message "dsh-bridge: prompt sent, but host reported no session")
+			  ;; Optimistically mark the session as running so the
+			  ;; header and sessions row flip immediately.  The SSE
+			  ;; `turn-start' round-trip usually arrives shortly.  A
+			  ;; turn that fails to start is corrected later.
+			  (dsh-bridge--status-set sent-id 'running)
+			  (dsh-bridge--status-event-render sent-id)
+			  (message "dsh-bridge: prompt sent")
+			  (unless target
+				;; The host resolved last-active itself: record it.
+				(dsh-bridge--record-last-resolved alist))
+			  ;; An attachment-only send is not a recallable
+			  ;; history entry.
+			  (unless (string-blank-p text)
+				(dsh-bridge--prompt-history-record-send sent-id text)))
+			(when (functionp on-success)
+			  (funcall on-success sent-id)))))))))
 
 (defun dsh-bridge-send-draft (text &optional session-id)
   "Send TEXT to the DSH composer as a draft (not submitted).
@@ -1496,18 +1480,18 @@ SESSION-ID overrides the effective session for this call only."
   (let* ((target (or session-id (dsh-bridge--effective-session)))
 		 (payload (append (list (cons 'text text))
 						  (and target (list (cons 'sessionId target))))))
-	(dsh-bridge--call "POST" "/draft" payload
-	  (lambda (status body http-status)
-		(let* ((alist (ignore-errors
-						(json-parse-string body :object-type 'alist)))
-			   (err (dsh-bridge--error-message status http-status alist)))
-		  (cond
-		   (err (message "dsh-bridge: %s" err))
-		   ((null alist)
-			(message "dsh-bridge: unreadable response: %s" body))
-		   (t (message "dsh-bridge: draft pushed")
-			  (unless target
-				(dsh-bridge--record-last-resolved alist)))))))))
+	(pcase-let ((`(,status ,body ,http-status)
+				 (dsh-bridge--http "POST" "/draft" payload)))
+	  (let* ((alist (ignore-errors
+					  (json-parse-string body :object-type 'alist)))
+			 (err (dsh-bridge--error-message status http-status alist)))
+		(cond
+		 (err (message "dsh-bridge: %s" err))
+		 ((null alist)
+		  (message "dsh-bridge: unreadable response: %s" body))
+		 (t (message "dsh-bridge: draft pushed")
+			(unless target
+			  (dsh-bridge--record-last-resolved alist))))))))
 
 ;;; Attachments
 
@@ -2975,20 +2959,20 @@ prefix argument, fetch from a chosen session for this call only.
 If SAME-WINDOW is non-nil, prefer to show the buffer in the same window."
   (interactive (list (dsh-bridge--read-session-override "Fetch from session: ")))
   (let ((target (or session-id (dsh-bridge--effective-session))))
-	(dsh-bridge--call "GET" (dsh-bridge--path "/turns" target) nil
-      (lambda (status body http-status)
-		(let* ((alist (dsh-bridge--parse-json-body body))
-			   (err (dsh-bridge--error-message status http-status alist)))
-		  (cond
-		   (err
-			(message "dsh-bridge: %s" err))
-		   ((null alist)
-			(message "dsh-bridge: unreadable response: %s" body))
-		   (t
-			;; A nil target is resolved by the host: record it for display.
-			(unless target
-			  (dsh-bridge--record-last-resolved alist))
-			(dsh-bridge--view-open alist same-window))))))))
+	(pcase-let ((`(,status ,body ,http-status)
+				 (dsh-bridge--http "GET" (dsh-bridge--path "/turns" target) nil)))
+	  (let* ((alist (dsh-bridge--parse-json-body body))
+			 (err (dsh-bridge--error-message status http-status alist)))
+		(cond
+		 (err
+		  (message "dsh-bridge: %s" err))
+		 ((null alist)
+		  (message "dsh-bridge: unreadable response: %s" body))
+		 (t
+		  ;; A nil target is resolved by the host: record it for display.
+		  (unless target
+			(dsh-bridge--record-last-resolved alist))
+		  (dsh-bridge--view-open alist same-window)))))))
 
 ;;;###autoload
 (defun dsh-bridge-receive ()
@@ -3326,7 +3310,7 @@ OUTCOME is `sent', `cancelled', or anything else (`elsewhere', `stale')."
   "What this buffer itself did, as a message, once it POSTs an answer or decline.
 Set before the POST leaves.  The host broadcasts `ask-user-resolved' when the
 waterfall settles, and that frame can reach us before the POST's own response
-callback runs; `dsh-bridge--ask-user-resolved' then banners this buffer with
+is handled; `dsh-bridge--ask-user-resolved' then banners this buffer with
 what it did rather than with \"answered elsewhere\".")
 (defvar-local dsh-bridge--question-banner nil
   "The resolution banner rendered at the top of the buffer, or nil while the
@@ -3880,38 +3864,38 @@ settle it."
 		 (dsh-bridge--view-answer-summary answers))
 		;; Capture the window the answer was typed in, for the exit.
 		(let ((window (selected-window)))
-		  (dsh-bridge--call "POST" "/answer"
-			(append (list (cons 'questionId dsh-bridge--question-id)
-						  (cons 'sessionId dsh-bridge--question-session))
-					(list (cons 'answers answers)))
-			(lambda (status body http-status)
-			  (let* ((alist (condition-case nil
-							  (json-parse-string body :object-type 'alist)
-							(error nil)))
-					 (reason (and alist (alist-get 'reason alist)))
-					 (accepted (and alist (alist-get 'accepted alist))))
-				(cond
-				 ((and status (null accepted))
-				  (dsh-bridge--view-answer-note-clear dsh-bridge--question-session)
-				  (message "dsh-bridge: %s" (dsh-bridge--error-message status http-status alist)))
-				 ((and reason (equal reason "not-pending"))
-				  (dsh-bridge--view-answer-note-clear dsh-bridge--question-session)
-				  (message "dsh-bridge: already answered or cancelled")
-				  (dsh-bridge--question-mark-resolved
-				   dsh-bridge--question-id
-				   "This question was already answered or cancelled." 'elsewhere))
-				 (accepted
-				  (message "dsh-bridge: answer sent to \"%s\""
-						   (dsh-bridge--session-label dsh-bridge--question-session))
-				  (dsh-bridge--question-mark-resolved
-				   dsh-bridge--question-id
-				   "Your answer was sent." 'sent)
-				  (dsh-bridge--exit-to-view
-				   (dsh-bridge--view-for-session dsh-bridge--question-session)
-				   window))
-				 (t (dsh-bridge--view-answer-note-clear dsh-bridge--question-session)
-					(message "dsh-bridge: answer not accepted%s"
-							 (if reason (concat ": " reason) ""))))))))))))
+		  (pcase-let ((`(,status ,body ,http-status)
+					   (dsh-bridge--http "POST" "/answer"
+						 (append (list (cons 'questionId dsh-bridge--question-id)
+									   (cons 'sessionId dsh-bridge--question-session))
+								 (list (cons 'answers answers))))))
+			(let* ((alist (condition-case nil
+							(json-parse-string body :object-type 'alist)
+						  (error nil)))
+				   (reason (and alist (alist-get 'reason alist)))
+				   (accepted (and alist (alist-get 'accepted alist))))
+			  (cond
+			   ((and status (null accepted))
+				(dsh-bridge--view-answer-note-clear dsh-bridge--question-session)
+				(message "dsh-bridge: %s" (dsh-bridge--error-message status http-status alist)))
+			   ((and reason (equal reason "not-pending"))
+				(dsh-bridge--view-answer-note-clear dsh-bridge--question-session)
+				(message "dsh-bridge: already answered or cancelled")
+				(dsh-bridge--question-mark-resolved
+				 dsh-bridge--question-id
+				 "This question was already answered or cancelled." 'elsewhere))
+			   (accepted
+				(message "dsh-bridge: answer sent to \"%s\""
+						 (dsh-bridge--session-label dsh-bridge--question-session))
+				(dsh-bridge--question-mark-resolved
+				 dsh-bridge--question-id
+				 "Your answer was sent." 'sent)
+				(dsh-bridge--exit-to-view
+				 (dsh-bridge--view-for-session dsh-bridge--question-session)
+				 window))
+			   (t (dsh-bridge--view-answer-note-clear dsh-bridge--question-session)
+				  (message "dsh-bridge: answer not accepted%s"
+						   (if reason (concat ": " reason) "")))))))))))
 
 (defun dsh-bridge--question-decline ()
   "Tell the model we will not answer (cancels the ask_user_question tool call).
@@ -3927,34 +3911,34 @@ answer; an already-resolved question is bannered in place."
 	(dsh-bridge--view-answer-note-record
 	 dsh-bridge--question-session "You declined to answer")
 	(let ((window (selected-window)))
-	  (dsh-bridge--call "POST" "/answer"
-		(list (cons 'questionId dsh-bridge--question-id)
-			  (cons 'sessionId dsh-bridge--question-session)
-			  (cons 'cancelled t))
-		(lambda (_status body _http-status)
-		  (let* ((alist (condition-case nil
-						  (json-parse-string body :object-type 'alist)
-						(error nil)))
-				 (reason (and alist (alist-get 'reason alist)))
-				 (accepted (and alist (alist-get 'accepted alist))))
-			(cond
-			 (accepted
-			  (message "dsh-bridge: question cancelled")
-			  (dsh-bridge--question-mark-resolved
-			   dsh-bridge--question-id
-			   "You declined to answer; the question was cancelled." 'cancelled)
-			  (dsh-bridge--exit-to-view
-			   (dsh-bridge--view-for-session dsh-bridge--question-session)
-			   window))
-			 ((and reason (equal reason "not-pending"))
-			  (dsh-bridge--view-answer-note-clear dsh-bridge--question-session)
-			  (message "dsh-bridge: already answered or cancelled")
-			  (dsh-bridge--question-mark-resolved
-			   dsh-bridge--question-id
-			   "This question was already answered or cancelled." 'elsewhere))
-			 (t (dsh-bridge--view-answer-note-clear dsh-bridge--question-session)
-				(message "dsh-bridge: decline not accepted%s"
-						(if reason (concat ": " reason) ""))))))))))
+	  (pcase-let ((`(,_status ,body ,_http-status)
+				   (dsh-bridge--http "POST" "/answer"
+					 (list (cons 'questionId dsh-bridge--question-id)
+						   (cons 'sessionId dsh-bridge--question-session)
+						   (cons 'cancelled t)))))
+		(let* ((alist (condition-case nil
+						(json-parse-string body :object-type 'alist)
+					  (error nil)))
+			   (reason (and alist (alist-get 'reason alist)))
+			   (accepted (and alist (alist-get 'accepted alist))))
+		  (cond
+		   (accepted
+			(message "dsh-bridge: question cancelled")
+			(dsh-bridge--question-mark-resolved
+			 dsh-bridge--question-id
+			 "You declined to answer; the question was cancelled." 'cancelled)
+			(dsh-bridge--exit-to-view
+			 (dsh-bridge--view-for-session dsh-bridge--question-session)
+			 window))
+		   ((and reason (equal reason "not-pending"))
+			(dsh-bridge--view-answer-note-clear dsh-bridge--question-session)
+			(message "dsh-bridge: already answered or cancelled")
+			(dsh-bridge--question-mark-resolved
+			 dsh-bridge--question-id
+			 "This question was already answered or cancelled." 'elsewhere))
+		   (t (dsh-bridge--view-answer-note-clear dsh-bridge--question-session)
+			  (message "dsh-bridge: decline not accepted%s"
+					   (if reason (concat ": " reason) "")))))))))
 
 ;; The `a' (answer) key and the question mode --------------------------------
 
@@ -5650,9 +5634,9 @@ once, stores the fresh list, and re-renders each shown, non-cycling view from
 its newest turn — the `(continuing...)' marker disappears now that `endedAt'
 is known, so the completed turn ends cleanly (point is preserved when the
 content merely changed in place)."
-  (dsh-bridge--call "GET" (dsh-bridge--path "/turns" session-id) nil
-	(lambda (status body http-status)
-	  (let* ((alist (dsh-bridge--parse-json-body body))
+  (pcase-let ((`(,status ,body ,http-status)
+			   (dsh-bridge--http "GET" (dsh-bridge--path "/turns" session-id) nil)))
+	(let* ((alist (dsh-bridge--parse-json-body body))
 			 (err (dsh-bridge--error-message status http-status alist)))
 		(if err
 			(when (eq http-status 404)
@@ -5703,7 +5687,7 @@ content merely changed in place)."
 						  (dsh-bridge--view-fill shown-id nil nil nil t)
 						  (setq-local dsh-bridge--view-waiting nil))
 					  (when newest
-						(dsh-bridge--view-fill shown-id newest nil nil t t)))))))))))))
+						(dsh-bridge--view-fill shown-id newest nil nil t t))))))))))))
 
 ;;;###autoload
 (defun dsh-bridge-list-sessions ()
