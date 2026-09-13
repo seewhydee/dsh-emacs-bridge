@@ -1775,28 +1775,17 @@ controls whether to re-enter it automatically whenever the DSH-View
 buffer is showing a session's latest turn.")
 
 (defvar-local dsh-bridge--view-waiting nil
-  "How this DSH-View's post-send placeholder is gated, or nil when none is up.
-Non-nil while the buffer shows the placeholder for a turn that has started
-but not committed its first text segment: `(running...)', or the ask-user
-awaiting note if that turn asks before producing any text.  The value bounds
-what may end the placeholder:
+  "Non-nil if the DSH-View buffer is awaiting its first reply segment.
+If the buffer has been prepared to display a new turn, but the turn's
+first text segment has not yet arrived, the value is one of the
+following:
 
-- a turn number N is the pre-send turn that was showing when the placeholder
-  went up.  Only a turn numbered greater than N may replace it, because the
-  turn cache still names that pre-send turn while the new one is textless, so
-  a naive refill would re-show already-seen content as the new reply.
-- `t' means no turn was showing (a fresh session), so any turn qualifies.
+- an integer N, specifying the preceding turn (the one showing right
+  before the placeholder went up).
 
-The placeholder is not a turn, so `dsh-bridge--view-turn-position'
-contributes no `(k/n)' segment while it is up; the bound is enforced by
-`dsh-bridge--view-waiting-accept-p'.
+- or t, if there was no earlier turn in the session.
 
-Set by `dsh-bridge--view-waiting-fill', which sets it after the
-`dsh-bridge--view-fill' it calls has cleared it.  Cleared by
-`dsh-bridge--view-fill' itself, so any path that renders content ends the
-placeholder and no caller has to remember; `dsh-bridge--view-follow-enter'
-clears explicitly as well because its refill is skipped when the turn cache
-is empty.")
+Otherwise, the value is nil.")
 
 (defvar-local dsh-bridge--view-provenance nil
   "How this DSH-View buffer was last rendered, or nil if unknown.
