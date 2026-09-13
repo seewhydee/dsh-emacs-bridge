@@ -1296,10 +1296,9 @@ buffer-local index and the cached list; no I/O."
 
 (defun dsh-bridge--prompt-history-refresh ()
   "Fetch the prompt history for this DSH-Prompt buffer.
-Always fetches `GET /prompts' for the effective session; callers skip
-the fetch while browsing, so \\`M-p' and \\`M-n' walk a stable list.  The
-fetched list is cached in `dsh-bridge--prompt-history' under the session
-id returned by the host."
+This obtains a fresh history for the effective session via a HTTP
+request, updates `dsh-bridge--prompt-history', and returns the value of
+that variable."
   (let* ((path (dsh-bridge--path "/prompts" (dsh-bridge--effective-session)))
 		 (result (dsh-bridge--request "GET" path nil))
 		 (alist (cdr result))
@@ -1340,8 +1339,8 @@ contents, stash it in `dsh-bridge--prompt-draft', so that a future
   (interactive)
   (unless (eq major-mode 'dsh-bridge-prompt-mode)
 	(user-error "Not in a DSH-Prompt buffer"))
-  ;; Refetch prompt history if we were composing a draft (i.e., not
-  ;; just walking history).
+  ;; Refetch prompt history if we were composing a draft (not just
+  ;; walking history).
   (unless dsh-bridge--prompt-history-index
 	(dsh-bridge--prompt-history-refresh))
   (let ((prompts (dsh-bridge--buffer-prompt-history)))
@@ -1450,17 +1449,15 @@ with the prompt; PATH must be absolute."
 		 ((null alist)
 		  (message "dsh-bridge: unreadable response: %s" body))
 		 (t
-		  ;; The session id in the response is authoritative,
-		  ;; falling back to the requested target.  When neither
-		  ;; names a session, the prompt is still reported as sent,
-		  ;; but no session state is recorded or rendered.
+		  ;; Use the session id in the response, falling back to the
+		  ;; requested target.  If neither exists, report the prompt
+		  ;; as sent but don't update session state.
 		  (let ((sent-id (or (alist-get 'sessionId alist) target)))
 			(if (null sent-id)
 				(message "dsh-bridge: prompt sent, but host reported no session")
-			  ;; Optimistically mark the session as running so the
-			  ;; header and sessions row flip immediately.  The SSE
-			  ;; `turn-start' round-trip usually arrives shortly.  A
-			  ;; turn that fails to start is corrected later.
+			  ;; Mark the session as running, so status indicators are
+			  ;; updated immediately without waiting for the notifier.
+			  ;; A failed turn-start is corrected later.
 			  (dsh-bridge--status-set sent-id 'running)
 			  (dsh-bridge--status-event-render sent-id)
 			  (message "dsh-bridge: prompt sent")
@@ -1495,13 +1492,10 @@ SESSION-ID overrides the effective session for this call only."
 
 ;;; Attachments
 
-;; DSH attachments ride in the prompt buffer as MML-like tag lines, the same
-;; shape of UX `message-mode' gives MIME parts: `C-c C-a' inserts a tag at
-;; point, deleting the line detaches the file, and send strips the tags out
-;; of the prompt text and uploads the named files.  DSH has no MIME type,
-;; description or disposition field, so `mml-attach-file's type/description/
-;; disposition prompts have no analogue here: the host sniffs an image's type
-;; from its bytes and derives the display name from the file name.
+;; DSH attachments are placed in the prompt buffer as MML-like tag
+;; lines, similar to Message mode.  Unlike `mml-attach-file', however,
+;; DSH attachments have no MIME type, description or disposition: the
+;; host handles its own type detection.
 
 (defconst dsh-bridge--attachment-line-regexp
   "^[ \t]*<#attachment\\([^\n]*\\)>[ \t]*\n?"
@@ -1525,8 +1519,8 @@ name such as \"filename\"."
 
 (defun dsh-bridge--attachment-format (path)
   "Return the attachment tag for PATH.
-PATH is escaped for the double-quoted attribute value.  The result
-carries no trailing newline."
+In the result, PATH is escaped for the double-quoted attribute value,
+and there is no trailing newline."
   (concat "<#attachment filename=\""
 		  (dsh-bridge--attachment-escape path)
 		  "\">"))
