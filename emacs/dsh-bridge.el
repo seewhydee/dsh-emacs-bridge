@@ -5125,7 +5125,8 @@ DSH-Prompt buffer, `D' re-describes the session.")
 	  (concat (if negative "-" "") result))))
 
 (defun dsh-bridge--format-duration (ms)
-  "Format millisecond duration MS as \"450 ms\", \"12.3 s\", or \"2m 13.4s\"."
+  "Format millisecond duration MS as \"450 ms\", \"12.3 s\", \"2m 13.4s\",
+or \"1h 35m\"."
   (if (not (numberp ms)) "—"
 	(let ((seconds (/ ms 1000.0)))
 	  (cond
@@ -5134,8 +5135,11 @@ DSH-Prompt buffer, `D' re-describes the session.")
 	   ((< seconds 3600)
 		(format "%dm %04.1fs" (floor (/ seconds 60))
 				(- seconds (* 60 (floor (/ seconds 60))))))
-	   (t (format "%dh %dm" (floor (/ seconds 3600))
-				  (floor (/ (% seconds 3600) 60))))))))
+	   (t (let ((hours (floor (/ seconds 3600))))
+			;; `seconds' is a float, so take the remainder by
+			;; subtraction: `%' rejects a float operand.
+			(format "%dh %dm" hours
+					(floor (/ (- seconds (* hours 3600)) 60)))))))))
 
 (defun dsh-bridge--format-percent (num den)
   "Format NUM/DEN as a percentage, or nil when DEN is not positive."

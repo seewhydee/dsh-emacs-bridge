@@ -5648,7 +5648,7 @@ keymap whose mouse-1 binding toggles the row under the click."
                                        (cons 'description "Can edit."))))))
          (cons 'stats
                (list (cons 'turns 12) (cons 'steps 48)
-                     (cons 'llmMs 133400) (cons 'toolMs 18200)
+                     (cons 'llmMs 133400) (cons 'toolMs 5701550)
                      (cons 'ttftMs 35728) (cons 'ttftSteps 44)
                      (cons 'decodeMs 104000) (cons 'decodeTokens 12345)))
          (cons 'tokens
@@ -5709,6 +5709,7 @@ parent-session link describes the parent."
         (should (string-match-p "DSH session Title s1" text))
         (should (string-match-p "Turns / steps\\s-+12 / 48" text))
         (should (string-match-p "2m 13\\.4s" text))
+        (should (string-match-p "Tool time\\s-+1h 35m" text))
         (should (string-match-p "Cache hit\\s-+96\\.4%" text))
         (should (string-match-p "118\\.7 tok/s" text))
         (should (string-match-p "Next request\\s-+123,456 / 200,000 (61\\.7%)" text))
@@ -5917,6 +5918,11 @@ parent-session link describes the parent."
   (should (equal (dsh-bridge--format-duration 450) "450 ms"))
   (should (equal (dsh-bridge--format-duration 12300) "12.3 s"))
   (should (equal (dsh-bridge--format-duration 133400) "2m 13.4s"))
+  ;; A float `seconds' must not reach `%', which only takes integers: a
+  ;; long-running session's tool time (here 1h 35m) used to signal
+  ;; `wrong-type-argument integer-or-marker-p 5701.55' and abort the report.
+  (should (equal (dsh-bridge--format-duration 3600000) "1h 0m"))
+  (should (equal (dsh-bridge--format-duration 5701550) "1h 35m"))
   (should (equal (dsh-bridge--format-duration nil) "—"))
   (should (equal (dsh-bridge--format-percent 1 4) "25.0%"))
   (should-not (dsh-bridge--format-percent 1 0))
