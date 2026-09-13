@@ -1248,17 +1248,23 @@ export function apply(ctx: Context): void {
 
   /**
    * Fold a cold session's title. The persisted projection cache serves the
-   * title with zero log reads (mirroring the harness's own session list); when
-   * the cache is absent, or its row lacks the title key, read the log through
-   * a read handle and fold `session/title` events directly. Fail-soft: a
-   * title is a display nicety and must never hide the session row.
+   * title with zero log reads (mirroring the harness's own session list) when
+   * it holds a non-empty one; otherwise read the log through a read handle and
+   * fold `session/title` events directly.
+   *
+   * A cached null title is deliberately not authoritative: the checkpoint is
+   * write-behind and can lag the log, so a `session/title` event appended
+   * after the last checkpoint (e.g. a rename just before a restart) is still
+   * recoverable from the log. Only an untitled session — usually blank, hence
+   * a cheap log — pays for that read.
    *
    * A seeded (forked) header's checkpoint identity needs the exact inherited
    * prefix length, which is Session state rather than header metadata; the
    * cache is trusted only for unseeded headers (the harness's list projection
    * takes the same shortcut), and a seeded one falls through to the log read.
    * The cache read is itself guarded: an API drift there must degrade to the
-   * log fold, not reject the caller's whole cold listing.
+   * log fold, not reject the caller's whole cold listing. Fail-soft: a title
+   * is a display nicety and must never hide the session row.
    */
   async function coldSessionTitle(
     cache: ProjectionCacheService | undefined,
@@ -1270,9 +1276,6 @@ export function apply(ctx: Context): void {
       if (snapshot !== undefined) {
         const title = snapshot.values.title
         if (typeof title === 'string' && title !== '') return title
-        // The title key is present with a null value: the session has no title
-        // yet, and a cold log is immutable, so it cannot acquire one. No read.
-        if (Object.hasOwn(snapshot.values, 'title')) return null
       }
     } catch {
       // Fall through to the log read: a cache fault is not a listing fault.

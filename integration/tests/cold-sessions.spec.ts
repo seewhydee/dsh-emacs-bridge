@@ -18,9 +18,13 @@
 // so this spec boots its own pair of hosts against one caller-supplied home:
 // the first creates and persists a session, the second starts with no live
 // agent for it and must still enumerate it through `sessionPersistence.list()`
-// with its durable title folded back. Regression guard: a title-fold fault
-// used to reject the whole persisted batch, silently reducing `/sessions` to
-// the live rows only.
+// with its durable title folded back. Two regression modes are guarded:
+//   - a title-fold fault that rejected the whole persisted batch, silently
+//     reducing `/sessions` to the live rows only;
+//   - trusting a projection-cache null title, when the write-behind checkpoint
+//     lagged the log past a rename (the cache row is written before shutdown),
+//     which made the title vanish whenever the checkpoint happened to be stale.
+// The rename-then-kill sequence below is what makes the second case likely.
 
 import { describe, it, expect } from 'vitest'
 import { mkdtempSync, rmSync } from 'node:fs'
