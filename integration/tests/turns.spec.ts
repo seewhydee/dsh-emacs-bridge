@@ -118,15 +118,14 @@ describe('plugin surface against a live fixture', () => {
     })
     expect(unknown.status).toBe(404)
 
-    // Oversize bodies are rejected, but the bridge currently destroys the
-    // request socket on oversize (see readJson in dsh-plugin/src/index.ts)
-    // rather than writing the documented 413, so the client observes a
-    // connection reset. Assert the request does not succeed, and record the
-    // 413-vs-reset discrepancy as a live-fixture finding.
+    // Oversize bodies are rejected with the documented 413 and a JSON error
+    // payload: readJson drains and discards the remainder so the response is
+    // written on the same connection instead of resetting it.
     const oversize = await post(fixture, '/dsh-bridge/send', {
       text: 'x'.repeat(1200 * 1024),
-    }).catch((error) => ({ status: 0, error: String(error?.message ?? error) }))
-    expect(oversize.status).not.toBe(200)
+    })
+    expect(oversize.status).toBe(413)
+    expect(oversize.body.error).toMatch(/too large/)
   }, 90000)
 })
 

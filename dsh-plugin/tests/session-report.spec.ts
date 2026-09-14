@@ -222,6 +222,10 @@ describe('sessionReport', () => {
     expect(report.missing).toEqual([
       'title', 'preset', 'model', 'permissions', 'stats', 'tokens', 'context', 'breakdown', 'lastPromptAt',
     ])
+    expect(report.running).toBe(false)
+    expect(report.workspace).toBeNull()
+    expect(report.archived).toBe(false)
+    expect(report.modelName).toBeNull()
   })
 
   it('prefers the pending model selection and ignores malformed options', () => {
@@ -237,6 +241,55 @@ describe('sessionReport', () => {
     })
     expect(report.model).toEqual({ provider: 'p', model: 'used' })
     expect(report.permissions).toEqual({ currentValue: 'x', options: [] })
+  })
+
+  it('names a present-but-malformed strict section in missing alongside its null', () => {
+    const report = sessionReport({
+      source: 'live',
+      header: { id: 's7', createdAt: 1 },
+      projections: {
+        values: {
+          sessionStats: {
+            turns: 12,
+            steps: 48,
+            llmMs: 1000,
+            toolMs: 200,
+            ttftMs: 300,
+            ttftSteps: 3,
+            decodeMs: 400,
+            // decodeTokens absent: the strict schema fails as a whole.
+          },
+          tokenUsage: { uncachedInputTokens: 10, outputTokens: 'plenty', cacheReadTokens: 30, cacheWriteTokens: 40 },
+          contextBreakdown: 'not an object',
+        },
+      },
+    })
+    expect(report.stats).toBeNull()
+    expect(report.tokens).toBeNull()
+    expect(report.breakdown).toBeNull()
+    expect(report.missing).toContain('stats')
+    expect(report.missing).toContain('tokens')
+    expect(report.missing).toContain('breakdown')
+    // The strict labels keep their documented positions in the list.
+    expect(report.missing).toEqual([
+      'title', 'preset', 'model', 'permissions', 'stats', 'tokens', 'context', 'breakdown', 'lastPromptAt',
+    ])
+  })
+
+  it('treats a present-but-malformed model selection as null, not as missing', () => {
+    // A malformed `next` degrades the section rather than falling back to
+    // `lastUsed`: a corrupt projection is reported, not silently repaired.
+    const report = sessionReport({
+      source: 'live',
+      header: { id: 's8', createdAt: 1 },
+      projections: {
+        values: {
+          modelSelection: { next: { provider: 7, model: 'new' }, lastUsed: { provider: 'p', model: 'used' } },
+        },
+      },
+    })
+    expect(report.model).toBeNull()
+    expect(report.missing).not.toContain('model')
   })
 
   it('returns null context when every pressure field is absent', () => {

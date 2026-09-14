@@ -1143,6 +1143,13 @@ function reportContext(value: unknown): SessionReportContext | null {
     : context
 }
 
+/**
+ * The model section: the pending selection when present and well-formed, else
+ * the last-used one. A null or absent `next` is the normal "no pending switch"
+ * state and falls back to `lastUsed`; a present-but-malformed `next` (a
+ * non-string provider or model) degrades the whole section to null instead —
+ * a corrupt projection is reported, not silently repaired from an older value.
+ */
 function reportModel(value: unknown): SessionReportModel | null {
   const view = asObject(value)
   const selection = asObject(view?.next) ?? asObject(view?.lastUsed)
@@ -1179,9 +1186,13 @@ function reportPermissions(value: unknown): SessionReportPermissions | null {
 /**
  * Build one session report from an observation (or a header-only stand-in)
  * and caller-supplied extras. Pure: every projection value is narrowed with
- * local guards, an unexpected shape degrades to null plus a `missing` entry,
- * and the only fallback folds (title, preset) read the log the caller already
- * materialized when it has no projection value to prefer.
+ * local guards and an unexpected shape degrades to null. For the strict-schema
+ * sections (stats, tokens, breakdown) null is never a legitimate state, so a
+ * present-but-malformed value also earns a `missing` entry; the other
+ * sections' null is a real state (untitled, no selection yet, no pressure
+ * sample), so they join `missing` only when the key is absent. The only
+ * fallback folds (title, preset) read the log the caller already materialized
+ * when it has no projection value to prefer.
  */
 export function sessionReport(
   observation: SessionObservationLike,
@@ -1189,6 +1200,10 @@ export function sessionReport(
 ): SessionReport {
   const values = observation.projections?.values
   const has = (key: string): boolean => values !== undefined && Object.hasOwn(values, key)
+  const stats = reportStats(values?.sessionStats)
+  const tokens = reportTokens(values?.tokenUsage)
+  const breakdown = reportBreakdown(values?.contextBreakdown)
+  const strict: Record<string, unknown> = { stats, tokens, breakdown }
   const missing: string[] = []
   for (const [key, label] of [
     ['title', 'title'],
@@ -1201,7 +1216,7 @@ export function sessionReport(
     ['contextBreakdown', 'breakdown'],
     ['sessionListMetadata', 'lastPromptAt'],
   ] as const) {
-    if (!has(key)) missing.push(label)
+    if (!has(key) || (Object.hasOwn(strict, label) && strict[label] === null)) missing.push(label)
   }
 
   const rawTitle = values?.title
@@ -1238,10 +1253,10 @@ export function sessionReport(
     model: reportModel(values?.modelSelection),
     modelName: null,
     permissions: reportPermissions(values?.permissions),
-    stats: reportStats(values?.sessionStats),
-    tokens: reportTokens(values?.tokenUsage),
+    stats,
+    tokens,
     context: reportContext(values?.contextPressure),
-    breakdown: reportBreakdown(values?.contextBreakdown),
+    breakdown,
   }
 }
 

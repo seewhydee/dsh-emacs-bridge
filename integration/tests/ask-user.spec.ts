@@ -77,14 +77,12 @@ describe('ask-user surfacing', () => {
     expect(turns.body.turns.length).toBeGreaterThan(0)
 
     // The mock saw exactly two main-turn calls (no purpose): the ask and the
-    // post-answer continuation. The session-title call is separate (see
-    // turns.spec for the title separation assertion).
+    // post-answer continuation. The session-title call is separate (it carries
+    // purpose 'session-title'; see turns.spec for the title separation
+    // assertion).
     const requests = await mockRequests(fixture)
     const mainTurns = requests.filter((r) => r.purpose === undefined)
-    // One fresh session still fires an automatic first-prompt title call; but
-    // under this scenario the turn is one main call for the ask + one for the
-    // continuation after the answer.
-    expect(mainTurns.length).toBeGreaterThanOrEqual(2)
+    expect(mainTurns.length).toBe(2)
     expect(mainTurns.filter((r) => r.provider === 'mock').length).toBe(mainTurns.length)
 
     sse.close()
@@ -157,5 +155,150 @@ describe('ask-user surfacing', () => {
     await expect(browser.waitFor('ask-user', 3000)).rejects.toThrow()
 
     browser.close()
+  }, 90000)
+
+  it('settles a cancel from Emacs: the tool call fails and the turn continues', async () => {
+    const fixture = inject('fixture')
+
+    // {cancelled: true} rejects the waterfall listener's wait, which the
+    // asker surfaces as the tool-call failure (the old cancel-envelope
+    // semantics) — the turn is not parked: the model is called again with the
+    // failed tool result and the scripted continuation completes it.
+    await post(fixture, '/mock-llm/reset', {})
+    await scriptMock(fixture, [
+      askUserQuestion('q1', 'Pick a color'),
+      textReply('Cancelled, moving on.'),
+    ])
+
+    const sse = openSse(fixture, { timeoutMs: 8000 })
+    const sessionId = await createSession(fixture)
+
+    const sent = await post(fixture, '/dsh-bridge/send', { text: 'Pick a color for me.', sessionId })
+    expect(sent.status).toBe(200)
+
+    const askFrame = await sse.waitFor('ask-user')
+    const cancel = await post(fixture, '/dsh-bridge/answer', {
+      questionId: askFrame.questionId,
+      sessionId,
+      cancelled: true,
+    })
+    expect(cancel.status).toBe(200)
+    expect(cancel.body.accepted).toBe(true)
+
+    const resolved = await sse.waitFor('ask-user-resolved')
+    expect(resolved.questionId).toBe(askFrame.questionId)
+    expect(resolved.outcome).toBe('cancelled')
+
+    // The turn ran to completion on the continuation reply.
+    const complete = await sse.waitFor('turn-complete')
+    expect(complete.sessionId).toBe(sessionId)
+    expect(complete.reason).toBe('completed')
+
+    const turns = await get(fixture, `/dsh-bridge/turns?sessionId=${sessionId}`)
+    const texts = turns.body.turns.flatMap((t) => t.segments.map((s) => s.text))
+    expect(texts).toContain('Cancelled, moving on.')
+
+    // Two main-turn calls: the ask, then the continuation past the failed
+    // tool call.
+    const requests = await mockRequests(fixture)
+    const mainTurns = requests.filter((r) => r.purpose === undefined)
+    expect(mainTurns.length).toBe(2)
+
+    sse.close()
+  }, 90000)
+
+  it('reads 404 not-pending for a late or duplicate answer', async () => {
+    const fixture = inject('fixture')
+
+    await post(fixture, '/mock-llm/reset', {})
+    await scriptMock(fixture, [askUserQuestion('q1', 'Pick a color'), textReply('Done.')])
+
+    const sse = openSse(fixture, { timeoutMs: 8000 })
+    const sessionId = await createSession(fixture)
+
+    const sent = await post(fixture, '/dsh-bridge/send', { text: 'Pick a color for me.', sessionId })
+    expect(sent.status).toBe(200)
+
+    const askFrame = await sse.waitFor('ask-user')
+
+    // A question the bridge never registered (or already retired) is 404.
+    const unknown = await post(fixture, '/dsh-bridge/answer', {
+      questionId: 'question-never-pending',
+      sessionId,
+      answers: [{ id: 'q1', selected: ['Red'] }],
+    })
+    expect(unknown.status).toBe(404)
+    expect(unknown.body.accepted).toBe(false)
+    expect(unknown.body.reason).toBe('not-pending')
+
+    // First settlement wins...
+    const answer = await post(fixture, '/dsh-bridge/answer', {
+      questionId: askFrame.questionId,
+      sessionId,
+      answers: [{ id: 'q1', selected: ['Red'] }],
+    })
+    expect(answer.status).toBe(200)
+
+    // ...so a duplicate POST (or one arriving after an abort) reads 404.
+    const late = await post(fixture, '/dsh-bridge/answer', {
+      questionId: askFrame.questionId,
+      sessionId,
+      answers: [{ id: 'q1', selected: ['Blue'] }],
+    })
+    expect(late.status).toBe(404)
+    expect(late.body.accepted).toBe(false)
+    expect(late.body.reason).toBe('not-pending')
+
+    await sse.waitFor('turn-complete')
+    sse.close()
+  }, 90000)
+
+  it('reads 400 bad-response for a malformed answer body and keeps the question pending', async () => {
+    const fixture = inject('fixture')
+
+    await post(fixture, '/mock-llm/reset', {})
+    await scriptMock(fixture, [askUserQuestion('q1', 'Pick a color'), textReply('Done.')])
+
+    const sse = openSse(fixture, { timeoutMs: 8000 })
+    const sessionId = await createSession(fixture)
+
+    const sent = await post(fixture, '/dsh-bridge/send', { text: 'Pick a color for me.', sessionId })
+    expect(sent.status).toBe(200)
+
+    const askFrame = await sse.waitFor('ask-user')
+
+    // Missing ids entirely.
+    const noIds = await post(fixture, '/dsh-bridge/answer', {})
+    expect(noIds.status).toBe(400)
+    expect(noIds.body.reason).toBe('bad-response')
+
+    // Well-formed ids but no answers (and no cancelled flag).
+    const noAnswers = await post(fixture, '/dsh-bridge/answer', {
+      questionId: askFrame.questionId,
+      sessionId,
+    })
+    expect(noAnswers.status).toBe(400)
+    expect(noAnswers.body.accepted).toBe(false)
+    expect(noAnswers.body.reason).toBe('bad-response')
+
+    // Answers naming a question id the asker never asked about.
+    const wrongId = await post(fixture, '/dsh-bridge/answer', {
+      questionId: askFrame.questionId,
+      sessionId,
+      answers: [{ id: 'q-nope', selected: ['Red'] }],
+    })
+    expect(wrongId.status).toBe(400)
+    expect(wrongId.body.reason).toBe('bad-response')
+
+    // None of the rejects settled the question: a proper answer still lands.
+    const answer = await post(fixture, '/dsh-bridge/answer', {
+      questionId: askFrame.questionId,
+      sessionId,
+      answers: [{ id: 'q1', selected: ['Red'] }],
+    })
+    expect(answer.status).toBe(200)
+
+    await sse.waitFor('turn-complete')
+    sse.close()
   }, 90000)
 })

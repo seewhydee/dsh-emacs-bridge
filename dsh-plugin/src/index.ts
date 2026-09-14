@@ -449,16 +449,24 @@ class PayloadTooLargeError extends Error {
   }
 }
 
-/** Read a bounded JSON request body; rejects on oversize or malformed input. */
+/**
+ * Read a bounded JSON request body; rejects on oversize or malformed input.
+ * An oversize body is NOT socket-destroyed: the remaining bytes are drained
+ * and discarded so the caller can still write the 413 response on the same
+ * connection.
+ */
 function readJson(req: IncomingMessage): Promise<unknown> {
   return new Promise((resolve, reject) => {
     let body = ''
+    let oversize = false
     req.setEncoding('utf8')
     req.on('data', (chunk: string) => {
+      if (oversize) return
       body += chunk
       if (Buffer.byteLength(body) > MAX_BODY_BYTES) {
+        oversize = true
+        body = ''
         reject(new PayloadTooLargeError())
-        req.destroy()
       }
     })
     req.on('end', () => {

@@ -96,13 +96,35 @@ class MockAdapter {
 
   async listModels(provider) {
     return [
-      { provider, id: 'mock-model', name: 'Mock Model', description: 'The default mock model' },
-      { provider, id: 'mock-model-pro', name: 'Mock Model Pro', description: 'A richer mock model' },
+      {
+        provider, id: 'mock-model', name: 'Mock Model',
+        description: 'The default mock model', inputModalities: ['text', 'image'],
+      },
+      {
+        provider, id: 'mock-model-pro', name: 'Mock Model Pro',
+        description: 'A richer mock model', inputModalities: ['text', 'image'],
+      },
+      {
+        provider, id: 'mock-model-text', name: 'Mock Model Text',
+        description: 'A text-only mock model', inputModalities: ['text'],
+      },
     ]
   }
 
+  // Modalities are real metadata the harness reads: the bridge's image-support
+  // precheck (and the agent loop's own image admission) key on
+  // inputModalities, and a declared context window feeds the request/context
+  // event behind the context-occupancy projection. The default model stays
+  // image-capable so the attachment fixtures keep passing; mock-model-text is
+  // the explicitly selectable text-only route.
   async resolveModel(provider, model) {
-    return { provider, id: model, name: model }
+    return {
+      provider,
+      id: model,
+      name: model,
+      inputModalities: model === 'mock-model-text' ? ['text'] : ['text', 'image'],
+      context: { contextWindow: 128000 },
+    }
   }
 
   async prepareCall(provider, model, signal) {
@@ -156,7 +178,13 @@ class MockAdapter {
       }
       case 'tool-call': {
         const argumentsJson = JSON.stringify(entry.arguments ?? {})
-        yield* this.paced(toolCallChunks(entry.name, argumentsJson, entry.text), 0, options.signal)
+        yield* this.paced(
+          toolCallChunks(entry.name, argumentsJson, entry.text, {
+            fragmentArgs: entry.fragmentArgs === true,
+          }),
+          0,
+          options.signal,
+        )
         return
       }
       case 'hang': {

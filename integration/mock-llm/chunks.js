@@ -37,8 +37,11 @@ export function textChunks(text) {
  * Chunks that emit one tool-call block and finish with `tool-calls`. An
  * optional lead-in text block is emitted first (mirrors the harness
  * `toolCallResponse` helper). `arguments` is the JSON string the tool receives.
+ * With `fragmentArgs` the arguments stream across several `tool-call-delta`
+ * chunks (the name rides the first one only), the way real providers fragment
+ * arguments; the harness assembler must concatenate them back to the same JSON.
  */
-export function toolCallChunks(name, argumentsJson, text) {
+export function toolCallChunks(name, argumentsJson, text, { fragmentArgs = false } = {}) {
   const chunks = []
   let index = 0
   if (text) {
@@ -49,9 +52,32 @@ export function toolCallChunks(name, argumentsJson, text) {
     )
     index += 1
   }
+  chunks.push({ type: 'block-start', index, blockType: 'tool-call' })
+  if (fragmentArgs && argumentsJson.length > 1) {
+    // Three pieces: the middle boundary is deliberately off the half so a
+    // boundary-aligned assembler bug cannot hide behind equal splits.
+    const first = Math.max(1, Math.floor(argumentsJson.length / 3))
+    const second = Math.max(first + 1, Math.floor(argumentsJson.length / 2))
+    const pieces = [
+      argumentsJson.slice(0, first),
+      argumentsJson.slice(first, second),
+      argumentsJson.slice(second),
+    ].filter((piece) => piece.length > 0)
+    pieces.forEach((piece, position) => {
+      chunks.push({
+        type: 'tool-call-delta',
+        index,
+        id: `mock-call-${index}`,
+        ...(position === 0 ? { name } : {}),
+        argumentsDelta: piece,
+      })
+    })
+  } else {
+    chunks.push(
+      { type: 'tool-call-delta', index, id: `mock-call-${index}`, name, argumentsDelta: argumentsJson },
+    )
+  }
   chunks.push(
-    { type: 'block-start', index, blockType: 'tool-call' },
-    { type: 'tool-call-delta', index, id: `mock-call-${index}`, name, argumentsDelta: argumentsJson },
     {
       type: 'block-end',
       index,

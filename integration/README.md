@@ -68,15 +68,18 @@ integration/
 
 | Spec | Covers |
 |---|---|
-| `tests/turns.spec.ts` | turn fold into `/turns`, auxiliary title/compaction calls, model catalog + selection parity, outbox round trip, 404/oversize bounds, degraded-profile boot |
-| `tests/ask-user.spec.ts` | the ask-user waterfall end to end (SSE frame, `/answer` settlement, pending-question replay) and the browser-draft stream never owning a question |
+| `tests/turns.spec.ts` | turn fold into `/turns`, auxiliary title/compaction calls, model catalog + selection parity, outbox round trip, 404/413 (oversize body) bounds, degraded-profile boot |
+| `tests/auth.spec.ts` | the fences: 401 missing/wrong bearer on representative routes, 401 wrong SSE query token, `/token` vend happy path, 403 hostile Origin on `/token` + `/status` |
+| `tests/ask-user.spec.ts` | the ask-user waterfall end to end (SSE frame, `/answer` settlement, pending-question replay), cancel/late/malformed settlements, and the browser-draft stream never owning a question |
 | `tests/sessions.spec.ts` | create by `path` (new and already-known workspace), create by `workspaceId`, create-argument bounds, workspace rename/conflict/blank/unknown, session rename/archive/unknown |
 | `tests/session.spec.ts` | the read-only session report over the `sessionQuery` seam: live stats/token usage/model selection, 404 unknown (never created or resumed), 400 repeated `sessionId`, default target |
-| `tests/cold-sessions.spec.ts` | the persisted-only roster: a session from a previous boot (two hosts sharing one `dshHome`) is listed cold with its durable title and observed by the report's cold arm |
+| `tests/cold-sessions.spec.ts` | the persisted-only roster: a session from a previous boot (two hosts sharing one `dshHome`) is listed cold with its durable title and observed by the report's cold arm; the cold write paths: `/send` naming a cold id resumes it on demand and lands the prompt, `/sessions/resume` brings a cold id live |
 | `tests/fork.spec.ts` | branching a completed-turn prefix through the `sessionController` seam: the `/turns` `endSeq` anchor, child lineage and inherited prefix, the omitted-`atSeq` fallback, and the failure taxonomy (unknown source, bad argument, open-turn anchor) |
 | `tests/attachments.spec.ts` | the path-based attachment seam through the real `ctx.attachments` store: image sniffing reaching the provider as an image block, a generic file projected to handle text, an attachment-only prompt, and the validation/count/byte-cap statuses |
+| `tests/routes.spec.ts` | the composer-draft push (frame to the `purpose=draft` stream, 409 with only an Emacs client), the outbox `messageId` deposit (host-side text resolution, 404 unknown), `/context` (204 before any sample, 200 after a turn, SSE `context` frame), and `/send` with no active session (409 on a dedicated fixture) |
+| `tests/models.spec.ts` | mock-LLM fidelity: advertised modalities behind the image-support precheck (text-only model → 400 `MODEL_DOES_NOT_SUPPORT_IMAGES`; the default stays image-capable), fragmented `tool-call-delta` argument assembly, and a model error ending the turn with reason `error` |
 | `tests/turns-incremental.spec.ts` | the `/turns` epoch contract incremental DSH-View filling relies on: a running turn grows segment by segment under a stable epoch, the inclusive `since` fetch re-sends the boundary turn in full, and a stale epoch forces the full-list fallback |
-| `dsh-bridge-it.el` | the live-Emacs seats of the ask-user path, `C-c C-a` attachment staging plus send-time tag stripping, DSH-Describe rendering live host statistics, turn branching, and incremental DSH-View filling (in-place segment append with a surviving marker, first-reply tailing, and the newer-turn rebuild) |
+| `dsh-bridge-it.el` | the live-Emacs seats of the ask-user path (submit and decline), `C-c C-a` attachment staging plus send-time tag stripping, DSH-Describe rendering live host statistics, turn branching, incremental DSH-View filling (in-place segment append with a surviving marker, first-reply tailing, and the newer-turn rebuild), SSE reconnect resilience across a same-port fixture restart, the DSH-Sessions list over live data, outbox receive + ack draining, and cold-session resume driven from Emacs |
 
 `tests/cold-sessions.spec.ts` boots a second host against a persisted
 `dshHome` (the launcher's `dshHome` option) to cover the cold roster; the
@@ -85,7 +88,10 @@ describe route's cold arm is exercised there too.
 ## Mock LLM
 
 `integration/mock-llm/index.js` plugs a scripted adapter into `ctx.llm` for the
-`mock` provider. It advertises `mock-model` / `mock-model-pro`, keeps a script
+`mock` provider. It advertises `mock-model` / `mock-model-pro` (image-capable)
+and `mock-model-text` (text-only) with real `inputModalities` metadata and a
+128k context window, so the bridge's image-support precheck and the
+context-occupancy projection have genuine values to read. It keeps a script
 queue consumed one entry per **main-turn** call (a `GenerateOptions` with no
 `purpose`), and answers auxiliary calls (`session-title`, `compaction`) with a
 canned reply without touching the queue. Control routes on the same loopback
@@ -98,7 +104,10 @@ lazily per request from `$DSH_HOME/dsh-bridge-token`):
 - `POST /mock-llm/reset` — clear queue + recording.
 
 Entry kinds: `{kind:'text', text, delayMs?}`, `{kind:'tool-call', name,
-arguments, text?}`, `{kind:'hang'}`, `{kind:'error', message}`.
+arguments, text?, fragmentArgs?}` (`fragmentArgs: true` splits the arguments
+JSON across several `tool-call-delta` chunks, the way real providers fragment
+them), `{kind:'hang'}`, `{kind:'error', message}` (the adapter throws; the
+turn ends with reason `error`).
 
 ## Failure bounds
 
@@ -112,6 +121,8 @@ library's `dshHome` option, the cold-resume reuse case) belongs to the caller.
 
 ## Adding a scenario
 
-Add a `scenarios/<name>.json` with `mockScript` (consumed by the automated
-tests) and `steps` (the human flow). The automated suites consume `mockScript`;
-the interactive runner drives `steps` and records annotations.
+Add a `scenarios/<name>.json` with `mockScript` (the model's reply queue) and
+`steps` (the human flow). Only the interactive runner consumes these files:
+it pushes `mockScript` to the mock and drives `steps`, recording annotations.
+The automated vitest suites do not read `scenarios/`; they script the mock
+inline over `POST /mock-llm/script`.

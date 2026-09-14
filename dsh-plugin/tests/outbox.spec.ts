@@ -1,5 +1,21 @@
+// dsh-emacs-bridge — Vitest specs for the bounded DSH→Emacs outbox.
+// Copyright (C) 2026  Chong Yidong <cyd@stupidchicken.com>
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
 import { describe, expect, it } from 'vitest'
-import { Outbox, type OutboxEntry } from '../src/outbox.ts'
+import { Outbox, OUTBOX_DEFAULT_CAP, type OutboxEntry } from '../src/outbox.ts'
 
 let counter = 0
 function entry(overrides: Partial<OutboxEntry> = {}): OutboxEntry {
@@ -43,6 +59,20 @@ describe('Outbox', () => {
     const outbox = new Outbox(2)
     outbox.deposit(entry({ id: 'a' }))
     expect(outbox.deposit(entry({ id: 'b' }))).toBe(false)
+  })
+
+  it('admits OUTBOX_DEFAULT_CAP entries by default and evicts on the next', () => {
+    const outbox = new Outbox()
+    for (let index = 1; index <= OUTBOX_DEFAULT_CAP; index += 1) {
+      expect(outbox.deposit(entry({ id: `e${index}` }))).toBe(false)
+    }
+    expect(outbox.size).toBe(OUTBOX_DEFAULT_CAP)
+    expect(outbox.deposit(entry({ id: `e${OUTBOX_DEFAULT_CAP + 1}` }))).toBe(true)
+    const { entries, overflowed } = outbox.collect()
+    expect(entries).toHaveLength(OUTBOX_DEFAULT_CAP)
+    expect(entries[0]!.id).toBe('e2')
+    expect(entries.at(-1)!.id).toBe(`e${OUTBOX_DEFAULT_CAP + 1}`)
+    expect(overflowed).toBe(true)
   })
 
   it('ack removes the named entries and leaves the rest', () => {

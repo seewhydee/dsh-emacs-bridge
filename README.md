@@ -279,7 +279,7 @@ loopback-only `GET /dsh-bridge/token` route (peer- and origin-fenced).
 HTTP request bodies are capped at 1 MiB; larger bodies get a 413
 error.  DSH-to-Emacs messages are held in a bounded outbox (100
 unacknowledged entries); overflow evicts the oldest entries and is
-reported to the collector.  Naming a cold (persisted-only) session
+reported to Emacs, which warns on receive when entries were dropped.  Naming a cold (persisted-only) session
 from Emacs resumes it on demand, matching the web UI; an id neither
 live nor persisted is 404, a subagent-owned session is 409, and a
 draft push fails with 409 when no browser client is subscribed.  The

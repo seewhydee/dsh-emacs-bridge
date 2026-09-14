@@ -275,7 +275,9 @@ turn (1/X) to enable turn-following state."
 (defcustom dsh-bridge-turn-boundary-echo t
   "Whether turn boundaries are announced in the echo area.
 When non-nil, each \"turn-start\" and \"turn-complete\" event produces a
-brief echo area message; see `dsh-bridge--view-displayed-p'."
+brief echo area message — unless a visible window is already showing that
+session's DSH-View (see `dsh-bridge--view-displayed-p'), in which case the
+view itself shows the boundary and the echo is suppressed as redundant."
   :type 'boolean
   :group 'dsh-bridge)
 
@@ -857,7 +859,8 @@ Currently supported events are:
 		  (dsh-bridge--status-set id 'running (alist-get 'time event))
 		  (dsh-bridge--status-event-render id)
 		  (dsh-bridge--models-event-refresh id)
-		  (when dsh-bridge-turn-boundary-echo
+		  (when (and dsh-bridge-turn-boundary-echo
+					 (not (dsh-bridge--view-displayed-p id)))
 			(message "dsh-bridge: session \"%s\" is running..."
 					 (dsh-bridge--session-label id)))
 		  ;; A turn boundary also grows the turn list, so refresh the
@@ -3044,6 +3047,8 @@ the button in the DSH web UI, so the common flow is to want the message
 visible on arrival).  When several messages were pending, only the latest is
 shown and the message says so (the ack invariant weakens deliberately: the
 alternative, a durable per-session store, is the deferred transcript buffer).
+When the host reports outbox overflow (older entries were evicted before
+Emacs collected them), a warning follows the summary message.
 This is also the manual fallback if you want to fetch the pending message
 yourself; the SSE listener calls it automatically unless
 `dsh-bridge-notifications-stop' has been run."
@@ -3071,7 +3076,9 @@ yourself; the SSE listener calls it automatically unless
 			(if (= (length entries) 1)
 				(message "dsh-bridge: DSH sent a message to %s" (buffer-name buf))
 			  (message "dsh-bridge: %d messages received from DSH"
-					   (length entries))))))))))
+					   (length entries)))
+			(when (alist-get 'overflowed alist)
+			  (message "dsh-bridge: the host dropped older messages (outbox overflow)")))))))))
 
 (defun dsh-bridge--view-fill (session-id turn received-at &optional cwd no-turns-refresh preserve-point)
   "Fill the current buffer with TURN as the shown content of SESSION-ID.
@@ -3882,7 +3889,11 @@ settle it."
 									   (cons 'sessionId dsh-bridge--question-session))
 								 (list (cons 'answers answers))))))
 			(let* ((alist (condition-case nil
-							(json-parse-string body :object-type 'alist)
+							;; JSON false must decode to nil: the
+							;; `accepted' cond branch below keys on
+							;; truthiness.
+							(json-parse-string body :object-type 'alist
+										   :null-object nil :false-object nil)
 						  (error nil)))
 				   (reason (and alist (alist-get 'reason alist)))
 				   (accepted (and alist (alist-get 'accepted alist))))
@@ -3930,7 +3941,11 @@ answer; an already-resolved question is bannered in place."
 						   (cons 'sessionId dsh-bridge--question-session)
 						   (cons 'cancelled t)))))
 		(let* ((alist (condition-case nil
-						(json-parse-string body :object-type 'alist)
+						;; JSON false must decode to nil: the
+						;; `accepted' cond branch below keys on
+						;; truthiness.
+						(json-parse-string body :object-type 'alist
+									   :null-object nil :false-object nil)
 					  (error nil)))
 			   (reason (and alist (alist-get 'reason alist)))
 			   (accepted (and alist (alist-get 'accepted alist))))
@@ -5479,14 +5494,17 @@ SESSION-ID is the session id for the ended session, and REASON is a
 string is a string describing how/why it ended.
 
 This function runs the actions prescribed by `dsh-bridge-turn-complete',
-then emits a message if `dsh-bridge-turn-boundary-echo' is non-nil."
+then emits a message if `dsh-bridge-turn-boundary-echo' is non-nil and no
+visible window is showing SESSION-ID's DSH-View (the view itself shows the
+boundary; see `dsh-bridge--view-displayed-p')."
   (if (and (eq dsh-bridge-turn-complete 'refetch)
 		   (dsh-bridge--session-view session-id)
 		   (not (seq-some #'dsh-bridge--view-browsing-p
 						  (dsh-bridge--session-views session-id))))
 	  (run-at-time 0 nil #'dsh-bridge--turn-complete-refetch session-id)
 	(run-at-time 0 nil #'dsh-bridge--view-turns-cache-refresh session-id))
-  (when dsh-bridge-turn-boundary-echo
+  (when (and dsh-bridge-turn-boundary-echo
+			 (not (dsh-bridge--view-displayed-p session-id)))
 	(message "dsh-bridge: %s"
 			 (dsh-bridge--turn-reason-phrase session-id reason))))
 

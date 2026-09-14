@@ -90,6 +90,12 @@
 (ert-deftest dsh-bridge-error-message-success ()
   (should (equal (dsh-bridge--error-message nil 200 '((ok . t))) nil)))
 
+(ert-deftest dsh-bridge-extra-headers-token-trailing-newline ()
+  "A trailing newline in the token file is trimmed."
+  (dsh-bridge-test--with-token-file "secret\n"
+    (should (equal (dsh-bridge--extra-headers nil)
+                   '(("Authorization" . "Bearer secret"))))))
+
 (defmacro dsh-bridge-test--with-http (retrieve &rest body)
   "Run BODY with the HTTP plumbing stubbed for `dsh-bridge--http'.
 RETRIEVE replaces `url-retrieve-synchronously'; `dsh-bridge--parse-response'
@@ -103,11 +109,23 @@ SSE listener are disabled."
              ((symbol-function 'dsh-bridge-notifications-start) #'ignore))
      ,@body))
 
+(defun dsh-bridge-test--mock-response (status body)
+  "Return a mock url-http response buffer with STATUS and BODY."
+  (let ((buf (generate-new-buffer " *dsh-bridge-mock*")))
+    (with-current-buffer buf
+      (insert (format "HTTP/1.1 %s OK\r\n\r\n" status))
+      (insert body)
+      (set (make-local-variable 'url-http-response-status) status))
+    buf))
+
 (ert-deftest dsh-bridge-http-success ()
   "`--http' returns (nil BODY STATUS), and `--request' parses the body
-into the (STATUS . ALIST) pair."
-  (dsh-bridge-test--with-http
-      (lambda (&rest _) (generate-new-buffer " *dsh-bridge-test-http*"))
+into the (STATUS . ALIST) pair — through the real `--parse-response'."
+  (cl-letf (((symbol-function 'url-retrieve-synchronously)
+             (lambda (&rest _)
+               (dsh-bridge-test--mock-response 200 "{\"ok\":true}")))
+            ((symbol-function 'dsh-bridge--ensure-plugin) #'ignore)
+            ((symbol-function 'dsh-bridge-notifications-start) #'ignore))
     (should (equal (dsh-bridge--http "GET" "/x" nil)
                    (list nil "{\"ok\":true}" 200)))
     (should (equal (dsh-bridge--request "GET" "/x" nil)
@@ -533,9 +551,7 @@ current buffer has no session of its own."
                           (concat "{\"sessionId\":\"s1\",\"turns\":["
                                   "{\"turn\":2,\"startedAt\":1000,\"endedAt\":2000,\"reason\":\"completed\",\"segments\":["
                                   "{\"text\":\"reply text\",\"time\":1000000,\"step\":1}]}]}")
-                          200)))
-              ((symbol-function 'dsh-bridge--request)
-               (lambda (&rest _) (cons nil nil))))
+                          200))))
       (dsh-bridge-fetch))
     (let ((buf (get-buffer "*dsh-bridge-output*")))
       (should buf)
@@ -559,9 +575,7 @@ not the default target."
                           (concat "{\"sessionId\":\"s2\",\"turns\":["
                                   "{\"turn\":3,\"startedAt\":1000,\"endedAt\":2000,\"reason\":\"completed\",\"segments\":["
                                   "{\"text\":\"other reply\",\"time\":1000000,\"step\":1}]}]}")
-                          200)))
-              ((symbol-function 'dsh-bridge--request)
-               (lambda (&rest _) (cons nil nil))))
+                          200))))
       (dsh-bridge-fetch "s2"))
     (with-current-buffer "*dsh-bridge-output*"
       (should (equal (buffer-string) "other reply"))
@@ -586,9 +600,7 @@ so the check must compare against t, not truthiness (a regression: a
           (dsh-bridge--session-status nil))
       (cl-letf (((symbol-function 'dsh-bridge--http)
                  (lambda (_method _path _payload)
-                   (list nil (car case) 200)))
-                ((symbol-function 'dsh-bridge--request)
-                 (lambda (&rest _) (cons nil nil))))
+                   (list nil (car case) 200))))
         (dsh-bridge-fetch "s1"))
       (should (eq (dsh-bridge--status-state "s1") (cdr case)))
       (kill-buffer "*dsh-bridge-output*"))))
@@ -603,9 +615,7 @@ then grows in place as further segments commit."
                           (concat "{\"sessionId\":\"s1\",\"running\":true,\"turns\":["
                                   "{\"turn\":5,\"startedAt\":1000,\"segments\":["
                                   "{\"text\":\"partial reply\",\"time\":1000000,\"step\":1}]}]}")
-                          200)))
-              ((symbol-function 'dsh-bridge--request)
-               (lambda (&rest _) (cons nil nil))))
+                          200))))
       (dsh-bridge-fetch))
     (let ((buf (get-buffer "*dsh-bridge-output*")))
       (should buf)
@@ -627,9 +637,7 @@ then grows in place as further segments commit."
                           (concat "{\"sessionId\":\"s1\",\"running\":false,\"turns\":["
                                   "{\"turn\":5,\"startedAt\":1000,\"endedAt\":2000,\"reason\":\"completed\",\"segments\":["
                                   "{\"text\":\"final reply\",\"time\":1000000,\"step\":1}]}]}")
-                          200)))
-              ((symbol-function 'dsh-bridge--request)
-               (lambda (&rest _) (cons nil nil))))
+                          200))))
       (dsh-bridge-fetch))
     (with-current-buffer "*dsh-bridge-output*"
       (should (equal (buffer-string) "final reply"))
@@ -650,9 +658,7 @@ later incremental requests see every turn."
                                   "{\"text\":\"newest\",\"time\":1000000,\"step\":1}]},"
                                   "{\"turn\":2,\"startedAt\":900,\"endedAt\":1900,\"reason\":\"completed\",\"segments\":["
                                   "{\"text\":\"older\",\"time\":900000,\"step\":1}]}]}")
-                          200)))
-              ((symbol-function 'dsh-bridge--request)
-               (lambda (&rest _) (cons nil nil))))
+                          200))))
       (dsh-bridge-fetch))
     (let ((cached (dsh-bridge--turns-cache-turns "s1")))
       (should (= (length cached) 2))
@@ -670,9 +676,7 @@ explicit target is not the host's resolution, so nothing is recorded."
                  (lambda (_method _path _payload)
                    (list nil
                             "{\"sessionId\":\"s1\",\"title\":\"T\",\"turns\":[]}"
-                            200)))
-                ((symbol-function 'dsh-bridge--request)
-                 (lambda (&rest _) (cons nil nil))))
+                            200))))
         (dsh-bridge-fetch))
       (if (cdr case)
           (should (equal dsh-bridge--last-resolved-active '("s1" . "T")))
@@ -711,9 +715,7 @@ not opened and no guessed target is used."
                           (concat "{\"sessionId\":\"s1\",\"cwd\":\"/w/sess1\","
                                   "\"turns\":[{\"turn\":2,\"startedAt\":1000,\"endedAt\":2000,\"reason\":\"completed\","
                                   "\"segments\":[{\"text\":\"reply\",\"time\":1000000,\"step\":1}]}]}")
-                          200)))
-              ((symbol-function 'dsh-bridge--request)
-               (lambda (&rest _) (cons nil nil))))
+                          200))))
       (dsh-bridge-fetch))
     (with-current-buffer "*dsh-bridge-output*"
       (should (equal default-directory "/w/sess1/"))
@@ -887,20 +889,21 @@ binds the compose keys plus fetch/set-session/list."
 
 (ert-deftest dsh-bridge-prompt-history-record-send ()
   "A recorded send prepends the text and returns the buffer to the draft slot."
-  (setq dsh-bridge--prompt-history '(("s1" "old")))
-  (when (get-buffer "*dsh-bridge-prompt*")
-    (kill-buffer "*dsh-bridge-prompt*"))
-  (let ((buf (get-buffer-create "*dsh-bridge-prompt*")))
-    (with-current-buffer buf
-      (dsh-bridge-prompt-mode)
-      (setq-local dsh-bridge--prompt-session "s1")
-      (setq-local dsh-bridge--prompt-history-index 1))
-    (dsh-bridge--prompt-history-record-send "s1" "just sent")
-    (should (equal (cdr (assoc "s1" dsh-bridge--prompt-history))
-                   (list "just sent" "old")))
-    (with-current-buffer buf
-      (should (null dsh-bridge--prompt-history-index)))
-    (kill-buffer buf)))
+  (let ((dsh-bridge--prompt-history (list (list "s1" "old")))
+        (dsh-bridge--last-sent nil))
+    (when (get-buffer "*dsh-bridge-prompt*")
+      (kill-buffer "*dsh-bridge-prompt*"))
+    (let ((buf (get-buffer-create "*dsh-bridge-prompt*")))
+      (with-current-buffer buf
+        (dsh-bridge-prompt-mode)
+        (setq-local dsh-bridge--prompt-session "s1")
+        (setq-local dsh-bridge--prompt-history-index 1))
+      (dsh-bridge--prompt-history-record-send "s1" "just sent")
+      (should (equal (cdr (assoc "s1" dsh-bridge--prompt-history))
+                     (list "just sent" "old")))
+      (with-current-buffer buf
+        (should (null dsh-bridge--prompt-history-index)))
+      (kill-buffer buf))))
 
 (ert-deftest dsh-bridge-prompt-history-edited-blocks-walk ()
   "Editing a history entry blocks walking until it is sent or reverted."
@@ -1215,6 +1218,37 @@ every collected id."
       (dsh-bridge-receive))
     (should (string-match-p "2 messages received from DSH" msg))))
 
+(ert-deftest dsh-bridge-receive-overflow-warns ()
+  "When the host reports outbox overflow, receive warns that it dropped
+older messages; without the flag there is no warning."
+  (let ((msgs nil))
+    (cl-letf (((symbol-function 'dsh-bridge--request)
+               (lambda (method _path _payload)
+                 (cond ((equal method "GET")
+                        (cons 200 (list (cons 'entries
+                                              (alist-get 'entries
+                                                         dsh-bridge-test--receive-response))
+                                        (cons 'overflowed t))))
+                       (t (cons 200 (list (cons 'ok t)))))))
+              ((symbol-function 'message)
+               (lambda (&rest args) (push (apply #'format args) msgs))))
+      (dsh-bridge-receive))
+    (should (seq-some (lambda (m) (string-match-p "dropped older messages" m))
+                      msgs))
+    ;; The summary still went out alongside the warning.
+    (should (seq-some (lambda (m) (string-match-p "messages received from DSH" m))
+                      msgs)))
+  (let ((msgs nil))
+    (cl-letf (((symbol-function 'dsh-bridge--request)
+               (lambda (method _path _payload)
+                 (cond ((equal method "GET") dsh-bridge-test--receive-response)
+                       (t (cons 200 (list (cons 'ok t)))))))
+              ((symbol-function 'message)
+               (lambda (&rest args) (push (apply #'format args) msgs))))
+      (dsh-bridge-receive))
+    (should-not (seq-some (lambda (m) (string-match-p "dropped older messages" m))
+                          msgs))))
+
 (ert-deftest dsh-bridge-receive-pops-by-default ()
   "With `dsh-bridge-receive-pop' (the default), receive selects the output
 buffer."
@@ -1462,9 +1496,7 @@ and the view is bound to the fetched turn's number."
                           (concat "{\"sessionId\":\"s1\",\"turns\":["
                                   "{\"turn\":2,\"startedAt\":1000,\"endedAt\":2000,\"reason\":\"completed\",\"segments\":["
                                   "{\"text\":\"fresh\",\"time\":1000000,\"step\":1}]}]}")
-                          200)))
-              ((symbol-function 'dsh-bridge--request)
-               (lambda (&rest _) (cons nil nil))))
+                          200))))
       (with-current-buffer (get-buffer-create "*dsh-bridge-output*")
         (dsh-bridge-view-mode)
         (setq-local dsh-bridge--view-browsing t))
@@ -2529,15 +2561,6 @@ stay available instead of a bare error message."
 
 ;;; Plugin management: probe, diagnosis, install/uninstall
 
-(defun dsh-bridge-test--mock-response (status body)
-  "Return a mock url-http response buffer with STATUS and BODY."
-  (let ((buf (generate-new-buffer " *dsh-bridge-mock*")))
-    (with-current-buffer buf
-      (insert (format "HTTP/1.1 %s OK\r\n\r\n" status))
-      (insert body)
-      (set (make-local-variable 'url-http-response-status) status))
-    buf))
-
 (ert-deftest dsh-bridge-bridge-status-running ()
   "A 200 naming dsh-emacs-bridge with the package version means running."
   (let ((dsh-bridge--bridge-status-cache nil))
@@ -3133,6 +3156,175 @@ prematurely; the payload is decoded only at the point of consumption."
     (let* ((decoded (dsh-bridge--chunked-decode raw))
            (parsed (dsh-bridge--sse-parse (car decoded))))
       (should (equal (car parsed) '(((kind . "outbox"))))))))
+
+(defun dsh-bridge-test--sse-chunked-body (json)
+  "A complete HTTP chunked body carrying one SSE data frame holding JSON."
+  (let ((line (concat "data: " json "\n\n")))
+    (format "%x\r\n%s\r\n0\r\n\r\n" (length line) line)))
+
+(ert-deftest dsh-bridge-notification-filter-accumulates ()
+  "The notification filter consumes the HTTP response headers before parsing
+SSE, and accumulates raw bytes across calls: a chunk split between two filter
+calls parses only once its closing bytes arrive."
+  (let ((dsh-bridge--notifications-raw "")
+        (dsh-bridge--notifications-headers-done nil)
+        (dsh-bridge--notifications-sse "")
+        (dsh-bridge--notifications-receive-pending nil)
+        (handled nil))
+    (cl-letf (((symbol-function 'dsh-bridge--notification-handle-events)
+               (lambda (events) (setq handled (append handled events))))
+              ((symbol-function 'run-at-time) (lambda (&rest _) nil)))
+      ;; Headers alone: consumed, nothing parsed yet.
+      (dsh-bridge--notification-filter
+       nil "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n")
+      (should dsh-bridge--notifications-headers-done)
+      (should-not handled)
+      ;; A partial chunk is held back whole until the rest arrives.
+      (let ((body (dsh-bridge-test--sse-chunked-body
+                   "{\"kind\":\"turn-start\",\"sessionId\":\"s1\"}")))
+        (dsh-bridge--notification-filter nil (substring body 0 10))
+        (should-not handled)
+        (dsh-bridge--notification-filter nil (substring body 10))
+        (should (equal handled
+                       '(((kind . "turn-start") (sessionId . "s1")))))))))
+
+(ert-deftest dsh-bridge-notification-filter-debounces-outbox-receive ()
+  "An outbox frame schedules one debounced receive; while a receive is
+pending, further outbox frames do not re-schedule, and the deferred receive
+clears the pending flag.  A non-outbox frame never schedules a receive."
+  (let ((dsh-bridge--notifications-raw "")
+        (dsh-bridge--notifications-headers-done nil)
+        (dsh-bridge--notifications-sse "")
+        (dsh-bridge--notifications-receive-pending nil)
+        (scheduled nil)
+        (received 0))
+    (cl-letf (((symbol-function 'dsh-bridge--notification-handle-events) #'ignore)
+              ((symbol-function 'run-at-time)
+               (lambda (_time _repeat fn &rest args)
+                 (push (cons fn args) scheduled)
+                 'timer))
+              ((symbol-function 'dsh-bridge-receive)
+               (lambda () (setq received (1+ received)))))
+      (dsh-bridge--notification-filter
+       nil (concat "HTTP/1.1 200 OK\r\n\r\n"
+                   (dsh-bridge-test--sse-chunked-body "{\"kind\":\"outbox\"}")))
+      (should dsh-bridge--notifications-receive-pending)
+      (should (equal (mapcar #'car scheduled)
+                     (list #'dsh-bridge--notification-receive)))
+      ;; A second outbox frame while pending does not re-schedule.
+      (dsh-bridge--notification-filter
+       nil (dsh-bridge-test--sse-chunked-body "{\"kind\":\"outbox\"}"))
+      (should (= (length scheduled) 1))
+      ;; A non-outbox frame never schedules a receive.
+      (dsh-bridge--notification-filter
+       nil (dsh-bridge-test--sse-chunked-body
+            "{\"kind\":\"turn-start\",\"sessionId\":\"s1\"}"))
+      (should (= (length scheduled) 1))
+      ;; The deferred receive clears the flag and calls `dsh-bridge-receive'.
+      (dsh-bridge--notification-receive)
+      (should-not dsh-bridge--notifications-receive-pending)
+      (should (= received 1)))))
+
+(ert-deftest dsh-bridge-notifications-retry-arms-only-when-enabled ()
+  "The retry helper re-arms a reconnect only while notifications are enabled
+and no reconnect timer is already pending."
+  (let ((dsh-bridge--notifications-enabled t)
+        (dsh-bridge--notifications-timer nil)
+        (armed nil))
+    (cl-letf (((symbol-function 'run-at-time)
+               (lambda (time _repeat fn &rest args)
+                 (setq armed (list time fn args))
+                 (timer-create))))
+      (dsh-bridge--notifications-retry)
+      (should (equal armed '(5 dsh-bridge-notifications-start nil)))
+      (should (timerp dsh-bridge--notifications-timer))
+      ;; Already armed: no second timer.
+      (setq armed nil)
+      (dsh-bridge--notifications-retry)
+      (should-not armed)))
+  (let ((dsh-bridge--notifications-enabled nil)
+        (dsh-bridge--notifications-timer nil)
+        (armed nil))
+    (cl-letf (((symbol-function 'run-at-time)
+               (lambda (&rest _) (setq armed t) 'timer)))
+      (dsh-bridge--notifications-retry)
+      (should-not armed)
+      (should (null dsh-bridge--notifications-timer)))))
+
+(ert-deftest dsh-bridge-notification-sentinel-reconnects-when-started ()
+  "A dropped connection re-arms the reconnect while notifications are
+started, and stays off while stopped; an `open' event is not a drop."
+  (let ((dsh-bridge--notifications-enabled t)
+        (dsh-bridge--notifications-process 'proc)
+        (retried nil))
+    (cl-letf (((symbol-function 'dsh-bridge--notifications-retry)
+               (lambda () (setq retried t))))
+      (dsh-bridge--notification-sentinel 'proc "connection broken")
+      (should retried)
+      (should (null dsh-bridge--notifications-process))))
+  (let ((dsh-bridge--notifications-enabled nil)
+        (dsh-bridge--notifications-process 'proc)
+        (retried nil))
+    (cl-letf (((symbol-function 'dsh-bridge--notifications-retry)
+               (lambda () (setq retried t))))
+      (dsh-bridge--notification-sentinel 'proc "deleted")
+      (should-not retried)
+      (should (null dsh-bridge--notifications-process))))
+  (let ((dsh-bridge--notifications-enabled t)
+        (dsh-bridge--notifications-process 'proc)
+        (retried nil))
+    (cl-letf (((symbol-function 'dsh-bridge--notifications-retry)
+               (lambda () (setq retried t))))
+      (dsh-bridge--notification-sentinel 'proc "open")
+      (should-not retried)
+      (should (eq dsh-bridge--notifications-process 'proc)))))
+
+(ert-deftest dsh-bridge-notifications-start-stop-latch ()
+  "Start/stop are latched: a double start does not reconnect, a stop after a
+stop is a no-op, a conditional start stays off while paused, and an explicit
+start after a stop re-listens."
+  (let ((dsh-bridge--notifications-enabled nil)
+        (dsh-bridge--notifications-paused nil)
+        (dsh-bridge--notifications-process nil)
+        (dsh-bridge--notifications-timer nil)
+        (connects 0)
+        (deletes 0))
+    (cl-letf (((symbol-function 'dsh-bridge--token) (lambda () "tok"))
+              ((symbol-function 'dsh-bridge--notifications-connect)
+               (lambda (_token)
+                 (setq connects (1+ connects)
+                       dsh-bridge--notifications-process 'fake-proc)))
+              ((symbol-function 'process-live-p)
+               (lambda (proc) (eq proc 'fake-proc)))
+              ((symbol-function 'delete-process)
+               (lambda (_proc) (setq deletes (1+ deletes)))))
+      (dsh-bridge-notifications-start)
+      (should dsh-bridge--notifications-enabled)
+      (should-not dsh-bridge--notifications-paused)
+      (should (= connects 1))
+      ;; A double start sees the live process and does not reconnect.
+      (dsh-bridge-notifications-start)
+      (should (= connects 1))
+      ;; A conditional start while enabled is a no-op.
+      (dsh-bridge-notifications-start t)
+      (should (= connects 1))
+      (dsh-bridge-notifications-stop)
+      (should-not dsh-bridge--notifications-enabled)
+      (should dsh-bridge--notifications-paused)
+      (should (= deletes 1))
+      (should (null dsh-bridge--notifications-process))
+      ;; Stop after stop: nothing left to tear down.
+      (dsh-bridge-notifications-stop)
+      (should (= deletes 1))
+      ;; A conditional start while paused stays off.
+      (dsh-bridge-notifications-start t)
+      (should (= connects 1))
+      (should-not dsh-bridge--notifications-enabled)
+      ;; An explicit start after a stop re-listens.
+      (dsh-bridge-notifications-start)
+      (should dsh-bridge--notifications-enabled)
+      (should-not dsh-bridge--notifications-paused)
+      (should (= connects 2)))))
 
 ;;; Turn notifications, session status, and the header line
 
@@ -3840,6 +4032,108 @@ than post the change to whatever the advisory caches name."
       (dsh-bridge-prompt-mode)
       (should-error (dsh-bridge-select-model) :type 'user-error))))
 
+(ert-deftest dsh-bridge-select-model-apply-posts-and-refetches ()
+  "A successful switch POSTs provider/model — plus `reasoningEffort' when
+set — drops the session's cached catalog, force-refetches it, and echoes the
+selection."
+  (let ((dsh-bridge--session-models '(("s1" . ((stale . t)))))
+        (posted nil)
+        (refetched nil)
+        (msg nil))
+    (cl-letf (((symbol-function 'dsh-bridge--request)
+               (lambda (method path payload)
+                 (should (equal method "POST"))
+                 (should (equal path "/model"))
+                 (setq posted payload)
+                 (cons 200 '((ok . t)))))
+              ((symbol-function 'dsh-bridge--fetch-models)
+               (lambda (id force) (push (list id force) refetched)))
+              ((symbol-function 'message)
+               (lambda (&rest args) (setq msg (apply #'format args)))))
+      (should (dsh-bridge--select-model-apply "s1" "p1" "m1" "high"))
+      (should (equal posted '((sessionId . "s1") (provider . "p1")
+                              (model . "m1") (reasoningEffort . "high"))))
+      ;; The stale entry was dropped and a forced refetch was kicked off.
+      (should-not (assoc "s1" dsh-bridge--session-models))
+      (should (equal refetched '(("s1" t))))
+      (should (string-match-p "model p1/m1 (high)" msg))
+      ;; Without an effort, no reasoningEffort key and a plainer echo.
+      (setq posted nil msg nil)
+      (should (dsh-bridge--select-model-apply "s1" "p1" "m2" nil))
+      (should-not (assq 'reasoningEffort posted))
+      (should (equal msg "dsh-bridge: model p1/m2")))))
+
+(ert-deftest dsh-bridge-select-model-apply-error-echoes ()
+  "A failed switch echoes the host's error (or the bare HTTP status) and
+leaves the cached catalog alone: no forced refetch runs."
+  (let ((dsh-bridge--session-models '(("s1" . ((cached . t)))))
+        (refetched nil)
+        (msg nil))
+    (cl-letf (((symbol-function 'dsh-bridge--request)
+               (lambda (&rest _) (cons 400 '((error . "no such model")))))
+              ((symbol-function 'dsh-bridge--fetch-models)
+               (lambda (&rest _) (setq refetched t)))
+              ((symbol-function 'message)
+               (lambda (&rest args) (setq msg (apply #'format args)))))
+      (should-not (dsh-bridge--select-model-apply "s1" "p1" "m9" nil))
+      (should (equal msg "dsh-bridge: no such model"))
+      (should-not refetched)
+      (should (assoc "s1" dsh-bridge--session-models)))
+    ;; An error body without an `error' field falls back to the status.
+    (setq msg nil)
+    (cl-letf (((symbol-function 'dsh-bridge--request)
+               (lambda (&rest _) (cons 500 nil)))
+              ((symbol-function 'message)
+               (lambda (&rest args) (setq msg (apply #'format args)))))
+      (should-not (dsh-bridge--select-model-apply "s1" "p1" "m9" nil))
+      (should (equal msg "dsh-bridge: HTTP 500")))))
+
+(ert-deftest dsh-bridge-select-model-effort-default-preselection ()
+  "For a reasoning model, the effort prompt preselects the session's current
+effort by name, else the catalog's `defaultEffort'; the chosen name maps back
+to its id for the apply call."
+  (let ((dsh-bridge-default-session "s1")
+        (data nil)
+        (reads nil)
+        (applied nil))
+    (cl-letf (((symbol-function 'dsh-bridge--fetch-models)
+               (lambda (&rest _) data))
+              ((symbol-function 'completing-read)
+               (lambda (_prompt _collection &rest args)
+                 (push (nth 4 args) reads) ; the DEF argument
+                 (nth 4 args)))
+              ((symbol-function 'dsh-bridge--select-model-apply)
+               (lambda (session provider model effort)
+                 (setq applied (list session provider model effort))
+                 t)))
+      ;; The session's current effort wins the preselection.
+      (setq data '((current . ((provider . "p1") (model . "m1")
+                               (reasoningEffort . "low")))
+                   (groups . (((id . "p1")
+                               (models . (((id . "m1")
+                                           (reasoning
+                                            . ((defaultEffort . "medium")
+                                               (efforts . (((id . "low") (name . "Low"))
+                                                           ((id . "medium") (name . "Medium"))
+                                                           ((id . "high") (name . "High"))))))))))))))
+      (dsh-bridge-select-model)
+      (should (equal (nreverse reads) '("p1/m1" "Low")))
+      (should (equal applied '("s1" "p1" "m1" "low")))
+      ;; No current effort: the catalog's defaultEffort is preselected.
+      (setq reads nil
+            applied nil
+            data '((current . ((provider . "p1") (model . "m1")))
+                   (groups . (((id . "p1")
+                               (models . (((id . "m1")
+                                           (reasoning
+                                            . ((defaultEffort . "medium")
+                                               (efforts . (((id . "low") (name . "Low"))
+                                                           ((id . "medium") (name . "Medium"))
+                                                           ((id . "high") (name . "High"))))))))))))))
+      (dsh-bridge-select-model)
+      (should (equal (nreverse reads) '("p1/m1" "Medium")))
+      (should (equal applied '("s1" "p1" "m1" "medium"))))))
+
 (ert-deftest dsh-bridge-fetch-context ()
   "fetch-context seeds the cache once and skips when cached."
   (let ((dsh-bridge--session-context nil) (calls 0))
@@ -4352,16 +4646,16 @@ following on."
 
 (ert-deftest dsh-bridge-prompt-history-position ()
   "The prompt-history position is newest-first (k/n), absent at rest."
-  (with-temp-buffer
-    (dsh-bridge-prompt-mode)
-    (setq-local dsh-bridge--prompt-session "s1")
-    (setq dsh-bridge--prompt-history '(("s1" "new" "mid" "old")))
-    (setq-local dsh-bridge--prompt-history-index nil)
-    (should (equal (dsh-bridge--prompt-history-position) ""))
-    (setq-local dsh-bridge--prompt-history-index 0)
-    (should (equal (dsh-bridge--prompt-history-position) " (1/3)"))
-    (setq-local dsh-bridge--prompt-history-index 2)
-    (should (equal (dsh-bridge--prompt-history-position) " (3/3)"))))
+  (let ((dsh-bridge--prompt-history (list (list "s1" "new" "mid" "old"))))
+    (with-temp-buffer
+      (dsh-bridge-prompt-mode)
+      (setq-local dsh-bridge--prompt-session "s1")
+      (setq-local dsh-bridge--prompt-history-index nil)
+      (should (equal (dsh-bridge--prompt-history-position) ""))
+      (setq-local dsh-bridge--prompt-history-index 0)
+      (should (equal (dsh-bridge--prompt-history-position) " (1/3)"))
+      (setq-local dsh-bridge--prompt-history-index 2)
+      (should (equal (dsh-bridge--prompt-history-position) " (3/3)")))))
 
 (ert-deftest dsh-bridge-session-update-last-active ()
   "A turn frame's `time' folds into the session cache's `lastActive'; a missing
@@ -4470,11 +4764,11 @@ declares itself following (so the follow helper sees it)."
   "The elapsed segment renders only for a running session with a known
 turn-start time; it degrades to nil on a mid-turn attach (no t0), when idle, or
 when the ticker is disabled."
-  ;; Running with a recorded start time ~now => ~00:00.
-  (let ((dsh-bridge--session-status nil))
-    (let ((dsh-bridge--session-status `(("s1" running . ,(* 1000 (float-time))))))
-      (should (string-match-p "⏱ 00:0[01]"
-                              (dsh-bridge--view-elapsed-label "s1"))))
+  ;; `float-time' is frozen so the rendered MM:SS is exact.
+  (cl-letf (((symbol-function 'float-time) (lambda (&rest _) 1065.0)))
+    ;; Running with a recorded start time 65s ago (ms-epoch 1000000).
+    (let ((dsh-bridge--session-status '(("s1" running . 1000000))))
+      (should (equal (dsh-bridge--view-elapsed-label "s1") " ⏱ 01:05")))
     ;; Running but no turn-start frame (mid-turn attach): start time nil.
     (let ((dsh-bridge--session-status '(("s1" running))))
       (should (null (dsh-bridge--view-elapsed-label "s1"))))
@@ -4482,34 +4776,69 @@ when the ticker is disabled."
     (let ((dsh-bridge--session-status '(("s1" idle . nil))))
       (should (null (dsh-bridge--view-elapsed-label "s1"))))
     ;; Disabled ticker: omitted even while running.
-    (let ((dsh-bridge--session-status `(("s1" running . ,(* 1000 (float-time)))))
+    (let ((dsh-bridge--session-status '(("s1" running . 1000000)))
           (dsh-bridge-view-elapsed-ticker nil))
       (should (null (dsh-bridge--view-elapsed-label "s1"))))))
 
 (ert-deftest dsh-bridge-turn-boundary-echo ()
-  "Turn boundaries echo for the session the user is looking at: 'is thinking…'
-on turn-start, and the reason phrase on turn-complete."
+  "Turn boundaries echo when the session has no visible DSH-View ('is
+running...' on turn-start, the reason phrase on turn-complete), are suppressed
+while a visible window shows that session's DSH-View (the view itself shows the
+boundary), and never echo when `dsh-bridge-turn-boundary-echo' is nil."
+  (when (get-buffer "*dsh-bridge-output*") (kill-buffer "*dsh-bridge-output*"))
   (let ((dsh-bridge--session-status nil)
         (dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t))))
         (dsh-bridge-turn-boundary-echo t)
         (dsh-bridge-turn-complete 'refetch)
+        (window (selected-window))
+        (previous (window-buffer (selected-window)))
         (msg nil))
     (cl-letf (((symbol-function 'message)
                (lambda (&rest args) (setq msg (apply #'format args))))
-              ((symbol-function 'dsh-bridge--view-displayed-p) (lambda (_id) t))
               ((symbol-function 'dsh-bridge--status-event-render) #'ignore)
               ((symbol-function 'dsh-bridge--models-event-refresh) #'ignore)
-              ((symbol-function 'run-at-time) (lambda (&rest _)))
-              ((symbol-function 'dsh-bridge--view-turns-cache-refresh) #'ignore)
-              ((symbol-function 'dsh-bridge--session-view) (lambda (_id) nil)))
-      (dsh-bridge--notification-handle-events
-       '(((kind . "turn-start") (sessionId . "s1") (time . 1))))
-      (should (string-match-p "is running..." msg))
-      (setq msg nil)
-      (dsh-bridge--notification-handle-events
-       '(((kind . "turn-complete") (sessionId . "s1") (reason . "completed"))))
-      (should (string-match-p "T" msg))
-      (should (string-match-p "finished" msg)))))
+              ((symbol-function 'run-at-time) (lambda (&rest _))))
+      (unwind-protect
+          (progn
+            ;; Make sure no earlier test's buffer occupies the window.
+            (set-window-buffer window (get-buffer-create " *dsh-bridge-echo-test*"))
+            ;; No visible view: both boundaries echo.
+            (dsh-bridge--notification-handle-events
+             '(((kind . "turn-start") (sessionId . "s1") (time . 1))))
+            (should (string-match-p "is running..." msg))
+            (setq msg nil)
+            (dsh-bridge--notification-handle-events
+             '(((kind . "turn-complete") (sessionId . "s1") (reason . "completed"))))
+            (should (string-match-p "T" msg))
+            (should (string-match-p "finished" msg))
+            ;; A visible DSH-View of s1 suppresses the echo as redundant.
+            (setq msg nil)
+            (with-current-buffer (get-buffer-create "*dsh-bridge-output*")
+              (dsh-bridge-view-mode)
+              (setq-local dsh-bridge--view-content-session "s1"))
+            (set-window-buffer window (get-buffer "*dsh-bridge-output*"))
+            (dsh-bridge--notification-handle-events
+             '(((kind . "turn-start") (sessionId . "s1") (time . 2))))
+            (should-not msg)
+            (dsh-bridge--notification-handle-events
+             '(((kind . "turn-complete") (sessionId . "s1") (reason . "completed"))))
+            (should-not msg)
+            ;; Hidden again, the echo returns; the option off wins either way.
+            (set-window-buffer window (get-buffer " *dsh-bridge-echo-test*"))
+            (kill-buffer "*dsh-bridge-output*")
+            (dsh-bridge--notification-handle-events
+             '(((kind . "turn-start") (sessionId . "s1") (time . 3))))
+            (should (string-match-p "is running..." msg))
+            (setq msg nil)
+            (let ((dsh-bridge-turn-boundary-echo nil))
+              (dsh-bridge--notification-handle-events
+               '(((kind . "turn-complete") (sessionId . "s1") (reason . "completed"))))
+              (should-not msg)))
+        (set-window-buffer window previous)
+        (when (get-buffer " *dsh-bridge-echo-test*")
+          (kill-buffer " *dsh-bridge-echo-test*"))
+        (when (get-buffer "*dsh-bridge-output*")
+          (kill-buffer "*dsh-bridge-output*"))))))
 
 (ert-deftest dsh-bridge-send-text-optimistic-running ()
   "A successful send marks the session running before any SSE turn-start frame,
@@ -5025,6 +5354,29 @@ and the late response settling afterwards does not banner a second time."
     (when (dsh-bridge--question-find-buffer "q1")
       (kill-buffer (dsh-bridge--question-find-buffer "q1")))))
 
+(ert-deftest dsh-bridge-ask-user-resolved-cancelled ()
+  "A resolved frame with outcome \"cancelled\" banners the question buffer as
+cancelled — not \"answered elsewhere\" — and retires the pending question
+without jumping."
+  (let ((dsh-bridge--pending-questions nil)
+        (dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t)))))
+    (cl-letf (((symbol-function 'message) (lambda (&rest _) nil))
+              ((symbol-function 'dsh-bridge--status-event-render) #'ignore)
+              ((symbol-function 'dsh-bridge--exit-to-view)
+               (lambda (&rest _) (ert-fail "a cancelled frame must not jump"))))
+      (dsh-bridge--ask-user-arrive "s1" "q1" '(( (id . "q1") (question . "Go?") )))
+      (dsh-bridge--ask-user-resolved "s1" "q1" "cancelled")
+      (should (null dsh-bridge--pending-questions)))
+    (with-current-buffer (get-buffer "*dsh-bridge-question: T*")
+      (should dsh-bridge--question-dead)
+      (should (string-match-p
+               "\\`This question was cancelled\\.\n"
+               (buffer-string)))
+      (should-not (string-match-p "answered elsewhere" (buffer-string)))
+      (should-not (string-match-p "is waiting for your answer" (buffer-string))))
+    (when (buffer-live-p (get-buffer "*dsh-bridge-question: T*"))
+      (kill-buffer "*dsh-bridge-question: T*"))))
+
 (defun dsh-bridge-test--pending-ask (session question)
   "A `dsh-bridge--pending-questions' registry with one QUESTION for SESSION."
   (list (cons session
@@ -5467,6 +5819,92 @@ user's action did not settle the question, so no jump happens."
         (dsh-bridge--question-submit))
       (should dsh-bridge--question-dead)
       (should (string-match-p "already answered or cancelled" (buffer-string)))
+      (should-not exited))
+    (when (dsh-bridge--question-find-buffer "q1")
+      (kill-buffer (dsh-bridge--question-find-buffer "q1")))))
+
+(ert-deftest dsh-bridge-question-submit-transport-error ()
+  "A submit whose POST never completes echoes the transport error, stays
+open (nothing was settled), drops the optimistic answered note, and does not
+exit to the view."
+  (let ((dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t))))
+        (dsh-bridge--view-answer-notes nil)
+        (dsh-bridge--turns-cache nil)
+        (exited nil)
+        (msg nil))
+    (with-current-buffer
+        (dsh-bridge--question-buffer "s1" "q1"
+          '(( (id . "q1") (question . "Go?") (options . (((label . "Yes")))) )))
+      (goto-char (point-min))
+      (re-search-forward "1\\. Yes")
+      (goto-char (line-beginning-position))
+      (dsh-bridge--question-toggle-at-point)
+      (cl-letf (((symbol-function 'dsh-bridge--http)
+                 (lambda (_m _p _payload)
+                   (list '(:error "connection refused") nil nil)))
+                ((symbol-function 'dsh-bridge--exit-to-view)
+                 (lambda (&rest _) (setq exited t)))
+                ((symbol-function 'message)
+                 (lambda (&rest args) (setq msg (apply #'format args)))))
+        (dsh-bridge--question-submit))
+      (should-not dsh-bridge--question-dead)
+      (should (string-match-p "request failed: connection refused" msg))
+      (should-not (assoc "s1" dsh-bridge--view-answer-notes))
+      (should-not exited))
+    (when (dsh-bridge--question-find-buffer "q1")
+      (kill-buffer (dsh-bridge--question-find-buffer "q1")))))
+
+(ert-deftest dsh-bridge-question-submit-not-accepted-generic-reason ()
+  "A submit the host answers 200 without accepting (a reason other than
+not-pending) echoes 'answer not accepted: REASON', stays open, and drops the
+optimistic answered note."
+  (let ((dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t))))
+        (dsh-bridge--view-answer-notes nil)
+        (dsh-bridge--turns-cache nil)
+        (exited nil)
+        (msg nil))
+    (with-current-buffer
+        (dsh-bridge--question-buffer "s1" "q1"
+          '(( (id . "q1") (question . "Go?") (options . (((label . "Yes")))) )))
+      (goto-char (point-min))
+      (re-search-forward "1\\. Yes")
+      (goto-char (line-beginning-position))
+      (dsh-bridge--question-toggle-at-point)
+      (cl-letf (((symbol-function 'dsh-bridge--http)
+                 (lambda (_m _p _payload)
+                   (list nil "{\"accepted\":false,\"reason\":\"answers malformed\"}" 200)))
+                ((symbol-function 'dsh-bridge--exit-to-view)
+                 (lambda (&rest _) (setq exited t)))
+                ((symbol-function 'message)
+                 (lambda (&rest args) (setq msg (apply #'format args)))))
+        (dsh-bridge--question-submit))
+      (should-not dsh-bridge--question-dead)
+      (should (string-match-p "answer not accepted: answers malformed" msg))
+      (should-not (assoc "s1" dsh-bridge--view-answer-notes))
+      (should-not exited))
+    (when (dsh-bridge--question-find-buffer "q1")
+      (kill-buffer (dsh-bridge--question-find-buffer "q1")))))
+
+(ert-deftest dsh-bridge-question-decline-not-pending-stays-put ()
+  "A decline the host reports as already resolved banners where it is —
+the user's action did not settle the question — and drops the optimistic
+answered note."
+  (let ((dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t))))
+        (dsh-bridge--view-answer-notes nil)
+        (dsh-bridge--turns-cache nil)
+        (exited nil))
+    (with-current-buffer
+        (dsh-bridge--question-buffer "s1" "q1"
+          '(( (id . "q1") (question . "Go?") (options . (((label . "Yes")))) )))
+      (cl-letf (((symbol-function 'dsh-bridge--http)
+                 (lambda (_m _p _payload)
+                   (list nil "{\"accepted\":false,\"reason\":\"not-pending\"}" 200)))
+                ((symbol-function 'dsh-bridge--exit-to-view)
+                 (lambda (&rest _) (setq exited t))))
+        (dsh-bridge--question-decline))
+      (should dsh-bridge--question-dead)
+      (should (string-match-p "already answered or cancelled" (buffer-string)))
+      (should-not (assoc "s1" dsh-bridge--view-answer-notes))
       (should-not exited))
     (when (dsh-bridge--question-find-buffer "q1")
       (kill-buffer (dsh-bridge--question-find-buffer "q1")))))

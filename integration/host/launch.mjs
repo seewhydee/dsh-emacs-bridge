@@ -169,7 +169,33 @@ export async function launch(options = {}) {
     throw error
   }
   const tokenPath = join(homeDir, 'dsh-bridge-token')
+  // SIGTERM the dsh child and resolve on its exit (the exit handler above
+  // removes a launcher-owned temp home). Escalates to SIGKILL after 3s.
+  // Callers must AWAIT this: a process that exits right after a fire-and-
+  // forget kill (vitest globalSetup teardown, the CLI's signal handler)
+  // would orphan the child and leak the temp home.
+  const kill = () => {
+    if (child.exitCode !== null) return Promise.resolve()
+    child.kill('SIGTERM')
+    return new Promise((resolvePromise) => {
+      const killer = setTimeout(() => {
+        if (child.exitCode === null) child.kill('SIGKILL')
+      }, 3000)
+      child.once('exit', () => {
+        clearTimeout(killer)
+        resolvePromise()
+      })
+    })
+  }
+  // The bridge writes the token file during plugin boot, which precedes the
+  // /status answer waitForReady gates on — so an absent or empty file here is
+  // a broken fixture, not a race. Fail the boot rather than handing every
+  // spec an empty token and a stream of confusing 401s.
   const token = existsSync(tokenPath) ? readFileSync(tokenPath, 'utf8').trim() : ''
+  if (token === '') {
+    await kill()
+    throw new Error(`fixture is ready but ${tokenPath} is missing or empty`)
+  }
   return {
     url,
     port,
@@ -179,24 +205,7 @@ export async function launch(options = {}) {
     logPath,
     overlayPath,
     version: info.version,
-    // SIGTERM the dsh child and resolve on its exit (the exit handler above
-    // removes a launcher-owned temp home). Escalates to SIGKILL after 3s.
-    // Callers must AWAIT this: a process that exits right after a fire-and-
-    // forget kill (vitest globalSetup teardown, the CLI's signal handler)
-    // would orphan the child and leak the temp home.
-    kill() {
-      if (child.exitCode !== null) return Promise.resolve()
-      child.kill('SIGTERM')
-      return new Promise((resolvePromise) => {
-        const killer = setTimeout(() => {
-          if (child.exitCode === null) child.kill('SIGKILL')
-        }, 3000)
-        child.once('exit', () => {
-          clearTimeout(killer)
-          resolvePromise()
-        })
-      })
-    },
+    kill,
   }
 }
 

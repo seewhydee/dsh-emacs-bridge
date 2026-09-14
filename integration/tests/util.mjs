@@ -38,6 +38,28 @@ export async function post(fixture, path, body) {
   return { status: res.status, body: parsed }
 }
 
+/**
+ * A request against the fixture with explicit control over the credentials:
+ * `token` undefined sends no Authorization header, a string is used as the
+ * bearer token verbatim, and `origin` sets the Origin header (the hostile-
+ * origin fence tests). `body`, when given, is JSON-encoded.
+ */
+export async function raw(fixture, method, path, { token, origin, body } = {}) {
+  const headers = {}
+  if (token !== undefined) headers.authorization = `Bearer ${token}`
+  if (origin !== undefined) headers.origin = origin
+  if (body !== undefined) headers['content-type'] = 'application/json'
+  const res = await fetch(`${fixture.url}${path}`, {
+    method,
+    headers,
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+  })
+  const text = await res.text()
+  let parsed = null
+  try { parsed = text === '' ? null : JSON.parse(text) } catch { parsed = text }
+  return { status: res.status, body: parsed }
+}
+
 /** Replace the mock LLM's script queue. */
 export async function scriptMock(fixture, script) {
   return post(fixture, '/mock-llm/script', { script })
@@ -65,19 +87,35 @@ export async function poll(predicate, timeoutMs = 15000, intervalMs = 250) {
   }
 }
 
-/** Create a session in a workspace by path; the session id is returned. */
-export async function createSession(fixture, path = REPO_ROOT) {
-  const { status, body } = await post(fixture, '/dsh-bridge/sessions/create', { path })
-  if (body?.sessionId === undefined) {
-    throw new Error(`create-session failed (${status}): ${JSON.stringify(body)}`)
+/**
+ * Create a session in a workspace by path; the session id is returned.
+ * Retries while the freshly booted host's workspace registry is still
+ * completing its async bootstrap (it answers 501 until it is active). No
+ * mutation precedes that 501, so retrying is safe.
+ */
+export async function createSession(fixture, path = REPO_ROOT, timeoutMs = 60000) {
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    const { status, body } = await post(fixture, '/dsh-bridge/sessions/create', { path })
+    if (status !== 501) {
+      if (body?.sessionId === undefined) {
+        throw new Error(`create-session failed (${status}): ${JSON.stringify(body)}`)
+      }
+      return body.sessionId
+    }
+    if (Date.now() >= deadline) {
+      throw new Error(`workspace registry did not become ready: ${JSON.stringify(body)}`)
+    }
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 250))
   }
-  return body.sessionId
 }
 
 /**
  * Open an SSE stream to `/dsh-bridge/events` and collect parsed frames.
  * `waitFor(kind)` resolves with the first frame of that kind seen after the
- * call, or rejects on timeout. `close()` aborts the stream. `purpose`
+ * call, or rejects on timeout. `opened` resolves once the host has accepted
+ * the connection (await it before driving a route that gates on client
+ * presence, e.g. POST /draft). `close()` aborts the stream. `purpose`
  * ('draft') marks the connection as the browser's draft stream, the way the
  * browser plugin's EventSource identifies itself.
  */
@@ -85,6 +123,14 @@ export function openSse(fixture, { timeoutMs = 15000, purpose } = {}) {
   const controller = new AbortController()
   const frames = []
   const waiters = new Map() // kind -> [{resolve, reject, timer}]
+  // Resolves once the stream's response headers arrive (the host has accepted
+  // and registered this client); rejects if the open itself fails.
+  let markOpened
+  let failOpened
+  const opened = new Promise((resolvePromise, rejectPromise) => {
+    markOpened = resolvePromise
+    failOpened = rejectPromise
+  })
 
   function settle(kind, frame) {
     const list = waiters.get(kind)
@@ -113,9 +159,11 @@ export function openSse(fixture, { timeoutMs = 15000, purpose } = {}) {
       headers: { accept: 'text/event-stream' },
     })
     if (!res.ok || !res.body) {
+      failOpened(new Error(`SSE open failed: HTTP ${res.status}`))
       failAll(new Error(`SSE open failed: HTTP ${res.status}`))
       return
     }
+    markOpened()
     const reader = res.body.getReader()
     const decoder = new TextDecoder()
     let buffer = ''
@@ -142,11 +190,14 @@ export function openSse(fixture, { timeoutMs = 15000, purpose } = {}) {
     }
     failAll(new Error('SSE stream closed'))
   })().catch((error) => {
-    if (error?.name !== 'AbortError') failAll(error)
+    if (error?.name !== 'AbortError') { failOpened(error); failAll(error) }
   })
+  // Specs that never await `opened` must not trip an unhandled rejection.
+  opened.catch(() => {})
 
   return {
     frames,
+    opened,
     waitFor(kind, timeout = timeoutMs) {
       const existing = frames.find((f) => f.kind === kind)
       if (existing !== undefined) return Promise.resolve(existing)

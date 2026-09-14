@@ -98,11 +98,15 @@ describe('branching a turn (POST /dsh-bridge/fork)', () => {
 
   it('rejects a bad atSeq and an unknown source (400 / 404)', async () => {
     const fixture = inject('fixture')
+    // Pair the bad atSeq values with a RESOLVABLE session so the 400 is pinned
+    // against a real target. (The route validates atSeq before resolving the
+    // source id, so an unknown id never masked these — the re-pairing keeps
+    // the assertion honest if that order ever changes.)
+    const sessionId = await createSession(fixture)
     for (const atSeq of [-1, 1.5, 'x']) {
-      const bad = await post(fixture, '/dsh-bridge/fork', {
-        sessionId: 'session-does-not-exist', atSeq,
-      })
-      expect(bad.status).toBe(400)
+      const bad = await post(fixture, '/dsh-bridge/fork', { sessionId, atSeq })
+      expect(bad.status, `atSeq ${JSON.stringify(atSeq)}`).toBe(400)
+      expect(bad.body.error).toMatch(/atSeq/)
     }
 
     const unknown = await post(fixture, '/dsh-bridge/fork', {

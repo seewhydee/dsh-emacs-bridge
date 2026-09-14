@@ -61,9 +61,15 @@ describe('session report route against a live fixture', () => {
 
   it('defaults to a session when no id is named', async () => {
     const fixture = inject('fixture')
+    // Self-sufficient: create a session so the default-target fallback has at
+    // least one row regardless of what earlier specs left behind.
+    const sessionId = await createSession(fixture)
     const report = await get(fixture, '/dsh-bridge/session')
     expect(report.status).toBe(200)
     expect(typeof report.body.sessionId).toBe('string')
     expect(report.body.sessionId.length).toBeGreaterThan(0)
+    // The host's last-active default is the freshest session: the one just
+    // created.
+    expect(report.body.sessionId).toBe(sessionId)
   }, 60000)
 })

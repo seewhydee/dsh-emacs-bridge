@@ -1,3 +1,19 @@
+// dsh-emacs-bridge — Vitest specs for the pure bridge logic.
+// Copyright (C) 2026  Chong Yidong <cyd@stupidchicken.com>
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
 import { describe, expect, it } from 'vitest'
 import {
   answerMatchesQuestions,
@@ -383,6 +399,27 @@ describe('assistantTurns', () => {
     const log: SessionTurnLogLike = { events, nodes: [1, 99] }
     expect(assistantTurns(log).map(turn => turn.turn)).toEqual([1])
   })
+
+  it('keeps the first turn/start time when a turn start is logged twice', () => {
+    const log = turnLog([
+      turnStart(1, 1000),
+      turnStart(1, 1050), // duplicate: first wins
+      assistantMessage(1, 1, 1100, text('done')),
+    ])
+    expect(assistantTurns(log)[0]!.startedAt).toBe(1000)
+  })
+
+  it('records a turn/end with a non-string reason kind without a reason', () => {
+    const log = turnLog([
+      turnStart(1, 1000), userMessage(1010),
+      assistantMessage(1, 1, 1100, text('done')),
+      { time: 1500, type: 'turn/end', data: { turn: 1, reason: { kind: 7 } } },
+    ])
+    const turn = assistantTurns(log)[0]!
+    expect(turn.endedAt).toBe(1500)
+    expect(turn.reason).toBeUndefined()
+    expect(turn.endSeq).toBe(3)
+  })
 })
 
 // -- turnsSince fixtures ----------------------------------------------------
@@ -561,6 +598,14 @@ describe('workspaceRefsBySession', () => {
   it('returns an empty map for no workspaces', () => {
     expect(workspaceRefsBySession([]).size).toBe(0)
   })
+
+  it('keeps the last workspace ref when a session id overlaps (defensive)', () => {
+    const map = workspaceRefsBySession([
+      workspace('w1', 'alpha', ['s1']),
+      workspace('w2', 'beta', ['s1']),
+    ])
+    expect(map.get('s1')).toEqual({ id: 'w2', title: 'beta' })
+  })
 })
 
 describe('classifySessionId', () => {
@@ -736,6 +781,12 @@ describe('token-vend origin fence', () => {
     expect(isLoopbackOrigin('https://evil.com')).toBe(false)
   })
 
+  it('rejects an unparseable origin and non-http(s) schemes', () => {
+    expect(isLoopbackOrigin('not a url')).toBe(false)
+    expect(isLoopbackOrigin('file:///etc/passwd')).toBe(false)
+    expect(isLoopbackOrigin('ftp://127.0.0.1')).toBe(false)
+  })
+
   it('accepts a same-origin request', () => {
     expect(tokenRequestsSameOrigin('localhost:3080', undefined)).toBe(true)
     expect(tokenRequestsSameOrigin('127.0.0.1:8080', 'http://127.0.0.1:8080')).toBe(true)
@@ -835,8 +886,8 @@ describe('sessionsChangedMessage', () => {
 
 describe('rpcRequestFrame', () => {
   it('emits a client-request envelope with the method, id, and payload', () => {
-    expect(rpcRequestFrame('session.models', 'rpc-1', { sessionId: 's1' })).toBe(
-      '{"type":"client-request","rpcId":"rpc-1","method":"session.models","payload":{"sessionId":"s1"}}',
+    expect(rpcRequestFrame('session/modelCatalog', 'rpc-1', { sessionId: 's1' })).toBe(
+      '{"type":"client-request","rpcId":"rpc-1","method":"session/modelCatalog","payload":{"sessionId":"s1"}}',
     )
   })
 })
@@ -855,6 +906,22 @@ describe('rpcUnwrapResponse', () => {
   it('collapses a malformed error into the internal code', () => {
     expect(rpcUnwrapResponse('{"type":"server-response","rpcId":"r","result":{"ok":false}}'))
       .toEqual({ ok: false, error: { code: 'internal', message: 'unknown error' } })
+  })
+
+  it('collapses a non-string error message into unknown error', () => {
+    expect(rpcUnwrapResponse('{"type":"server-response","rpcId":"r","result":{"ok":false,"error":{"code":"bad","message":42}}}'))
+      .toEqual({ ok: false, error: { code: 'bad', message: 'unknown error' } })
+  })
+
+  it('returns null when the result member is absent or not an object', () => {
+    expect(rpcUnwrapResponse('{"type":"server-response","rpcId":"r"}')).toBeNull()
+    expect(rpcUnwrapResponse('{"type":"server-response","result":null}')).toBeNull()
+    expect(rpcUnwrapResponse('{"type":"server-response","result":42}')).toBeNull()
+  })
+
+  it('returns null when result.ok is neither true nor false', () => {
+    expect(rpcUnwrapResponse('{"type":"server-response","result":{"value":{"a":1}}}')).toBeNull()
+    expect(rpcUnwrapResponse('{"type":"server-response","result":{"ok":"true","value":1}}')).toBeNull()
   })
 
   it('returns null for a non-server-response or invalid body', () => {
@@ -939,6 +1006,17 @@ describe('sessionPreset', () => {
   it('returns undefined when neither header nor events name a preset', () => {
     expect(sessionPreset({}, [])).toBeUndefined()
     expect(sessionPreset({}, [{ time: 1, type: 'agent-preset/selected', data: {} }])).toBeUndefined()
+  })
+
+  it('skips a selection event whose preset is not a string', () => {
+    const events: SessionEventLike[] = [
+      { time: 1, type: 'agent-preset/selected', data: { agentPreset: 'valid' } },
+      { time: 2, type: 'agent-preset/selected', data: { agentPreset: 42 } },
+    ]
+    expect(sessionPreset({}, events)).toBe('valid')
+    expect(sessionPreset({ agentPreset: 'header' }, [
+      { time: 1, type: 'agent-preset/selected', data: { agentPreset: null } },
+    ])).toBe('header')
   })
 })
 
@@ -1027,6 +1105,11 @@ describe('parseAttachmentRequests', () => {
     })
   })
 
+  it('drops an empty-string name like an absent one', () => {
+    expect(parseAttachmentRequests([{ path: '/tmp/a.png', name: '' }]))
+      .toEqual({ ok: true, items: [{ path: '/tmp/a.png' }] })
+  })
+
   it('rejects malformed members with the offending index', () => {
     const cases: Array<[unknown, string]> = [
       ['not-an-array', 'attachments must be an array'],
@@ -1050,7 +1133,9 @@ describe('parseAttachmentRequests', () => {
       ok: false,
       error: `too many attachments (max ${MAX_ATTACHMENTS})`,
     })
-    expect(parseAttachmentRequests(items.slice(0, MAX_ATTACHMENTS)).ok).toBe(true)
+    // At the cap every item survives parsing, order intact.
+    expect(parseAttachmentRequests(items.slice(0, MAX_ATTACHMENTS)))
+      .toEqual({ ok: true, items: items.slice(0, MAX_ATTACHMENTS) })
   })
 })
 
@@ -1068,7 +1153,15 @@ describe('attachmentErrorHttpStatus', () => {
     for (const code of ['IMAGES_TOO_LARGE', 'IMAGE_TOO_LARGE', 'IMAGE_TOO_MANY_PIXELS', 'IMAGE_DIMENSION_TOO_LARGE']) {
       expect(attachmentErrorHttpStatus(code)).toBe(413)
     }
-    for (const code of ['TOO_MANY_IMAGES', 'UNSUPPORTED_IMAGE_TYPE', 'INVALID_IMAGE', 'IMAGE_TYPE_MISMATCH']) {
+    for (const code of [
+      'TOO_MANY_IMAGES',
+      'UNSUPPORTED_IMAGE_TYPE',
+      'INVALID_IMAGE_BASE64',
+      'INVALID_IMAGE',
+      'IMAGE_TYPE_MISMATCH',
+      'INVALID_FILE_BASE64',
+      'ATTACHMENT_PROJECTION_UNSUPPORTED',
+    ]) {
       expect(attachmentErrorHttpStatus(code)).toBe(400)
     }
   })
