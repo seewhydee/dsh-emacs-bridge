@@ -4995,6 +4995,31 @@ copy silently instead of duplicating the registry entry."
     (when (dsh-bridge--question-find-buffer "q1")
       (kill-buffer (dsh-bridge--question-find-buffer "q1")))))
 
+(ert-deftest dsh-bridge-ask-user-arrive-message-names-current-binding ()
+  "The arrival message names the key the current buffer actually binds
+`dsh-bridge-answer' to, and falls back to \"M-x dsh-bridge-answer\" where the
+command is unbound — the frame is handled from an arbitrary buffer."
+  (let ((dsh-bridge--pending-questions nil)
+        (dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t))))
+        (dsh-bridge-question-auto-pop nil)
+        (msg nil))
+    (cl-letf (((symbol-function 'message)
+               (lambda (&rest args) (setq msg (apply #'format args))))
+              ((symbol-function 'dsh-bridge--status-event-render) #'ignore)
+              ((symbol-function 'dsh-bridge--view-await-refresh) #'ignore))
+      (with-temp-buffer
+        (dsh-bridge-view-mode)
+        (dsh-bridge--ask-user-arrive "s1" "q1" '(((id . "q1") (question . "Go?"))))
+        (should (string-match-p "(press a to answer)" msg)))
+      (with-temp-buffer
+        (fundamental-mode)
+        (dsh-bridge--ask-user-arrive "s1" "q2" '(((id . "q2") (question . "Go?"))))
+        (should (string-match-p "(press M-x dsh-bridge-answer to answer)" msg)))))
+  (when (dsh-bridge--question-find-buffer "q1")
+    (kill-buffer (dsh-bridge--question-find-buffer "q1")))
+  (when (dsh-bridge--question-find-buffer "q2")
+    (kill-buffer (dsh-bridge--question-find-buffer "q2"))))
+
 (ert-deftest dsh-bridge-ask-user-resolved ()
   "A resolved frame retires the pending question and banners the question buffer.
 The banner stands on its own line, the resolved buffer no longer claims the
@@ -5080,7 +5105,7 @@ and naming the live `dsh-bridge-answer' binding; completion drops the tail."
           (should (string-match-p "Awaiting your response:" rendered))
           (should (string-match-p (regexp-quote "Approve this plan?") rendered))
           (should (string-match-p
-                   (concat "press " (regexp-quote (dsh-bridge--view-answer-key)))
+                   (concat "press " (regexp-quote "a"))
                    rendered))
           (should-not (string-match-p "(continuing\\.\\.\\.)" rendered))
           (should (text-property-any 0 (length rendered)
@@ -5096,17 +5121,18 @@ and naming the live `dsh-bridge-answer' binding; completion drops the tail."
 
 (ert-deftest dsh-bridge-view-awaiting-note-variants ()
   "The awaiting note leads with the question text, its count, or a fallback,
-and quotes the answer key from the real `dsh-bridge-answer' binding."
+and names the answer key as resolved from the view's own keymap (`a')."
   (with-temp-buffer
     (dsh-bridge-view-mode)
     (setq-local dsh-bridge--view-content-session "s1")
-    ;; Single question: quoted text plus the action.
+    ;; Single question: quoted text plus the action.  The key comes from
+    ;; `substitute-command-keys' against the view's own map, so it is the real
+    ;; `a' binding; the note's text properties are not part of what is asserted.
     (let ((dsh-bridge--pending-questions
            (dsh-bridge-test--pending-ask "s1" "Approve this plan?")))
-      (should (equal (dsh-bridge--view-awaiting-note "s1")
+      (should (equal (substring-no-properties (dsh-bridge--view-awaiting-note "s1"))
                      (concat "(Awaiting your response: “Approve this plan?” — "
-                             "press " (dsh-bridge--view-answer-key)
-                             " to view and answer)"))))
+                             "press a to view and answer)"))))
     ;; Several questions under one ask: the count tells the user what to expect.
     (let ((dsh-bridge--pending-questions
            (list (cons "s1"

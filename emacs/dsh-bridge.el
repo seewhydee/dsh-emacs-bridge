@@ -1857,23 +1857,6 @@ property, which is used when filling the buffer with new replies.")
 This is used in place of `dsh-bridge--view-running-marker' when a new
 turn has just been started, but the first reply has not yet arrived.")
 
-(defun dsh-bridge--view-answer-key ()
-  "The key sequence bound to `dsh-bridge-answer', as display text.
-Searches the current buffer's local keymap (honoring a user rebinding), the
-global map, and the DSH-View / DSH-Sessions maps, in that order; a command
-bound nowhere reads as \"M-x dsh-bridge-answer\"."
-  (let ((key nil)
-        (maps (delq nil (list (and (current-local-map) (current-local-map))
-                              (and (current-global-map) (current-global-map))
-                              (and (boundp 'dsh-bridge-view-mode-map)
-                                   dsh-bridge-view-mode-map)
-                              (and (boundp 'dsh-bridge-sessions-mode-map)
-                                   dsh-bridge-sessions-mode-map)))))
-    (while (and (null key) maps)
-      (setq key (where-is-internal 'dsh-bridge-answer (car maps) t)
-            maps (cdr maps)))
-    (if key (key-description key) "M-x dsh-bridge-answer")))
-
 (defun dsh-bridge--view-await-question-text (text)
   "TEXT normalized for the awaiting note: one line, no double quotes,
 truncated to about 72 columns with an ASCII ellipsis."
@@ -1898,7 +1881,7 @@ do next."
 	 (raw (and (listp first) (alist-get 'question first)))
 	 (text (dsh-bridge--view-await-question-text
 		(and (stringp raw) (not (string-empty-p raw)) raw)))
-	 (key (dsh-bridge--view-answer-key))
+	 (key (substitute-command-keys "\\[dsh-bridge-answer]"))
 	 (body
 	  (cond
 	   ((and text (not (string-empty-p text)) (= count 1))
@@ -3371,7 +3354,7 @@ stored copy, silently, without re-messaging or touching the question buffer."
 		(message "dsh-bridge: session \"%s\" asks: %s (press %s to answer)"
 				 (dsh-bridge--session-label session-id)
 				 (or (and (stringp q) (substring q 0 (min 60 (length q)))) "")
-				 (dsh-bridge--view-answer-key)))
+				 (substitute-command-keys "\\[dsh-bridge-answer]")))
 	  (dsh-bridge--status-event-render session-id)
 	  ;; The DSH-View body must say the session is parked, not "(continuing...)".
 	  (dsh-bridge--view-await-refresh session-id)
