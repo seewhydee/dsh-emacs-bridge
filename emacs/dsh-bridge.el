@@ -1859,17 +1859,6 @@ property, which is used when filling the buffer with new replies.")
 This is used in place of `dsh-bridge--view-running-marker' when a new
 turn has just been started, but the first reply has not yet arrived.")
 
-(defun dsh-bridge--view-await-question-text (text)
-  "TEXT normalized for the awaiting note: one line, no double quotes,
-truncated to about 72 columns with an ASCII ellipsis."
-  (let* ((one-line (string-replace "\"" ""
-				   (string-replace "\n" " " (or text ""))))
-	 (one-line (replace-regexp-in-string "[ \t]+" " " one-line))
-	 (one-line (string-trim one-line)))
-    (if (> (length one-line) 72)
-	(concat (substring one-line 0 69) "...")
-      one-line)))
-
 (defun dsh-bridge--view-awaiting-note (session-id)
   "The terminal DSH-View marker line when awaiting an ask-user question.
 This string is displayed in place of the usual \"(continuing...)\" if
@@ -2008,15 +1997,11 @@ committed reply, or nil for no turn at all.
 A completed turn (or nil) has an empty suffix.  Otherwise the suffix is
 an answered note (the user just resolved an ask), an ask-user awaiting
 note, the running placeholder for `new', or the running marker for an
-open turn — preceded by a blank-line separator when a body renders before
-it."
-  (cond
-   ((null turn)
-	"")
-   ((and (consp turn)
-		 (not (dsh-bridge--view-turn-open-p turn)))
-	"")
-   (t
+open turn."
+  (if (or (null turn)
+		  (and (consp turn)
+			   (not (dsh-bridge--view-turn-open-p turn))))
+	  ""
 	(concat
 	 ;; A committed segment means a non-empty body (the turn fold drops
 	 ;; text-less assistant messages), so a rendered body takes the
@@ -2034,7 +2019,7 @@ it."
 		((eq turn 'new)
 		 dsh-bridge--view-running-placeholder)
 		(t
-		 dsh-bridge--view-running-marker)))))))
+		 dsh-bridge--view-running-marker))))))
 
 (defun dsh-bridge--view-segment-key (segment)
   "The identity of SEGMENT: its `(STEP . TIME)' pair."
