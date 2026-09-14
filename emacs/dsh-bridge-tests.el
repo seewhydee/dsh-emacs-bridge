@@ -613,7 +613,7 @@ then grows in place as further segments commit."
         (should (equal dsh-bridge--view-content-session "s1"))
         (should (equal dsh-bridge--view-turn 5))
         (should (eq dsh-bridge--view-follow t))
-        (should (null dsh-bridge--view-turn-index))
+        (should (null dsh-bridge--view-browsing))
         (should (string-prefix-p "partial reply" (buffer-string)))
         (should (string-match-p "latest" (format "%s" header-line-format)))))
     (kill-buffer "*dsh-bridge-output*")))
@@ -1088,9 +1088,9 @@ POST /fork, then opens the child's view and prompt."
       (dsh-bridge-view-mode)
       (setq-local dsh-bridge--view-content-session "s1")
       (setq-local dsh-bridge--view-turn 30)
-      ;; A non-nil index keeps the turn refresh off the wire: the seeded cache
+      ;; Browsing state keeps the turn refresh off the wire: the seeded cache
       ;; is authoritative, so only the fork request is issued.
-      (setq-local dsh-bridge--view-turn-index 0)
+      (setq-local dsh-bridge--view-browsing t)
       (cl-letf (((symbol-function 'dsh-bridge--request)
                  (lambda (method path payload)
                    (setq seen (list method path payload))
@@ -1124,7 +1124,7 @@ No request is issued."
       (dsh-bridge-view-mode)
       (setq-local dsh-bridge--view-content-session "s1")
       (setq-local dsh-bridge--view-turn 30)
-      (setq-local dsh-bridge--view-turn-index 0)
+      (setq-local dsh-bridge--view-browsing t)
       (cl-letf (((symbol-function 'dsh-bridge--request)
                  (lambda (&rest _) (setq requested t))))
         (should-error (dsh-bridge-fork-turn) :type 'user-error))
@@ -1138,7 +1138,7 @@ No request is issued."
       (dsh-bridge-view-mode)
       (setq-local dsh-bridge--view-content-session "s1")
       (setq-local dsh-bridge--view-turn nil)
-      (setq-local dsh-bridge--view-turn-index 0)
+      (setq-local dsh-bridge--view-browsing t)
       (cl-letf (((symbol-function 'dsh-bridge--request)
                  (lambda (&rest _) (setq requested t))))
         (should-error (dsh-bridge-fork-turn) :type 'user-error))
@@ -1158,7 +1158,7 @@ No request is issued."
       (dsh-bridge-view-mode)
       (setq-local dsh-bridge--view-content-session "s1")
       (setq-local dsh-bridge--view-turn 30)
-      (setq-local dsh-bridge--view-turn-index 0)
+      (setq-local dsh-bridge--view-browsing t)
       (cl-letf (((symbol-function 'dsh-bridge--request)
                  (lambda (&rest _) (cons 409 '((error . "not completed")))))
                 ((symbol-function 'dsh-bridge-fetch)
@@ -1473,12 +1473,12 @@ after its last segment."
         ;; First M-p from rest (the newest turn): step one older.
         (dsh-bridge-view-previous-reply)
         (should (equal (buffer-string) dsh-bridge-test--view-middle-rendered))
-        (should (equal dsh-bridge--view-turn-index 1))
+        (should (eq dsh-bridge--view-browsing t))
         (should (string-match-p " (2/3)" (format "%s" header-line-format)))
         ;; Older, then at the oldest it stays.
         (dsh-bridge-view-previous-reply)
         (should (equal (buffer-string) dsh-bridge-test--view-oldest-rendered))
-        (should (equal dsh-bridge--view-turn-index 2))
+        (should (string-match-p " (3/3)" (format "%s" header-line-format)))
         (dsh-bridge-view-previous-reply)
         (should (equal (buffer-string) dsh-bridge-test--view-oldest-rendered))
         ;; M-n walks back toward the newest; arriving there resumes
@@ -1488,7 +1488,7 @@ after its last segment."
         (dsh-bridge-view-next-reply)
         (should (equal (buffer-string) dsh-bridge-test--view-newest-rendered))
         (should (eq dsh-bridge--view-follow t))
-        (should (null dsh-bridge--view-turn-index))
+        (should (null dsh-bridge--view-browsing))
         (should (string-match-p " (latest/3)" (format "%s" header-line-format)))))))
 
 (ert-deftest dsh-bridge-view-turn-navigation-no-turns ()
@@ -1509,7 +1509,7 @@ after its last segment."
       (should (string-match-p "no turns" msg)))))
 
 (ert-deftest dsh-bridge-fetch-resets-turn-navigation ()
-  "Fetching a fresh turn resets turn navigation to rest: no mid-browse index,
+  "Fetching a fresh turn resets turn navigation to rest: no mid-browse state,
 and the view is bound to the fetched turn's number."
   (let ((dsh-bridge-default-session "s1")
         (dsh-bridge--turns-cache nil))
@@ -1524,11 +1524,11 @@ and the view is bound to the fetched turn's number."
                (lambda (&rest _) (cons nil nil))))
       (with-current-buffer (get-buffer-create "*dsh-bridge-output*")
         (dsh-bridge-view-mode)
-        (setq-local dsh-bridge--view-turn-index 2))
+        (setq-local dsh-bridge--view-browsing t))
       (dsh-bridge-fetch)
       (with-current-buffer "*dsh-bridge-output*"
         (should (equal (buffer-string) "fresh"))
-        (should (null dsh-bridge--view-turn-index))
+        (should (null dsh-bridge--view-browsing))
         (should (equal dsh-bridge--view-turn 2)))
       (kill-buffer "*dsh-bridge-output*"))))
 
@@ -3262,25 +3262,26 @@ A turn in the same session leaves the recorded answer in place."
                                 (dsh-bridge--dispatcher-header)))))))
 
 (ert-deftest dsh-bridge-view-position ()
-  "The view position is newest-first (k/n) over the session's turns, at rest
-and while cycling; content without a turn identity (a pushed message) or a
-turn no longer cached shows nothing."
+  "The view position is newest-first (k/n) over the session's turns, derived
+from the shown turn's number at rest and while browsing; content without a
+turn identity (a pushed message) or a turn no longer cached shows nothing."
   (let ((dsh-bridge--turns-cache (dsh-bridge-test--view-cache dsh-bridge-test--view-turns)))
     (with-temp-buffer
       (dsh-bridge-view-mode)
       (setq-local dsh-bridge--view-content-session "s1")
-      ;; At rest on the middle turn (turn 20, index 1): (2/3).
+      ;; The shown turn's number decides: turn 20 is (2/3) at rest ...
       (setq-local dsh-bridge--view-turn 20)
-      (setq-local dsh-bridge--view-turn-index nil)
       (should (equal (dsh-bridge--view-turn-position) " (2/3)"))
-      ;; Cycling by index, newest first.
-      (setq-local dsh-bridge--view-turn-index 0)
+      ;; ... and mid-browse; turn 30 is (1/3), turn 10 is (3/3).
+      (setq-local dsh-bridge--view-browsing t)
+      (should (equal (dsh-bridge--view-turn-position) " (2/3)"))
+      (setq-local dsh-bridge--view-turn 30)
       (should (equal (dsh-bridge--view-turn-position) " (1/3)"))
-      (setq-local dsh-bridge--view-turn-index 2)
+      (setq-local dsh-bridge--view-turn 10)
       (should (equal (dsh-bridge--view-turn-position) " (3/3)"))
       ;; At rest on a turn no longer cached (e.g. after a compaction) or on raw
       ;; pushed content: no indicator.
-      (setq-local dsh-bridge--view-turn-index nil)
+      (setq-local dsh-bridge--view-browsing nil)
       (setq-local dsh-bridge--view-turn 999)
       (should (equal (dsh-bridge--view-turn-position) nil))
       (setq-local dsh-bridge--view-turn nil)
@@ -3996,7 +3997,7 @@ even when newer turns have arrived mid-walk, and announces it."
       (let ((inhibit-read-only t))
         (insert (dsh-bridge-test--view-turn-render newest-open))
         (setq-local dsh-bridge--view-turn (alist-get 'turn newest-open)))
-      (setq-local dsh-bridge--view-turn-index 0)
+      (setq-local dsh-bridge--view-browsing t)
       (cl-letf (((symbol-function 'message)
                  (lambda (&rest args) (setq msg (apply #'format args))))
                 ((symbol-function 'dsh-bridge--request)
@@ -4006,12 +4007,13 @@ even when newer turns have arrived mid-walk, and announces it."
         (dsh-bridge-view-next-reply))
       (should (equal (buffer-string) (dsh-bridge-test--view-turn-render newest-open)))
       (should (eq dsh-bridge--view-follow t))
-      (should (null dsh-bridge--view-turn-index))
+      (should (null dsh-bridge--view-browsing))
       (should (string-match-p "following the newest turn" msg)))))
 
-(ert-deftest dsh-bridge-view-turns-cache-refresh-recomputes-index ()
-  "A turn-cache refresh recomputes a cycling view's index from the shown turn's
-number, so the `(k/n)' counter stays honest when newer turns arrive."
+(ert-deftest dsh-bridge-view-turns-cache-refresh-keeps-browsing-position ()
+  "A turn-cache refresh keeps a browsing view on its shown turn: the `(k/n)'
+counter is derived from the shown turn's number, so it stays honest when
+newer turns arrive."
   (let* ((newest-open (dsh-bridge-test--view-turn 40 4000000
                        (list (dsh-bridge-test--view-segment "newest2" 4001000 1))))
          (new-turns (cons newest-open dsh-bridge-test--view-turns))
@@ -4023,19 +4025,20 @@ number, so the `(k/n)' counter stays honest when newer turns arrive."
       (with-current-buffer (get-buffer-create "*dsh-bridge-output*")
         (dsh-bridge-view-mode)
         (setq-local dsh-bridge--view-content-session "s1")
-        ;; Cycling on turn 20, at index 1 of the 3-turn list.
+        ;; Browsing turn 20, at index 1 of the 3-turn list.
         (setq-local dsh-bridge--view-turn 20)
-        (setq-local dsh-bridge--view-turn-index 1)
+        (setq-local dsh-bridge--view-browsing t)
         (dsh-bridge--view-turns-cache-refresh "s1")
         (should (equal (dsh-bridge--turns-cache-turns "s1") new-turns))
-        ;; Turn 20 now sits at index 2 in the refreshed list.
-        (should (eq dsh-bridge--view-turn-index 2)))
+        ;; Turn 20 now sits at index 2 in the refreshed list: (3/4).
+        (should (eq dsh-bridge--view-browsing t))
+        (should (string-match-p " (3/4)" (format "%s" header-line-format))))
       (kill-buffer "*dsh-bridge-output*"))))
 
 (ert-deftest dsh-bridge-view-turns-cache-refresh-vanished-turn-rests ()
   "When the shown turn vanished from the refreshed list (a compaction replaced
-it), a cycling view drops its index to at-rest rather than pointing at an
-unrelated turn; the buffer text is untouched."
+it), a browsing view returns to at-rest rather than deriving a position from
+an unrelated turn; the buffer text is untouched."
   (let ((new-turns (list (nth 0 dsh-bridge-test--view-turns)
                          (nth 2 dsh-bridge-test--view-turns)))
         (dsh-bridge--turns-cache (dsh-bridge-test--view-cache dsh-bridge-test--view-turns)))
@@ -4048,10 +4051,10 @@ unrelated turn; the buffer text is untouched."
         (setq-local dsh-bridge--view-content-session "s1")
         (let ((inhibit-read-only t)) (insert "browsing turn 20"))
         (setq-local dsh-bridge--view-turn 20)
-        (setq-local dsh-bridge--view-turn-index 1)
+        (setq-local dsh-bridge--view-browsing t)
         (dsh-bridge--view-turns-cache-refresh "s1")
         (should (equal (dsh-bridge--turns-cache-turns "s1") new-turns))
-        (should (null dsh-bridge--view-turn-index))
+        (should (null dsh-bridge--view-browsing))
         (should (equal (buffer-string) "browsing turn 20")))
       (kill-buffer "*dsh-bridge-output*"))))
 
@@ -4067,12 +4070,12 @@ response without a `turns' field (an error body) leaves the cache alone."
         (dsh-bridge-view-mode)
         (setq-local dsh-bridge--view-content-session "s1")
         (setq-local dsh-bridge--view-turn 20)
-        (setq-local dsh-bridge--view-turn-index 1)
+        (setq-local dsh-bridge--view-browsing t)
         (dsh-bridge--view-turns-cache-refresh "s1")
-        ;; The entry survives as empty, and the cycling view rests.
+        ;; The entry survives as empty, and the browsing view rests.
         (should (assoc "s1" dsh-bridge--turns-cache))
         (should (null (dsh-bridge--turns-cache-turns "s1")))
-        (should (null dsh-bridge--view-turn-index)))
+        (should (null dsh-bridge--view-browsing)))
       (kill-buffer "*dsh-bridge-output*")))
   (let ((dsh-bridge--turns-cache (dsh-bridge-test--view-cache dsh-bridge-test--view-turns)))
     (cl-letf (((symbol-function 'dsh-bridge--request)
@@ -4158,8 +4161,9 @@ stored `epoch'; the response epoch is stored."
       (should (string-match-p "since=8" (car paths))))))
 
 (ert-deftest dsh-bridge-view-turns-cache-refresh-incremental-keeps-index ()
-  "An incremental merge recomputes a mid-browse index against the merged list:
-cycling on an older turn, the shown turn's `(k/n)' position stays honest."
+  "An incremental merge keeps a mid-browse view's `(k/n)' position honest
+against the merged list: browsing an older turn, the position is derived
+from the shown turn's number."
   (let* ((cached-7 (dsh-bridge-test--view-turn 7 7000000
                     (list (dsh-bridge-test--view-segment "old" 7001000 1))))
          (grown-7 (dsh-bridge-test--view-turn 7 7000000
@@ -4178,12 +4182,12 @@ cycling on an older turn, the shown turn's `(k/n)' position stays honest."
       (with-current-buffer (get-buffer-create "*dsh-bridge-output*")
         (dsh-bridge-view-mode)
         (setq-local dsh-bridge--view-content-session "s1")
-        ;; Cycling on turn 5, at index 1 of the 2-turn cache.
+        ;; Browsing turn 5, at index 1 of the 2-turn cache.
         (setq-local dsh-bridge--view-turn 5)
-        (setq-local dsh-bridge--view-turn-index 1)
+        (setq-local dsh-bridge--view-browsing t)
         (dsh-bridge--view-turns-cache-refresh "s1")
-        ;; The merged list is [8, 7, 5]; turn 5 recomputes to index 2.
-        (should (eq dsh-bridge--view-turn-index 2))
+        ;; The merged list is [8, 7, 5]; turn 5 derives index 2.
+        (should (eq dsh-bridge--view-browsing t))
         (should (string-match-p " (3/3)" (format "%s" header-line-format))))
       (kill-buffer "*dsh-bridge-output*"))))
 
@@ -4282,7 +4286,7 @@ arrived (new turns land at the head); landing on the newest resumes following."
         (erase-buffer)
         (insert (dsh-bridge-test--view-turn-render shown))
         (setq-local dsh-bridge--view-turn (alist-get 'turn shown)))
-      (setq-local dsh-bridge--view-turn-index nil)
+      (setq-local dsh-bridge--view-browsing nil)
       (cl-letf (((symbol-function 'dsh-bridge--request)
                  (lambda (_method _path _payload)
                    (cons 200 (list (cons 'sessionId "s1")
@@ -4291,7 +4295,7 @@ arrived (new turns land at the head); landing on the newest resumes following."
       (should (equal (buffer-string) (dsh-bridge-test--view-turn-render newest-open)))
       ;; Reaching the new newest resumes following rather than pinning it.
       (should (eq dsh-bridge--view-follow t))
-      (should (null dsh-bridge--view-turn-index)))
+      (should (null dsh-bridge--view-browsing)))
     (kill-buffer "*dsh-bridge-output*")))
 
 (ert-deftest dsh-bridge-view-next-reply-from-rest-at-newest ()
@@ -4313,18 +4317,18 @@ state (\"turn 0\") and announces it."
           (erase-buffer)
           (insert (dsh-bridge-test--view-turn-render newest))
           (setq-local dsh-bridge--view-turn (alist-get 'turn newest)))
-        (setq-local dsh-bridge--view-turn-index nil)
+        (setq-local dsh-bridge--view-browsing nil)
         (dsh-bridge-view-next-reply)
         (should (equal (buffer-string) (dsh-bridge-test--view-turn-render newest)))
         (should (eq dsh-bridge--view-follow t))
-        (should (null dsh-bridge--view-turn-index))
+        (should (null dsh-bridge--view-browsing))
         (should (string-match-p "following the newest turn" msg)))
       (kill-buffer "*dsh-bridge-output*"))))
 
 (ert-deftest dsh-bridge-view-next-reply-from-rest-not-found ()
   "M-n at rest reports no newer turns when the shown content has no turn
 identity (e.g. a pushed message that is not a committed turn segment), and
-leaves the buffer and index untouched."
+leaves the buffer and browsing state untouched."
   (let ((dsh-bridge--turns-cache (dsh-bridge-test--view-cache dsh-bridge-test--view-turns))
         (msg nil))
     (cl-letf (((symbol-function 'dsh-bridge--request)
@@ -4338,15 +4342,15 @@ leaves the buffer and index untouched."
         (setq-local dsh-bridge--view-content-session "s1")
         (let ((inhibit-read-only t)) (erase-buffer) (insert "a pushed message"))
         (setq-local dsh-bridge--view-turn nil)
-        (setq-local dsh-bridge--view-turn-index nil)
+        (setq-local dsh-bridge--view-browsing nil)
         (dsh-bridge-view-next-reply)
         (should (equal (buffer-string) "a pushed message"))
-        (should (null dsh-bridge--view-turn-index))
+        (should (null dsh-bridge--view-browsing))
         (should (string-match-p "no newer turns" msg)))
       (kill-buffer "*dsh-bridge-output*"))))
 
 (ert-deftest dsh-bridge-view-next-reply-auto-follows-at-newest ()
-  "M-n onto the newest turn resumes following directly: cycling up from the
+  "M-n onto the newest turn resumes following directly: browsing up from the
 second-newest turn needs no extra M-n (the pinned `(1/X)' stop is gone)."
   (let* ((dsh-bridge--turns-cache
           (dsh-bridge-test--view-cache dsh-bridge-test--view-turns))
@@ -4361,18 +4365,19 @@ second-newest turn needs no extra M-n (the pinned `(1/X)' stop is gone)."
         (let ((inhibit-read-only t))
           (erase-buffer)
           (insert dsh-bridge-test--view-middle-rendered))
-        ;; Mid-cycle at index 1 (the newest-but-one turn): M-n follows.
+        ;; Mid-browse on the newest-but-one turn: M-n follows.
         (setq-local dsh-bridge--view-turn 20)
-        (setq-local dsh-bridge--view-turn-index 1)
+        (setq-local dsh-bridge--view-browsing t)
         (dsh-bridge-view-next-reply)
         (should (equal (buffer-string) dsh-bridge-test--view-newest-rendered))
         (should (eq dsh-bridge--view-follow t))
-        (should (null dsh-bridge--view-turn-index)))
+        (should (null dsh-bridge--view-browsing)))
       (kill-buffer "*dsh-bridge-output*"))))
 
 (ert-deftest dsh-bridge-view-next-reply-follow-at-newest-off-pins ()
   "With `dsh-bridge-view-follow-at-newest' nil, M-n onto the newest turn pins
-it at `(1/X)' (index 0, not following); a further M-n turns following on."
+it at `(1/X)' (browsing the newest turn, not following); a further M-n turns
+following on."
   (let* ((dsh-bridge--turns-cache
           (dsh-bridge-test--view-cache dsh-bridge-test--view-turns))
          (dsh-bridge-view-follow-at-newest nil))
@@ -4387,16 +4392,17 @@ it at `(1/X)' (index 0, not following); a further M-n turns following on."
           (erase-buffer)
           (insert dsh-bridge-test--view-middle-rendered))
         (setq-local dsh-bridge--view-turn 20)
-        (setq-local dsh-bridge--view-turn-index 1)
+        (setq-local dsh-bridge--view-browsing t)
         ;; Pinned at the newest: shown at (1/X), not following.
         (dsh-bridge-view-next-reply)
         (should (equal (buffer-string) dsh-bridge-test--view-newest-rendered))
-        (should (equal dsh-bridge--view-turn-index 0))
+        (should (eq dsh-bridge--view-browsing t))
+        (should (string-match-p " (1/3)" (format "%s" header-line-format)))
         (should-not dsh-bridge--view-follow)
         ;; One more M-n turns following on.
         (dsh-bridge-view-next-reply)
         (should (eq dsh-bridge--view-follow t))
-        (should (null dsh-bridge--view-turn-index)))
+        (should (null dsh-bridge--view-browsing)))
       (kill-buffer "*dsh-bridge-output*"))))
 
 (ert-deftest dsh-bridge-prompt-history-position ()
@@ -4463,7 +4469,7 @@ window; a hidden view showing the session does not count as \"looking\"."
 ;;; blank-on-send, and the follow auto-refill.
 
 (ert-deftest dsh-bridge-view-follow-enter ()
-  "Turn-following shows the newest turn (resetting any mid-browse index) and
+  "Turn-following shows the newest turn (resetting any mid-browse state) and
 declares itself following (so the follow helper sees it)."
   (let* ((newest (nth 0 dsh-bridge-test--view-turns))
          (dsh-bridge--turns-cache (dsh-bridge-test--view-cache dsh-bridge-test--view-turns))
@@ -4475,10 +4481,10 @@ declares itself following (so the follow helper sees it)."
       (with-current-buffer (get-buffer-create "*dsh-bridge-output*")
         (dsh-bridge-view-mode)
         (setq-local dsh-bridge--view-content-session "s1")
-        (setq-local dsh-bridge--view-turn-index 1)
+        (setq-local dsh-bridge--view-browsing t)
         (dsh-bridge--view-follow-enter)
         (should (eq dsh-bridge--view-follow t))
-        (should (null dsh-bridge--view-turn-index))
+        (should (null dsh-bridge--view-browsing))
         (should (equal (buffer-string) (dsh-bridge-test--view-turn-render newest)))))
     (when (buffer-live-p (get-buffer "*dsh-bridge-output*"))
       (kill-buffer "*dsh-bridge-output*"))))
@@ -4744,7 +4750,7 @@ following view."
         (kill-buffer b)))))
 
 (ert-deftest dsh-bridge-turn-complete-refetch-one-fetch ()
-  "The deferred turn-complete refetch fills every shown, non-cycling view
+  "The deferred turn-complete refetch fills every shown, non-browsing view
 with the completed turn — appending its closing divider — fetching `/turns'
 once for all of them."
   (let ((dsh-bridge--session-status nil)
