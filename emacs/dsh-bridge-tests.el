@@ -969,8 +969,6 @@ compose/fetch/targeting verbs."
   (should (eq (lookup-key dsh-bridge-view-mode-map (kbd "g")) #'revert-buffer))
   (should (eq (lookup-key dsh-bridge-view-mode-map (kbd "q")) #'quit-window))
   (should (eq (lookup-key dsh-bridge-view-mode-map (kbd "r")) #'dsh-bridge-reply))
-  (should (eq (lookup-key dsh-bridge-view-mode-map (kbd "w"))
-              #'dsh-bridge-copy-reply))
   (should (eq (lookup-key dsh-bridge-view-mode-map (kbd "B"))
               #'dsh-bridge-fork-turn))
   (should (eq (lookup-key dsh-bridge-view-mode-map (kbd "i"))
@@ -1168,61 +1166,6 @@ No request is issued."
         (dsh-bridge-fork-turn))
       (should-not fetched)
       (should (string-match-p "not completed" msg)))))
-
-(ert-deftest dsh-bridge-copy-reply ()
-  "`dsh-bridge-copy-reply' copies the whole reply without a region."
-  (with-temp-buffer
-    (insert "the reply")
-    (dsh-bridge-view-mode)
-    (setq-local dsh-bridge--view-content-session "s1")
-    (dsh-bridge-copy-reply)
-    (should (equal (current-kill 0) "the reply"))))
-
-(ert-deftest dsh-bridge-copy-reply-raw-markdown ()
-  "`dsh-bridge-copy-reply' copies the original Markdown source, not the
-rendered text, when the view buffer derives from `gfm-view-mode' (which hides
-markup and installs `filter-buffer-substring-function')."
-  (when (require 'markdown-mode nil t)
-    (with-temp-buffer
-      (insert "# Title\n\nSome **bold** text.\n")
-      (dsh-bridge-view-mode)
-      (when (derived-mode-p 'gfm-mode)
-        (font-lock-ensure)
-        ;; Sanity: markup hiding really is in effect.
-        (should (text-property-any (point-min) (point-max)
-                                   'invisible 'markdown-markup))
-        (dsh-bridge-copy-reply)
-        (should (equal (current-kill 0) "# Title\n\nSome **bold** text.\n"))))))
-
-(ert-deftest dsh-bridge-copy-reply-whole-turn ()
-  "`dsh-bridge-copy-reply' kills the shown turn's raw Markdown — its segments
-joined by blank lines, without the divider lines — when the turn is cached."
-  (let ((dsh-bridge--turns-cache (dsh-bridge-test--view-cache dsh-bridge-test--view-turns))
-        (turn (nth 0 dsh-bridge-test--view-turns)))
-    (with-temp-buffer
-      (dsh-bridge-view-mode)
-      (setq-local dsh-bridge--view-content-session "s1")
-      (let ((inhibit-read-only t))
-        (insert (dsh-bridge-test--view-turn-render turn)))
-      (setq-local dsh-bridge--view-turn (alist-get 'turn turn))
-      (dsh-bridge-copy-reply)
-      (should (equal (current-kill 0) "newest first\n\nnewest second")))))
-
-(ert-deftest dsh-bridge-copy-reply-turn-not-cached ()
-  "`dsh-bridge-copy-reply' falls back to the buffer text when the shown turn
-is no longer in the cached turn list (e.g. after a compaction)."
-  ;; The cache holds only turns 20 and 10; the view still shows turn 30.
-  (let ((dsh-bridge--turns-cache
-         (dsh-bridge-test--view-cache (cdr dsh-bridge-test--view-turns)))
-        (rendered (dsh-bridge-test--view-turn-render
-                   (nth 0 dsh-bridge-test--view-turns))))
-    (with-temp-buffer
-      (dsh-bridge-view-mode)
-      (setq-local dsh-bridge--view-content-session "s1")
-      (let ((inhibit-read-only t)) (insert rendered))
-      (setq-local dsh-bridge--view-turn 30)
-      (dsh-bridge-copy-reply)
-      (should (equal (current-kill 0) rendered)))))
 
 ;;; Receive (the DSH→Emacs push; the outbox is invisible transport)
 
@@ -3736,7 +3679,6 @@ per-buffer decision, not a helper: it is covered at the caller level by
       ;; which is what keeps fork/copy/M-p/M-n inert during the placeholder.
       (should-not (dsh-bridge--view-turn-index-of
                    (dsh-bridge--turns-cache-turns "s1") dsh-bridge--view-turn))
-      (should-not (dsh-bridge--view-shown-turn-markdown))
       ;; Not a turn, so no position segment.
       (should (equal (dsh-bridge--view-turn-position) nil))
       (should-not (string-match-p "(latest/" (format "%s" header-line-format))))

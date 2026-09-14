@@ -338,13 +338,12 @@ display cache to show the active model in DSH-prompt buffers.")
 Each entry has the form (SESSION-ID . ((QUESTION-ID . QUESTIONS) ...)).")
 
 (defvar dsh-bridge--view-answer-notes nil
-  "Alist of (SESSION-ID . PLIST) notes recorded when the user resolves an ask.
-PLIST carries `:text', the one-line note to show, and `:baseline', the
-`(STEP . TIME)' identity of the answered turn's last segment at answer time
-(or the symbol `:unknown' when the turn list had not been cached).  While the
-shown turn's last segment still matches the baseline, the note replaces the
-terminal \"(continuing...)\" furniture; a new segment, a new turn, or the
-turn's end retires it.  See `dsh-bridge--view-answer-note'.")
+  "Alist of (SESSION-ID . PLIST) notes for answers to user queries.
+These notes are placed in the DSH-View buffer's turn display to indicate
+what the user answered.  PLIST is keyed by:
+- `:text': the note in the form of a string
+- `:baseline', the `(STEP . TIME)' identity of the turn's last segment
+  at answer time (or the symbol `:unknown' if uncached).")
 
 (defvar dsh-bridge--session-context nil
   "Alist storing the token and context window usage in DSH sessions.
@@ -393,10 +392,7 @@ on `unknown'.  No active retrieval is done.  See
 	(and entry (car (cdr entry)))))
 
 (defun dsh-bridge--status-glyph (session-id)
-  "Return a status indicator for SESSION-ID as a propertized string.
-The choice of string contents is based on `dsh-bridge--status-state', with a
-pending ask-user question taking display precedence (awaiting > running > idle
-> unknown)."
+  "Return a status indicator for SESSION-ID as a propertized string."
   (if (eq dsh-bridge-status-indicator 'none)
       ""
     (let* ((state (if (and session-id
@@ -1883,42 +1879,6 @@ press %s to view and answer" count key)
 
 (defvar-local dsh-bridge--question-session) ; forward declaration: set below
 
-(defun dsh-bridge--view-answer-note-record (answers)
-  "Record ANSWERS for the ask-user question in the current buffer.
-ANSWERS is `none' when the user declined to answer at all, else the
-answers list `dsh-bridge--question-validate' returned: a list of
-alists, each with `id', `selected' and, for a custom answer, `custom'.
-The answer's text is summarized for the session named by
-`dsh-bridge--question-session', which must be set in this buffer."
-  (let* ((session-id dsh-bridge--question-session)
-		 (newest (car-safe (dsh-bridge--turns-cache-turns session-id)))
-		 (last (and newest (dsh-bridge--view-turn-open-p newest)
-					(car (last (alist-get 'segments newest)))))
-		 (baseline (if last (dsh-bridge--view-segment-key last) :unknown))
-		 parts text)
-	(cond
-	 ((eq answers 'none)
-	  (setq text "You declined to answer"))
-	 (t
-	  ;; Take the custom answer and every label, dropping empties.  A
-	  ;; single-select custom answer has empty `selected'; a
-	  ;; multi-select one may supplement its labels.
-	  (dolist (answer answers)
-		(let ((lst (cons (alist-get 'custom answer)
-						 (append (alist-get 'selected answer) nil))))
-		  (setq parts
-				(append parts
-						(seq-filter #'dsh-bridge--normalized-string lst)))))
-	  (setq text
-			(cond
-			 ((null parts) "You answered")
-			 ((null (cdr parts)) (format "You answered \u201c%s\u201d" (car parts)))
-			 (t (format "You answered \u201c%s\u201d"
-						(mapconcat #'identity parts ", ")))))))
-	(setq dsh-bridge--view-answer-notes
-		  (cons (cons session-id (list :baseline baseline :text text))
-				(assoc-delete-all session-id dsh-bridge--view-answer-notes)))))
-
 (defun dsh-bridge--view-answer-note-clear (session-id)
   "Retire SESSION-ID's answered note, if one is recorded."
   (when (assoc session-id dsh-bridge--view-answer-notes)
@@ -2055,13 +2015,6 @@ recorded body."
          (or (not (plist-get provenance :open))
              (text-property-any (1+ body) (point-max)
                                 'dsh-bridge-turn-marker t)))))
-
-(defun dsh-bridge--view-turn-text (turn)
-  "The raw Markdown of TURN's segments, blank-line separated (no dividers).
-Used by `dsh-bridge-copy-reply' for a whole-turn copy."
-  (mapconcat (lambda (seg) (or (alist-get 'text seg) ""))
-			 (alist-get 'segments turn)
-			 "\n\n"))
 
 (defun dsh-bridge--view-turn-index-of (turns turn)
   "Index of TURN (a number) in TURNS (newest first), or nil when absent."
@@ -2452,7 +2405,6 @@ is applied."
 (define-key dsh-bridge-view-mode-map (kbd "g") #'revert-buffer)
 (define-key dsh-bridge-view-mode-map (kbd "q") #'quit-window)
 (define-key dsh-bridge-view-mode-map (kbd "r") #'dsh-bridge-reply)
-(define-key dsh-bridge-view-mode-map (kbd "w") #'dsh-bridge-copy-reply)
 (define-key dsh-bridge-view-mode-map (kbd "i") #'dsh-bridge-receive)
 (define-key dsh-bridge-view-mode-map (kbd "a") #'dsh-bridge-answer)
 (define-key dsh-bridge-view-mode-map (kbd "B") #'dsh-bridge-fork-turn)
@@ -2468,8 +2420,6 @@ is applied."
   '("DSH Bridge"
 	["Reply" dsh-bridge-reply
 	 :help "Bind the prompt buffer to the shown session"]
-	["Copy" dsh-bridge-copy-reply
-	 :help "Copy the reply (region, else the whole shown turn)"]
 	["Branch Turn" dsh-bridge-fork-turn
 	 :help "Branch the shown turn into a new session"]
 	["Receive Message…" dsh-bridge-receive
@@ -3791,6 +3741,42 @@ multi-select question it may accompany the marked options.  See
 		 (t (setq failed t)))))
 	(and (not failed) (nreverse answers))))
 
+(defun dsh-bridge--view-answer-note-record (answers)
+  "Record ANSWERS for the ask-user question in the current buffer.
+ANSWERS is `none' when the user declined to answer at all, else the
+answers list `dsh-bridge--question-validate' returned: a list of
+alists, each with `id', `selected' and, for a custom answer, `custom'.
+The answer's text is summarized for the session named by
+`dsh-bridge--question-session', which must be set in this buffer."
+  (let* ((session-id dsh-bridge--question-session)
+		 (newest (car-safe (dsh-bridge--turns-cache-turns session-id)))
+		 (last (and newest (dsh-bridge--view-turn-open-p newest)
+					(car (last (alist-get 'segments newest)))))
+		 (baseline (if last (dsh-bridge--view-segment-key last) :unknown))
+		 parts text)
+	(cond
+	 ((eq answers 'none)
+	  (setq text "You declined to answer"))
+	 (t
+	  ;; Take the custom answer and every label, dropping empties.  A
+	  ;; single-select custom answer has empty `selected'; a
+	  ;; multi-select one may supplement its labels.
+	  (dolist (answer answers)
+		(let ((lst (cons (alist-get 'custom answer)
+						 (append (alist-get 'selected answer) nil))))
+		  (setq parts
+				(append parts
+						(seq-filter #'dsh-bridge--normalized-string lst)))))
+	  (setq text
+			(cond
+			 ((null parts) "You answered")
+			 ((null (cdr parts)) (format "You answered \u201c%s\u201d" (car parts)))
+			 (t (format "You answered \u201c%s\u201d"
+						(mapconcat #'identity parts ", ")))))))
+	(setq dsh-bridge--view-answer-notes
+		  (cons (cons session-id (list :baseline baseline :text text))
+				(assoc-delete-all session-id dsh-bridge--view-answer-notes)))))
+
 (defun dsh-bridge--question-submit ()
   "Validate and POST the answers for this question buffer.
 On acceptance the session resumes, so this buffer is bannered and the
@@ -4287,44 +4273,6 @@ refused.  Only meaningful in a DSH-View buffer."
                          dsh-bridge-prompt-display-action)
           (message "dsh-bridge: branched into %s (preset inherited; default model; untitled)"
                    (dsh-bridge--id-tail child)))))))
-
-(defun dsh-bridge--view-shown-turn-markdown ()
-  "The raw Markdown of the turn the DSH-View buffer shows, or nil.
-Returns the shown turn's segments joined by blank lines (no divider lines)
-when the buffer has a turn identity and that turn is still in the cached list;
-nil for a pushed message with no turn identity, or when the turn is no longer
-cached (e.g. after a compaction)."
-  (let* ((session dsh-bridge--view-content-session)
-		 (turn dsh-bridge--view-turn)
-		 (turns (and session turn
-					 (dsh-bridge--turns-cache-turns session)))
-		 (record (and turns
-					  (seq-find (lambda (r) (equal (alist-get 'turn r) turn))
-								turns))))
-	(and record (dsh-bridge--view-turn-text record))))
-
-(defun dsh-bridge-copy-reply ()
-  "Copy the reply in the current DSH-View buffer (region, else the whole turn).
-With an active region, the raw text of the region is copied.  Otherwise the
-whole shown turn's raw Markdown is copied — its segments joined by blank
-lines, without the divider lines — or, for a pushed message that is not (yet)
-a known turn, the whole buffer content.  The kill carries the original
-Markdown source: under `gfm-view-mode', markup delimiters are hidden from
-display and `filter-buffer-substring-function' would strip them from a copy,
-so this copies the raw text instead."
-  (interactive)
-  (let* ((region-p (use-region-p))
-		 (beg (and region-p (region-beginning)))
-		 (end (and region-p (region-end)))
-		 (str (if region-p
-				  (buffer-substring beg end)
-				(or (dsh-bridge--view-shown-turn-markdown)
-					(buffer-string)))))
-	(if (eq last-command 'kill-region)
-		(kill-append str (and region-p (< end beg)))
-	  (kill-new str)))
-  (setq deactivate-mark t)
-  (message "dsh-bridge: copied reply"))
 
 ;;; The prompt buffer
 
