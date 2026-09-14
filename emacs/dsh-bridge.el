@@ -1726,6 +1726,23 @@ sessions list it keeps its tabulated-list sort meaning."))
 
 ;;; DSH-View buffer (*dsh-bridge-output*)
 
+;; The DSH-View buffer shows one turn, consisting of sequential
+;; messages ("segments") separated by horizontal-rule dividers.
+;; Furthermore, user answers (from replying to ask-user queries) are
+;; spliced between the segments where they occur.
+;;
+;; If `dsh-bridge--view-follow' is non-nil (the default), and the
+;; DSH-View buffer is showing the latest turn of a non-idle session,
+;; then arriving segments are inserted automatically.  We also put a
+;; run-status line at the end of the buffer: "(running...)"  if the
+;; turn is awaiting its first segment; "(continuing...)" if waiting
+;; for more segments; and an ask-user question if the turn is parked
+;; on a query.  In a completed (idle) turn, the final segment ends
+;; without any run-status line.
+;;
+;; Arriving segments are spliced in place, so that the user can tail
+;; the buffer by parking the cursor on the run-status line.
+
 (defvar-local dsh-bridge--view-timestamp nil
   "Time the current DSH-View buffer was last refreshed, or nil.")
 
@@ -1802,19 +1819,6 @@ turn is fully re-rendered.  See `dsh-bridge--view-provenance-intact-p'.")
 
 (defvar dsh-bridge--view-ticker-timer nil
   "Repeating timer to repaint the DSH-View header, or nil.")
-
-;;; Turn rendering and the position counter
-
-;; The DSH-View shows one *turn*, consisting of text-bearing assistant
-;; messages ("segments") separated by GFM horizontal-rule dividers.
-;;
-;; For a still-running turn, the latest segment ends with a terminal
-;; marker line "(continuing...)", or an "awaiting your response" note
-;; if the agent is parked on an ask-user question.  Arriving replies
-;; are spliced in place, without disturbing the window start; see
-;; `dsh-bridge--view-provenance'.
-;;
-;; After a turn completes, the final segment has no marker at the end.
 
 (defvar dsh-bridge--view-segment-divider "\n\n---\n"
   "Text between two segments of the same turn in DSH-View buffers.
