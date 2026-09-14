@@ -3282,9 +3282,9 @@ turn no longer cached shows nothing."
       ;; pushed content: no indicator.
       (setq-local dsh-bridge--view-turn-index nil)
       (setq-local dsh-bridge--view-turn 999)
-      (should (equal (dsh-bridge--view-turn-position) ""))
+      (should (equal (dsh-bridge--view-turn-position) nil))
       (setq-local dsh-bridge--view-turn nil)
-      (should (equal (dsh-bridge--view-turn-position) ""))
+      (should (equal (dsh-bridge--view-turn-position) nil))
       ;; Turn-following reads (latest/n), pinned to the newest turn.
       (setq-local dsh-bridge--view-turn 30)
       (setq-local dsh-bridge--view-follow t)
@@ -3422,8 +3422,8 @@ newest) turn, so only a genuinely newer turn's content replaces it."
       (with-current-buffer (get-buffer "*dsh-bridge-output*")
         (should (equal dsh-bridge--view-content-session "s1"))
         (should (eq dsh-bridge--view-follow t))
-        (should (equal dsh-bridge--view-waiting 2))
-        (should (null dsh-bridge--view-turn))
+        (should (eq dsh-bridge--view-waiting t))
+        (should (equal dsh-bridge--view-turn 3))
         (should (equal (buffer-string) dsh-bridge--view-running-placeholder)))))
   (when (buffer-live-p (get-buffer "*dsh-bridge-output*"))
     (kill-buffer "*dsh-bridge-output*")))
@@ -3522,8 +3522,8 @@ replace it (the regression guard for the fix above)."
       (should shown)
       (with-current-buffer (get-buffer "*dsh-bridge-output*")
         (should (eq dsh-bridge--view-follow t))
-        (should (equal dsh-bridge--view-waiting 2))
-        (should (null dsh-bridge--view-turn))
+        (should (eq dsh-bridge--view-waiting t))
+        (should (equal dsh-bridge--view-turn 3))
         (should (equal (buffer-string) dsh-bridge--view-running-placeholder)))))
   (when (buffer-live-p (get-buffer "*dsh-bridge-output*"))
     (kill-buffer "*dsh-bridge-output*")))
@@ -3709,10 +3709,12 @@ the window the action came from is quit, so the old buffer does not linger."
         (when (buffer-live-p b) (kill-buffer b))))))
 
 (ert-deftest dsh-bridge-view-waiting-state ()
-  "The waiting state shows the `(running...)' placeholder, has no `(k/n)'
-position (it is not a turn), and is ended by a content fill.  The acceptance
-gate is a per-buffer decision, not a helper: it is covered at the caller level
-by `dsh-bridge-view-follow-refill-waiting-gate' and
+  "The waiting state shows the `(running...)' placeholder, holds the awaited
+turn number in `dsh-bridge--view-turn' (a number with no record yet, so
+lookups by it miss and commands acting on the shown turn stay inert), has no
+`(k/n)' position, and is ended by a content fill.  The acceptance gate is a
+per-buffer decision, not a helper: it is covered at the caller level by
+`dsh-bridge-view-follow-refill-waiting-gate' and
 `dsh-bridge-turn-complete-refetch-waiting-newer'."
   (let ((dsh-bridge--session-status nil)
         (dsh-bridge--pending-questions nil)
@@ -3726,10 +3728,16 @@ by `dsh-bridge-view-follow-refill-waiting-gate' and
       (should (equal (buffer-string) dsh-bridge--view-running-placeholder))
       (should (text-property-any (point-min) (point-max)
                                  'dsh-bridge-running t))
-      (should (eq dsh-bridge--view-waiting 2))
+      (should (eq dsh-bridge--view-waiting t))
+      (should (equal dsh-bridge--view-turn 3))
       (should (eq dsh-bridge--view-follow t))
+      ;; The awaited turn has no record yet: a lookup by its number misses,
+      ;; which is what keeps fork/copy/M-p/M-n inert during the placeholder.
+      (should-not (dsh-bridge--view-turn-index-of
+                   (dsh-bridge--turns-cache-turns "s1") dsh-bridge--view-turn))
+      (should-not (dsh-bridge--view-shown-turn-markdown))
       ;; Not a turn, so no position segment.
-      (should (equal (dsh-bridge--view-turn-position) ""))
+      (should (equal (dsh-bridge--view-turn-position) nil))
       (should-not (string-match-p "(latest/" (format "%s" header-line-format))))
     ;; A fresh session (nothing was showing) records the fresh marker, which
     ;; a content fill then ends.
@@ -3738,6 +3746,7 @@ by `dsh-bridge-view-follow-refill-waiting-gate' and
       (setq-local dsh-bridge--view-content-session "s1")
       (dsh-bridge--view-waiting-fill "s1" nil)
       (should (eq dsh-bridge--view-waiting t))
+      (should (equal dsh-bridge--view-turn 1))
       (dsh-bridge--view-fill "s1" nil nil nil t)
       (should (null dsh-bridge--view-waiting)))))
 
@@ -4249,7 +4258,7 @@ refresh returns content again — the epoch is kept and then updated."
         (should (null (dsh-bridge--turns-cache-turns "s1")))
         (should (equal (dsh-bridge--turns-cache-epoch "s1") 4))
         ;; The view has no turns to navigate; position shows nothing.
-        (should (equal (dsh-bridge--view-turn-position) ""))
+        (should (equal (dsh-bridge--view-turn-position) nil))
         ;; A forced refresh refetches and repopulates.
         (dsh-bridge--view-turns-cache-refresh "s1")
         (should (equal (dsh-bridge--turns-cache-turns "s1") (list fresh-8)))
@@ -4858,7 +4867,8 @@ the placeholder when the cache holds none."
       (dsh-bridge--view-follow-refill "s1"))
     (with-current-buffer "*dsh-bridge-output*"
       (should (equal (buffer-string) dsh-bridge--view-running-placeholder))
-      (should (equal dsh-bridge--view-waiting 2)))
+      (should (eq dsh-bridge--view-waiting t))
+      (should (equal dsh-bridge--view-turn 3)))
     ;; Case 2: a newer turn (3) has started producing: it replaces the
     ;; placeholder and clears the waiting state.  The header's position is
     ;; computed after the placeholder ends, so `(k/n)' appears immediately
@@ -4872,11 +4882,12 @@ the placeholder when the cache holds none."
         (should (equal (buffer-string) "fresh\n\n(continuing...)"))
         (should (null dsh-bridge--view-waiting))
         (should (string-match-p "latest/1" (format "%s" header-line-format)))))
-    ;; Case 3: a fresh session (waiting `t', no pre-send turn) accepts the
-    ;; first committed turn — there is no turn number to compare against.
+    ;; Case 3: a fresh session (waiting for turn 1, no pre-send turn) accepts
+    ;; the first committed turn — there is no earlier turn to reject.
     (with-current-buffer "*dsh-bridge-output*"
       (dsh-bridge--view-waiting-fill "s1" nil)
-      (should (eq dsh-bridge--view-waiting t)))
+      (should (eq dsh-bridge--view-waiting t))
+      (should (equal dsh-bridge--view-turn 1)))
     (let ((dsh-bridge--turns-cache
            (dsh-bridge-test--view-cache
             (list (dsh-bridge-test--view-turn 1 1000000
@@ -4893,7 +4904,8 @@ the placeholder when the cache holds none."
       (dsh-bridge--view-follow-refill "s1"))
     (with-current-buffer "*dsh-bridge-output*"
       (should (equal (buffer-string) dsh-bridge--view-running-placeholder))
-      (should (eq dsh-bridge--view-waiting t)))
+      (should (eq dsh-bridge--view-waiting t))
+      (should (equal dsh-bridge--view-turn 1)))
     (when (buffer-live-p (get-buffer "*dsh-bridge-output*"))
       (kill-buffer "*dsh-bridge-output*"))))
 

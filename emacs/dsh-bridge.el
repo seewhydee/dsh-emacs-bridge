@@ -1771,7 +1771,12 @@ An entry may have TURNS nil, which refers to a session folded to no
 turns, e.g. after a compaction.")
 
 (defvar-local dsh-bridge--view-turn nil
-  "Turn number of the turn the DSH-View buffer shows, or nil.
+  "The turn number this DSH-View buffer is anchored to, or nil.
+Normally this is the turn being displayed.  If the buffer is being
+prepared for a turn with no content yet (so `dsh-bridge--view-waiting'
+is non-nil), it is the turn number for the awaited turn, which is not in
+the turns cache yet.
+
 A nil value corresponds to content with no turn identity, e.g., a
 message pushed from DSH.")
 
@@ -1793,16 +1798,8 @@ buffer is showing a session's latest turn.")
 
 (defvar-local dsh-bridge--view-waiting nil
   "Non-nil if the DSH-View buffer is awaiting its first reply segment.
-If the buffer has been prepared to display a new turn, but the turn's
-first text segment has not yet arrived, the value is one of the
-following:
-
-- an integer N, specifying the preceding turn (the one showing right
-  before the placeholder went up).
-
-- or t, if there was no earlier turn in the session.
-
-Otherwise, the value is nil.")
+In this state, the DSH-View buffer shows a placeholder to indicate that
+the turn is running, but no replies.")
 
 (defvar-local dsh-bridge--view-provenance nil
   "How this DSH-View buffer was last rendered, or nil if unknown.
@@ -1997,24 +1994,24 @@ open-turn provenance check."
 			  'dsh-bridge-answered t))
 
 (defun dsh-bridge--view-waiting-fill (session-id base &optional cwd)
-  "Put the current DSH-View for SESSION-ID into the waiting state at BASE.
-BASE is the pre-send turn number whose content was showing before the send
-(nil for nothing).  The buffer shows the running placeholder (or the awaiting
-note if a question is already pending) and turns on following; automatic
-refills replace it only with a newer turn.  CWD, when non-nil, sets the
-buffer's workspace directory."
-  ;; The fill clears the waiting state; set it afterwards so the placeholder
-  ;; stays up.
+  "Put the current DSH-View for SESSION-ID into the waiting state.
+BASE is the turn number *before* the send, or nil if there is no
+preceding turn.  CWD, if non-nil, is the working directory.
+
+This erases the buffer, inserts a \"(running...)\" placeholder (or an
+awaiting note if a question is already pending), and then turns on
+turn-following state for the new turn."
+  ;; The fill clears the waiting state and `dsh-bridge--view-turn';
+  ;; reset both afterwards.
   (dsh-bridge--view-fill session-id nil nil cwd t)
-  (setq-local dsh-bridge--view-waiting (or base t))
+  (setq-local dsh-bridge--view-turn (1+ (or base 0)))
+  (setq-local dsh-bridge--view-waiting t)
   (setq-local dsh-bridge--view-follow t)
   (let ((inhibit-read-only t))
     (erase-buffer)
     (insert (dsh-bridge--view-turn-suffix 'new session-id))
     (goto-char (point-min)))
-  ;; The placeholder is not a turn body, so there is nothing to reconcile
-  ;; against; the first committed segment rebuilds and tails.
-  (setq-local dsh-bridge--view-provenance nil)
+  (setq-local dsh-bridge--view-provenance nil) ; placeholder isn't content
   (setq header-line-format (dsh-bridge--view-header-line))
   (dsh-bridge--view-ticker-ensure))
 
@@ -2110,32 +2107,31 @@ Used by `dsh-bridge-copy-reply' for a whole-turn copy."
 
 (defun dsh-bridge--view-turn-position ()
   "Return the position segment for a DSH-View buffer.
-This is a string of the form \"(k/n)\" (newest-first, 1-indexed), or the
-empty string if there is no valid positioning.
+This is a string of the form \"(k/n)\" (newest-first, 1-indexed), or nil
+if there is no valid positioning.
 
 If the DSH-View buffer is at rest, k is the position of the shown turn in the
 session's cached turn list (a fetched turn is normally 1).  In turn-following
 state, the segment reads `(latest/n)' instead.
 
 This function uses the turns cache only, and does no synchronous I/O."
-  (if dsh-bridge--view-waiting
-      ;; Waiting for the first reply: the placeholder is not a turn, so no
-      ;; position (the cache may still hold the pre-send turn).
-      ""
-    (let ((session dsh-bridge--view-content-session))
-      (if (and session (dsh-bridge--turns-cache-turns session))
-          (let* ((turns (dsh-bridge--turns-cache-turns session))
-			   (n (length turns)))
-			(cond
-			 (dsh-bridge--view-follow (format " (latest/%d)" n))
-			 (dsh-bridge--view-turn-index
-			  (format " (%d/%d)" (1+ dsh-bridge--view-turn-index) n))
-			 (dsh-bridge--view-turn
-			  (let ((k (dsh-bridge--view-turn-index-of
-						turns dsh-bridge--view-turn)))
-				(if k (format " (%d/%d)" (1+ k) n) "")))
-			 (t "")))
-        ""))))
+  ;; Omit the turn indicator if (i) the first reply hasn't arrived yet
+  ;; (the turn only exists after the first reply, even though we have
+  ;; prepped the DSH-View buffer for it); or (ii) there's no session
+  ;; or cache data available.
+  (unless dsh-bridge--view-waiting
+	(let* ((session dsh-bridge--view-content-session)
+		   (turns (dsh-bridge--turns-cache-turns session))
+		   total)
+	  (when turns
+		(setq total (length turns))
+		(cond (dsh-bridge--view-follow (format " (latest/%d)" total))
+			  (dsh-bridge--view-turn-index
+			   (format " (%d/%d)" (1+ dsh-bridge--view-turn-index) total))
+			  (dsh-bridge--view-turn
+			   (let ((k (dsh-bridge--view-turn-index-of
+						 turns dsh-bridge--view-turn)))
+				 (if k (format " (%d/%d)" (1+ k) total)))))))))
 
 (defun dsh-bridge--view-elapsed-label (session-id)
   "The view header's elapsed-turn segment for SESSION-ID, or nil.
@@ -2186,9 +2182,11 @@ Announces the state change, since the only other feedback is the header's `⤓'
 marker."
   (let ((turns (dsh-bridge--view-turns-refresh t)))
     ;; Entering follow by hand ends any waiting state.  Kept explicit even
-    ;; though `dsh-bridge--view-fill' also clears it, because the refill
-    ;; below is skipped when the turn cache is empty.
+    ;; though `dsh-bridge--view-fill' also clears it, because the refill below
+    ;; is skipped when the turn cache is empty — and in that case the awaited
+    ;; turn number must be dropped too, since no fill will replace it.
     (setq-local dsh-bridge--view-waiting nil)
+    (setq-local dsh-bridge--view-turn nil)
     (setq-local dsh-bridge--view-follow t)
     (setq-local dsh-bridge--view-turn-index nil)
     (when turns
@@ -2350,11 +2348,13 @@ performing any further network request."
 	  (with-current-buffer buf
 		(and newest
 			 dsh-bridge--view-follow
-			 ;; If the buffer is being prepped for a new turn, drop
-			 ;; any update arriving (somehow) for earlier turns.
-			 (or (memq dsh-bridge--view-waiting '(nil t))
+			 ;; If the buffer is being prepped for a new turn, drop any
+			 ;; update arriving (somehow) for an earlier turn; the awaited
+			 ;; turn number is in `dsh-bridge--view-turn'.
+			 (or (not dsh-bridge--view-waiting)
 				 (and (numberp turn)
-					  (> turn dsh-bridge--view-waiting)))
+					  (numberp dsh-bridge--view-turn)
+					  (>= turn dsh-bridge--view-turn)))
 			 (dsh-bridge--view-fill session-id newest nil nil t t))))))
 
 (defun dsh-bridge--turns-changed (session-id)
@@ -2432,7 +2432,7 @@ The session-pos segment is the position in the session's turn history (see
 turn-following marker appear while the shown session runs."
   (let* ((id dsh-bridge--view-content-session)
 		 (status (dsh-bridge--status-glyph id))
-		 (pos (dsh-bridge--view-turn-position))
+		 (pos (or (dsh-bridge--view-turn-position) ""))
 		 (label (dsh-bridge--session-link (dsh-bridge--session-label id) id))
 		 (context (and id (dsh-bridge--prompt-context-label id)))
 		 (elapsed (and id (dsh-bridge--view-elapsed-label id)))
@@ -3046,7 +3046,7 @@ settled `(k/n)' position."
   ;; Rendering content ends the placeholder.  Clearing before the header is
   ;; computed (below) means an accepted refill shows its position at once
   ;; rather than waiting for the next ticker repaint; `--view-waiting-fill'
-  ;; re-sets the state after its own fill.
+  ;; re-sets the state and the awaited turn after its own fill.
   (setq-local dsh-bridge--view-waiting nil)
   (setq-local dsh-bridge--view-received-at received-at)
   (setq-local dsh-bridge--view-turn-index nil)
@@ -5701,11 +5701,12 @@ content merely changed in place)."
 				(when newest
 				  (dsh-bridge--view-fill shown-id newest nil nil t t)))
 			   ;; If the buffer is being prepped for a fresh turn,
-			   ;; insert the new segment if it's for the new turn.
+			   ;; insert the new segment if it's for the awaited turn
+			   ;; (or a later one, should the awaited turn stay textless).
 			   ((and newest
-					 (or (eq dsh-bridge--view-waiting t)
-						 (and (numberp turn)
-							  (> turn dsh-bridge--view-waiting))))
+					 (numberp turn)
+					 (numberp dsh-bridge--view-turn)
+					 (>= turn dsh-bridge--view-turn))
 				(dsh-bridge--view-fill shown-id newest nil nil t t))
 			   ;; Otherwise the content is not the new turn's (or
 			   ;; there is none): blank the view to idle.
