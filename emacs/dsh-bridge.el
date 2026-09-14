@@ -2278,7 +2278,8 @@ marker."
     (setq-local dsh-bridge--view-follow t)
     (setq-local dsh-bridge--view-browsing nil)
     (when turns
-      (dsh-bridge--view-fill dsh-bridge--view-content-session (car turns) nil nil t))
+      (dsh-bridge--view-fill dsh-bridge--view-content-session
+							 (car turns) nil nil t))
     (setq header-line-format (dsh-bridge--view-header-line))
     (dsh-bridge--view-ticker-ensure)
     (message "dsh-bridge: following the newest turn")))
@@ -2327,7 +2328,6 @@ to pop to the buffer using the same window.  Return the buffer."
 		(dsh-bridge--view-fill id (car-safe turns) nil cwd t)
 		(when follow
 		  (setq-local dsh-bridge--view-follow t))
-		;; Re-set header after the follow flag so `⤓' marker is right.
 		(setq header-line-format (dsh-bridge--view-header-line))
 		(dsh-bridge--view-ticker-ensure))
 	  (funcall (if same-window
@@ -2338,14 +2338,19 @@ to pop to the buffer using the same window.  Return the buffer."
 
 (defun dsh-bridge--exit-to-view (buffer &optional invoked-window)
   "Select DSH-View BUFFER after an explicit user action.
-Reuse a window already displaying BUFFER; otherwise display BUFFER in the
-selected window, replacing the buffer the action was typed in.  When a
-window already displayed BUFFER, INVOKED-WINDOW -- the window the action
-came from -- is quit instead, so the old buffer does not linger on screen.
-Point is left at BUFFER's end so following replies splice in above it.
-Return BUFFER.  Only explicit user actions (sending a prompt, answering or
-declining a question) jump this way; an outcome learned from the host while
-the user did nothing (a question resolved elsewhere) is bannered in place."
+Reuse a window already displaying BUFFER; otherwise display BUFFER in
+the selected window.  Return BUFFER.
+
+If INVOKED-WINDOW is non-nil, it specifies the window the action came
+from; if this window is displaying the buffer that was current when this
+function was invoked, quit it.  This ensures that the old buffer does
+not linger on screen.
+
+This function leaves point at the end of BUFFER, so that following
+replies splice in above it.    Only explicit user
+actions (sending a prompt, answering or declining a question) jump this
+way; an outcome learned from the host while the user did nothing (a
+question resolved elsewhere) is bannered in place."
   (let* ((old (current-buffer))
 		 (old-window (or (and (window-live-p invoked-window)
 							  (eq (window-buffer invoked-window) old)
@@ -2978,10 +2983,8 @@ kept when composing for the same session (see
 `dsh-bridge--prompt-buffer').
 
 If SENT-SESSION-ID is non-nil, show a DSH-View buffer for the session in
-turn-following state (see `dsh-bridge--exit-to-view'): a window already
-displaying that view is reused, else the view replaces the prompt in the
-invoking window.  WINDOW, if non-nil, is the window the send was invoked
-from.  SENT-AT, if non-nil, is the ms-epoch the prompt was sent;
+turn-following state.  WINDOW, if non-nil, is the window the send was
+invoked from.  SENT-AT, if non-nil, is the ms-epoch the prompt was sent;
 `dsh-bridge--after-prompt-view' uses it to recognize a turn that started
 (or even finished) during the send."
   (when (eq major-mode 'dsh-bridge-prompt-mode)
@@ -3314,29 +3317,25 @@ your answer\" header.")
 			(buffer-list)))
 
 (defun dsh-bridge--question-mark-resolved (question-id message outcome)
-  "Mark QUESTION-ID's live buffer resolved and banner it with MESSAGE.
-OUTCOME is `sent', `cancelled', `elsewhere', or `stale' and selects the
-banner's face.  MESSAGE says what happened in the user's terms.  A buffer
-already marked resolved is left alone, so the local settlement and the
-later SSE `ask-user-resolved' frame do not banner twice.  The buffer is
-re-rendered so the banner replaces the now-false \"waiting for your
-answer\" header rather than sitting above it.  This performs no window
-management: an explicit submit/decline moves the user to the session's
-view separately (see `dsh-bridge--exit-to-view'), while an outcome learned
-from the host leaves the buffer on screen."
+  "Mark QUESTION-ID's DSH-Question buffer resolved, with banner MESSAGE.
+MESSAGE should say what happened in the user's terms.
+OUTCOME should be one of `sent', `cancelled', `elsewhere', or `stale'.
+
+This function does nothing if the buffer was already resolved.  It also
+performs no window management; the caller is responsible for displaying
+the result on-screen."
   (let ((buffer (dsh-bridge--question-find-buffer question-id)))
-	(when (and buffer
-			   (with-current-buffer buffer (not dsh-bridge--question-dead)))
+	(when buffer
 	  (with-current-buffer buffer
-		(setq-local dsh-bridge--question-dead t)
-		(setq-local dsh-bridge--question-banner
-				  ;; Only a local outcome repeats what this buffer did.
-				  ;; `elsewhere'/`stale' means some other surface (or no
-				  ;; one) settled it, so the descriptive MESSAGE is right.
-				  (if (memq outcome '(sent cancelled))
-					  (or dsh-bridge--question-sent message)
-					message))
-		(dsh-bridge--question-render)))))
+		(unless dsh-bridge--question-dead
+		  (setq-local dsh-bridge--question-dead t)
+		  ;; Only a local outcome repeats the answer; `elsewhere' or
+		  ;; `stale' means some other surface settled it.
+		  (setq-local dsh-bridge--question-banner
+					  (if (memq outcome '(sent cancelled))
+						  (or dsh-bridge--question-sent message)
+						message))
+		  (dsh-bridge--question-render))))))
 
 ;; Registry maintenance ----------------------------------------------------
 
@@ -3861,21 +3860,16 @@ The answer's text is summarized for the session named by
 
 (defun dsh-bridge--question-submit ()
   "Validate and POST the answers for this question buffer.
-On acceptance the session resumes, so this buffer is bannered and the
-session's DSH-View is selected in turn-following state at its tail
-(`dsh-bridge--exit-to-view'): the continuation is collected where the
-prompt flow collects replies.  A question the host reports as already
-resolved is bannered in place, with no jump — the user's action did not
-settle it."
+On acceptance, the session resumes; clean up the DSH-Question buffer,
+and pop to the session's DSH-View in turn-following state."
   (interactive)
   (unless (eq major-mode 'dsh-bridge-question-mode)
 	(user-error "Not in a DSH-Question buffer"))
   (if dsh-bridge--question-dead
 	  (message "dsh-bridge: this question was already resolved")
 	(let ((answers (dsh-bridge--question-validate)))
-	  (when (null answers)
-		(message "dsh-bridge: not all questions answered"))
-	  (when answers
+	  (if (null answers)
+		  (message "dsh-bridge: not all questions answered")
 		;; Record what this buffer did before the request leaves: the
 		;; resolved frame can outrun the POST's response (see the variable).
 		(setq dsh-bridge--question-sent "Your answer was sent.")
@@ -3890,13 +3884,11 @@ settle it."
 						 (append (list (cons 'questionId dsh-bridge--question-id)
 									   (cons 'sessionId dsh-bridge--question-session))
 								 (list (cons 'answers answers))))))
-			(let* ((alist (condition-case nil
-							;; JSON false must decode to nil: the
-							;; `accepted' cond branch below keys on
-							;; truthiness.
-							(json-parse-string body :object-type 'alist
-										   :null-object nil :false-object nil)
-						  (error nil)))
+			(let* ((alist (ignore-errors
+							(json-parse-string body
+											   :object-type 'alist
+											   :null-object nil
+											   :false-object nil)))
 				   (reason (and alist (alist-get 'reason alist)))
 				   (accepted (and alist (alist-get 'accepted alist))))
 			  (cond
