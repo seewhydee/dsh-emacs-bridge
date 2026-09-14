@@ -271,6 +271,114 @@ the synchronous request never runs inside the SSE process filter."
   :type 'boolean
   :group 'dsh-bridge)
 
+;;; Faces
+
+(defface dsh-bridge-status-running-face
+  '((t :foreground "goldenrod3"))
+  "Face for the status glyph of a running DSH session."
+  :group 'dsh-bridge)
+
+(defface dsh-bridge-status-idle-face
+  '((t :foreground "ForestGreen"))
+  "Face for the status glyph of an idle DSH session."
+  :group 'dsh-bridge)
+
+(defface dsh-bridge-status-unknown-face
+  '((t :inherit shadow))
+  "Face for the status glyph of an unknown DSH session."
+  :group 'dsh-bridge)
+
+(defface dsh-bridge-default-target-face
+  '((t :inherit font-lock-keyword-face))
+  "Face for the default target session in the DSH-Sessions buffer."
+  :group 'dsh-bridge)
+
+(defface dsh-bridge-untitled-face
+  '((t :inherit font-lock-comment-face))
+  "Face for an untitled session in the DSH-Sessions buffer."
+  :group 'dsh-bridge)
+
+(defface dsh-bridge-describe-heading-face
+  '((t :inherit bold))
+  "Face for section headings in the DSH-Describe-Session buffer."
+  :group 'dsh-bridge)
+
+(defface dsh-bridge-describe-label-face
+  '((t :inherit font-lock-function-name-face))
+  "Face for field labels in the DSH-Describe-Session buffer."
+  :group 'dsh-bridge)
+
+(defface dsh-bridge-view-marker-face
+  '((t :inherit shadow :italic t))
+  "Face for the turn-running markers in DSH-View buffers."
+  :group 'dsh-bridge)
+
+(defface dsh-bridge-view-awaiting-face
+  '((t :inherit bold :foreground "orange"))
+  "Face for \"Awaiting response\" notes in DSH-View buffers.
+Such a note is shown whenever the session is waiting for your answers(s)
+to its queries before proceeding."
+  :group 'dsh-bridge)
+
+(defface dsh-bridge-view-answered-face
+  '((t :inherit shadow :italic t))
+  "Face for \"You answered…\" notes in DSH-View buffers.
+These notes indicate the answers you gave to mid-turn queries."
+  :group 'dsh-bridge)
+
+(defface dsh-bridge-attachment-face
+  '((t :inherit font-lock-keyword-face))
+  "Face for file/image attachment tags in the DSH-Prompt buffer."
+  :group 'dsh-bridge)
+
+(defface dsh-bridge-question-heading-face
+  '((t :inherit bold))
+  "Face for the headings in the DSH-Question buffer.
+The waiting header line and each question's short `header' label."
+  :group 'dsh-bridge)
+
+(defface dsh-bridge-question-banner-face
+  '((t :inherit success))
+  "Face for the status banner in the DSH-Question buffer."
+  :group 'dsh-bridge)
+
+(defface dsh-bridge-question-furniture-face
+  '((t :inherit shadow))
+  "Face for miscellaneous UI elements in the DSH-Question buffer's.
+This face is applied to help prose, question numbering, option numbers,
+option descriptions, and the custom-row hint."
+  :group 'dsh-bridge)
+
+(defface dsh-bridge-question-text-face
+  '((t :inherit default))
+  "Face for a question's own text in the DSH-Question buffer."
+  :group 'dsh-bridge)
+
+(defface dsh-bridge-question-option-face
+  '((t :inherit font-lock-keyword-face))
+  "Face for an unmarked option label in the DSH-Question buffer."
+  :group 'dsh-bridge)
+
+(defface dsh-bridge-question-selected-face
+  '((t :inherit font-lock-constant-face))
+  "Face for a marked option (its `[x]' box and label) in the DSH-Question buffer."
+  :group 'dsh-bridge)
+
+(defface dsh-bridge-question-custom-value-face
+  '((t :inherit font-lock-string-face))
+  "Face for a typed custom answer in the DSH-Question buffer."
+  :group 'dsh-bridge)
+
+(defface dsh-bridge-question-detail-face
+  '((t :inherit font-lock-doc-face))
+  "Face for a detail block in the DSH-Question buffer."
+  :group 'dsh-bridge)
+
+(defface dsh-bridge-question-skip-face
+  '((t :inherit warning))
+  "Face for the \"skipped\" marker in the DSH-Question buffer."
+  :group 'dsh-bridge)
+
 ;;; Session tracking
 
 (defvar dsh-bridge-default-session nil
@@ -2360,32 +2468,26 @@ turn-following marker appear while the shown session runs."
 							(and context (concat " · " context))
 							await elapsed follow))))
 
+;; A conditional expression cannot go directly in the parent slot of
+;; `define-derived-mode', since the macro quotes it into the mode
+;; metadata and the docstring generation calls `symbol-name' on it.
+
 (defmacro dsh-bridge--define-view-mode (parent)
   "Define `dsh-bridge-view-mode' as a variant of PARENT.
-PARENT is `gfm-view-mode' (GFM rendering when markdown-mode is installed) or
-`special-mode' (the fallback when it is absent).  A conditional expression
-cannot go directly in the parent slot of `define-derived-mode' — the macro
-quotes it into the mode metadata and the docstring generation calls
-`symbol-name' on it — so the choice is resolved here, driven by
-`dsh-bridge-view-gfm' and `(require \='markdown-mode nil t)'."
+PARENT is `gfm-view-mode' if Markdown mode is installed, or
+`special-mode' otherwise."
   `(define-derived-mode dsh-bridge-view-mode ,parent "DSH-View"
 	 "Major mode to view replies from the DeepSeek Harness (DSH).
-Read-only.  Keys: `g' refresh (re-fetch the shown session's newest turn),
-`r' reply (bind the prompt buffer to the shown session, without changing the
-default target), `w' copy, `B' branch the shown turn into a new session
-(the child inherits the preset but starts on the default model), `i' receive
-(pull the latest \"Send to Emacs\"
-message), `l' list sessions, `q' dismiss.  `M-p'/`M-n' cycle the shown
-session's agent turns (older / newer; a turn is the whole run from a prompt
-to an idle reply, and the header shows the position `k/n' over the session's
-turns).	 `g' is the view buffer's fetch: `f' elsewhere fetches the
-session's latest turn into this buffer, so inside it the two coincide.
+The DSH-View buffer is read-only, and displays one or more replies
+produced by the DSH agent: either a \"turn\" (a sequence of replies
+starting from a user prompt and ending at an idle reply), or a single
+reply.  If Markdown mode is installed, the replies are formatted based
+on GitHub-Flavored Markdown (via `gfm-view-mode').
 
-When markdown-mode is installed and `dsh-bridge-view-gfm' is non-nil, the mode
-derives from `gfm-view-mode', so replies are font-locked as GitHub-Flavored
-Markdown with native code-block highlighting and markdown's own navigation keys
-are inherited.  Otherwise it derives from `special-mode' and no GFM font-locking
-is applied."
+When invoked, the DSH-View buffer is typically bound to a DSH session;
+the commands below let you cycle through the session's turn history,
+compose a reply (prompt) for the session, etc.
+\\{dsh-bridge-view-mode-map}"
 	 (setq buffer-read-only t)))
 
 ;; The mode and its `gfm-view-mode' parent are chosen at load time, so the
@@ -2400,16 +2502,16 @@ is applied."
 
 (defvar-keymap dsh-bridge-view-mode-map
   :doc "Keymap for `dsh-bridge-view-mode'."
-  "g" #'revert-buffer
+  "r"   #'dsh-bridge-reply
+  "M-p" #'dsh-bridge-view-previous-reply
+  "M-n" #'dsh-bridge-view-next-reply
   "q" #'quit-window
-  "r" #'dsh-bridge-reply
+  "g" #'revert-buffer
   "i" #'dsh-bridge-receive
   "a" #'dsh-bridge-answer
   "B" #'dsh-bridge-fork-turn
   "D" #'dsh-bridge-describe-session
-  "l" #'dsh-bridge-list-sessions
-  "M-p" #'dsh-bridge-view-previous-reply
-  "M-n" #'dsh-bridge-view-next-reply)
+  "l" #'dsh-bridge-list-sessions)
 
 ;; The parent is a load-time choice, so set it here rather than naming it
 ;; through `:parent'; `define-derived-mode' (below) sees an existing parent and
@@ -3117,78 +3219,6 @@ toggling it takes effect at the next render."
   :type 'boolean
   :group 'dsh-bridge)
 
-;; Question buffer faces ----------------------------------------------------
-
-(defface dsh-bridge-question-heading-face
-  '((t :inherit bold))
-  "Face for the ask-user buffer's headings.
-The waiting header line and each question's short `header' label."
-  :group 'dsh-bridge)
-
-(defface dsh-bridge-question-furniture-face
-  '((t :inherit shadow))
-  "Face for the ask-user buffer's chrome.
-Help prose, question numbering, option numbers, option descriptions, and
-the custom-row hint.  Keeping bridge furniture visually quiet lets the
-question text and its options carry the eye."
-  :group 'dsh-bridge)
-
-(defface dsh-bridge-question-text-face
-  '((t :inherit default))
-  "Face for a question's own text in the ask-user buffer."
-  :group 'dsh-bridge)
-
-(defface dsh-bridge-question-option-face
-  '((t :inherit font-lock-keyword-face))
-  "Face for an unmarked option label in the ask-user buffer."
-  :group 'dsh-bridge)
-
-(defface dsh-bridge-question-selected-face
-  '((t :inherit font-lock-constant-face))
-  "Face for a marked option — its `[x]' box and label — in the ask-user buffer."
-  :group 'dsh-bridge)
-
-(defface dsh-bridge-question-custom-value-face
-  '((t :inherit font-lock-string-face))
-  "Face for a typed custom answer in the ask-user buffer."
-  :group 'dsh-bridge)
-
-(defface dsh-bridge-question-detail-face
-  '((t :inherit font-lock-doc-face))
-  "Face for a question's `detail' block (a plan-review's plan).
-Markdown-fontified runs, when available, keep their own faces; this face
-covers the rest of the block."
-  :group 'dsh-bridge)
-
-(defface dsh-bridge-question-skip-face
-  '((t :inherit warning))
-  "Face for the \"— skipped\" marker on a skipped question."
-  :group 'dsh-bridge)
-
-(defface dsh-bridge-question-banner-sent-face
-  '((t :inherit success))
-  "Face for the ask-user banner when this Emacs sent the answer."
-  :group 'dsh-bridge)
-
-(defface dsh-bridge-question-banner-cancelled-face
-  '((t :inherit warning))
-  "Face for the ask-user banner when the question was cancelled or declined."
-  :group 'dsh-bridge)
-
-(defface dsh-bridge-question-banner-elsewhere-face
-  '((t :inherit shadow))
-  "Face for the ask-user banner when the question was resolved elsewhere.
-The web UI answered it, or the ask went away with its turn."
-  :group 'dsh-bridge)
-
-(defun dsh-bridge--question-banner-face-for (outcome)
-  "The banner face for resolution OUTCOME.
-OUTCOME is `sent', `cancelled', or anything else (`elsewhere', `stale')."
-  (pcase outcome
-	('sent 'dsh-bridge-question-banner-sent-face)
-	('cancelled 'dsh-bridge-question-banner-cancelled-face)
-	(_ 'dsh-bridge-question-banner-elsewhere-face)))
-
 ;; Question buffer state and lookup -----------------------------------------
 ;; (Defined before the registry maintenance below, which banners live buffers
 ;; via `dsh-bridge--question-mark-resolved'.)
@@ -3223,8 +3253,6 @@ question is open.  Set with `dsh-bridge--question-dead' by
 `dsh-bridge--question-mark-resolved' and re-emitted by
 `dsh-bridge--question-render', which also drops the now-false \"waiting for
 your answer\" header.")
-(defvar-local dsh-bridge--question-banner-face nil
-  "Face for `dsh-bridge--question-banner', chosen from the resolution outcome.")
 
 (defun dsh-bridge--question-find-buffer (question-id)
   "The live question buffer answering QUESTION-ID, or nil."
@@ -3257,8 +3285,6 @@ from the host leaves the buffer on screen."
 				  (if (memq outcome '(sent cancelled))
 					  (or dsh-bridge--question-sent message)
 					message))
-		(setq-local dsh-bridge--question-banner-face
-				  (dsh-bridge--question-banner-face-for outcome))
 		(dsh-bridge--question-render)))))
 
 ;; Registry maintenance ----------------------------------------------------
@@ -3356,7 +3382,6 @@ with `q' and returning with `a' keeps any in-progress marks.  A name collision
 		  (setq-local dsh-bridge--question-dead nil)
 		  (setq-local dsh-bridge--question-sent nil)
 		  (setq-local dsh-bridge--question-banner nil)
-		  (setq-local dsh-bridge--question-banner-face nil)
 		  (dsh-bridge--question-render))
 		buffer))))
 
@@ -3450,8 +3475,7 @@ the buffer is rebuilt rather than font-locked in place."
 		(when dsh-bridge--question-banner
 		  (insert (dsh-bridge--question-propertize
 				   dsh-bridge--question-banner
-				   (or dsh-bridge--question-banner-face
-					   'dsh-bridge-question-banner-elsewhere-face))
+				   'dsh-bridge-question-banner-face)
 				  "\n"))
 	  (insert (dsh-bridge--question-propertize
 			   (format "Session \"%s\" is waiting for your answer\n"
@@ -3938,20 +3962,14 @@ are pending.  Otherwise reports that no question is pending."
   (keymap-set dsh-bridge-question-mode-map (number-to-string (1+ i))
 			  #'dsh-bridge--question-toggle-number))
 
-(defun dsh-bridge--define-question-mode ()
-  "Define `dsh-bridge-question-mode'."
-  (define-derived-mode dsh-bridge-question-mode special-mode "DSH-Question"
-	"Major mode for an ask-user question buffer.
-Read-only; mark options with `RET' or an option's number key.  Free text is
-entered in the minibuffer: press `RET' on the `c' row (or `c' anywhere in the
-question) to type a custom answer, and an empty entry clears it.  Skip the
-question at point with `C-c C-s'; move between questions with `TAB'.  `C-c C-c'
-submits the answer and `C-c C-k' declines (cancels the tool call); either
-resumes the session, so the session's DSH-View is shown in turn-following
-state at its tail, exactly as `C-c C-c' in DSH-Prompt shows the reply.
-`q' buries without answering (the question stays pending, and `a' reopens
-the buffer with any marks intact)."))
-(dsh-bridge--define-question-mode)
+(define-derived-mode dsh-bridge-question-mode special-mode "DSH-Question"
+  "Major mode for answering model queries from the DeepSeek Harness (DSH).
+This buffer is launched when the user calls `dsh-bridge-answer' to
+answer an \"ask-user\" query emitted from a DSH session.
+
+The buffer is read-only; the user marks options mark options with RET or
+an option's number key.  These commands are also available:
+\\{dsh-bridge-question-mode-map}")
 
 ;;; Prompt-buffer model selection and context occupancy
 
@@ -4350,37 +4368,16 @@ carries N attachment tag lines."
 
 (defmacro dsh-bridge--define-prompt-mode (parent)
   "Define `dsh-bridge-prompt-mode' as a variant of PARENT.
-PARENT is `markdown-mode' or `text-mode', chosen at load time: the mode is
-defined once, with a literal symbol parent.	 A conditional expression cannot
-go directly in the parent slot of `define-derived-mode' — the macro quotes it
-into the mode metadata and the docstring generation calls `symbol-name' on it
-— so the choice is resolved here, driven by `dsh-bridge-prompt-markdown' and
-`(require \\='markdown-mode nil t)'."
+PARENT is `markdown-mode' if installed, or `text-mode' otherwise."
   `(define-derived-mode dsh-bridge-prompt-mode ,parent "DSH-Prompt"
-	 "Major mode for composing DeepSeek Harness (DSH) prompts.
-`C-c C-c' sends the whole buffer (as in Message mode, an active region
-is ignored) and, on success, buries the buffer (text survives,
-unmodified, for edit-and-resubmit; the window pops to a DSH-View buffer
-following the sent session).  `C-c C-a' attaches a file, as
-`mml-attach-file' does in Message mode: it inserts an
-`<#attachment filename=\"...\">' tag line at point, uploading the file
-with the prompt and stripping the tag from the sent text.  Delete a tag
-line to detach its file; the header shows a `📎N' count while any
-remain.  DSH detects an image's type from its bytes and has no MIME
-type, description or disposition field, so Message mode's type and
-disposition prompts do not apply.  `C-c C-d' pushes the buffer as a
-composer draft (attachments are text-only there, so tags are stripped),
-`C-c C-k' erases the buffer, `C-c C-f' fetches the effective session's
-latest turn, `C-c C-m' changes the model, `C-c C-s' rebinds this
-buffer's session, `C-c C-l' lists sessions.  `M-p' and `M-n' walk the
-session's prompt history, recalling earlier prompts (the current draft
-is restored by `M-n' at the newest prompt); an edited history entry must
-be sent or reverted with `revert-buffer' before walking on.  The header
-shows the session's status glyph and a `✓ sent HH:MM' marker when the
-current text was just sent.  When the mode derives from markdown-mode,
-several markdown keys are shadowed by the bridge commands (C-c C-c,
-C-c C-a, C-c C-d, C-c C-k, C-c C-f, C-c C-m, C-c C-s, C-c C-l); the
-markdown commands stay reachable via the menu."
+	 "Major mode for composing prompts for the DeepSeek Harness (DSH).
+This mode inherits from `markdown-mode' if that package is installed,
+and `text-mode' otherwise.
+
+Edit the prompt, then send it to DSH with `\\[dsh-bridge-send-and-exit]'.
+Commands are also available for fetching the reply view for the DSH
+session, attaching a file, selecting a model, etc.
+\\{dsh-bridge-prompt-mode-map}"
 	 (dsh-bridge--prompt-mode-setup)))
 
 (defvar-keymap dsh-bridge-prompt-mode-map
@@ -4519,65 +4516,6 @@ pin to write, and clearing has no host round-trip."
 
 ;;; The sessions buffer
 
-(defface dsh-bridge-default-target-face
-  '((t :inherit font-lock-keyword-face))
-  "Face for the default-target session in the DSH-Sessions buffer."
-  :group 'dsh-bridge)
-
-(defface dsh-bridge-attachment-face
-  '((t :inherit font-lock-keyword-face))
-  "Face for DSH attachment tag lines in the DSH-Prompt buffer.
-The tag is bridge furniture, not prompt text; this face sets it apart from
-the words that will actually be sent."
-  :group 'dsh-bridge)
-
-(defface dsh-bridge-untitled-face
-  '((t :inherit font-lock-comment-face))
-  "Face for \"[Untitled Session]\" in the DSH-Sessions buffer."
-  :group 'dsh-bridge)
-
-(defface dsh-bridge-status-running-face
-  '((t :foreground "goldenrod3"))
-  "Face for the running session status glyph (amber)."
-  :group 'dsh-bridge)
-
-(defface dsh-bridge-status-idle-face
-  '((t :foreground "ForestGreen"))
-  "Face for the idle session status glyph (green)."
-  :group 'dsh-bridge)
-
-(defface dsh-bridge-status-unknown-face
-  '((t :inherit shadow))
-  "Face for the unknown session status glyph (shadow)."
-  :group 'dsh-bridge)
-
-(defface dsh-bridge-status-awaiting-face
-  '((t :inherit bold :foreground "orange"))
-  "Face for a session whose turn is paused on an ask-user question."
-  :group 'dsh-bridge)
-
-(defface dsh-bridge-view-marker-face
-  '((t :inherit shadow :italic t))
-  "Face for the `(continuing...)' marker at the end of a running turn.
-The marker is bridge furniture, not model text; this face keeps it visually
-quiet so it never reads as part of the reply."
-  :group 'dsh-bridge)
-
-(defface dsh-bridge-view-awaiting-face
-  '((t :inherit bold :foreground "orange"))
-  "Face for the \"(Awaiting response…)\" note at the end of a running turn.
-Shown while the session is parked on an ask-user question, so the note stands
-out from the quiet `(continuing...)' marker it replaces."
-  :group 'dsh-bridge)
-
-(defface dsh-bridge-view-answered-face
-  '((t :inherit shadow :italic t))
-  "Face for the \"You answered…\" note at the end of a running turn.
-Shown briefly after you resolve an ask-user question, explaining why the
-turn is continuing; it replaces the `(continuing...)' marker it supersedes,
-so it stays quiet like that marker rather than competing with the reply."
-  :group 'dsh-bridge)
-
 (defun dsh-bridge--default-target-marker (session)
   "Return the leftmost marker cell for SESSION: \"*\" when it is the default
 target, else a space."
@@ -4642,25 +4580,7 @@ Archived sessions are hidden unless `dsh-bridge--sessions-archived-p' (or
 
 (define-derived-mode dsh-bridge-sessions-mode tabulated-list-mode "DSH-Sessions"
   "Major mode for browsing DSH sessions.
-`RET' does the next thing for the session under point (resuming a saved
-session on demand; the default target is untouched): it opens the answer
-buffer when the session is waiting on a question, shows the DSH-View and
-follows the turn when it is running, opens a prompt when it has no output
-yet, and otherwise shows the DSH-View with its prompt below (see
-`dsh-bridge-visit-session' and `dsh-bridge-session-default-visit-action').  `r' opens
-just a prompt for the session, `t' sets the default target to the row's
-session (also resuming saved sessions), `u' clears the default target, `f'
-peeks the session's latest turn, `a' answers a pending question, `v' toggles
-archived-session visibility, `R' renames the session, `d' archives it
-(one-way), `+' creates a session (possibly in a new workspace), `W' renames
-the row's workspace, `w' copies the session id under point, `D' describes the
-session, `g' re-fetches the list, `S' sorts by column (inherited).	 `p' is
-previous-line (the tabulated-list convention; reply/open is `r' everywhere).
-Column legend: `*' = the default target session; the `S' (state) column shows
-a session's live status, a filled circle that is green when idle and amber
-when running (`?' when unknown; cold sessions are always unknown), obeying
-`dsh-bridge-status-indicator' and updating live from the bridge's turn
-notifications."
+\\{dsh-bridge-sessions-mode}"
   (setq-local dsh-bridge--sessions-archived-p dsh-bridge-sessions-show-archived))
 
 (easy-menu-define dsh-bridge-sessions-menu dsh-bridge-sessions-mode-map
@@ -4987,16 +4907,6 @@ The row's workspace id comes from the cached session; prompts for the new title
 
 ;;; Session report (DSH-Describe)
 
-(defface dsh-bridge-describe-heading-face
-  '((t :inherit bold))
-  "Face for section headings in the DSH session report."
-  :group 'dsh-bridge)
-
-(defface dsh-bridge-describe-label-face
-  '((t :inherit shadow))
-  "Face for field labels in the DSH session report."
-  :group 'dsh-bridge)
-
 (defvar-local dsh-bridge--describe-session nil
   "The session id this DSH-Describe buffer reports, or nil.")
 
@@ -5010,14 +4920,7 @@ The row's workspace id comes from the cached session; prompts for the new title
 
 (define-derived-mode dsh-bridge-describe-mode help-mode "DSH-Describe"
   "Major mode for the read-only DSH session report.
-
-The buffer is a `help-mode' buffer, so `q' quits, `g' re-fetches the
-report, `l'/`r' walk the describe history (back/forward — Help mode's
-keys, not the bridge's list-sessions/reply), `n'/`p' move between
-sections, `TAB'/`S-TAB' move between buttons, and `RET'/`mouse-2'
-follow the button at point.  Bridge commands: `w' copies the session
-id, `f' opens the DSH-View for the session's latest turn, `o' opens the
-DSH-Prompt buffer, `D' re-describes the session.")
+\\{dsh-bridge-describe-mode}")
 
 (easy-menu-define dsh-bridge-describe-menu dsh-bridge-describe-mode-map
   "Menu bar menu for the `*dsh-bridge-describe*' buffer."

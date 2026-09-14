@@ -5610,24 +5610,6 @@ font-lock pass."
     (when (dsh-bridge--question-find-buffer "q1")
       (kill-buffer (dsh-bridge--question-find-buffer "q1")))))
 
-(ert-deftest dsh-bridge-question-banner-faces ()
-  "The resolution banner takes the face matching its outcome: sent, cancelled,
-or elsewhere/stale."
-  (let ((dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t))))
-        (cases '((sent . dsh-bridge-question-banner-sent-face)
-                 (cancelled . dsh-bridge-question-banner-cancelled-face)
-                 (elsewhere . dsh-bridge-question-banner-elsewhere-face)
-                 (stale . dsh-bridge-question-banner-elsewhere-face))))
-    (dolist (case cases)
-      (let* ((question-id (format "q-%s" (car case)))
-             (buffer (dsh-bridge--question-buffer
-                      "s1" question-id '(( (id . "q1") (question . "Go?") )))))
-        (with-current-buffer buffer
-          (dsh-bridge--question-mark-resolved question-id "A banner." (car case))
-          (should dsh-bridge--question-dead)
-          (should (eq (get-text-property (point-min) 'face) (cdr case))))
-        (kill-buffer buffer)))))
-
 (ert-deftest dsh-bridge-question-detail-fontification ()
   "The `detail' block carries the detail face, and — when markdown-mode is
 installed — is fontified as Markdown over that block face."
