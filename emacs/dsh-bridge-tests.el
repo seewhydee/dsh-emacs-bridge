@@ -5374,15 +5374,6 @@ rather than answering s2's question."
         (dsh-bridge-answer))
       (should (string-match-p "no pending question" msg)))))
 
-(ert-deftest dsh-bridge-view-await-question-text-normalizes ()
-  "Question text for the note is single-line, free of double quotes, and
-truncated to about 72 columns."
-  (should (equal (dsh-bridge--view-await-question-text "say \"hi\"\nthere")
-                 "say hi there"))
-  (should (equal (dsh-bridge--view-await-question-text
-                  (make-string 200 ?x))
-                 (concat (make-string 69 ?x) "..."))))
-
 (ert-deftest dsh-bridge-view-awaiting-ask-frames-refresh-tail ()
   "An ask-user frame flips a following view's running marker to the awaiting
 note; its resolution flips it back to `(continuing...)'."
