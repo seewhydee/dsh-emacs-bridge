@@ -172,7 +172,8 @@ that is idle and has a non-empty reply history, this option determines
 what buffers are displayed.
 
 - `both' (the default) opens a DSH-Prompt buffer and DSH-View buffer in
-  separate windows, with the former selected.
+  separate windows, with the former selected, using the display actions
+  specified in `dsh-bridge-visit-both-display-action'.
 - `view' only shows the view (like `\\[dsh-bridge-peek-session]').
 - `prompt' only opens the prompt (like `\\[dsh-bridge-open-session]').
 
@@ -181,6 +182,47 @@ on a user query, or has no output yet; see `dsh-bridge-visit-session'."
   :type '(choice (const :tag "Both view and prompt" both)
 				 (const :tag "Show the view only" view)
 				 (const :tag "Open the prompt only" prompt))
+  :group 'dsh-bridge)
+
+(defcustom dsh-bridge-visit-both-display-action
+  ;; A `display-buffer' action takes its car as the function list, so the
+  ;; action functions must be wrapped in an inner list.
+  '((prompt (display-buffer-reuse-window display-buffer-same-window))
+	(view (display-buffer-reuse-window display-buffer-use-some-window
+									   display-buffer-below-selected)
+		  ;; `inhibit-same-window' keeps it out of the prompt window.
+		  (inhibit-same-window . t)))
+  "How to place windows when visiting a session in the DSH-Sessions buffer.
+This option is used when the user invokes `\\[dsh-bridge-visit-session]'
+to visit an idle session, with `dsh-bridge-session-default-visit-action'
+set to `both'.  The value specifies how to display the prompt and view
+windows, and should be an alist with two entries:
+
+- `prompt' is the `display-buffer' action for the DSH-Prompt buffer,
+  given the selected window (the one the DSH-Sessions buffer occupied).
+
+- `view' is the action for the DSH-View buffer, which must go elsewhere.
+
+See Info node `(elisp)Window Choice' for the action form."
+  ;; The action type must be spliced in by value: a bare symbol in
+  ;; `:value-type' does not resolve (cf. `display-buffer-alist').
+  :type `(alist :key-type (choice (const :tag "Prompt buffer" prompt)
+								  (const :tag "View buffer" view))
+				:value-type ,display-buffer--action-custom-type)
+  :group 'dsh-bridge)
+
+(defcustom dsh-bridge-prompt-display-action
+  ;; A `display-buffer' action takes its car as the function list, so two
+  ;; functions must be wrapped in an inner list.
+  '((display-buffer-reuse-window display-buffer-pop-up-window))
+  "Display action for opening a DSH-Prompt buffer.
+This is used whenever a DSH-Prompt buffer is opened directly by a user
+command (e.g. `dsh-bridge-reply').
+
+See Info node `(elisp)Window Choice' for the action form."
+  ;; Spliced in by value: a bare symbol type does not resolve (cf.
+  ;; `display-buffer-alist').
+  :type `(choice ,display-buffer--action-custom-type)
   :group 'dsh-bridge)
 
 (defcustom dsh-bridge-status-indicator 'emoji
@@ -268,6 +310,24 @@ projections, which can outlast the general `dsh-bridge-timeout'."
   "Whether a visible session report refreshes when its turn completes.
 The refresh re-fetches the report and preserves point; it is deferred so
 the synchronous request never runs inside the SSE process filter."
+  :type 'boolean
+  :group 'dsh-bridge)
+
+(defcustom dsh-bridge-question-auto-pop nil
+  "Whether an arriving ask-user question pops to its question buffer.
+When nil (the default), an ask is announced in the echo area and the
+DSH-View buffer, and the user must run ``\\[dsh-bridge-answer]' to
+answer it.  If non-nil, pop to the question buffer on arrival."
+  :type 'boolean
+  :group 'dsh-bridge)
+
+(defcustom dsh-bridge-question-markdown t
+  "Whether to fontify an ask-user question's `detail' as Markdown.
+When non-nil and `markdown-mode' is installed, a plan-review question's
+plan is font-locked as GitHub-Flavored Markdown in the question buffer;
+otherwise the block carries only `dsh-bridge-question-detail-face'.
+Unlike `dsh-bridge-view-gfm', this is resolved when the buffer renders, so
+toggling it takes effect at the next render."
   :type 'boolean
   :group 'dsh-bridge)
 
@@ -3201,24 +3261,6 @@ note instead.  A no-op for sessions no view shows in either state."
 ;; late or duplicate answer gets a 404 `not-pending` (benign);
 ;; cancelling from Emacs fails the asking tool call.
 
-(defcustom dsh-bridge-question-auto-pop nil
-  "Whether an arriving ask-user question pops to its question buffer.
-When nil (the default), an ask is announced in the echo area and the
-DSH-View buffer, and the user must run ``\\[dsh-bridge-answer]' to
-answer it.  If non-nil, pop to the question buffer on arrival."
-  :type 'boolean
-  :group 'dsh-bridge)
-
-(defcustom dsh-bridge-question-markdown t
-  "Whether to fontify an ask-user question's `detail' as Markdown.
-When non-nil and `markdown-mode' is installed, a plan-review question's
-plan is font-locked as GitHub-Flavored Markdown in the question buffer;
-otherwise the block carries only `dsh-bridge-question-detail-face'.
-Unlike `dsh-bridge-view-gfm', this is resolved when the buffer renders, so
-toggling it takes effect at the next render."
-  :type 'boolean
-  :group 'dsh-bridge)
-
 ;; Question buffer state and lookup -----------------------------------------
 ;; (Defined before the registry maintenance below, which banners live buffers
 ;; via `dsh-bridge--question-mark-resolved'.)
@@ -4220,15 +4262,6 @@ compose→read loop."
   (interactive)
   (pop-to-buffer (dsh-bridge--prompt-buffer (dsh-bridge--effective-session))))
 
-(defconst dsh-bridge-prompt-display-action
-  ;; A `display-buffer' action takes its car as the function list, so two
-  ;; functions must be wrapped in an inner list.
-  '((display-buffer-reuse-window display-buffer-pop-up-window))
-  "`display-buffer' action for opening the prompt buffer to reply.
-Reuse the prompt's window when already visible, else show it below the
-selected window, so the output buffer stays visible (cf. `flymake',
-`debug').")
-
 (defun dsh-bridge-reply ()
   "Reply to the session whose reply is shown in the current DSH-View buffer.
 The prompt buffer is bound to that session (no default-target change) and
@@ -4666,21 +4699,6 @@ change the default target session."
 	 (t
 	  (error "dsh-bridge: could not open session \"%s\"" id)))))
 
-(defconst dsh-bridge--display-both-action
-  ;; A `display-buffer' action takes its car as the function list, so the
-  ;; action functions must be wrapped in an inner list.
-  '((display-buffer-reuse-window display-buffer-use-some-window
-                                 display-buffer-below-selected)
-    (inhibit-same-window . t))
-  "`display-buffer' action placing RET's DSH-View when the prompt shares it.
-`dsh-bridge-visit-session' gives the prompt the selected window -- the one
-the DSH-Sessions buffer occupied -- so the view has to go elsewhere: reuse
-its own window, then any other existing window, and only split below the
-prompt as a last resort.
-`inhibit-same-window' is essential: without it
-`display-buffer-use-some-window' reuses the selected prompt window when it
-is the only one, replacing the prompt instead of splitting.")
-
 (defun dsh-bridge-visit-session ()
   "Do the next thing for the session under point in a DSH-Sessions buffer.
 - Waiting on an ask-user question: open its answer buffer
@@ -4723,11 +4741,15 @@ is not changed."
 		 (t
 		  ;; `both': the prompt takes this window -- the one the
 		  ;; DSH-Sessions buffer occupied -- while the view goes to
-		  ;; another window, else below the prompt.
-		  (pop-to-buffer (dsh-bridge--prompt-buffer id)
-						 '((display-buffer-reuse-window display-buffer-same-window)))
-		  (let ((view (dsh-bridge--view-for-session id alist)))
-			(display-buffer view dsh-bridge--display-both-action)
+		  ;; another window, else below the prompt (see
+		  ;; `dsh-bridge-visit-both-display-action').
+		  (let ((view (dsh-bridge--view-for-session id alist))
+				(prompt-display (alist-get 'prompt
+										   dsh-bridge-visit-both-display-action))
+				(view-display (alist-get 'view
+										 dsh-bridge-visit-both-display-action)))
+			(pop-to-buffer (dsh-bridge--prompt-buffer id) prompt-display)
+			(display-buffer view view-display)
 			(with-current-buffer view
 			  (goto-char (point-max)))))))))))
 
