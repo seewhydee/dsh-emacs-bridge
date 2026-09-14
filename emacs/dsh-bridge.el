@@ -1600,8 +1600,11 @@ If walking through the prompt history, then:
 (defun dsh-bridge-send-text (text &optional session-id on-success attachments)
   "Send TEXT to the DSH session as a prompt.
 SESSION-ID overrides the effective session for this call only.
+
 If ON-SUCCESS is a function, it is called with SENT-SESSION-ID in the
-success branch of the send, after the history is recorded.
+success branch of the send, after the history is recorded.  The callback
+runs in the same buffer that was current when this function is called.
+
 ATTACHMENTS, when non-nil, is a list of plists (:path PATH) to upload
 with the prompt; PATH must be absolute."
   (let* ((target (or session-id (dsh-bridge--effective-session)))
@@ -2879,9 +2882,7 @@ and bury the buffer (see `dsh-bridge--prompt-exit')."
   (interactive)
   (unless (eq major-mode 'dsh-bridge-prompt-mode)
 	(user-error "dsh-bridge: not a DSH-Prompt buffer"))
-  (let* ((prompt-buffer (current-buffer))
-		 ;; Attachments are tag lines; strip them from the sent text.
-		 (parsed (dsh-bridge--parse-attachments
+  (let* ((parsed (dsh-bridge--parse-attachments ; strip attachments
 				  (substring-no-properties (buffer-string))))
 		 (text (car parsed))
 		 (attachments (cdr parsed))
@@ -2909,11 +2910,12 @@ and bury the buffer (see `dsh-bridge--prompt-exit')."
 		 text
 		 dsh-bridge--prompt-session
 		 (lambda (sent-id)
-		   ;; The attachments went out with this send; drop their tags from
-		   ;; the kept text so an immediate resend cannot re-upload them.
+		   ;; This is still the prompt buffer: the ON-SUCCESS callback runs
+		   ;; in the buffer that sent the text (see `dsh-bridge-send-text').
+		   ;; Drop the tags from the kept text, so an immediate resend
+		   ;; cannot re-upload them, then hand the prompt over to the view.
 		   (when attachments
-			 (with-current-buffer prompt-buffer
-			   (dsh-bridge--remove-attachment-tags)))
+			 (dsh-bridge--remove-attachment-tags))
 		   (dsh-bridge--prompt-exit sent-id window sent-at))
 		 attachments)))))
 
