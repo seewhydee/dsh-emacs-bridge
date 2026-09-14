@@ -1804,16 +1804,18 @@ the turn is running, but no replies.")
 
 (defvar-local dsh-bridge--view-provenance nil
   "How this DSH-View buffer was last rendered, or nil if unknown.
-The value, if non-nil, should be a plist keyed with `:session' (the
-session id), `:epoch' (the turns-cache history epoch, a number or nil),
-`:turn' (turn number), `:open' (whether the rendered turn was still
-running), `:keys' (oldest-first `(STEP . TIME)' identities of the
-segments rendered), `:body-length' (characters of the segment-joined
-body) and `:tail-length' (characters of the terminal suffix).
+The value, if non-nil, should be a plist keyed with:
+
+- `:session' (the session id)
+- `:epoch' (the turns-cache history epoch, a number or nil)
+- `:turn' (the turn number)
+- `:open' (whether the rendered turn was still running)
+- `:keys' (oldest-first `(STEP . TIME)' identities of segments rendered)
+- `:body-length' (characters of the segment-joined body)
+- `:tail-length' (characters of the terminal suffix)
 
 The `dsh-bridge--view-fill' function uses this record to splice a new
-segment in front of the recorded body end.  If there is a mismatch, the
-turn is fully re-rendered.  See `dsh-bridge--view-provenance-intact-p'.")
+segment in front of the recorded body end.")
 
 (defvar dsh-bridge--view-ticker-timer nil
   "Repeating timer to repaint the DSH-View header, or nil.")
@@ -1870,67 +1872,60 @@ truncated to about 72 columns with an ASCII ellipsis."
 
 (defun dsh-bridge--view-awaiting-note (session-id)
   "The terminal DSH-View marker line when awaiting an ask-user question.
-This string is displayed, in place of the usual \"(continuing...)\", if
-the session described by SESSION-ID is parked on an ask-user question.
-It briefly describes the question(s) and instructs the user on what to
-do next."
+This string is displayed in place of the usual \"(continuing...)\" if
+SESSION-ID is parked on an ask-user question.  It should instruct the
+user on what to do next."
   (let* ((entry (dsh-bridge--pending-question session-id))
-	 (questions (and entry (cdr entry)))
-	 (count (length questions))
-	 (first (car questions))
-	 (raw (and (listp first) (alist-get 'question first)))
-	 (text (dsh-bridge--view-await-question-text
-		(and (stringp raw) (not (string-empty-p raw)) raw)))
-	 (key (substitute-command-keys "\\[dsh-bridge-answer]"))
-	 (body
-	  (cond
-	   ((and text (not (string-empty-p text)) (= count 1))
-	    (format "Awaiting your response: “%s” — press %s to view and answer"
-		    text key))
-	   ((> count 1)
-	    (format "Awaiting your response: %d questions — press %s to view and answer"
-		    count key))
-	   (t
-	    (format "Awaiting your response — press %s to view the question" key)))))
+		 (questions (and entry (cdr entry)))
+		 (count (length questions))
+		 (key (substitute-command-keys "\\[dsh-bridge-answer]"))
+		 (body (if (> count 1)
+				   (format "(Awaiting response [%d questions]: \
+press %s to view and answer" count key)
+				 (format "(Awaiting response: press %s to view and answer)"
+						 key))))
 	;; Apply both `face' and `font-lock-face' text properties; the
 	;; latter prevents clobbering by Font Lock mode.
-    (propertize (concat "(" body ")")
-		'face 'dsh-bridge-view-awaiting-face
-		'font-lock-face 'dsh-bridge-view-awaiting-face
-		'dsh-bridge-turn-marker t
-		'dsh-bridge-awaiting t)))
+    (propertize body
+				'face 'dsh-bridge-view-awaiting-face
+				'font-lock-face 'dsh-bridge-view-awaiting-face
+				'dsh-bridge-turn-marker t
+				'dsh-bridge-awaiting t)))
 
-(defun dsh-bridge--view-answer-summary (answers)
-  "A one-line summary of ANSWERS for the answered note, or nil.
-ANSWERS is the wire-shaped answer list built by
-`dsh-bridge--question-validate' (each entry `(id selected custom?)', with
-`selected' a vector of labels).  Free-text answers and selected labels are
-named in order; a question resolved with nothing to show (a skip) yields
-the generic phrase rather than an empty quotation."
-  (let (parts)
-	(dolist (answer answers)
-	  (let ((custom (alist-get 'custom answer)))
-		(dolist (label (append (alist-get 'selected answer) nil))
-		  (when (dsh-bridge--normalized-string label) (push label parts)))
-		(when (dsh-bridge--normalized-string custom) (push custom parts))))
-	(setq parts (nreverse parts))
-	(cond
-	 ((null parts) "You answered")
-	 ((null (cdr parts)) (format "You answered \u201c%s\u201d" (car parts)))
-	 (t (format "You answered \u201c%s\u201d" (mapconcat #'identity parts ", "))))))
+(defvar-local dsh-bridge--question-session) ; forward declaration: set below
 
-(defun dsh-bridge--view-answer-note-record (session-id text)
-  "Record TEXT as SESSION-ID's answered note.
-The baseline is the parked turn's last segment identity, so the note
-self-retires on the next committed segment even if the `replies-changed'
-frame is missed.  The turn list is cached only while a view has been
-refreshed, so an uncached session records `:unknown' and relies on the
-frame handlers alone."
-  (let* ((turns (dsh-bridge--turns-cache-turns session-id))
-		 (newest (car-safe turns))
+(defun dsh-bridge--view-answer-note-record (answers)
+  "Record ANSWERS for the ask-user question in the current buffer.
+ANSWERS is `none' when the user declined to answer at all, else the
+answers list `dsh-bridge--question-validate' returned: a list of
+alists, each with `id', `selected' and, for a custom answer, `custom'.
+The answer's text is summarized for the session named by
+`dsh-bridge--question-session', which must be set in this buffer."
+  (let* ((session-id dsh-bridge--question-session)
+		 (newest (car-safe (dsh-bridge--turns-cache-turns session-id)))
 		 (last (and newest (dsh-bridge--view-turn-open-p newest)
 					(car (last (alist-get 'segments newest)))))
-		 (baseline (if last (dsh-bridge--view-segment-key last) :unknown)))
+		 (baseline (if last (dsh-bridge--view-segment-key last) :unknown))
+		 parts text)
+	(cond
+	 ((eq answers 'none)
+	  (setq text "You declined to answer"))
+	 (t
+	  ;; Take the custom answer and every label, dropping empties.  A
+	  ;; single-select custom answer has empty `selected'; a
+	  ;; multi-select one may supplement its labels.
+	  (dolist (answer answers)
+		(let ((lst (cons (alist-get 'custom answer)
+						 (append (alist-get 'selected answer) nil))))
+		  (setq parts
+				(append parts
+						(seq-filter #'dsh-bridge--normalized-string lst)))))
+	  (setq text
+			(cond
+			 ((null parts) "You answered")
+			 ((null (cdr parts)) (format "You answered \u201c%s\u201d" (car parts)))
+			 (t (format "You answered \u201c%s\u201d"
+						(mapconcat #'identity parts ", ")))))))
 	(setq dsh-bridge--view-answer-notes
 		  (cons (cons session-id (list :baseline baseline :text text))
 				(assoc-delete-all session-id dsh-bridge--view-answer-notes)))))
@@ -3780,12 +3775,17 @@ any marks and custom text for the question."
 	  (dsh-bridge--question-rerender-at-point))))
 
 (defun dsh-bridge--question-validate ()
-  "Return the answers list for POSTing if every question is settled, else nil.
-A question is settled when it is skipped, has a marked option, or has a typed
-custom answer.  Wire shape per answer: { id, selected, custom? } where
-`selected' holds option labels only — a skipped or custom-only answer sends an
-empty array, and a single-select custom answer never travels with a selection
-(the apiproxy's `matchesQuestions' rejects both violations)."
+  "Return this buffer's answers, or nil if a question is still unanswered.
+Each element of the returned list describes one question's answer, as an
+alist of `id', `selected' and (for a custom answer) `custom'.  The value
+stored in `selected' is a vector of option labels; a skipped question
+contributes an empty vector.
+
+A question counts as answered when it was skipped, has a marked option,
+or has a typed custom answer.  For a single-select question the custom
+text supersedes the marked option and `selected' is empty; for a
+multi-select question it may accompany the marked options.  See
+`dsh-bridge--question-submit'."
   (let (answers failed)
 	(dolist (question dsh-bridge--question-questions)
 	  (let* ((qid (alist-get 'id question))
@@ -3812,9 +3812,11 @@ On acceptance the session resumes, so this buffer is bannered and the
 session's DSH-View is selected in turn-following state at its tail
 (`dsh-bridge--exit-to-view'): the continuation is collected where the
 prompt flow collects replies.  A question the host reports as already
-resolved is bannered in place, with no jump -- the user's action did not
+resolved is bannered in place, with no jump — the user's action did not
 settle it."
   (interactive)
+  (unless (eq major-mode 'dsh-bridge-question-mode)
+	(user-error "Not in a DSH-Question buffer"))
   (if dsh-bridge--question-dead
 	  (message "dsh-bridge: this question was already resolved")
 	(let ((answers (dsh-bridge--question-validate)))
@@ -3827,9 +3829,7 @@ settle it."
 		;; The view explains why it continues once this answer lands;
 		;; recorded pre-POST for the same race, and dropped on every
 		;; branch that fails to settle the question.
-		(dsh-bridge--view-answer-note-record
-		 dsh-bridge--question-session
-		 (dsh-bridge--view-answer-summary answers))
+		(dsh-bridge--view-answer-note-record answers)
 		;; Capture the window the answer was typed in, for the exit.
 		(let ((window (selected-window)))
 		  (pcase-let ((`(,status ,body ,http-status)
@@ -3871,13 +3871,14 @@ On acceptance the cancelled session resumes, so the session's DSH-View is
 selected in turn-following state at its tail, exactly as for a submitted
 answer; an already-resolved question is bannered in place."
   (interactive)
+  (unless (eq major-mode 'dsh-bridge-question-mode)
+	(user-error "Not in a DSH-Question buffer"))
   (if dsh-bridge--question-dead
 	  (message "dsh-bridge: this question was already resolved")
 	(setq dsh-bridge--question-sent
 		  "You declined to answer; the question was cancelled.")
 	;; The view explains the continuation exactly as for a submitted answer.
-	(dsh-bridge--view-answer-note-record
-	 dsh-bridge--question-session "You declined to answer")
+	(dsh-bridge--view-answer-note-record 'none)
 	(let ((window (selected-window)))
 	  (pcase-let ((`(,_status ,body ,_http-status)
 				   (dsh-bridge--http "POST" "/answer"
@@ -4615,7 +4616,7 @@ quiet so it never reads as part of the reply."
 
 (defface dsh-bridge-view-awaiting-face
   '((t :inherit bold :foreground "orange"))
-  "Face for the \"Awaiting your response…\" note at the end of a running turn.
+  "Face for the \"(Awaiting response…)\" note at the end of a running turn.
 Shown while the session is parked on an ask-user question, so the note stands
 out from the quiet `(continuing...)' marker it replaces."
   :group 'dsh-bridge)

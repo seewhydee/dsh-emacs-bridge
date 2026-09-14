@@ -3764,7 +3764,7 @@ commits any text.  Resolving the question restores the placeholder."
       (dsh-bridge-view-mode)
       (setq-local dsh-bridge--view-content-session "s1")
       (dsh-bridge--view-waiting-fill "s1" 2)
-      (should (string-match-p "Awaiting your response:" (buffer-string)))
+      (should (string-match-p "Awaiting response: press a" (buffer-string)))
       (should-not (string-match-p "(running\\.\\.\\.)" (buffer-string)))
       (should (text-property-any (point-min) (point-max)
                                  'dsh-bridge-awaiting t)))
@@ -3773,7 +3773,7 @@ commits any text.  Resolving the question restores the placeholder."
       (dsh-bridge--view-await-refresh "s1"))
     (with-current-buffer "*dsh-bridge-output*"
       (should (string-match-p "(running\\.\\.\\.)" (buffer-string)))
-      (should-not (string-match-p "Awaiting your response:" (buffer-string)))))
+      (should-not (string-match-p "Awaiting response:" (buffer-string)))))
   (when (buffer-live-p (get-buffer "*dsh-bridge-output*"))
     (kill-buffer "*dsh-bridge-output*")))
 
@@ -5086,10 +5086,15 @@ and the late response settling afterwards does not banner a second time."
               (list (cons "q1"
                           (list (list (cons 'id "q1") (cons 'question question))))))))
 
+(defun dsh-bridge-test--answer-note-text (session)
+  "The recorded answered-note text for SESSION, or nil."
+  (plist-get (cdr (assoc session dsh-bridge--view-answer-notes)) :text))
+
 (ert-deftest dsh-bridge-view-awaiting-tail ()
   "While SESSION-ID has a pending ask-user question, a running turn's tail
-reads as the awaiting note instead of `(continuing...)', quoting the question
-and naming the live `dsh-bridge-answer' binding; completion drops the tail."
+reads as the awaiting note instead of `(continuing...)', naming the live
+`dsh-bridge-answer' binding without repeating the question text; completion
+drops the tail."
   (let* ((open (dsh-bridge-test--view-turn 7 7000000
                 (list (dsh-bridge-test--view-segment "progress" 7001000 1))))
          (done (dsh-bridge-test--view-turn 7 7000000
@@ -5102,11 +5107,9 @@ and naming the live `dsh-bridge-answer' binding; completion drops the tail."
              (dsh-bridge-test--pending-ask "s1" "Approve this plan?")))
         (let ((rendered (dsh-bridge-test--view-turn-render open "s1")))
           (should (string-prefix-p "progress\n\n" rendered))
-          (should (string-match-p "Awaiting your response:" rendered))
-          (should (string-match-p (regexp-quote "Approve this plan?") rendered))
-          (should (string-match-p
-                   (concat "press " (regexp-quote "a"))
-                   rendered))
+          (should (string-match-p "Awaiting response: press a" rendered))
+          ;; The question text itself belongs to the question buffer.
+          (should-not (string-match-p "Approve this plan?" rendered))
           (should-not (string-match-p "(continuing\\.\\.\\.)" rendered))
           (should (text-property-any 0 (length rendered)
                                      'dsh-bridge-awaiting t rendered)))
@@ -5120,46 +5123,60 @@ and naming the live `dsh-bridge-answer' binding; completion drops the tail."
         (should (equal (dsh-bridge-test--view-turn-render done "s1") "progress"))))))
 
 (ert-deftest dsh-bridge-view-awaiting-note-variants ()
-  "The awaiting note leads with the question text, its count, or a fallback,
-and names the answer key as resolved from the view's own keymap (`a')."
+  "The awaiting note names the answer key and, for a batch, the question count;
+the question text itself is left to the question buffer."
   (with-temp-buffer
     (dsh-bridge-view-mode)
     (setq-local dsh-bridge--view-content-session "s1")
-    ;; Single question: quoted text plus the action.  The key comes from
-    ;; `substitute-command-keys' against the view's own map, so it is the real
-    ;; `a' binding; the note's text properties are not part of what is asserted.
+    ;; One question: the key alone, quoted from the view's own map, so it is
+    ;; the real `a' binding; the note's text properties are not asserted.
     (let ((dsh-bridge--pending-questions
            (dsh-bridge-test--pending-ask "s1" "Approve this plan?")))
       (should (equal (substring-no-properties (dsh-bridge--view-awaiting-note "s1"))
-                     (concat "(Awaiting your response: “Approve this plan?” — "
-                             "press a to view and answer)"))))
+                     "(Awaiting response: press a to view and answer)")))
     ;; Several questions under one ask: the count tells the user what to expect.
     (let ((dsh-bridge--pending-questions
            (list (cons "s1"
                        (list (cons "q1"
                                    (list (list (cons 'id "q1") (cons 'question "One?"))
                                          (list (cons 'id "q2") (cons 'question "Two?")))))))))
-      (should (string-match-p "Awaiting your response: 2 questions"
+      (should (string-match-p "Awaiting response \\[2 questions\\]: press a"
                               (dsh-bridge--view-awaiting-note "s1"))))
-    ;; Whitespace-only question text: a plain invitation.
+    ;; A question whose text is empty or whitespace reads the same.
     (let ((dsh-bridge--pending-questions
            (dsh-bridge-test--pending-ask "s1" "   ")))
-      (should (string-match-p "view the question"
+      (should (string-match-p "Awaiting response: press a"
                               (dsh-bridge--view-awaiting-note "s1"))))))
 
-(ert-deftest dsh-bridge-view-answer-summary-shapes ()
-  "The answered note names selected labels and custom text in order, and
-falls back to the generic phrase for a question skipped with nothing to say."
-  (should (equal (dsh-bridge--view-answer-summary
-                  (list (list (cons 'id "q1") (cons 'selected ["Go"]))))
-                 "You answered “Go”"))
-  (should (equal (dsh-bridge--view-answer-summary
-                  (list (list (cons 'id "q1") (cons 'selected ["A" "B"]))
-                        (list (cons 'id "q2") (cons 'selected []) (cons 'custom "x"))))
-                 "You answered “A, B, x”"))
-  (should (equal (dsh-bridge--view-answer-summary
-                  (list (list (cons 'id "q1") (cons 'selected []))))
-                 "You answered")))
+(ert-deftest dsh-bridge-view-answer-note-shapes ()
+  "The answered note summarizes the wire-shaped answers: selected labels and
+custom text in order, a bare phrase when every question was skipped, and the
+decline phrase only for a decline.  A multi-select answer may carry both a
+custom answer and marked labels, and both are named."
+  (let ((dsh-bridge--view-answer-notes nil)
+        (dsh-bridge--turns-cache nil))
+    (with-temp-buffer
+      (dsh-bridge-view-mode)
+      (setq-local dsh-bridge--question-session "s1")
+      ;; One marked option.
+      (dsh-bridge--view-answer-note-record
+       (list (list (cons 'id "q1") (cons 'selected ["Go"]))))
+      (should (equal (dsh-bridge-test--answer-note-text "s1")
+                     "You answered “Go”"))
+      ;; A multi-select custom answer supplements its marked labels.
+      (dsh-bridge--view-answer-note-record
+       (list (list (cons 'id "q1") (cons 'selected ["A" "B"]))
+             (list (cons 'id "q2") (cons 'selected []) (cons 'custom "x"))))
+      (should (equal (dsh-bridge-test--answer-note-text "s1")
+                     "You answered “A, B, x”"))
+      ;; Every question skipped is not a decline.
+      (dsh-bridge--view-answer-note-record
+       (list (list (cons 'id "q1") (cons 'selected []))))
+      (should (equal (dsh-bridge-test--answer-note-text "s1") "You answered"))
+      ;; A declined ask has no answers at all.
+      (dsh-bridge--view-answer-note-record 'none)
+      (should (equal (dsh-bridge-test--answer-note-text "s1")
+                     "You declined to answer")))))
 
 (ert-deftest dsh-bridge-view-answer-note-tail ()
   "After an ask is answered, a running turn's tail names the answer instead
@@ -5176,7 +5193,9 @@ and the option being off all drop the note."
     (with-temp-buffer
       (dsh-bridge-view-mode)
       (setq-local dsh-bridge--view-content-session "s1")
-      (dsh-bridge--view-answer-note-record "s1" "You answered “Go”")
+      (setq-local dsh-bridge--question-session "s1")
+      (dsh-bridge--view-answer-note-record
+       (list (list (cons 'id "q1") (cons 'selected ["Go"]))))
       (let ((rendered (dsh-bridge-test--view-turn-render open "s1")))
         (should (string-prefix-p "progress\n\n" rendered))
         (should (string-match-p "You answered “Go”" rendered))
@@ -5196,7 +5215,8 @@ and the option being off all drop the note."
       ;; A note recorded before any segment existed shows in the waiting
       ;; placeholder slot, where the turn list has nothing to match against.
       (let ((dsh-bridge--turns-cache nil))
-        (dsh-bridge--view-answer-note-record "s1" "You answered “Go”")
+        (dsh-bridge--view-answer-note-record
+         (list (list (cons 'id "q1") (cons 'selected ["Go"]))))
         (should (string-match-p "You answered"
                                 (dsh-bridge--view-turn-suffix 'new "s1"))))
       ;; The option suppresses the note entirely.
@@ -5241,9 +5261,11 @@ self-retires on the new segment and the earlier body stays byte-identical."
          probe)
     (with-temp-buffer
       (dsh-bridge-view-mode)
+      (setq-local dsh-bridge--question-session "s1")
       (setq-local dsh-bridge--view-follow t)
       (dsh-bridge--view-fill "s1" open nil nil t)
-      (dsh-bridge--view-answer-note-record "s1" "You answered “Go”")
+      (dsh-bridge--view-answer-note-record
+       (list (list (cons 'id "q1") (cons 'selected ["Go"]))))
       (dsh-bridge--view-fill "s1" open nil nil t t)
       (should (string-match-p "You answered" (buffer-string)))
       (setq probe (copy-marker 3))
@@ -5284,14 +5306,14 @@ selected label; a submit the host does not accept leaves no note behind."
                           (dsh-bridge--question-decline)
                         (dsh-bridge--question-submit))))))
       (answer "q1" nil "{\"accepted\":true}")
-      (should (equal (plist-get (cdr (assoc "s1" dsh-bridge--view-answer-notes)) :text)
+      (should (equal (dsh-bridge-test--answer-note-text "s1")
                      "You answered “Yes”"))
       ;; The optimistic note is dropped when the host did not settle it.
       (answer "q2" nil "{\"accepted\":false,\"reason\":\"not-pending\"}")
       (should-not (assoc "s1" dsh-bridge--view-answer-notes))
       ;; A decline records its own note.
       (answer "q3" t "{\"accepted\":true}")
-      (should (equal (plist-get (cdr (assoc "s1" dsh-bridge--view-answer-notes)) :text)
+      (should (equal (dsh-bridge-test--answer-note-text "s1")
                      "You declined to answer")))
     (dolist (qid '("q1" "q2" "q3"))
       (when (dsh-bridge--question-find-buffer qid)
@@ -5384,7 +5406,7 @@ note; its resolution flips it back to `(continuing...)'."
        '(((kind . "ask-user") (sessionId . "s1") (questionId . "q1")
           (questions . (((id . "q1") (question . "Approve this plan?")))))))
       (with-current-buffer "*dsh-bridge-output*"
-        (should (string-match-p "Awaiting your response:" (buffer-string)))
+        (should (string-match-p "Awaiting response:" (buffer-string)))
         (should-not (string-match-p "(continuing\\.\\.\\.)" (buffer-string))))
       (dsh-bridge--notification-handle-events
        '(((kind . "ask-user-resolved") (sessionId . "s1") (questionId . "q1")
