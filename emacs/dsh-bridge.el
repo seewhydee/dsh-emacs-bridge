@@ -2388,32 +2388,39 @@ are inherited.  Otherwise it derives from `special-mode' and no GFM font-locking
 is applied."
 	 (setq buffer-read-only t)))
 
-;; The mode map is created by whichever branch of the `if' runs; declare it here
-;; so the byte-compiler knows the `define-key' forms below are valid.
-(defvar dsh-bridge-view-mode-map)
-
 ;; The mode and its `gfm-view-mode' parent are chosen at load time, so the
 ;; byte-compiler cannot see them through the conditional macro expansion;
 ;; declare them (mirroring the prompt mode) to keep the compile clean.
 (declare-function dsh-bridge-view-mode "dsh-bridge")
 (declare-function gfm-view-mode "markdown-mode")
 
+;; The parent keymap is named only in the branch that required markdown-mode,
+;; so declare it for the byte-compiler.
+(defvar gfm-view-mode-map)
+
+(defvar-keymap dsh-bridge-view-mode-map
+  :doc "Keymap for `dsh-bridge-view-mode'."
+  "g" #'revert-buffer
+  "q" #'quit-window
+  "r" #'dsh-bridge-reply
+  "i" #'dsh-bridge-receive
+  "a" #'dsh-bridge-answer
+  "B" #'dsh-bridge-fork-turn
+  "D" #'dsh-bridge-describe-session
+  "l" #'dsh-bridge-list-sessions
+  "M-p" #'dsh-bridge-view-previous-reply
+  "M-n" #'dsh-bridge-view-next-reply)
+
+;; The parent is a load-time choice, so set it here rather than naming it
+;; through `:parent'; `define-derived-mode' (below) sees an existing parent and
+;; leaves it alone.
+(if (and dsh-bridge-view-gfm (require 'markdown-mode nil t))
+	(set-keymap-parent dsh-bridge-view-mode-map gfm-view-mode-map)
+  (set-keymap-parent dsh-bridge-view-mode-map special-mode-map))
+
 (if (and dsh-bridge-view-gfm (require 'markdown-mode nil t))
 	(dsh-bridge--define-view-mode gfm-view-mode)
   (dsh-bridge--define-view-mode special-mode))
-
-(define-key dsh-bridge-view-mode-map (kbd "g") #'revert-buffer)
-(define-key dsh-bridge-view-mode-map (kbd "q") #'quit-window)
-(define-key dsh-bridge-view-mode-map (kbd "r") #'dsh-bridge-reply)
-(define-key dsh-bridge-view-mode-map (kbd "i") #'dsh-bridge-receive)
-(define-key dsh-bridge-view-mode-map (kbd "a") #'dsh-bridge-answer)
-(define-key dsh-bridge-view-mode-map (kbd "B") #'dsh-bridge-fork-turn)
-(define-key dsh-bridge-view-mode-map (kbd "D") #'dsh-bridge-describe-session)
-(define-key dsh-bridge-view-mode-map (kbd "l") #'dsh-bridge-list-sessions)
-(define-key dsh-bridge-view-mode-map (kbd "M-p")
-			#'dsh-bridge-view-previous-reply)
-(define-key dsh-bridge-view-mode-map (kbd "M-n")
-			#'dsh-bridge-view-next-reply)
 
 (easy-menu-define dsh-bridge-view-menu dsh-bridge-view-mode-map
   "Menu bar menu for DSH-View buffers."
@@ -3913,6 +3920,24 @@ are pending.  Otherwise reports that no question is pending."
                  (dsh-bridge--session-label session)))
        (t (message "dsh-bridge: no pending question"))))))
 
+(defvar-keymap dsh-bridge-question-mode-map
+  :parent special-mode-map
+  :doc "Keymap for `dsh-bridge-question-mode'."
+  "RET" #'dsh-bridge--question-toggle-at-point
+  "c" #'dsh-bridge--question-custom-answer
+  "TAB" #'dsh-bridge--question-next
+  "C-c C-s" #'dsh-bridge--question-skip
+  "C-c C-c" #'dsh-bridge--question-submit
+  "C-c C-k" #'dsh-bridge--question-decline
+  "q" #'quit-window
+  "n" #'forward-line
+  "p" #'previous-line)
+
+;; The numbered option keys (1-9) mark the option at that position.
+(dotimes (i 9)
+  (keymap-set dsh-bridge-question-mode-map (number-to-string (1+ i))
+			  #'dsh-bridge--question-toggle-number))
+
 (defun dsh-bridge--define-question-mode ()
   "Define `dsh-bridge-question-mode'."
   (define-derived-mode dsh-bridge-question-mode special-mode "DSH-Question"
@@ -3927,20 +3952,6 @@ state at its tail, exactly as `C-c C-c' in DSH-Prompt shows the reply.
 `q' buries without answering (the question stays pending, and `a' reopens
 the buffer with any marks intact)."))
 (dsh-bridge--define-question-mode)
-
-(defvar dsh-bridge-question-mode-map)
-(define-key dsh-bridge-question-mode-map (kbd "RET") #'dsh-bridge--question-toggle-at-point)
-(define-key dsh-bridge-question-mode-map (kbd "c") #'dsh-bridge--question-custom-answer)
-(define-key dsh-bridge-question-mode-map (kbd "TAB") #'dsh-bridge--question-next)
-(define-key dsh-bridge-question-mode-map (kbd "C-c C-s") #'dsh-bridge--question-skip)
-(define-key dsh-bridge-question-mode-map (kbd "C-c C-c") #'dsh-bridge--question-submit)
-(define-key dsh-bridge-question-mode-map (kbd "C-c C-k") #'dsh-bridge--question-decline)
-(define-key dsh-bridge-question-mode-map (kbd "q") #'quit-window)
-(define-key dsh-bridge-question-mode-map (kbd "n") #'forward-line)
-(define-key dsh-bridge-question-mode-map (kbd "p") #'previous-line)
-(dotimes (i 9)
-  (define-key dsh-bridge-question-mode-map (kbd (number-to-string (1+ i)))
-			  #'dsh-bridge--question-toggle-number))
 
 ;;; Prompt-buffer model selection and context occupancy
 
@@ -4332,6 +4343,9 @@ carries N attachment tag lines."
          t)))))
 
 (declare-function markdown-mode "markdown-mode")
+;; As for DSH-View, the parent keymap is named only in the branch that
+;; required markdown-mode; declare it for the byte-compiler.
+(defvar markdown-mode-map)
 (declare-function dsh-bridge-prompt-mode "dsh-bridge")
 
 (defmacro dsh-bridge--define-prompt-mode (parent)
@@ -4369,26 +4383,28 @@ C-c C-a, C-c C-d, C-c C-k, C-c C-f, C-c C-m, C-c C-s, C-c C-l); the
 markdown commands stay reachable via the menu."
 	 (dsh-bridge--prompt-mode-setup)))
 
-;; The map is created by whichever branch of the `if' runs; declare it here so
-;; the byte-compiler knows the `define-key' forms below are valid.
-(defvar dsh-bridge-prompt-mode-map)
+(defvar-keymap dsh-bridge-prompt-mode-map
+  :doc "Keymap for `dsh-bridge-prompt-mode'."
+  "C-c C-c" #'dsh-bridge-send-and-exit
+  "C-c C-a" #'dsh-bridge-attach-file
+  "C-c C-d" #'dsh-bridge-draft
+  "C-c C-k" #'dsh-bridge-erase-prompt
+  "C-c C-f" #'dsh-bridge-fetch
+  "C-c C-m" #'dsh-bridge-select-model
+  "C-c C-s" #'dsh-bridge-set-prompt-session
+  "C-c C-l" #'dsh-bridge-list-sessions
+  "M-p" #'dsh-bridge-prompt-previous-history
+  "M-n" #'dsh-bridge-prompt-next-history)
+
+;; As for DSH-View, the parent is a load-time choice between markdown-mode
+;; and text-mode; name it here and let `define-derived-mode' keep it.
+(if (and dsh-bridge-prompt-markdown (require 'markdown-mode nil t))
+	(set-keymap-parent dsh-bridge-prompt-mode-map markdown-mode-map)
+  (set-keymap-parent dsh-bridge-prompt-mode-map text-mode-map))
 
 (if (and dsh-bridge-prompt-markdown (require 'markdown-mode nil t))
 	(dsh-bridge--define-prompt-mode markdown-mode)
   (dsh-bridge--define-prompt-mode text-mode))
-
-(define-key dsh-bridge-prompt-mode-map (kbd "C-c C-c") #'dsh-bridge-send-and-exit)
-(define-key dsh-bridge-prompt-mode-map (kbd "C-c C-a") #'dsh-bridge-attach-file)
-(define-key dsh-bridge-prompt-mode-map (kbd "C-c C-d") #'dsh-bridge-draft)
-(define-key dsh-bridge-prompt-mode-map (kbd "C-c C-k") #'dsh-bridge-erase-prompt)
-(define-key dsh-bridge-prompt-mode-map (kbd "C-c C-f") #'dsh-bridge-fetch)
-(define-key dsh-bridge-prompt-mode-map (kbd "C-c C-m") #'dsh-bridge-select-model)
-(define-key dsh-bridge-prompt-mode-map (kbd "C-c C-s") #'dsh-bridge-set-prompt-session)
-(define-key dsh-bridge-prompt-mode-map (kbd "C-c C-l") #'dsh-bridge-list-sessions)
-(define-key dsh-bridge-prompt-mode-map (kbd "M-p")
-			#'dsh-bridge-prompt-previous-history)
-(define-key dsh-bridge-prompt-mode-map (kbd "M-n")
-			#'dsh-bridge-prompt-next-history)
 
 (defun dsh-bridge-erase-prompt ()
   "Erase the contents of the prompt buffer."
@@ -4607,6 +4623,23 @@ Archived sessions are hidden unless `dsh-bridge--sessions-archived-p' (or
 	  (setq cols (vconcat cols (vector id))))
 	(list id cols)))
 
+(defvar-keymap dsh-bridge-sessions-mode-map
+  :parent tabulated-list-mode-map
+  :doc "Keymap for `dsh-bridge-sessions-mode'."
+  "RET" #'dsh-bridge-visit-session
+  "r" #'dsh-bridge-open-session
+  "t" #'dsh-bridge-set-default-target-at-point
+  "u" #'dsh-bridge-clear-default-target
+  "f" #'dsh-bridge-peek-session
+  "a" #'dsh-bridge-answer
+  "v" #'dsh-bridge-toggle-archived-sessions
+  "R" #'dsh-bridge-rename-session
+  "d" #'dsh-bridge-archive-session
+  "+" #'dsh-bridge-create-session
+  "W" #'dsh-bridge-rename-workspace
+  "w" #'dsh-bridge-copy-session-id
+  "D" #'dsh-bridge-describe-session)
+
 (define-derived-mode dsh-bridge-sessions-mode tabulated-list-mode "DSH-Sessions"
   "Major mode for browsing DSH sessions.
 `RET' does the next thing for the session under point (resuming a saved
@@ -4629,33 +4662,6 @@ when running (`?' when unknown; cold sessions are always unknown), obeying
 `dsh-bridge-status-indicator' and updating live from the bridge's turn
 notifications."
   (setq-local dsh-bridge--sessions-archived-p dsh-bridge-sessions-show-archived))
-
-(define-key dsh-bridge-sessions-mode-map (kbd "RET")
-			#'dsh-bridge-visit-session)
-(define-key dsh-bridge-sessions-mode-map (kbd "r")
-			#'dsh-bridge-open-session)
-(define-key dsh-bridge-sessions-mode-map (kbd "t")
-			#'dsh-bridge-set-default-target-at-point)
-(define-key dsh-bridge-sessions-mode-map (kbd "u")
-			#'dsh-bridge-clear-default-target)
-(define-key dsh-bridge-sessions-mode-map (kbd "f")
-			#'dsh-bridge-peek-session)
-(define-key dsh-bridge-sessions-mode-map (kbd "a")
-			#'dsh-bridge-answer)
-(define-key dsh-bridge-sessions-mode-map (kbd "v")
-			#'dsh-bridge-toggle-archived-sessions)
-(define-key dsh-bridge-sessions-mode-map (kbd "R")
-			#'dsh-bridge-rename-session)
-(define-key dsh-bridge-sessions-mode-map (kbd "d")
-			#'dsh-bridge-archive-session)
-(define-key dsh-bridge-sessions-mode-map (kbd "+")
-			#'dsh-bridge-create-session)
-(define-key dsh-bridge-sessions-mode-map (kbd "W")
-			#'dsh-bridge-rename-workspace)
-(define-key dsh-bridge-sessions-mode-map (kbd "w")
-			#'dsh-bridge-copy-session-id)
-(define-key dsh-bridge-sessions-mode-map (kbd "D")
-			#'dsh-bridge-describe-session)
 
 (easy-menu-define dsh-bridge-sessions-menu dsh-bridge-sessions-mode-map
   "Menu bar menu for the `*dsh-bridge-sessions*' buffer."
@@ -4994,6 +5000,14 @@ The row's workspace id comes from the cached session; prompts for the new title
 (defvar-local dsh-bridge--describe-session nil
   "The session id this DSH-Describe buffer reports, or nil.")
 
+(defvar-keymap dsh-bridge-describe-mode-map
+  :parent help-mode-map
+  :doc "Keymap for `dsh-bridge-describe-mode'."
+  "w" #'dsh-bridge--describe-copy-id
+  "f" #'dsh-bridge--describe-open-view
+  "o" #'dsh-bridge--describe-open-prompt
+  "D" #'revert-buffer)
+
 (define-derived-mode dsh-bridge-describe-mode help-mode "DSH-Describe"
   "Major mode for the read-only DSH session report.
 
@@ -5004,12 +5018,6 @@ sections, `TAB'/`S-TAB' move between buttons, and `RET'/`mouse-2'
 follow the button at point.  Bridge commands: `w' copies the session
 id, `f' opens the DSH-View for the session's latest turn, `o' opens the
 DSH-Prompt buffer, `D' re-describes the session.")
-
-(defvar dsh-bridge-describe-mode-map)
-(define-key dsh-bridge-describe-mode-map (kbd "w") #'dsh-bridge--describe-copy-id)
-(define-key dsh-bridge-describe-mode-map (kbd "f") #'dsh-bridge--describe-open-view)
-(define-key dsh-bridge-describe-mode-map (kbd "o") #'dsh-bridge--describe-open-prompt)
-(define-key dsh-bridge-describe-mode-map (kbd "D") #'revert-buffer)
 
 (easy-menu-define dsh-bridge-describe-menu dsh-bridge-describe-mode-map
   "Menu bar menu for the `*dsh-bridge-describe*' buffer."
