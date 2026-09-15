@@ -130,6 +130,7 @@ menu:
 * `t` — set the default target session.
 * `u` — clear the default target session.
 * `l` — open the DSH-Sessions buffer.
+* `+` — create a new session, prompting for its title.
 
 ### DSH-Sessions buffer
 

@@ -216,15 +216,15 @@ round-trip."
     (cl-letf (((symbol-function 'dsh-bridge--fetch-sessions)
                (lambda ()
                  (cons 200
-                       '(((id . "live-1") (live . t) (cwd . "/a"))
-                         ((id . "saved-1") (live . nil) (cwd . "/b"))))))
+                       '(((id . "live-1") (title . "A") (live . t) (cwd . "/a"))
+                         ((id . "saved-1") (title . "B") (live . nil) (cwd . "/b"))))))
               ((symbol-function 'completing-read)
                (lambda (_prompt table &rest _rest)
                  (setq table-seen table)
                  "(last-active)")))
       (call-interactively #'dsh-bridge-set-default-target))
     (should (equal (all-completions "" table-seen)
-                   '("live-1" "saved-1" "(last-active)")))))
+                   '("A" "B" "(last-active)")))))
 
 (ert-deftest dsh-bridge-dispatcher-header-labels ()
   "The dispatcher header labels the effective session with the right qualifier.
@@ -341,26 +341,34 @@ neither, the send is still reported but no session state is touched."
 ;;; Session labels
 
 (ert-deftest dsh-bridge-session-label-precedence ()
-  "The label is the title, else the raw id; alist inputs work too."
+  "The label is the title, else \"[Untitled Session]\"; a bare id with no
+cached row still labels as that id, and NO-DEFAULT drops the untitled
+placeholder so completion can skip such sessions."
   (let ((dsh-bridge--sessions-cache
          '(((id . "s1") (title . "T") (cwd . "/x"))
            ((id . "s2") (cwd . "/x/y")))))
+    ;; A cached row is found for a bare id too, so a titled session labels as
+    ;; its title and an untitled one as the placeholder, not the raw id.
     (should (equal (dsh-bridge--session-label "s1") "T"))
-    (should (equal (dsh-bridge--session-label "s2") "s2"))
+    (should (equal (dsh-bridge--session-label "s2") "[Untitled Session]"))
+    ;; No cached row: the id is all we have, so it labels as itself.  This is
+    ;; what keeps a message naming an unknown session informative.
     (should (equal (dsh-bridge--session-label "missing") "missing"))
     (should (equal (dsh-bridge--session-label nil) "[Untitled Session]"))
     ;; Session data alists are accepted directly (no cache lookup).
     (should (equal (dsh-bridge--session-label '((id . "s3") (title . "T3"))) "T3"))
-    (should (equal (dsh-bridge--session-label '((id . "s4"))) "s4"))
-    ;; NO-DEFAULT suppresses the \"[Untitled Session]\" final fallback, so an
-    ;; untitled alist with an id still labels as the id but one without an id
-    ;; (or no session at all) labels as nil: the completing-read candidate.  A
-    ;; real title still wins under NO-DEFAULT.
-    (should (equal (dsh-bridge--session-label '((id . "s4")) t) "s4"))
+    (should (equal (dsh-bridge--session-label '((id . "s4"))) "[Untitled Session]"))
+    ;; NO-DEFAULT suppresses the \"[Untitled Session]\" fallback, so a known
+    ;; untitled session labels as nil (the completing-read candidate).  A bare
+    ;; id with no row is not \"known untitled\" and still labels as the id, so
+    ;; an explicit id stays usable.  A real title still wins under NO-DEFAULT.
+    (should (null (dsh-bridge--session-label '((id . "s4")) t)))
+    (should (null (dsh-bridge--session-label "s2" t)))
+    (should (equal (dsh-bridge--session-label "missing" t) "missing"))
     (should (equal (dsh-bridge--session-label '((id . "s7") (title . "T7")) t) "T7"))
     (should (null (dsh-bridge--session-label '((cwd . "/x")) t)))
     (should (null (dsh-bridge--session-label nil t)))
-    ;; ADD-FALLBACK-FACE marks only fallback labels (raw id / untitled), never
+    ;; ADD-FALLBACK-FACE marks only fallback labels (untitled / raw id), never
     ;; a real title.
     (should (eq (get-text-property
                  0 'face (dsh-bridge--session-label '((id . "s5")) nil t))
@@ -370,6 +378,43 @@ neither, the send is still reported but no session state is touched."
                 'dsh-bridge-untitled-face))
     (should-not (get-text-property
                  0 'face (dsh-bridge--session-label '((id . "s6") (title . "T6")) nil t)))))
+
+(ert-deftest dsh-bridge-read-session-id-skips-untitled ()
+  "Untitled sessions are not completion candidates; a titled one still is.
+Excluding them is why the dispatcher's create verb demands a title."
+  (let ((table-seen nil) (seen-prompt nil) (dsh-bridge-default-session nil))
+    (cl-letf (((symbol-function 'dsh-bridge--fetch-sessions)
+               (lambda ()
+                 (cons 200
+                       '(((id . "s1") (title . "T") (live . t) (cwd . "/a"))
+                         ((id . "s2") (live . t) (cwd . "/b"))
+                         ((id . "s3") (live . nil) (cwd . "/c"))))))
+              ((symbol-function 'completing-read)
+               (lambda (prompt table &rest _rest)
+                 (setq table-seen table seen-prompt prompt)
+                 "T")))
+      (should (equal (dsh-bridge--read-session-id "Default target: " "(last-active)")
+                     "s1")))
+    ;; The pseudo-entry stays; the two untitled rows do not.
+    (should (equal (all-completions "" table-seen) '("T" "(last-active)")))))
+
+(ert-deftest dsh-bridge-read-session-id-untitled-only-signals ()
+  "A roster of only untitled sessions leaves no session candidate.
+The pseudo-entry alone still completes, but picking it returns nil."
+  (let ((table-seen nil) (dsh-bridge-default-session nil))
+    (cl-letf (((symbol-function 'dsh-bridge--fetch-sessions)
+               (lambda () (cons 200 '(((id . "s2") (live . t) (cwd . "/b"))))))
+              ((symbol-function 'completing-read)
+               (lambda (_prompt table &rest _rest)
+                 (setq table-seen table)
+                 "(last-active)")))
+      (should (null (dsh-bridge--read-session-id "Default target: " "(last-active)"))))
+    (should (equal (all-completions "" table-seen) '("(last-active)"))))
+  ;; With no pseudo-entry there is nothing to choose, which is an error.
+  (cl-letf (((symbol-function 'dsh-bridge--fetch-sessions)
+             (lambda () (cons 200 '(((id . "s2") (live . t) (cwd . "/b")))))))
+    (should-error (dsh-bridge--read-session-id "Default target: ")
+                  :type 'user-error)))
 
 (ert-deftest dsh-bridge-workspace-label ()
   "The workspace label is the title, else the cwd basename, else the cwd."
@@ -518,9 +563,10 @@ call only, leaving the default target untouched."
       (goto-char (point-min))
       (set-mark (point-max))
       (cl-letf (((symbol-function 'dsh-bridge--fetch-sessions)
-                 (lambda () (cons 200 '(((id . "live-1") (live . t))))))
+                 (lambda () (cons 200 '(((id . "live-1") (title . "Live One")
+                                          (live . t))))))
                 ((symbol-function 'completing-read)
-                 (lambda (_prompt _table &rest _) "live-1"))
+                 (lambda (_prompt _table &rest _) "Live One"))
                 ((symbol-function 'dsh-bridge--http)
                  (lambda (_method _path payload)
                    (setq captured payload) nil)))
@@ -2186,15 +2232,16 @@ Emoji glyphs are double-width; in a one-column cell
         (should-not (get-text-property (1- (point)) 'display))))))
 
 (ert-deftest dsh-bridge-session-cell-untitled ()
-  "The session cell shows the title, or the raw id (untitled face) otherwise.
-The cell is `dsh-bridge--session-label' with the fallback-face argument."
+  "The session cell shows the title, or \"[Untitled Session]\" (untitled face).
+The cell is `dsh-bridge--session-label' with the fallback-face argument; the
+raw id is not used, so an untitled row reads as untitled."
   (let ((dsh-bridge--session-status nil)
         (a '((id . "aaaaaa") (live . t) (cwd . "/x")))
         (b '((id . "bbbbbb") (live . t) (title . "B"))))
     ;; The Session column is index 2 of the entry's cell vector.
     (let ((a-cell (aref (cadr (dsh-bridge--session-entry a)) 2))
           (b-cell (aref (cadr (dsh-bridge--session-entry b)) 2)))
-      (should (string= a-cell "aaaaaa"))
+      (should (string= a-cell "[Untitled Session]"))
       (should (eq (get-text-property 0 'face a-cell)
                   'dsh-bridge-untitled-face))
       (should (string= b-cell "B"))
@@ -2332,7 +2379,7 @@ The cell is `dsh-bridge--session-label' with the fallback-face argument."
 
 (ert-deftest dsh-bridge-create-session-marshals-args ()
   "Create GETs /workspaces, then POSTs the chosen workspace and binds the new
-session as default target."
+session as default target.  Without PROMPT-TITLE no title is sent."
   (let ((called nil) (bound-target nil))
     (cl-letf (((symbol-function 'completing-read)
                (lambda (_prompt _table &optional _pred _req) "WS B"))
@@ -2349,14 +2396,57 @@ session as default target."
               ((symbol-function 'dsh-bridge--refresh-sessions-buffer) (lambda () nil))
               ((symbol-function 'dsh-bridge-set-default-target)
                (lambda (id) (setq bound-target id))))
-      (dsh-bridge-create-session))
+      ;; No PROMPT-TITLE: the DSH-Sessions "+" route, which never asks.
+      (cl-letf (((symbol-function 'read-string)
+                 (lambda (&rest _) (ert-fail "prompted for a title without PROMPT-TITLE"))))
+        (dsh-bridge-create-session)))
     (let ((get (cdr (assoc "/workspaces" (mapcar (lambda (c) (list (cadr c) c)) called))))
           (create (cadr (assoc "/sessions/create"
                                (mapcar (lambda (c) (list (cadr c) c)) called)))))
       (should get)
       (should create)
       (should (equal (cdr (assoc 'workspaceId (caddr create))) "w2"))
+      (should-not (assoc 'title (caddr create)))
       (should (equal bound-target "s-new")))))
+
+(ert-deftest dsh-bridge-create-session-prompts-for-required-title ()
+  "With PROMPT-TITLE, an empty answer is refused and the title is POSTed.
+This is the transient dispatcher's route, which must produce a completable
+(named) session."
+  (let ((called nil) (prompts 0))
+    (cl-letf (((symbol-function 'completing-read)
+               (lambda (&rest _) "WS A"))
+              ((symbol-function 'dsh-bridge--request)
+               (lambda (method path payload)
+                 (push (list method path payload) called)
+                 (if (equal path "/workspaces")
+                     (cons 200
+                           (list (cons 'workspaces
+                                       (list (list (cons 'id "w1") (cons 'title "WS A"))))))
+                   (cons 201 (list (cons 'sessionId "s-new"))))))
+              ;; Answers: blank, whitespace-only, then the title.  A prompt that
+              ;; accepted the first answer would POST "" and stop at one read.
+              ((symbol-function 'read-string)
+               (lambda (&rest _) (setq prompts (1+ prompts))
+                       (nth (1- prompts) '("" "   " "My New Session"))))
+              ((symbol-function 'dsh-bridge--fetch-sessions) (lambda () nil))
+              ((symbol-function 'dsh-bridge--refresh-sessions-buffer) (lambda () nil))
+              ((symbol-function 'dsh-bridge-set-default-target) (lambda (_id) nil)))
+      (dsh-bridge-create-session t))
+    (let ((create (cadr (assoc "/sessions/create"
+                               (mapcar (lambda (c) (list (cadr c) c)) called)))))
+      (should create)
+      (should (equal (cdr (assoc 'title (caddr create))) "My New Session"))
+      ;; The two blank answers were rejected by re-prompting.
+      (should (= prompts 3)))))
+
+(ert-deftest dsh-bridge-create-titled-session-forwards-prompt-title ()
+  "The dispatcher's create verb is the prompt-free command with PROMPT-TITLE."
+  (let ((seen 'none))
+    (cl-letf (((symbol-function 'dsh-bridge-create-session)
+               (lambda (&optional prompt-title) (setq seen prompt-title))))
+      (dsh-bridge-create-titled-session))
+    (should (eq seen t))))
 
 (ert-deftest dsh-bridge-create-session-empty-workspaces ()
   "A 200 with an empty workspace list still offers \"New workspace…\"."

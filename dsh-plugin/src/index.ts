@@ -60,8 +60,10 @@
 //   POST /dsh-bridge/sessions/resume { sessionId }        -> resume a cold session
 //   POST /dsh-bridge/sessions/rename { sessionId, title } -> rename (resumes cold)
 //   POST /dsh-bridge/sessions/archive { sessionId }       -> archive (one-way)
-//   POST /dsh-bridge/sessions/create { workspaceId | path, workspaceTitle? }
-//        -> create a session in a workspace (exactly one of the two keys)
+//   POST /dsh-bridge/sessions/create { workspaceId | path, workspaceTitle?, title? }
+//        -> create a session in a workspace (exactly one of the two keys);
+//        `title` names the new session when the profile mounts a session
+//        title service, else the session stays untitled
 //   POST /dsh-bridge/fork { sessionId?, atSeq? } -> branch a completed-turn
 //        prefix into a new session (returns the child id; the source may be
 //        cold — it is never resumed; 409 session/fork-unavailable or
@@ -2112,10 +2114,13 @@ export function apply(ctx: Context): void {
             workspaceId?: unknown
             path?: unknown
             workspaceTitle?: unknown
+            title?: unknown
           } | undefined
           const workspaceId = typeof body?.workspaceId === 'string' && body.workspaceId !== '' ? body.workspaceId : undefined
           const path = typeof body?.path === 'string' && body.path !== '' ? body.path : undefined
           const workspaceTitle = typeof body?.workspaceTitle === 'string' ? body.workspaceTitle : undefined
+          const rawTitle = typeof body?.title === 'string' ? body.title.trim() : undefined
+          const title = rawTitle !== undefined && rawTitle !== '' ? rawTitle : undefined
           if ((workspaceId === undefined) === (path === undefined)) {
             sendJson(res, 400, { error: 'exactly one of workspaceId or path is required' })
             return
@@ -2158,15 +2163,28 @@ export function apply(ctx: Context): void {
             await handle.dispose()
             throw attachError
           }
+          // An explicit title is applied after the session exists, through the
+          // same optional service `/sessions/rename` uses. A profile without
+          // that service leaves the new session untitled rather than failing
+          // the creation, which has already happened.
+          let appliedTitle: string | undefined
+          if (title !== undefined) {
+            const sessionTitleService = ctx.get('sessionTitle') as SessionTitleService | undefined
+            if (sessionTitleService !== undefined) {
+              appliedTitle = sessionTitleService.rename(handle.agent.session, title).title
+            }
+          }
           sendJson(res, 201, {
             ok: true,
             sessionId: String(sessionId),
             workspaceId: String(workspace.id),
             cwd: workspace.path,
+            ...appliedTitle === undefined ? {} : { title: appliedTitle },
           })
           broadcastSessionsChanged(String(sessionId))
         } catch (error: unknown) {
-          sendJson(res, bridgeErrorStatus(error), { error: error instanceof Error ? error.message : String(error) })
+          const status = isSessionTitleInvalidError(error) ? 400 : bridgeErrorStatus(error)
+          sendJson(res, status, { error: error instanceof Error ? error.message : String(error) })
         }
         return
       }

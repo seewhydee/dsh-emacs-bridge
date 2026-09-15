@@ -1186,23 +1186,39 @@ appropriate directory, do nothing."
 		 (with-current-buffer buf
 		   (setq default-directory (file-name-as-directory dir))))))
 
+(defun dsh-bridge--session-untitled-p (session)
+  "Whether SESSION is a known session carrying no title.
+SESSION is a string (a session ID) or a session data alist; a bare id
+counts as untitled only when the sessions cache has a row for it, so an
+id with no cached row is not \"known untitled\"."
+  (let ((alist (if (stringp session)
+				   (dsh-bridge--session-for-id session)
+				 session)))
+	(and alist (null (dsh-bridge--normalized-string (alist-get 'title alist))))))
+
 (defun dsh-bridge--session-label (session &optional no-default add-fallback-face)
   "Return the display label for SESSION.
 SESSION should be a string (a session ID), or a session data alist in
 the format described in `dsh-bridge--sessions-cache'.
 
-If the session has no title, use the session ID as fallback.  As a final
-fallback, use \"[Untitled Session]\" unless NO-DEFAULT is supplied, in
-which case return nil.  If ADD-FALLBACK-FACE is non-nil, apply
-`dsh-bridge-untitled-face' as a face property for any fallback string."
+The label is the session's title, falling back on \"[Untitled Session]\"
+if the session is known but untitled.  With NO-DEFAULT, a session that
+is neither titled nor identifiable returns nil instead of using this
+fallback.
+
+If ADD-FALLBACK-FACE is non-nil, apply `dsh-bridge-untitled-face' as a
+face property for any fallback string."
   (let* ((alist (if (stringp session)
 					(dsh-bridge--session-for-id session)
 				  session))
-		 (title (alist-get 'title alist)))
-	(or (dsh-bridge--normalized-string title)
-		(let ((fallback (or (dsh-bridge--normalized-string session)
-							(alist-get 'id session)
-							(unless no-default "[Untitled Session]"))))
+		 (title (dsh-bridge--normalized-string (alist-get 'title alist))))
+	(or title
+		(let ((fallback
+			   (if (dsh-bridge--session-untitled-p alist)
+				   (unless no-default "[Untitled Session]")
+				 (or (dsh-bridge--normalized-string session)
+					 (alist-get 'id session)
+					 (unless no-default "[Untitled Session]")))))
 		  (if (and add-fallback-face (stringp fallback))
 			  (propertize fallback 'face 'dsh-bridge-untitled-face)
 			fallback)))))
@@ -1368,17 +1384,21 @@ session's id."
 
 (defun dsh-bridge--read-session-id (prompt &optional pseudo-entry)
   "Read a session id via completing-read, disambiguating duplicate titles.
-Each candidate is annotated with its workspace, age, and running state.	 Both
-live and saved (cold) sessions complete; the host resumes a saved id when the
-request targets it.	 Untitled sessions complete as their raw id.  PSEUDO-ENTRY,
-when non-nil, is an extra choice (e.g. \"(last-active)\" or \"(default)\") that
-returns nil.  When several sessions share a title, a second completing-read
-resolves the collision.	 With no sessions and no PSEUDO-ENTRY, signals an
-error."
+Each candidate is annotated with its workspace, age, and running state.
+Both live and saved (cold) sessions are valid completions; if the
+request targets a saved session, it is resumed.  If several sessions
+share a title, a second completing-read resolves the collision.
+Untitled sessions are not offered for completion.
+
+PSEUDO-ENTRY, if non-nil, is an extra choice that returns nil, such as
+\"(last-active)\" or \"(default)\").  With there are no candidate
+sessions and no PSEUDO-ENTRY, the function signals an error."
   (let* ((sessions (cdr (dsh-bridge--fetch-sessions)))
-		 (choices (mapcar (lambda (s) ; return (LABEL . SESSION-DATA)
-							(cons (dsh-bridge--session-label s t) s))
-						  sessions))
+		 (choices (seq-filter
+				   #'car ; drop untitled sessions, whose label is nil under NO-DEFAULT
+				   (mapcar (lambda (s) ; return (LABEL . SESSION-DATA)
+							 (cons (dsh-bridge--session-label s t) s))
+						   sessions)))
 		 (all (append choices
 					  (and pseudo-entry (list (cons pseudo-entry nil)))))
 		 (table (dsh-bridge--session-completion-table all)))
@@ -1864,7 +1884,8 @@ the visited file (not the buffer text) is attached."
 	  ("D" dsh-bridge-describe-session :description "describe session")
 	  ("t" dsh-bridge-set-default-target :description "set default target")
 	  ("u" dsh-bridge-clear-default-target :description "clear default target")
-	  ("l" dsh-bridge-list-sessions :description "list sessions"))
+	  ("l" dsh-bridge-list-sessions :description "list sessions")
+	  ("+" dsh-bridge-create-titled-session :description "create session"))
 	"Suffix specs for the `dsh-bridge' dispatcher.
 Each spec is (KEY COMMAND DESCRIPTION).	 The view buffers no longer mirror
 these letters; this table serves the dispatcher's layout alone.")
@@ -1886,13 +1907,11 @@ these letters; this table serves the dispatcher's layout alone.")
 			 (vconcat (list "Sessions"
 							(dsh-bridge--layout-verb "t")
 							(dsh-bridge--layout-verb "u")
-							(dsh-bridge--layout-verb "l")))
+							(dsh-bridge--layout-verb "l")
+							(dsh-bridge--layout-verb "+")))
 			 (vconcat (list '("q" transient-quit-one :description "quit"))))
 	"Layout of the `dsh-bridge' dispatcher, grouped by purpose.
-The verbs come from `dsh-bridge--verb-suffixes'; `r' (reply/open the prompt
-buffer — the same key the buffers use) and `q' (quit) are dispatcher-only.
-`t' set / `u' clear the default target; `S' is not a dispatcher key — in the
-sessions list it keeps its tabulated-list sort meaning."))
+The verbs are defined in `dsh-bridge--verb-suffixes'."))
 
 ;;; DSH-View buffer (*dsh-bridge-output*)
 
@@ -4645,7 +4664,7 @@ Archived sessions are hidden unless `dsh-bridge--sessions-archived-p' (or
 	["Archive Session" dsh-bridge-archive-session
 	 :help "Archive the session under point (one-way: no unarchive)"]
 	["Create Session…" dsh-bridge-create-session
-	 :help "Create a new session, optionally in a new workspace"]
+	 :help "Create a new untitled session, optionally in a new workspace"]
 	["Rename Workspace…" dsh-bridge-rename-workspace
 	 :help "Rename the workspace of the session under point"]
 	["Copy Session Id" dsh-bridge-copy-session-id
@@ -4843,14 +4862,31 @@ cold sessions alike."
 			  (message "dsh-bridge: %s"
 					   (dsh-bridge--error-message nil status alist)))))))))
 
-(defun dsh-bridge-create-session ()
+(defun dsh-bridge--read-required-session-title ()
+  "Read a non-empty session title, re-prompting until one is entered.
+An empty answer is refused rather than accepted: a session created from
+the transient dispatcher must carry a title, because untitled sessions
+are not offered by `dsh-bridge--read-session-id' completion."
+  (let (title)
+	(while (string-empty-p
+			(setq title (string-trim
+						 (read-string "Session title (required): "))))
+	  (message "dsh-bridge: a session title is required"))
+	title))
+
+(defun dsh-bridge-create-session (&optional prompt-title)
   "Create a new DSH session, optionally in a new workspace.
 Completing-read over the host's workspaces plus a \"New workspace…\" entry; a
 new workspace prompts for an existing directory (and an optional title).  The
 prompted directory is expanded to a fully-qualified path before it is sent, so
 a `~'-relative or relative answer is accepted.  The new session is bound as the
-default target."
-  (interactive)
+default target.
+
+PROMPT-TITLE requires a session title before the session is created.  The
+transient dispatcher passes it, since completion cannot offer untitled
+sessions (see `dsh-bridge--read-session-id'); the DSH-Sessions \"+\" binding
+does not, leaving the session untitled."
+  (interactive (list current-prefix-arg))
   (let* ((wresult (dsh-bridge--request "GET" "/workspaces" nil))
 		 (wstatus (car wresult))
 		 (wlist (cdr wresult)))
@@ -4881,9 +4917,11 @@ default target."
 		  (let* ((workspaceTitle (and is-new
 									  (let ((title (read-string "Workspace title (optional): ")))
 										(and (not (string-empty-p title)) title))))
+				 (sessionTitle (and prompt-title (dsh-bridge--read-required-session-title)))
 				 (payload (append (and workspaceId (list (cons 'workspaceId workspaceId)))
 								  (and new-path (list (cons 'path new-path)))
-								  (and workspaceTitle (list (cons 'workspaceTitle workspaceTitle)))))
+								  (and workspaceTitle (list (cons 'workspaceTitle workspaceTitle)))
+								  (and sessionTitle (list (cons 'title sessionTitle)))))
 				 (creates (dsh-bridge--request "POST" "/sessions/create" payload))
 				 (cstatus (car creates))
 				 (calist (cdr creates)))
@@ -4895,6 +4933,14 @@ default target."
 				  (message "dsh-bridge: created a new session"))
 			  (message "dsh-bridge: %s"
 					   (dsh-bridge--error-message nil cstatus calist)))))))))
+
+(defun dsh-bridge-create-titled-session ()
+  "Create a new DSH session with an explicit title.
+Unlike the `dsh-bridge-create-session' command, this prompts for an
+explicit session title, rather than creating an initially-untitled
+session."
+  (interactive)
+  (dsh-bridge-create-session t))
 
 (defun dsh-bridge-rename-workspace ()
   "Rename the workspace of the session under point.
