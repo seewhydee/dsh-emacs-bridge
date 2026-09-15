@@ -58,6 +58,7 @@ import {
   workspaceTitleConflict,
   attachmentErrorHttpStatus,
   imageInputUnsupported,
+  KeyedSerial,
   MAX_ATTACHMENTS,
   parseAttachmentRequests,
   sniffImageMediaType,
@@ -1171,5 +1172,86 @@ describe('attachmentErrorHttpStatus', () => {
     for (const code of ['ATTACHMENT_WRITE_FAILED', 'ATTACHMENT_CORRUPT', 'ATTACHMENT_NOT_FOUND', 'SOMETHING_ELSE']) {
       expect(attachmentErrorHttpStatus(code)).toBe(500)
     }
+  })
+})
+
+describe('KeyedSerial', () => {
+  it('runs same-key sections strictly one after another', async () => {
+    const serial = new KeyedSerial()
+    const order: string[] = []
+    let releaseFirst: (() => void) | undefined
+    const gate = new Promise<void>((resolve) => { releaseFirst = resolve })
+
+    const first = serial.runExclusive('k', async () => {
+      order.push('first:start')
+      await gate
+      order.push('first:end')
+      return 'first'
+    })
+    const second = serial.runExclusive('k', async () => {
+      order.push('second:start')
+      return 'second'
+    })
+
+    // The second section has not begun while the first holds the key.
+    await Promise.resolve()
+    expect(order).toEqual(['first:start'])
+    releaseFirst?.()
+    await expect(Promise.all([first, second])).resolves.toEqual(['first', 'second'])
+    // No interleaving: the first section completed before the second started.
+    expect(order).toEqual(['first:start', 'first:end', 'second:start'])
+  })
+
+  it('runs different keys concurrently', async () => {
+    const serial = new KeyedSerial()
+    let release: (() => void) | undefined
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    let bStarted = false
+
+    const a = serial.runExclusive('a', async () => {
+      await gate
+      return 'a'
+    })
+    const b = serial.runExclusive('b', async () => {
+      bStarted = true
+      return 'b'
+    })
+
+    // Key 'b' is not blocked behind key 'a'.
+    await expect(b).resolves.toBe('b')
+    expect(bStarted).toBe(true)
+    release?.()
+    await expect(a).resolves.toBe('a')
+  })
+
+  it('releases the key when a section rejects and still isolates callers', async () => {
+    const serial = new KeyedSerial()
+    const boom = serial.runExclusive('k', async () => {
+      throw new Error('boom')
+    })
+    const after = serial.runExclusive('k', async () => 'ok')
+
+    await expect(boom).rejects.toThrow('boom')
+    await expect(after).resolves.toBe('ok')
+  })
+
+  it('serializes a check-then-act pair so the second sees the first write', async () => {
+    const serial = new KeyedSerial()
+    // Stands in for "read the roster, then create a workspace title".
+    let title: string | undefined
+    const claim = async (name: string): Promise<'claimed' | 'taken'> =>
+      await serial.runExclusive('workspace-titles', async () => {
+        if (title !== undefined) return 'taken'
+        // Yield inside the section: without the lock the second claim would
+        // observe the still-unset title and also succeed.
+        await new Promise<void>((resolve) => setTimeout(resolve, 0))
+        title = name
+        return 'claimed'
+      })
+
+    const results = await Promise.all([claim('dup'), claim('dup')])
+    expect(results.filter(result => result === 'claimed')).toHaveLength(1)
+    expect(results.filter(result => result === 'taken')).toHaveLength(1)
+    expect(title).toBe('dup')
   })
 })

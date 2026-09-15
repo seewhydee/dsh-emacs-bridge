@@ -1424,6 +1424,96 @@ then uses the effective session)."
   (when current-prefix-arg
 	(dsh-bridge--read-session-id prompt)))
 
+;;; Workspace selection
+
+(defun dsh-bridge--workspace-default ()
+  "The workspace label to offer as the create-session default, or nil.
+In order: the workspace of the most recently active live session (from the
+sessions cache, which carries that session's `workspaceId'), else the current
+buffer's `default-directory' when that is an existing directory.  The second
+tier is a path rather than a label, so it never collides with a workspace
+title; the caller treats a non-matching answer as a new workspace and uses it
+as the directory to create one in."
+  (let* ((session (dsh-bridge--cache-last-active))
+		 (row (and session (dsh-bridge--session-for-id session)))
+		 (label (and row (dsh-bridge--normalized-string
+						  (alist-get 'workspace row)))))
+	(or label
+		(let ((dir default-directory))
+		  (and (stringp dir)
+			   (not (string-empty-p dir))
+			   (file-directory-p dir)
+			   dir)))))
+
+(defun dsh-bridge--workspace-matches (label workspaces)
+  "The workspaces sharing display LABEL, an exact title or path match."
+  (seq-filter (lambda (w)
+				(or (equal (alist-get 'title w) label)
+					(equal (alist-get 'path w) label)))
+			  workspaces))
+
+(defun dsh-bridge--read-ambiguous-workspace (label workspaces)
+  "Read one of WORKSPACES (which share display LABEL) via a second prompt.
+Each candidate is annotated with its path, and the chosen workspace data is
+returned.  This is reachable only if the roster already holds duplicate
+titles; create and rename both refuse to add one."
+  (let* ((choices (mapcar (lambda (w) (cons (format "%s — %s" label (alist-get 'path w)) w))
+						  workspaces))
+		 (table (dsh-bridge--session-completion-table choices)))
+	(cdr (assoc (completing-read (format "Which %S? " label) table nil t) choices))))
+
+(defun dsh-bridge--read-workspace (workspaces)
+  "Read the workspace for a new session from WORKSPACES.
+Returns (ID) for an existing workspace, or (nil PATH TITLE) for a new one.
+
+The candidates are the workspaces' display labels.  The default is
+`dsh-bridge--workspace-default'; accepting it (or typing an answer that is
+exactly one workspace's label or path) selects that workspace.  Any other
+answer names a NEW workspace, whose directory is then read.  An answer
+matching several workspaces is resolved with a second prompt that shows each
+candidate's path."
+  (let* ((default (dsh-bridge--workspace-default))
+		 (choices (mapcar (lambda (w)
+							(cons (or (alist-get 'title w) (alist-get 'path w)) w))
+						  workspaces))
+		 (answer (completing-read
+				  (if default
+					  (format "Create session in workspace (default %s): " default)
+					"Create session in workspace: ")
+				  choices nil nil nil nil default))
+		 (matches (dsh-bridge--workspace-matches answer workspaces)))
+	(cond
+	 ((null (dsh-bridge--normalized-string answer))
+	  (user-error "dsh-bridge: a workspace name is required"))
+	 ((= (length matches) 1) (list (alist-get 'id (car matches))))
+	 ((> (length matches) 1)
+	  (list (alist-get 'id (dsh-bridge--read-ambiguous-workspace answer matches))))
+	 (t
+	  ;; A name the roster does not have: a NEW workspace.  Its directory is
+	  ;; the answer itself when that names an existing directory, else a
+	  ;; prompted one starting from the session default.
+	  (let* ((as-dir (and (file-directory-p answer) (expand-file-name answer)))
+			 (path (or as-dir
+					   (let ((answer-dir (read-directory-name "New workspace directory: "
+															  (dsh-bridge--workspace-default))))
+						 (and answer-dir (expand-file-name answer-dir))))))
+		(unless (and path (file-directory-p path))
+		  (user-error "dsh-bridge: %s is not an existing directory"
+					  (or path "no directory given")))
+		(list nil path answer))))))
+
+(defun dsh-bridge--workspace-payload (selection session-title)
+  "The POST /sessions/create payload for workspace SELECTION.
+SELECTION is the value `dsh-bridge--read-workspace' returns: (ID) to use an
+existing workspace, or (nil PATH TITLE) to create or reuse one at PATH.  A
+non-nil SESSION-TITLE names the new session."
+  (append
+   (if (car selection)
+	   (list (cons 'workspaceId (car selection)))
+	 (append (list (cons 'path (cadr selection)))
+			 (and (caddr selection) (list (cons 'workspaceTitle (caddr selection))))))
+   (and session-title (list (cons 'title session-title)))))
+
 (defun dsh-bridge--record-last-resolved (alist)
   "Record the session ALIST the host resolved for a nil-target request.
 Advisory display cache only (see `dsh-bridge--last-resolved-active')."
@@ -4875,64 +4965,38 @@ are not offered by `dsh-bridge--read-session-id' completion."
 	title))
 
 (defun dsh-bridge-create-session (&optional prompt-title)
-  "Create a new DSH session, optionally in a new workspace.
-Completing-read over the host's workspaces plus a \"New workspace…\" entry; a
-new workspace prompts for an existing directory (and an optional title).  The
-prompted directory is expanded to a fully-qualified path before it is sent, so
-a `~'-relative or relative answer is accepted.  The new session is bound as the
-default target.
+  "Create a new DSH session in an existing or new workspace.
+This function reads a workspace in which to put the session, defaulting
+to the workspace returned by `dsh-bridge--workspace-default'.  If the
+user names a workspace that does not yet exist, create a new one after
+prompting for the workspace's working directory.
 
-PROMPT-TITLE requires a session title before the session is created.  The
-transient dispatcher passes it, since completion cannot offer untitled
-sessions (see `dsh-bridge--read-session-id'); the DSH-Sessions \"+\" binding
-does not, leaving the session untitled."
+The new session is bound as the default target.
+
+If PROMPT-TITLE is non-nil, read a title before creating the session,
+rather than leaving the session untitled."
   (interactive (list current-prefix-arg))
   (let* ((wresult (dsh-bridge--request "GET" "/workspaces" nil))
 		 (wstatus (car wresult))
-		 (wlist (cdr wresult)))
+		 (workspaces (and (eq wstatus 200) (cdr (assoc 'workspaces (cdr wresult))))))
 	(if (not (eq wstatus 200))
 		(message "dsh-bridge: %s"
-				 (or (dsh-bridge--error-message nil wstatus wlist)
+				 (or (dsh-bridge--error-message nil wstatus (cdr wresult))
 					 "failed to list workspaces"))
-	  ;; An empty workspace list is a valid roster, not a failure: "New
-	  ;; workspace…" is then the only choice.
-	  (let* ((workspaces (cdr (assoc 'workspaces wlist)))
-			 (labels (mapcar (lambda (w) (or (alist-get 'title w) (alist-get 'path w)))
-							 workspaces))
-			 (choice (completing-read "Create session in workspace: "
-									  (append labels (list "New workspace…"))
-									  nil t))
-			 (is-new (equal choice "New workspace…"))
-			 (workspaceId (and (not is-new)
-							   (let ((match (seq-find (lambda (w)
-														(equal (or (alist-get 'title w)
-																   (alist-get 'path w))
-																 choice))
-													  workspaces)))
-								 (and match (alist-get 'id match)))))
-			 (new-path (and is-new (expand-file-name
-									(read-directory-name "New workspace directory: ")))))
-		(if (and is-new (not (file-directory-p new-path)))
-			(user-error "dsh-bridge: %s is not an existing directory" new-path)
-		  (let* ((workspaceTitle (and is-new
-									  (let ((title (read-string "Workspace title (optional): ")))
-										(and (not (string-empty-p title)) title))))
-				 (sessionTitle (and prompt-title (dsh-bridge--read-required-session-title)))
-				 (payload (append (and workspaceId (list (cons 'workspaceId workspaceId)))
-								  (and new-path (list (cons 'path new-path)))
-								  (and workspaceTitle (list (cons 'workspaceTitle workspaceTitle)))
-								  (and sessionTitle (list (cons 'title sessionTitle)))))
-				 (creates (dsh-bridge--request "POST" "/sessions/create" payload))
-				 (cstatus (car creates))
-				 (calist (cdr creates)))
-			(if (eq cstatus 201)
-				(let ((new-id (alist-get 'sessionId calist)))
-				  (dsh-bridge--fetch-sessions)
-				  (dsh-bridge--refresh-sessions-buffer)
-				  (dsh-bridge-set-default-target new-id)
-				  (message "dsh-bridge: created a new session"))
-			  (message "dsh-bridge: %s"
-					   (dsh-bridge--error-message nil cstatus calist)))))))))
+	  (let* ((selection (dsh-bridge--read-workspace workspaces))
+			 (sessionTitle (and prompt-title (dsh-bridge--read-required-session-title)))
+			 (payload (dsh-bridge--workspace-payload selection sessionTitle))
+			 (creates (dsh-bridge--request "POST" "/sessions/create" payload))
+			 (cstatus (car creates))
+			 (calist (cdr creates)))
+		(if (eq cstatus 201)
+			(let ((new-id (alist-get 'sessionId calist)))
+			  (dsh-bridge--fetch-sessions)
+			  (dsh-bridge--refresh-sessions-buffer)
+			  (dsh-bridge-set-default-target new-id)
+			  (message "dsh-bridge: created a new session"))
+		  (message "dsh-bridge: %s"
+				   (dsh-bridge--error-message nil cstatus calist)))))))
 
 (defun dsh-bridge-create-titled-session ()
   "Create a new DSH session with an explicit title.

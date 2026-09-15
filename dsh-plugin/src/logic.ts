@@ -1439,3 +1439,37 @@ export function attachmentErrorHttpStatus(code: string): 400 | 413 | 500 | 501 {
   if (code === 'ATTACHMENT_FILES_UNSUPPORTED') return 501
   return 500
 }
+
+/**
+ * A per-key critical section: operations sharing a key run one after another,
+ * in the order they were requested, while operations under different keys run
+ * concurrently.
+ *
+ * This exists for check-then-act sequences whose decision is not itself
+ * serialized by the service behind it. The workspace title rule is the live
+ * example: `/workspaces/rename` and `/sessions/create` both read the roster
+ * and then write a title, and the harness's workspace registry allows
+ * duplicate titles, so two interleaved requests could each see a free name
+ * and both claim it. Holding `runExclusive('workspace-titles', ...)` across
+ * the read and the write makes the pair atomic within this process.
+ *
+ * The section keeps chaining even when an operation throws, so a rejected
+ * caller cannot strand the key; each caller still sees its own error.
+ */
+export class KeyedSerial {
+  private readonly tails = new Map<string, Promise<void>>()
+
+  async runExclusive<T>(key: string, operation: () => Promise<T>): Promise<T> {
+    const tail = this.tails.get(key) ?? Promise.resolve()
+    const critical = tail.then(operation)
+    // Chain on the settled section so a throw releases the key.
+    const settled = critical.then(() => undefined, () => undefined)
+    this.tails.set(key, settled)
+    try {
+      return await critical
+    } finally {
+      // Drop the key once its last section drains, so the map stays bounded.
+      if (this.tails.get(key) === settled) this.tails.delete(key)
+    }
+  }
+}

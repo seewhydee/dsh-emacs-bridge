@@ -63,7 +63,10 @@
 //   POST /dsh-bridge/sessions/create { workspaceId | path, workspaceTitle?, title? }
 //        -> create a session in a workspace (exactly one of the two keys);
 //        `title` names the new session when the profile mounts a session
-//        title service, else the session stays untitled
+//        title service, else the session stays untitled.  A `path` already
+//        owned by a workspace reuses it; otherwise `workspaceTitle` names the
+//        new workspace and a title another workspace holds is 409 (the
+//        name-uniqueness rule `/workspaces/rename` also keeps)
 //   POST /dsh-bridge/fork { sessionId?, atSeq? } -> branch a completed-turn
 //        prefix into a new session (returns the child id; the source may be
 //        cold — it is never resumed; 409 session/fork-unavailable or
@@ -135,6 +138,7 @@ import {
   userPrompts,
   workspaceRefsBySession,
   workspaceTitleConflict,
+  KeyedSerial,
   type AttachmentRequest,
   type BridgeImageMediaType,
   type LiveSessionLike,
@@ -663,6 +667,15 @@ export function apply(ctx: Context): void {
 
   /** Pending ask-user questions offered to Emacs, keyed by question id. */
   const pendingQuestions = new Map<string, PendingQuestion>()
+
+  /**
+   * Serializes every workspace-title check-then-write in this process. The
+   * harness's workspace registry allows duplicate display titles, so the
+   * uniqueness rule this bridge enforces on rename/create is ours to keep:
+   * two interleaved requests could otherwise both read a free name and both
+   * claim it. Both writers hold this key across the read and the write.
+   */
+  const workspaceTitles = new KeyedSerial()
 
   /** Write one SSE frame to every subscribed client, dropping dead ones. */
   function broadcast(frame: string): void {
@@ -2095,17 +2108,70 @@ export function apply(ctx: Context): void {
             sendJson(res, 200, { ok: true, workspaceId, title: workspace.title })
             return
           }
-          if (workspaceTitleConflict(normalized, workspaceRegistry.list(), workspaceId)) {
+          const outcome = await workspaceTitles.runExclusive('workspace-titles', async () => {
+            // Re-read inside the section: a concurrent rename or create may
+            // have taken the name between the lookup above and here.
+            if (workspaceTitleConflict(normalized, workspaceRegistry.list(), workspaceId)) {
+              return 'conflict' as const
+            }
+            await workspace.setTitle(normalized)
+            return 'renamed' as const
+          })
+          if (outcome === 'conflict') {
             sendJson(res, 409, { error: `workspace named ${normalized} exists` })
             return
           }
-          await workspace.setTitle(normalized)
           sendJson(res, 200, { ok: true, workspaceId, title: normalized })
           broadcastSessionsChanged()
         } catch (error: unknown) {
           sendJson(res, bridgeErrorStatus(error), { error: error instanceof Error ? error.message : String(error) })
         }
         return
+      }
+
+      /**
+       * Resolve the workspace a new session should live in: either a known id,
+       * or a directory path that is created as a workspace (reusing the one
+       * already owning that path).
+       *
+       * A path that is not yet owned must not claim a display title another
+       * workspace already holds: the harness registry permits duplicate
+       * titles, so the rule is ours to keep, and it is what lets Emacs
+       * complete a workspace by name. The read (`resolveByPath` +
+       * `list()`) and the write (`create`) therefore run inside
+       * `workspaceTitles`, whose other writer is `/workspaces/rename`;
+       * without it two concurrent creates of different directories could
+       * both observe a free name and both claim it. A losing request gets a
+       * 409 and creates nothing.
+       *
+       * A path already owned by a workspace reuses that workspace and ignores
+       * WORKSPACE-TITLE, matching the registry's "same directory is the same
+       * workspace" rule.
+       */
+      async function resolveOrCreateWorkspace(
+        workspaceId: string | undefined,
+        path: string | undefined,
+        workspaceTitle: string | undefined,
+      ): Promise<WorkspaceEntityService> {
+        const workspaceRegistry = ctx.get('workspaceRegistry') as WorkspaceRegistryService | undefined
+        if (workspaceRegistry === undefined) {
+          throw new BridgeError(501, 'profile lacks a workspace registry')
+        }
+        if (workspaceId !== undefined) {
+          const existing = workspaceRegistry.get(workspaceId)
+          if (existing === undefined) throw new BridgeError(404, `workspace ${workspaceId} is not known`)
+          return existing
+        }
+        const target = path as string
+        return await workspaceTitles.runExclusive('workspace-titles', async () => {
+          const owner = await workspaceRegistry.resolveByPath(target)
+          if (owner !== undefined) return owner
+          if (workspaceTitle !== undefined
+            && workspaceTitleConflict(workspaceTitle, workspaceRegistry.list())) {
+            throw new BridgeError(409, `workspace named ${workspaceTitle} exists`)
+          }
+          return await workspaceRegistry.create(target, workspaceTitle)
+        })
       }
 
       if (req.method === 'POST' && pathname === '/dsh-bridge/sessions/create') {
@@ -2125,27 +2191,7 @@ export function apply(ctx: Context): void {
             sendJson(res, 400, { error: 'exactly one of workspaceId or path is required' })
             return
           }
-          const workspaceRegistry = ctx.get('workspaceRegistry') as WorkspaceRegistryService | undefined
-          if (workspaceRegistry === undefined) {
-            sendJson(res, 501, { error: 'profile lacks a workspace registry' })
-            return
-          }
-          let workspace: WorkspaceEntityService
-          if (workspaceId !== undefined) {
-            const existing = workspaceRegistry.get(workspaceId)
-            if (existing === undefined) {
-              sendJson(res, 404, { error: `workspace ${workspaceId} is not known` })
-              return
-            }
-            workspace = existing
-          } else {
-            const existing = await workspaceRegistry.resolveByPath(path as string)
-            if (existing !== undefined) {
-              workspace = existing
-            } else {
-              workspace = await workspaceRegistry.create(path as string, workspaceTitle)
-            }
-          }
+          const workspace = await resolveOrCreateWorkspace(workspaceId, path, workspaceTitle)
           const sessionId = `session-${randomUUID()}` as SessionId
           const composition = await composeBridgeAgent(undefined)
           const handle = await ctx.agents.create({

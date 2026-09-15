@@ -130,7 +130,7 @@ menu:
 * `t` — set the default target session.
 * `u` — clear the default target session.
 * `l` — open the DSH-Sessions buffer.
-* `+` — create a new session, prompting for its title.
+* `+` — create a new session, prompting for its workspace and its title.
 
 ### DSH-Sessions buffer
 
@@ -151,7 +151,7 @@ live status.  The following commands are available from here:
 * `v` — toggle whether archived sessions are shown (hidden by default).
 * `R` — rename the session at point.
 * `d` — archive the session at point.
-* `+` — create a new session, optionally in a new workspace.
+* `+` — create a new session, in an existing or new workspace.
 * `W` — rename the workspace of the session at point.
 * `D` — describe the session at point.
 * `g` — refresh the DSH-Sessions buffer.
