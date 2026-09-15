@@ -2378,9 +2378,9 @@ raw id is not used, so an untitled row reads as untitled."
       (should (equal (cdr (assoc 'title (caddr rename))) "New WS")))))
 
 (ert-deftest dsh-bridge-create-session-marshals-args ()
-  "Create GETs /workspaces, then POSTs the chosen workspace and binds the new
-session as default target.  Without PROMPT-TITLE no title is sent."
-  (let ((called nil) (bound-target nil))
+  "Create fetches /workspaces, POSTs the chosen workspace, and leaves the
+default target alone (only the dispatcher's titled create binds it)."
+  (let ((called nil) (bound-target 'unset))
     (cl-letf (((symbol-function 'completing-read)
                (lambda (_prompt _table &rest _rest) "WS B"))
               ((symbol-function 'dsh-bridge--request)
@@ -2396,21 +2396,20 @@ session as default target.  Without PROMPT-TITLE no title is sent."
               ((symbol-function 'dsh-bridge--refresh-sessions-buffer) (lambda () nil))
               ((symbol-function 'dsh-bridge-set-default-target)
                (lambda (id) (setq bound-target id))))
-      ;; No PROMPT-TITLE: the DSH-Sessions "+" route, which never asks.
-      (cl-letf (((symbol-function 'read-string)
-                 (lambda (&rest _) (ert-fail "prompted for a title without PROMPT-TITLE"))))
-        (dsh-bridge-create-session)))
-    (let ((get (cdr (assoc "/workspaces" (mapcar (lambda (c) (list (cadr c) c)) called))))
-          (create (cadr (assoc "/sessions/create"
+      ;; Without SET-TITLE: the DSH-Sessions "+" route, which never asks.
+      (let ((dsh-bridge-default-session nil))
+        (cl-letf (((symbol-function 'read-string)
+                   (lambda (&rest _) (ert-fail "prompted for a title without set-title"))))
+          (dsh-bridge-create-session))))
+    (let ((create (cadr (assoc "/sessions/create"
                                (mapcar (lambda (c) (list (cadr c) c)) called)))))
-      (should get)
       (should create)
       (should (equal (cdr (assoc 'workspaceId (caddr create))) "w2"))
       (should-not (assoc 'title (caddr create)))
-      (should (equal bound-target "s-new")))))
+      (should (eq bound-target 'unset)))))
 
 (ert-deftest dsh-bridge-create-session-prompts-for-required-title ()
-  "With PROMPT-TITLE, an empty answer is refused and the title is POSTed.
+  "With SET-TITLE, an empty answer is refused and the title is POSTed.
 This is the transient dispatcher's route, which must produce a completable
 (named) session."
   (let ((called nil) (prompts 0))
@@ -2428,11 +2427,11 @@ This is the transient dispatcher's route, which must produce a completable
               ;; accepted the first answer would POST "" and stop at one read.
               ((symbol-function 'read-string)
                (lambda (&rest _) (setq prompts (1+ prompts))
-                       (nth (1- prompts) '("" "   " "My New Session"))))
+                 (nth (1- prompts) '("" "   " "My New Session"))))
               ((symbol-function 'dsh-bridge--fetch-sessions) (lambda () nil))
-              ((symbol-function 'dsh-bridge--refresh-sessions-buffer) (lambda () nil))
-              ((symbol-function 'dsh-bridge-set-default-target) (lambda (_id) nil)))
-      (dsh-bridge-create-session t))
+              ((symbol-function 'dsh-bridge--refresh-sessions-buffer) (lambda () nil)))
+      (let ((dsh-bridge-default-session nil))
+        (dsh-bridge-create-session t)))
     (let ((create (cadr (assoc "/sessions/create"
                                (mapcar (lambda (c) (list (cadr c) c)) called)))))
       (should create)
@@ -2440,19 +2439,23 @@ This is the transient dispatcher's route, which must produce a completable
       ;; The two blank answers were rejected by re-prompting.
       (should (= prompts 3)))))
 
-(ert-deftest dsh-bridge-create-titled-session-forwards-prompt-title ()
-  "The dispatcher's create verb is the prompt-free command with PROMPT-TITLE."
-  (let ((seen 'none))
+(ert-deftest dsh-bridge-create-titled-session-forwards-title-and-binds ()
+  "The dispatcher's create verb demands a title and binds the new session as
+the default target."
+  (let ((seen 'none) (bound nil))
     (cl-letf (((symbol-function 'dsh-bridge-create-session)
-               (lambda (&optional prompt-title) (setq seen prompt-title))))
+               (lambda (&optional set-title) (setq seen set-title) "s-new"))
+              ((symbol-function 'dsh-bridge-set-default-target)
+               (lambda (id) (setq bound id))))
       (dsh-bridge-create-titled-session))
-    (should (eq seen t))))
+    (should (eq seen t))
+    (should (equal bound "s-new"))))
 
 (ert-deftest dsh-bridge-create-session-empty-workspaces ()
   "With no workspaces, a fresh name creates one at the prompted directory.
 The roster is offered as-is (no \"New workspace…\" sentinel); an answer that
 matches no workspace names a new one."
-  (let ((called nil) (table-seen nil) (bound-target nil))
+  (let ((called nil) (table-seen nil))
     (cl-letf (((symbol-function 'completing-read)
                (lambda (_prompt table &rest _rest)
                  (setq table-seen table)
@@ -2460,7 +2463,7 @@ matches no workspace names a new one."
               ((symbol-function 'read-directory-name)
                (lambda (&rest _) default-directory))
               ((symbol-function 'read-string)
-               (lambda (&rest _) (ert-fail "prompted for a title without PROMPT-TITLE")))
+               (lambda (&rest _) (ert-fail "prompted for a title without set-title")))
               ((symbol-function 'dsh-bridge--request)
                (lambda (method path payload)
                  (push (list method path payload) called)
@@ -2468,10 +2471,9 @@ matches no workspace names a new one."
                      (cons 200 (list (cons 'workspaces nil)))
                    (cons 201 (list (cons 'sessionId "s-new"))))))
               ((symbol-function 'dsh-bridge--fetch-sessions) (lambda () nil))
-              ((symbol-function 'dsh-bridge--refresh-sessions-buffer) (lambda () nil))
-              ((symbol-function 'dsh-bridge-set-default-target)
-               (lambda (id) (setq bound-target id))))
-      (dsh-bridge-create-session))
+              ((symbol-function 'dsh-bridge--refresh-sessions-buffer) (lambda () nil)))
+      (let ((dsh-bridge-default-session nil))
+        (dsh-bridge-create-session)))
     ;; An empty roster yields an empty candidate list, not a sentinel entry.
     (should (equal (all-completions "" table-seen) nil))
     (let ((create (cadr (assoc "/sessions/create"
@@ -2481,8 +2483,7 @@ matches no workspace names a new one."
       ;; The answer arrives in `read-directory-name' form, so it must be
       ;; expanded before it reaches the host.
       (should (equal (cdr (assoc 'path (caddr create)))
-                     (expand-file-name default-directory))))
-    (should (equal bound-target "s-new"))))
+                     (expand-file-name default-directory))))))
 
 (ert-deftest dsh-bridge-create-session-expands-new-workspace-path ()
   "A `~'-relative new-workspace answer is expanded before it is POSTed.
@@ -2497,7 +2498,7 @@ The host's workspace registry rejects a path that is not fully qualified."
               ((symbol-function 'file-directory-p)
                (lambda (dir) (equal dir (expand-file-name "~/dsh-bridge-test-dir/"))))
               ((symbol-function 'read-string)
-               (lambda (&rest _) (ert-fail "prompted for a title without PROMPT-TITLE")))
+               (lambda (&rest _) (ert-fail "prompted for a title without set-title")))
               ((symbol-function 'dsh-bridge--request)
                (lambda (method path payload)
                  (push (list method path payload) called)
@@ -2505,10 +2506,9 @@ The host's workspace registry rejects a path that is not fully qualified."
                      (cons 200 (list (cons 'workspaces nil)))
                    (cons 201 (list (cons 'sessionId "s-new"))))))
               ((symbol-function 'dsh-bridge--fetch-sessions) (lambda () nil))
-              ((symbol-function 'dsh-bridge--refresh-sessions-buffer) (lambda () nil))
-              ((symbol-function 'dsh-bridge-set-default-target)
-               (lambda (id) nil)))
-      (dsh-bridge-create-session))
+              ((symbol-function 'dsh-bridge--refresh-sessions-buffer) (lambda () nil)))
+      (let ((dsh-bridge-default-session nil))
+        (dsh-bridge-create-session)))
     (let ((create (cadr (assoc "/sessions/create"
                                (mapcar (lambda (c) (list (cadr c) c)) called)))))
       (should create)
@@ -2526,19 +2526,33 @@ The host's workspace registry rejects a path that is not fully qualified."
                (lambda (method path payload)
                  (push (list method path payload) called)
                  (cons 200 (list (cons 'workspaces nil))))))
-      (should-error (dsh-bridge-create-session) :type 'user-error))
+      (let ((dsh-bridge-default-session nil))
+        (should-error (dsh-bridge-create-session) :type 'user-error)))
     (should-not (assoc "/sessions/create"
                        (mapcar (lambda (c) (list (cadr c) c)) called)))))
 
+(ert-deftest dsh-bridge-create-session-reports-host-error ()
+  "A failed POST surfaces the host's own error message, not a generic one."
+  (let ((dsh-bridge-default-session nil) (caught nil))
+    (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) "WS A"))
+              ((symbol-function 'dsh-bridge--request)
+               (lambda (method path payload)
+                 (if (equal path "/workspaces")
+                     (cons 200
+                           (list (cons 'workspaces
+                                       (list (list (cons 'id "w1") (cons 'title "WS A"))))))
+                   (cons 409 (list (cons 'error "workspace named WS A exists")))))))
+      (setq caught (should-error (dsh-bridge-create-session) :type 'error)))
+    (should (string-match-p "workspace named WS A exists"
+                            (error-message-string caught)))))
+
 (ert-deftest dsh-bridge-create-session-default-accepts-ret ()
-  "RET (the completion default) selects the default workspace by id.
-The default is the last-active live session's workspace, so accepting it
-skips name matching entirely."
-  (let ((called nil) (bound-target nil) (seen-default nil))
+  "RET (the prompt default) addresses the default workspace by id.
+The default is the effective session's workspace, verified against the fresh
+roster, so accepting it skips name matching entirely."
+  (let ((called nil) (seen-prompt nil))
     (cl-letf (((symbol-function 'dsh-bridge--fetch-sessions) (lambda () nil))
               ((symbol-function 'dsh-bridge--refresh-sessions-buffer) (lambda () nil))
-              ((symbol-function 'dsh-bridge-set-default-target)
-               (lambda (id) (setq bound-target id)))
               ((symbol-function 'dsh-bridge--request)
                (lambda (method path payload)
                  (push (list method path payload) called)
@@ -2552,26 +2566,42 @@ skips name matching entirely."
                    (cons 201 (list (cons 'sessionId "s-new")))))))
       (let ((dsh-bridge--sessions-cache
              '(((id . "s1") (live . t) (lastActive . 20)
-                (workspace . "WS B") (workspaceId . "w2")))))
+                (workspace . "WS B") (workspaceId . "w2"))))
+            (dsh-bridge-default-session "s1"))
         (cl-letf (((symbol-function 'completing-read)
-                   ;; Stands in for accepting DEF: completing-read returns it.
-                   (lambda (_prompt _table &rest _rest)
-                     (setq seen-default (dsh-bridge--workspace-default))
-                     seen-default)))
+                   ;; Stands in for accepting the prompt default: "".
+                   (lambda (prompt &rest _rest)
+                     (setq seen-prompt prompt)
+                     "")))
           (dsh-bridge-create-session))))
-    (should (equal seen-default "WS B"))
-    ;; Accepting the default reuses the workspace by id, and does not treat
-    ;; the label as a new workspace.
+    ;; The prompt names the default workspace, but completion returns no
+    ;; candidate; the id, not the name, is what the request carries.
+    (should (string-match-p "WS B" seen-prompt))
     (let ((create (cadr (assoc "/sessions/create"
                                (mapcar (lambda (c) (list (cadr c) c)) called)))))
       (should create)
       (should (equal (cdr (assoc 'workspaceId (caddr create))) "w2"))
-      (should-not (assoc 'path (caddr create)))
-      (should (equal bound-target "s-new")))))
+      (should-not (assoc 'path (caddr create))))))
+
+(ert-deftest dsh-bridge-create-session-default-verified-against-roster ()
+  "A cached workspace id absent from the fresh roster is not the default.
+RET then has no default to accept, so it is refused."
+  (let ((dsh-bridge-default-session "s1"))
+    (cl-letf (((symbol-function 'dsh-bridge--request)
+               (lambda (method path payload)
+		 (if (equal path "/workspaces")
+                     (cons 200
+                           (list (cons 'workspaces
+                                       (list (list (cons 'id "w1") (cons 'title "WS A")
+                                                   (cons 'path "/a"))))))
+                   (cons 201 (list (cons 'sessionId "s-new"))))))
+              ((symbol-function 'completing-read) (lambda (&rest _) "")))
+      (let ((dsh-bridge--sessions-cache
+             '(((id . "s1") (workspace . "WS gone") (workspaceId . "w-gone")))))
+	(should-error (dsh-bridge-create-session) :type 'user-error)))))
 
 (ert-deftest dsh-bridge-workspace-helpers ()
-  "`dsh-bridge--workspace-matches' matches titles and paths exactly;
-`dsh-bridge--workspace-payload' shapes the existing/new POST bodies."
+  "`dsh-bridge--workspace-matches' matches titles and paths exactly."
   (let ((workspaces '(((id . "w1") (title . "WS A") (path . "/a"))
                       ((id . "w2") (title . "WS B") (path . "/b")))))
     ;; Exact title or path; no prefix or case folding.
@@ -2584,38 +2614,67 @@ skips name matching entirely."
     (should-not (dsh-bridge--workspace-matches "WS" workspaces))
     ;; Duplicate titles are a roster anomaly, but must still disambiguate.
     (should (= (length (dsh-bridge--workspace-matches
-                        "WS A"
-                        (append workspaces '(((id . "w3") (title . "WS A") (path . "/c"))))))
-               2)))
-  ;; An existing workspace addresses by id, with no path or title.
-  (should (equal (dsh-bridge--workspace-payload '("w2") nil)
-                 '((workspaceId . "w2"))))
-  (should (equal (dsh-bridge--workspace-payload '("w2") "Sess")
-                 '((workspaceId . "w2") (title . "Sess"))))
-  ;; A new workspace addresses by path + the typed name as its title.
-  (should (equal (dsh-bridge--workspace-payload '(nil "/new" "Fresh") nil)
-                 '((path . "/new") (workspaceTitle . "Fresh"))))
-  (should (equal (dsh-bridge--workspace-payload '(nil "/new" "Fresh") "Sess")
-                 '((path . "/new") (workspaceTitle . "Fresh") (title . "Sess")))))
+			"WS A"
+			(append workspaces '(((id . "w3") (title . "WS A") (path . "/c"))))))
+               2))))
 
-(ert-deftest dsh-bridge-workspace-default-falls-back-to-default-directory ()
-  "With no live session, the default is the buffer's existing directory."
-  (let ((dsh-bridge--sessions-cache nil))
-    (should (equal (dsh-bridge--workspace-default) default-directory)))
-  ;; A live session carrying a workspace title wins over the directory.
-  (let ((dsh-bridge--sessions-cache
-         '(((id . "s1") (live . t) (workspace . "WS X") (workspaceId . "w9")))))
-    (should (equal (dsh-bridge--workspace-default) "WS X"))))
+(ert-deftest dsh-bridge-workspace-default-verifies-roster ()
+  "The default is the effective session's workspace, when the fresh roster has
+it.  A cached id the roster no longer knows yields no default."
+  (let ((roster '(((id . "w9") (title . "WS X") (path . "/x")))))
+    (let ((dsh-bridge--sessions-cache
+           '(((id . "s1") (workspace . "WS X") (workspaceId . "w9"))))
+          (dsh-bridge-default-session "s1"))
+      (should (equal (alist-get 'id (dsh-bridge--workspace-default roster)) "w9")))
+    ;; A workspace archived (or otherwise gone) is not offered.
+    (let ((dsh-bridge--sessions-cache
+           '(((id . "s1") (workspace . "WS gone") (workspaceId . "w-gone"))))
+          (dsh-bridge-default-session "s1"))
+      (should-not (dsh-bridge--workspace-default roster)))
+    ;; No effective session: no default.
+    (let ((dsh-bridge--sessions-cache nil)
+          (dsh-bridge-default-session nil))
+      (should-not (dsh-bridge--workspace-default roster)))))
 
-(ert-deftest dsh-bridge-create-session-new-workspace-from-directory-answer ()
-  "An answer that is itself an existing directory becomes the new workspace.
-This is the escape hatch that avoids the directory prompt entirely."
+(ert-deftest dsh-bridge-read-workspace-return-shapes ()
+  "`dsh-bridge--read-workspace' returns an existing workspace's id, or a
+(PATH . TITLE) descriptor for a new one; duplicate titles disambiguate."
+  (let ((workspaces '(((id . "w1") (title . "WS A") (path . "/a"))
+                      ((id . "w2") (title . "WS B") (path . "/b")))))
+    (cl-letf (((symbol-function 'dsh-bridge--get-workspaces) (lambda () workspaces))
+              ((symbol-function 'dsh-bridge--effective-session)
+               (lambda (&optional _buffer _nodefault) nil))
+              ((symbol-function 'read-directory-name) (lambda (&rest _) "/new"))
+              ((symbol-function 'file-directory-p)
+               (lambda (dir) (equal dir "/new"))))
+      ;; An existing workspace is addressed by id.
+      (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) "WS B")))
+	(should (equal (dsh-bridge--read-workspace "Workspace") "w2")))
+      ;; An unknown name is a new workspace, whose directory is read.
+      (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) "Fresh WS")))
+	(should (equal (dsh-bridge--read-workspace "Workspace")
+                       (cons "/new" "Fresh WS"))))
+      ;; Duplicate titles resolve with a second, path-annotated prompt.
+      (let ((dups (append workspaces '(((id . "w3") (title . "WS B") (path . "/c"))))))
+	(cl-letf (((symbol-function 'dsh-bridge--get-workspaces) (lambda () dups))
+                  ((symbol-function 'completing-read)
+                   (lambda (prompt &rest _)
+                     (if (string-match-p "Which" prompt) "WS B — /c" "WS B"))))
+          (should (equal (dsh-bridge--read-workspace "Workspace") "w3")))))))
+
+(ert-deftest dsh-bridge-create-session-new-workspace-always-prompts-directory ()
+  "A new workspace name always prompts for the workspace directory.
+An answer that happens to name an existing directory is a name like any
+other; the directory must come from the prompt."
   (let ((called nil) (prompted nil))
     (cl-letf (((symbol-function 'completing-read)
                (lambda (&rest _) "/direct/answer"))
-              ((symbol-function 'file-directory-p) (lambda (_dir) t))
               ((symbol-function 'read-directory-name)
-               (lambda (&rest _) (setq prompted t) default-directory))
+               (lambda (&rest _) (setq prompted t) "/prompted/dir"))
+              ;; Only the prompted directory exists, so an implementation
+              ;; that short-circuited on the answer would not POST.
+              ((symbol-function 'file-directory-p)
+               (lambda (dir) (equal dir (expand-file-name "/prompted/dir"))))
               ((symbol-function 'dsh-bridge--request)
                (lambda (method path payload)
                  (push (list method path payload) called)
@@ -2623,16 +2682,16 @@ This is the escape hatch that avoids the directory prompt entirely."
                      (cons 200 (list (cons 'workspaces nil)))
                    (cons 201 (list (cons 'sessionId "s-new"))))))
               ((symbol-function 'dsh-bridge--fetch-sessions) (lambda () nil))
-              ((symbol-function 'dsh-bridge--refresh-sessions-buffer) (lambda () nil))
-              ((symbol-function 'dsh-bridge-set-default-target) (lambda (_id) nil)))
-      (dsh-bridge-create-session))
+              ((symbol-function 'dsh-bridge--refresh-sessions-buffer) (lambda () nil)))
+      (let ((dsh-bridge-default-session nil))
+        (dsh-bridge-create-session)))
+    (should prompted)
     (let ((create (cadr (assoc "/sessions/create"
                                (mapcar (lambda (c) (list (cadr c) c)) called)))))
       (should create)
-      (should (equal (cdr (assoc 'path (caddr create))) (expand-file-name "/direct/answer")))
-      (should (equal (cdr (assoc 'workspaceTitle (caddr create))) "/direct/answer")))
-    ;; The answer already names a directory, so the directory prompt is skipped.
-    (should-not prompted)))
+      (should (equal (cdr (assoc 'path (caddr create)))
+                     (expand-file-name "/prompted/dir")))
+      (should (equal (cdr (assoc 'workspaceTitle (caddr create))) "/direct/answer")))))
 
 (ert-deftest dsh-bridge-status-glyph-session-states ()
   "The status glyph reflects the session state under the geometric indicator:
