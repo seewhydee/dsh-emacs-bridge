@@ -6708,10 +6708,20 @@ Another session, an invisible report, or the option off does not."
   (let ((buffer (get-buffer "*dsh-bridge-prompt*")))
     (when (buffer-live-p buffer) (kill-buffer buffer))))
 
+(defun dsh-bridge-test--attachment-format (path)
+  "The attachment tag for PATH, without a trailing newline.
+A test-local stand-in for the removed `dsh-bridge--attachment-format':
+the parser specs build tag text directly instead of routing it through
+the insertion command, so they must not depend on that command's shape
+(or force the source to keep a formatting helper just for them)."
+  (concat "<#attachment filename=\""
+          (dsh-bridge--attachment-escape path)
+          "\">"))
+
 (ert-deftest dsh-bridge-attachment-format-roundtrip ()
   "Tag values round-trip paths containing quotes and backslashes."
   (let* ((path "/tmp/a \"quoted\" \\ file.png")
-         (tag (dsh-bridge--attachment-format path))
+         (tag (dsh-bridge-test--attachment-format path))
          (parsed (dsh-bridge--parse-attachments (concat tag "\nbody\n"))))
     (should (equal (cdr parsed) (list (list :path path))))
     (should (equal (car parsed) "body\n"))))
@@ -6719,8 +6729,8 @@ Another session, an invisible report, or the option off does not."
 (ert-deftest dsh-bridge-parse-attachments-order-and-malformed ()
   "Tag lines are extracted in order and removed from the text; a tag with a
 relative `filename' is malformed and stays as text."
-  (let* ((one (dsh-bridge--attachment-format "/tmp/one.txt"))
-         (two (dsh-bridge--attachment-format "/tmp/two.png"))
+  (let* ((one (dsh-bridge-test--attachment-format "/tmp/one.txt"))
+         (two (dsh-bridge-test--attachment-format "/tmp/two.png"))
          (parsed (dsh-bridge--parse-attachments
                   (concat "lead\n" one "\nmiddle\n" two "\ntail\n"))))
     (should (equal (cdr parsed)

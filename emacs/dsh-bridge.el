@@ -1436,8 +1436,8 @@ Entries whose cdr is nil (e.g. a pseudo-entry) get no annotation."
 
 (defun dsh-bridge--id-tail (id)
   "A short stable suffix of session id ID, for display disambiguation.
-DSH ids are `session-<uuid>', so the leading characters are identical; the
-tail is the distinguishing part."
+DSH ids \"session-<uuid>\", so the leading characters are identical.
+For this purpose, we extract the last 6 characters from the end."
   (substring id (max 0 (- (length id) 6))))
 
 (defun dsh-bridge--disambiguation-suffixes (sessions)
@@ -1475,11 +1475,11 @@ share a title, a second completing-read resolves the collision.
 Untitled sessions are not offered for completion.
 
 PSEUDO-ENTRY, if non-nil, is an extra choice that returns nil, such as
-\"(last-active)\" or \"(default)\").  With there are no candidate
-sessions and no PSEUDO-ENTRY, the function signals an error."
+\"(last-active)\" or \"(default)\").  With no candidate sessions and no
+PSEUDO-ENTRY, signal an error."
   (let* ((sessions (cdr (dsh-bridge--fetch-sessions)))
 		 (choices (seq-filter
-				   #'car ; drop untitled sessions, whose label is nil under NO-DEFAULT
+				   #'car ; drop untitled sessions, whose label is nil
 				   (mapcar (lambda (s) ; return (LABEL . SESSION-DATA)
 							 (cons (dsh-bridge--session-label s t) s))
 						   sessions)))
@@ -1888,14 +1888,6 @@ name such as \"filename\"."
 	(replace-regexp-in-string "\\\\\\(.\\)" "\\1"
 							  (match-string 1 attributes))))
 
-(defun dsh-bridge--attachment-format (path)
-  "Return the attachment tag for PATH.
-In the result, PATH is escaped for the double-quoted attribute value,
-and there is no trailing newline."
-  (concat "<#attachment filename=\""
-		  (dsh-bridge--attachment-escape path)
-		  "\">"))
-
 (defun dsh-bridge--parse-attachments (text)
   "Return (CLEAN-TEXT . ATTACHMENTS) parsed from TEXT.
 ATTACHMENTS lists the tag lines with an absolute `filename' in order, as
@@ -1949,13 +1941,10 @@ ATTACHMENTS is a list of plists (:path PATH).  The vector makes
 
 (defun dsh-bridge--insert-attachment-tag (path)
   "Insert an attachment tag for PATH at point.
-The tag is plain text.  Highlighting and recognition both key off the
-`<#attachment filename=\"...\">' shape (see
-`dsh-bridge--attachment-tag-search'), so editing the tag out of shape
-makes the highlight disappear: the highlight is the affordance that the
-tag will still be attached."
-  (insert (dsh-bridge--attachment-format path))
-  (insert "\n"))
+This tag has the form <#attachment filename=\"...\">."
+  (insert (concat "<#attachment filename=\""
+				  (dsh-bridge--attachment-escape path)
+				  "\">\n")))
 
 (defun dsh-bridge--remove-attachment-tags ()
   "Remove every attachment tag line from the current buffer."
