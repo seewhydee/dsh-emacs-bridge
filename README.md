@@ -1,6 +1,6 @@
 # dsh-emacs-bridge
 
-This is a two-way bridge between [Emacs](https://www.gnu.org/software/emacs/)
+This is a two-way bridge between [GNU Emacs](https://www.gnu.org/software/emacs/)
 and a [Deepseek Harness](https://github.com/deepseek-ai/deepseek-harness) 
 session.  The bridge moves text from Emacs to DeepSeek Harness (DSH),
 and vice versa, over loopback HTTP.  This lets you type in Emacs and
@@ -123,15 +123,14 @@ menu:
 * `q` — exit the transient menu.
 * `r` — open a buffer to type in a prompt.
 * `s` — send the region or buffer as a prompt.
-* `d` — send the region or buffer as a draft (can still edit in DSH's
-        web interface before submitting).
+* `d` — send the region or buffer as a draft (can still edit in DSH before submitting).
 * `f` — fetch and display the session's latest reply.
 * `D` — describe the session.
 * `t` — set the default target session.
 * `u` — clear the default target session.
 * `l` — open the DSH-Sessions buffer.
-* `+` — create a new session, prompting for its workspace and its title.
-        The new session becomes the default target.
+* `+` — create a new session, prompting for its workspace and its title;
+        the new session becomes the default target.
 
 ### DSH-Sessions buffer
 
@@ -141,9 +140,9 @@ the leftmost column, and the `S` (state) column shows each session's
 live status.  The following commands are available from here:
 
 * `q` — quit the window and bury the buffer.
-* `RET` — do the next appropriate thing for the session at point.  If
-          it is running, view the current replies, if waiting for a
-          prompt, open a buffer to type a prompt, etc.
+* `RET` — do the next appropriate thing for the session at point:
+          e.g., if it is running, view the current replies; if waiting
+          for a prompt, open a buffer to type a prompt.
 * `r` — open a buffer to type a prompt for the session at point.
 * `f` — fetch and display the output from the session at point.
 * `a` — answer a pending user query for the session at point.
@@ -152,8 +151,7 @@ live status.  The following commands are available from here:
 * `v` — toggle whether archived sessions are shown (hidden by default).
 * `R` — rename the session at point.
 * `d` — archive the session at point.
-* `+` — create a new session, in an existing or new workspace (the
-        default target is left unchanged).
+* `+` — create a new session, in an existing or new workspace.
 * `W` — rename the workspace of the session at point.
 * `D` — describe the session at point.
 * `g` — refresh the DSH-Sessions buffer.
@@ -190,7 +188,7 @@ If Markdown mode is installed, and `dsh-bridge-view-gfm` is non-nil,
 the reply is font-locked as GitHub-Flavored Markdown (the dividers use
 GFM horizontal-rule syntax, so they render cleanly).
 
-#### Answering agent queries
+#### Agent queries and approval requests
 
 If the model requests additional user input via the
 `ask_user_question` tool, the query is surfaced in the DSH-View
@@ -200,25 +198,16 @@ the session) to open a buffer for handling the query.
 In this buffer, mark the option(s) you choose with `RET`.  You can
 also navigate to a question block and type your desired option's
 number key, or type `c` and write a freeform answer via the
-minibuffer.
+minibuffer.  To submit the answers, type `C-c C-c`.  Alternatively,
+type `C-c C-k` to decline the query, canceling the tool call.
 
-To submit the answers, type `C-c C-c`.  Alternatively, type `C-c C-k`
-to decline the query, canceling the tool call.
-
-#### Answering approval requests
-
-Some tools ask for explicit approval before acting — for example, when
-the model requests a one-shot `danger-full-access` sandbox escalation
-for a command.  While an Emacs notification client that will answer is
-connected, the request is surfaced in the DSH-View buffer; type `A`
-here (or in the DSH-Sessions buffer with point on the session) to open
-its approval buffer, which shows the tool, the asker's reason, and the
-pending tool call's arguments.
-
-In the approval buffer, type `y` (or `a`) to allow the operation once,
-`n` (or `r`) to reject it, or `C-c C-k` to cancel the request (the
-asking tool call then fails).  There is no standing grant: each approval
-covers exactly the one operation it names.
+Some agent tools ask for explicit approval before acting; for example,
+`danger-full-access` asks the user before allowing sandbox escalation.
+Such a request is surfaced in the DSH-View buffer; type `A` here (or
+in the DSH-Sessions buffer with point on the session) to open a buffer
+showing details about the approval request.  In this buffer, type `y`
+(or `a`) to allow the operation once, `n` (or `r`) to reject it, or
+`C-c C-k` to cancel the request (the asking tool call then fails).
 
 While an answering Emacs client is connected the bridge claims each
 request exclusively, so the web UI's own approval panel does not open.
@@ -306,13 +295,13 @@ loopback-only `GET /dsh-bridge/token` route (peer- and origin-fenced).
 HTTP request bodies are capped at 1 MiB; larger bodies get a 413
 error.  DSH-to-Emacs messages are held in a bounded outbox (100
 unacknowledged entries); overflow evicts the oldest entries and is
-reported to Emacs, which warns on receive when entries were dropped.  Naming a cold (persisted-only) session
-from Emacs resumes it on demand, matching the web UI; an id neither
-live nor persisted is 404, a subagent-owned session is 409, and a
-draft push fails with 409 when no browser client is subscribed.  The
-read-only session report and the `POST /dsh-bridge/fork` source read are
-the exceptions: each observes a cold session's persisted log without
-resuming it.
+reported to Emacs, which warns on receive when entries were dropped.
+Naming a cold (persisted-only) session from Emacs resumes it on
+demand, matching the web UI; an id neither live nor persisted is 404,
+a subagent-owned session is 409, and a draft push fails with 409 when
+no browser client is subscribed.  The read-only session report and the
+`POST /dsh-bridge/fork` source read are the exceptions: each observes
+a cold session's persisted log without resuming it.
 
 `POST /dsh-bridge/send` also accepts an `attachments` list of absolute
 host-local paths and reads those files itself, so attachment bytes never
@@ -326,25 +315,6 @@ Attachment bytes are copied into the content-addressed store under
 verbatim), and one prompt may carry at most 20 attachments and 200 MiB
 per file; the image store applies its own limits (20 MiB per image, 20
 images, 200 MiB of images) and reports violations as 413 or 400.
-
-Approval requests (sandbox escalations and hook-gated tool asks) are
-answered under the same bearer-token boundary, over
-`POST /dsh-bridge/approval`.  Allowing one is a one-shot grant —
-typically a `danger-full-access` escalation for a single command — and
-is exactly what the web UI's own approval panel offers: the harness
-enforces a session's `approval: never` policy before any prompt is
-raised, so Emacs cannot grant more than the web UI could.  With
-`dsh-bridge-approval-answer` at its default `all`, Emacs answers every
-approval.  While an answering Emacs notification client is connected
-the bridge claims each request exclusively, so the browser panel does
-not open; because a claimed request cannot be un-claimed, an Emacs
-client that disconnects without reconnecting leaves the turn parked
-until Emacs reconnects (the pending approval is replayed to the new
-connection) or the turn is cancelled from the web UI.  Customize
-`dsh-bridge-approval-answer` to `notify-only` to avoid that exclusive
-claim: Emacs then displays approvals read-only and the web UI remains
-the answerer (an approval that arrives with no browser open fails
-closed).
 
 ## License
 
