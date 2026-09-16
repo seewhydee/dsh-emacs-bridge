@@ -6708,39 +6708,38 @@ Another session, an invisible report, or the option off does not."
   (let ((buffer (get-buffer "*dsh-bridge-prompt*")))
     (when (buffer-live-p buffer) (kill-buffer buffer))))
 
-(defun dsh-bridge-test--attachment-format (path)
-  "The attachment tag for PATH, without a trailing newline.
-A test-local stand-in for the removed `dsh-bridge--attachment-format':
-the parser specs build tag text directly instead of routing it through
-the insertion command, so they must not depend on that command's shape
-(or force the source to keep a formatting helper just for them)."
-  (concat "<#attachment filename=\""
-          (dsh-bridge--attachment-escape path)
-          "\">"))
-
-(ert-deftest dsh-bridge-attachment-format-roundtrip ()
-  "Tag values round-trip paths containing quotes and backslashes."
-  (let* ((path "/tmp/a \"quoted\" \\ file.png")
-         (tag (dsh-bridge-test--attachment-format path))
-         (parsed (dsh-bridge--parse-attachments (concat tag "\nbody\n"))))
-    (should (equal (cdr parsed) (list (list :path path))))
-    (should (equal (car parsed) "body\n"))))
-
-(ert-deftest dsh-bridge-parse-attachments-order-and-malformed ()
-  "Tag lines are extracted in order and removed from the text; a tag with a
-relative `filename' is malformed and stays as text."
-  (let* ((one (dsh-bridge-test--attachment-format "/tmp/one.txt"))
-         (two (dsh-bridge-test--attachment-format "/tmp/two.png"))
-         (parsed (dsh-bridge--parse-attachments
-                  (concat "lead\n" one "\nmiddle\n" two "\ntail\n"))))
-    (should (equal (cdr parsed)
-                   (list (list :path "/tmp/one.txt")
-                         (list :path "/tmp/two.png"))))
-    (should (equal (car parsed) "lead\nmiddle\ntail\n")))
-  (let ((parsed (dsh-bridge--parse-attachments
-                 "<#attachment filename=\"rel.txt\">\nbody")))
-    (should (null (cdr parsed)))
-    (should (equal (car parsed) "<#attachment filename=\"rel.txt\">\nbody"))))
+(ert-deftest dsh-bridge-insert-attachment-tag-roundtrip ()
+  "`dsh-bridge--insert-attachment-tag' escapes the path and emits one tag line.
+Escaping no longer lives in its own helper, so this drives the command and
+checks the round-trip: a path with quotes and backslashes parses back
+unchanged, several tags come out in order, and a relative `filename' is
+malformed and stays as text."
+  (let ((quoted "/tmp/a \"quoted\" \\ file.png")
+        (one "/tmp/one.txt")
+        (two "/tmp/two.png"))
+    ;; The escaped path in the emitted tag round-trips to the original value.
+    (with-temp-buffer
+      (dsh-bridge--insert-attachment-tag quoted)
+      (let ((parsed (dsh-bridge--parse-attachments
+                     (concat (buffer-string) "body\n"))))
+        (should (equal (cdr parsed) (list (list :path quoted))))
+        (should (equal (car parsed) "body\n"))))
+    ;; Tags inserted among text are extracted in order and removed.
+    (with-temp-buffer
+      (insert "lead\n")
+      (dsh-bridge--insert-attachment-tag one)
+      (insert "middle\n")
+      (dsh-bridge--insert-attachment-tag two)
+      (insert "tail\n")
+      (let ((parsed (dsh-bridge--parse-attachments (buffer-string))))
+        (should (equal (cdr parsed)
+                       (list (list :path one) (list :path two))))
+        (should (equal (car parsed) "lead\nmiddle\ntail\n"))))
+    ;; A relative `filename' is not a valid tag and stays as text.
+    (let ((parsed (dsh-bridge--parse-attachments
+                   "<#attachment filename=\"rel.txt\">\nbody")))
+      (should (null (cdr parsed)))
+      (should (equal (car parsed) "<#attachment filename=\"rel.txt\">\nbody")))))
 
 (ert-deftest dsh-bridge-attachment-payload-order-and-type ()
   "The wire payload is a vector of path alists in ATTACHMENTS order."

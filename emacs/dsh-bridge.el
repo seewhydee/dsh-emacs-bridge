@@ -1874,10 +1874,6 @@ The first group captures the tag text and the second its attribute text.
 The optional trailing newline makes the match a whole line, for stripping
 and counting.")
 
-(defun dsh-bridge--attachment-escape (value)
-  "Return VALUE escaped for a double-quoted attachment tag attribute."
-  (replace-regexp-in-string "[\"\\\\]" "\\\\\\&" value))
-
 (defun dsh-bridge--attachment-attribute (attributes key)
   "Return KEY's unescaped value in ATTRIBUTES, or nil.
 ATTRIBUTES is the text inside one attachment tag; KEY is an attribute
@@ -1943,7 +1939,7 @@ ATTACHMENTS is a list of plists (:path PATH).  The vector makes
   "Insert an attachment tag for PATH at point.
 This tag has the form <#attachment filename=\"...\">."
   (insert (concat "<#attachment filename=\""
-				  (dsh-bridge--attachment-escape path)
+				  (replace-regexp-in-string "[\"\\\\]" "\\\\\\&" path)
 				  "\">\n")))
 
 (defun dsh-bridge--remove-attachment-tags ()
