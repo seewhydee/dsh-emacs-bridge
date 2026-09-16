@@ -211,7 +211,9 @@ as a live-only refinement, not the primary source.
 
 Mutation from Emacs is deferred: it is a privilege-escalation surface behind
 the same local token file, and the web UI gates full access behind an explicit
-risk acknowledgement. See [Deferred](#deferred).
+risk acknowledgement. See [Deferred](#deferred).  Answering an on-demand
+`approval/request` (a one-shot sandbox escalation or hook-gated tool ask) is
+a separate, implemented feature — see `approval-handling-plan.md`.
 
 ### 7. `/emacs edit` flow
 
@@ -310,10 +312,16 @@ candidates above.
 
 ## Deferred
 
-- **Permission mutation from Emacs.** Revisit only with an explicit risk
-  design: a confirmation matching the web UI's acknowledgement, no
-  `danger-full-access`, and a README "Permissions, authentication, and failure
-  bounds" update.
+- **Permission mutation from Emacs.** Changing a session's standing permission
+  preset (or approval policy) from Emacs remains deferred: revisit only with an
+  explicit risk design — a confirmation matching the web UI's acknowledgement,
+  and a README "Permissions, authentication, and failure bounds" update.  This
+  is deliberately distinct from *answering an on-demand `approval/request`*
+  (implemented; see `approval-handling-plan.md`): an approval answer is a
+  one-shot grant for the single operation it names (`allowed-once`,
+  `rejected`, or `cancelled`), never a policy change, and the harness still
+  enforces a standing `approval: never` before any prompt — so Emacs grants
+  nothing the web UI's own panel could not.
 - **`todos` and `turnOutline` projection display.** Both are wire-visible
   observation units: `todos` would give an org-mode-native view of the
   agent's task list (header segment or side buffer); `turnOutline` would

@@ -921,6 +921,140 @@ export function askUserResolvedMessage(
 }
 
 /**
+ * One decision Emacs may return for a pending approval. A subset of the
+ * harness's `ApprovalOutcome` (`'unavailable'` is the fail-closed answerer
+ * absence, which the bridge never produces as an Emacs decision).
+ */
+export type ApprovalDecision = 'allowed-once' | 'rejected' | 'cancelled'
+
+/**
+ * The outcome an `approval-resolved` frame may report. The bridge's own
+ * answerer only ever settles the three {@link ApprovalDecision} values, but a
+ * request delegated to the web UI for a notify-only Emacs can resolve as the
+ * fail-closed `'unavailable'` too.
+ */
+export type ApprovalResolution = ApprovalDecision | 'unavailable'
+
+/** Whether VALUE is one of the three decisions the bridge accepts. */
+export function approvalDecisionValid(value: unknown): value is ApprovalDecision {
+  return value === 'allowed-once' || value === 'rejected' || value === 'cancelled'
+}
+
+/** Cap on the tool-arguments text embedded in an `approval` frame. */
+export const MAX_APPROVAL_DETAIL_CHARS = 8192
+
+/** Appended to a tool-arguments string cut at the cap. */
+const APPROVAL_TRUNCATION_MARKER = '\u2026[truncated]'
+
+/**
+ * Truncate an `arguments` JSON string to at most CAP characters without
+ * cutting inside a JSON escape. The prefix is not parseable JSON either way
+ * (it is a prefix), but ending on a lone backslash or a partial `\uXXXX` would
+ * hand a client raw broken text; this walks the prefix once so the cut lands
+ * on a token boundary (outside a string every character is a token; inside
+ * one, `\X` is two and `\uXXXX` is six). Truncation appends a marker, so the
+ * result can exceed CAP by the marker's length.
+ */
+export function truncateApprovalArguments(
+  text: string,
+  cap: number = MAX_APPROVAL_DETAIL_CHARS,
+): string {
+  if (text.length <= cap) return text
+  let safe = 0
+  let index = 0
+  let inString = false
+  while (index < cap) {
+    const char = text[index]!
+    if (!inString) {
+      index += 1
+      safe = index
+      if (char === '"') inString = true
+      continue
+    }
+    if (char === '\\') {
+      const next = text[index + 1]
+      if (next === undefined) break
+      if (next === 'u') {
+        if (index + 6 > cap) break
+        index += 6
+      } else {
+        index += 2
+      }
+      safe = index
+      continue
+    }
+    index += 1
+    safe = index
+    if (char === '"') inString = false
+  }
+  return `${text.slice(0, safe)}${APPROVAL_TRUNCATION_MARKER}`
+}
+
+/** The bounded tool-call detail an `approval` frame carries. */
+export interface ApprovalToolCallDetail {
+  name: string
+  arguments: string
+}
+
+/**
+ * The tool-call detail for CALLID, folded from a session's event log: the last
+ * `tool/call` event whose `callId` matches, with its arguments truncated to
+ * {@link MAX_APPROVAL_DETAIL_CHARS}. Returns undefined when CALLID is absent
+ * (a hook-gated ask may carry none) or no matching event is found — the frame
+ * then omits `detail` rather than showing a bogus one.
+ */
+export function toolCallForId(
+  events: readonly SessionEventLike[],
+  callId: string | undefined,
+): ApprovalToolCallDetail | undefined {
+  if (callId === undefined || callId === '') return undefined
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index]
+    if (event?.type !== 'tool/call') continue
+    const data = event.data as
+      { callId?: unknown; name?: unknown; arguments?: unknown } | undefined
+    if (data?.callId !== callId) continue
+    if (typeof data.name !== 'string') return undefined
+    return {
+      name: data.name,
+      arguments: truncateApprovalArguments(typeof data.arguments === 'string' ? data.arguments : ''),
+    }
+  }
+  return undefined
+}
+
+/**
+ * One SSE `data:` frame announcing a pending approval to Emacs. `detail` is the
+ * bounded tool-call lookup (omitted when the host could not resolve it), so
+ * the Emacs side can show what is actually being approved.
+ */
+export function approvalMessage(
+  approvalId: string,
+  sessionId: string,
+  toolName: string,
+  callId: string | undefined,
+  reason: string | undefined,
+  detail: ApprovalToolCallDetail | undefined,
+): string {
+  return `data: ${JSON.stringify({ kind: 'approval', approvalId, sessionId, toolName, callId, reason, detail })}\n\n`
+}
+
+/**
+ * One SSE `data:` frame telling Emacs a pending approval was resolved.
+ * `toolName`/`callId` ride along for a browser-side dismissal (unused by the
+ * exclusive-claim v1) and for a stale Emacs buffer to banner itself.
+ */
+export function approvalResolvedMessage(
+  approvalId: string,
+  sessionId: string,
+  outcome: ApprovalResolution,
+  toolName: string,
+  callId: string | undefined,
+): string {
+  return `data: ${JSON.stringify({ kind: 'approval-resolved', approvalId, sessionId, outcome, toolName, callId })}\n\n`
+}
+
+/**
  * The visible text of one durable assistant message, addressed by its message
  * id: the `assistant/message` event whose `message.id` matches, with its text
  * blocks concatenated. Returns undefined when no logged message carries that

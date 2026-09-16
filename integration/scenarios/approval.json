@@ -1,0 +1,23 @@
+{
+  "name": "approval",
+  "description": "The model asks for a danger-full-access sandbox escalation; the user approves it from Emacs.",
+  "mockScript": [
+    {
+      "kind": "tool-call",
+      "name": "bash",
+      "arguments": {
+        "command": "true",
+        "description": "Run a harmless marker command",
+        "sandbox_permissions": "danger-full-access",
+        "justification": "Demonstrate the approval prompt end to end"
+      }
+    },
+    { "kind": "text", "text": "Escalation granted; the command ran." }
+  ],
+  "steps": [
+    { "action": "send", "text": "Escalate the sandbox and run `true`." },
+    { "observe": "The DSH-View ends with an \"Awaiting approval for bash\" note, not \"(continuing...)\"." },
+    { "observe": "Press `A` — the approval buffer opens with the tool, reason, and arguments." },
+    { "observe": "Press `y` to allow once; the view refills with \"Escalation granted; the command ran.\" and no marker." }
+  ]
+}

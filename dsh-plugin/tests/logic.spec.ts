@@ -17,6 +17,9 @@
 import { describe, expect, it } from 'vitest'
 import {
   answerMatchesQuestions,
+  approvalDecisionValid,
+  approvalMessage,
+  approvalResolvedMessage,
   askUserMessage,
   askUserResolvedMessage,
   assistantMessageHasText,
@@ -60,8 +63,11 @@ import {
   imageInputUnsupported,
   KeyedSerial,
   MAX_ATTACHMENTS,
+  MAX_APPROVAL_DETAIL_CHARS,
   parseAttachmentRequests,
   sniffImageMediaType,
+  toolCallForId,
+  truncateApprovalArguments,
   type LiveSessionLike,
   type AssistantTurn,
   type MessageLike,
@@ -987,6 +993,92 @@ describe('ask-user frame construction and answer validation', () => {
     expect(answerMatchesQuestions(questions, [{ id: 'q1' }])).toBe(false)
     expect(answerMatchesQuestions(questions, [{ id: 'q1', selected: 'Yes' }])).toBe(false)
     expect(answerMatchesQuestions(questions, [{ id: 'q1', selected: ['Yes'], custom: 3 }])).toBe(false)
+  })
+})
+
+describe('approval frame construction, decision validation, and tool-call detail', () => {
+  it('approvalMessage emits one SSE data frame, omitting absent optional fields', () => {
+    expect(approvalMessage('appr-1', 'session-1', 'bash', 'call-1', 'escalate sandbox to danger-full-access: need /etc',
+      { name: 'bash', arguments: '{"command":"cat /etc/passwd"}' })).toBe(
+      'data: {"kind":"approval","approvalId":"appr-1","sessionId":"session-1","toolName":"bash",'
+      + '"callId":"call-1","reason":"escalate sandbox to danger-full-access: need /etc",'
+      + '"detail":{"name":"bash","arguments":"{\\"command\\":\\"cat /etc/passwd\\"}"}}\n\n')
+    // A hook-gated ask may carry no callId/reason/detail: the frame stays lean.
+    expect(approvalMessage('appr-2', 'session-1', 'write', undefined, undefined, undefined)).toBe(
+      'data: {"kind":"approval","approvalId":"appr-2","sessionId":"session-1","toolName":"write"}\n\n')
+  })
+
+  it('approvalResolvedMessage emits the outcome frame with the decision and call identity', () => {
+    expect(approvalResolvedMessage('appr-1', 'session-1', 'allowed-once', 'bash', 'call-1')).toBe(
+      'data: {"kind":"approval-resolved","approvalId":"appr-1","sessionId":"session-1",'
+      + '"outcome":"allowed-once","toolName":"bash","callId":"call-1"}\n\n')
+    // A request delegated to the web UI for a notify-only Emacs can resolve as
+    // the fail-closed `unavailable`.
+    expect(approvalResolvedMessage('appr-2', 'session-1', 'unavailable', 'bash', undefined)).toBe(
+      'data: {"kind":"approval-resolved","approvalId":"appr-2","sessionId":"session-1",'
+      + '"outcome":"unavailable","toolName":"bash"}\n\n')
+  })
+
+  it('approvalDecisionValid accepts exactly the three answerable outcomes', () => {
+    expect(approvalDecisionValid('allowed-once')).toBe(true)
+    expect(approvalDecisionValid('rejected')).toBe(true)
+    expect(approvalDecisionValid('cancelled')).toBe(true)
+    // `unavailable` is the service's fail-closed answerer absence, never a
+    // decision Emacs may submit.
+    expect(approvalDecisionValid('unavailable')).toBe(false)
+    expect(approvalDecisionValid('ALLOWED-ONCE')).toBe(false)
+    expect(approvalDecisionValid(undefined)).toBe(false)
+    expect(approvalDecisionValid(1)).toBe(false)
+  })
+
+  it('toolCallForId folds the matching tool/call event from the log', () => {
+    const events: SessionEventLike[] = [
+      { time: 1, type: 'tool/call', data: { callId: 'call-0', name: 'read', arguments: '{"path":"/a"}' } },
+      { time: 2, type: 'tool/call', data: { callId: 'call-1', name: 'bash', arguments: '{"command":"true"}' } },
+    ]
+    expect(toolCallForId(events, 'call-1')).toEqual({ name: 'bash', arguments: '{"command":"true"}' })
+    // A missing call id (hook-gated ask) or an unknown id omits detail.
+    expect(toolCallForId(events, undefined)).toBeUndefined()
+    expect(toolCallForId(events, '')).toBeUndefined()
+    expect(toolCallForId(events, 'call-nope')).toBeUndefined()
+    // A matching event with no usable name omits detail rather than lying.
+    expect(toolCallForId([{ time: 1, type: 'tool/call', data: { callId: 'c', arguments: '{}' } }], 'c')).toBeUndefined()
+  })
+
+  it('truncateApprovalArguments leaves short text untouched', () => {
+    expect(truncateApprovalArguments('{"a":1}', 100)).toBe('{"a":1}')
+    expect(truncateApprovalArguments('', 8)).toBe('')
+  })
+
+  it('truncateApprovalArguments caps long text and marks the cut', () => {
+    const long = `{"command":"${'x'.repeat(200)}"}`
+    const cut = truncateApprovalArguments(long, 32)
+    expect(cut.startsWith(long.slice(0, 32))).toBe(true)
+    expect(cut.endsWith('\u2026[truncated]')).toBe(true)
+    expect(cut.length).toBeLessThanOrEqual(32 + '\u2026[truncated]'.length)
+  })
+
+  it('truncateApprovalArguments never cuts inside a JSON escape', () => {
+    // A `\uXXXX` escape straddling the cap: the cut backs off to before it,
+    // so the prefix never ends on a lone backslash or partial hex digits.
+    const text = '{"a":"\\u0041\\u0042\\u0043"}'
+    const cut = truncateApprovalArguments(text, 12)
+    const prefix = cut.slice(0, cut.indexOf('\u2026[truncated]'))
+    expect(prefix.endsWith('\\')).toBe(false)
+    expect(/\\u[0-9a-fA-F]{0,3}$/.test(prefix)).toBe(false)
+    // The cut is a genuine prefix of the input.
+    expect(text.startsWith(prefix)).toBe(true)
+  })
+
+  it('toolCallForId truncates an oversized arguments string at the cap', () => {
+    const huge = `{"content":"${'y'.repeat(MAX_APPROVAL_DETAIL_CHARS * 2)}"}`
+    const detail = toolCallForId(
+      [{ time: 1, type: 'tool/call', data: { callId: 'c', name: 'write', arguments: huge } }],
+      'c',
+    )
+    expect(detail?.name).toBe('write')
+    expect(detail?.arguments.endsWith('\u2026[truncated]')).toBe(true)
+    expect(detail?.arguments.length).toBeLessThan(huge.length)
   })
 })
 

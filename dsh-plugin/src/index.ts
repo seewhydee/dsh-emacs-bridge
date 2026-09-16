@@ -23,7 +23,9 @@
 //   GET  /dsh-bridge/events?token=                  -> EventSource (composer-draft push)
 //        (?purpose=draft marks the browser's own draft stream; an unmarked
 //        connection is Emacs and is eligible to answer ask-user questions,
-//        which coexist with the web UI's own question panel)
+//        which coexist with the web UI's own question panel.  &answer=0 marks
+//        an Emacs stream that will not answer approvals — it still receives
+//        approval frames, but the host delegates the approval to the web UI)
 //   POST /dsh-bridge/send   { text?, sessionId?, attachments?: [{path, name?}] }
 //        -> stage host-local absolute paths into the durable attachment store,
 //        then Agent.followup() (images sniffed from content and rejected for
@@ -53,6 +55,10 @@
 //   POST /dsh-bridge/outbox/ack { ids }           -> clear collected entries
 //   POST /dsh-bridge/answer { questionId, sessionId, answers? | cancelled? }
 //        -> settle the bridge's pending ask-user waterfall answerer
+//   POST /dsh-bridge/approval { approvalId, sessionId, decision }
+//        -> settle the bridge's pending approval/request answerer; `decision`
+//        is `allowed-once` | `rejected` | `cancelled` (400 bad-response, 404
+//        not-pending for a late/duplicate/mismatched POST)
 //   GET  /dsh-bridge/models?sessionId=     -> model catalog + current selection
 //   POST /dsh-bridge/model { sessionId?, provider, model, reasoningEffort? }
 //        -> change the target session's model (proxies session/selectModel)
@@ -92,9 +98,19 @@ import type {} from '@deepseek-ai/dsh-user-questions'
 import type { AskUserQuestionAnswer } from '@deepseek-ai/dsh-user-questions'
 // The request-event type itself is exported only from the ./types subpath.
 import type { AskUserQuestionRequestEvent } from '@deepseek-ai/dsh-user-questions/types'
+// Type-only: pulls the `approval/request` waterfall declaration (the
+// user-approval seam the bridge answers) into the cordis Events merge, and
+// names its request/outcome types.  Erased at build; never a runtime import.
+import type {} from '@deepseek-ai/dsh-user-approval'
+import type { ApprovalOutcome } from '@deepseek-ai/dsh-user-approval'
+// The request-event type itself is exported only from the ./types subpath.
+import type { ApprovalRequestEvent } from '@deepseek-ai/dsh-user-approval/types'
 import { Outbox } from './outbox.ts'
 import {
   answerMatchesQuestions,
+  approvalDecisionValid,
+  approvalMessage,
+  approvalResolvedMessage,
   askUserMessage,
   askUserResolvedMessage,
   assistantMessageHasText,
@@ -132,6 +148,7 @@ import {
   sniffImageMediaType,
   tokenRequestsSameOrigin,
   tokensEqual,
+  toolCallForId,
   turnCompleteMessage,
   turnStartMessage,
   turnsSince,
@@ -140,6 +157,8 @@ import {
   workspaceTitleConflict,
   KeyedSerial,
   type AttachmentRequest,
+  type ApprovalDecision,
+  type ApprovalToolCallDetail,
   type BridgeImageMediaType,
   type LiveSessionLike,
   type AskUserAnswerItemLike,
@@ -648,6 +667,15 @@ export function apply(ctx: Context): void {
    */
   const emacsSseClients = new Set<ServerResponse>()
 
+  /**
+   * The subset of `emacsSseClients` that will answer approvals. An Emacs
+   * configured `notify-only` connects with `answer=0`: it still receives
+   * approval frames (so it can display the request) but is not counted as an
+   * answerer, so the host delegates the waterfall to the web UI instead of
+   * exclusively claiming it for a client that has opted out of deciding.
+   */
+  const approvalAnswerers = new Set<ServerResponse>()
+
   /** The settlement one pending question waits on: an answer set, or a cancel. */
   type QuestionSettlement =
     | { ok: true; answers: AskUserAnswerItemLike[] }
@@ -669,6 +697,25 @@ export function apply(ctx: Context): void {
   const pendingQuestions = new Map<string, PendingQuestion>()
 
   /**
+   * One pending approval offered to Emacs, keyed by the bridge-minted approval
+   * id. `settle` is first-call-wins: it resolves the waterfall listener's wait
+   * and removes the entry, so a late `/approval` (after an abort or a duplicate
+   * POST) reads `not-pending`. `reason` and `detail` are kept so a reconnecting
+   * Emacs can be handed the same frame again.
+   */
+  interface PendingApproval {
+    sessionId: string
+    toolName: string
+    callId: string | undefined
+    reason: string | undefined
+    detail: ApprovalToolCallDetail | undefined
+    settle(decision: ApprovalDecision): void
+  }
+
+  /** Pending approvals offered to Emacs, keyed by approval id. */
+  const pendingApprovals = new Map<string, PendingApproval>()
+
+  /**
    * Serializes every workspace-title check-then-write in this process. The
    * harness's workspace registry allows duplicate display titles, so the
    * uniqueness rule this bridge enforces on rename/create is ours to keep:
@@ -688,6 +735,7 @@ export function apply(ctx: Context): void {
   function dropSseClient(client: ServerResponse): void {
     browserSseClients.delete(client)
     emacsSseClients.delete(client)
+    approvalAnswerers.delete(client)
   }
 
   /** The turn number carried by a turn-boundary / assistant-message event payload, or undefined. */
@@ -775,6 +823,96 @@ export function apply(ctx: Context): void {
       pendingQuestions.delete(questionId)
       broadcast(askUserResolvedMessage(sessionId, questionId, outcome,
         questions.map(question => question.id)))
+    }
+  }
+
+  /**
+   * The bridge's `approval/request` answerer: surface a pending approval to
+   * Emacs over SSE and settle the waterfall from `/approval`.
+   *
+   * Registered with `prepend` so it runs OUTSIDE the api-remotes browser
+   * forwarder. Unlike the ask-user answerer — which still offers the request to
+   * an open browser and lets the two presentations race — this listener claims
+   * an approval EXCLUSIVELY while any Emacs SSE client that will answer is
+   * connected (`approvalAnswerers`; a `notify-only` Emacs stream is present but
+   * not counted) and never calls `next()`, so the web UI's own approval panel
+   * never opens. The browser panel has no "resolved elsewhere" event (the
+   * bridge's client `question-dismiss` deliberately ignores approvals), so
+   * racing it would leave a panel stranded after an Emacs answer; exclusive
+   * claim avoids that, at the documented cost of a lockout: a claim cannot be
+   * withdrawn, so an answering Emacs client that dies without reconnecting
+   * parks the turn until Emacs reconnects (the `/events` replay re-delivers the
+   * approval) or the web UI cancels the turn.
+   *
+   * With no answering Emacs client the request delegates via `next()`, and the
+   * browser flow is untouched. A `notify-only` Emacs client may still be
+   * connected: it is not an answerer, but it does receive the `approval` frame
+   * (and the delegated `approval-resolved` frame) so it can display the
+   * request; nothing is registered as pending, so Emacs cannot settle it.
+   *
+   * Cancelling is a legal outcome of this waterfall (unlike ask-user, whose
+   * cancel rejects the wait), so the abort path settles `'cancelled'` and the
+   * listener returns it cleanly; a throw would be normalized by the service to
+   * the fail-closed `'unavailable'`.
+   */
+  async function onApprovalRequest(
+    request: ApprovalRequestEvent,
+    next: () => Promise<ApprovalOutcome>,
+  ): Promise<ApprovalOutcome> {
+    // The declared request agent is required, but a malformed emitter must
+    // degrade to delegation, not a throw (which the service reads as
+    // `'unavailable'` and the browser would never see).
+    const agent = request.agent as Agent | undefined
+    if (agent === undefined) return next()
+    const sessionId = String(agent.id)
+    const approvalId = randomUUID()
+    const callId = request.callId === undefined ? undefined : String(request.callId)
+    // The web panel gets the escalated tool call from the streamed call id; the
+    // bridge folds the same detail host-side so an Emacs decision is not blind.
+    const detail = toolCallForId(agent.session.snapshotEvents(), callId)
+    const frame = approvalMessage(approvalId, sessionId, request.toolName, callId, request.reason, detail)
+    if (approvalAnswerers.size === 0) {
+      // No Emacs will decide this. With no Emacs at all, delegate silently; a
+      // notify-only Emacs is present but cannot settle the request, so it is
+      // only notified (the delegated outcome banners it too).
+      if (emacsSseClients.size === 0) return next()
+      broadcast(frame)
+      try {
+        const delegated = await next()
+        broadcast(approvalResolvedMessage(approvalId, sessionId, delegated, request.toolName, callId))
+        return delegated
+      } catch (error: unknown) {
+        broadcast(approvalResolvedMessage(approvalId, sessionId, 'unavailable', request.toolName, callId))
+        throw error
+      }
+    }
+    let settled = false
+    let outcome: ApprovalDecision = 'cancelled'
+    let resolveWait!: (decision: ApprovalDecision) => void
+    const wait = new Promise<ApprovalDecision>((resolve) => { resolveWait = resolve })
+    pendingApprovals.set(approvalId, {
+      sessionId,
+      toolName: request.toolName,
+      callId,
+      reason: request.reason,
+      detail,
+      settle: (decision) => {
+        if (settled) return
+        settled = true
+        pendingApprovals.delete(approvalId)
+        outcome = decision
+        resolveWait(decision)
+      },
+    })
+    broadcast(frame)
+    const onAbort = (): void => pendingApprovals.get(approvalId)?.settle('cancelled')
+    request.signal?.addEventListener('abort', onAbort, { once: true })
+    try {
+      return await wait
+    } finally {
+      request.signal?.removeEventListener('abort', onAbort)
+      pendingApprovals.delete(approvalId)
+      broadcast(approvalResolvedMessage(approvalId, sessionId, outcome, request.toolName, callId))
     }
   }
 
@@ -1481,6 +1619,18 @@ export function apply(ctx: Context): void {
     'dsh-bridge: ask-user answerer',
   )
 
+  // Answer approval requests from Emacs (sandbox escalations, hook-gated
+  // asks). Prepended like the ask-user listener so the bridge runs outside the
+  // api-remotes browser forwarder; while an Emacs SSE client is connected it
+  // claims the request exclusively and the web panel never opens, otherwise it
+  // delegates via next(). A profile without the user-approval capability simply
+  // never dispatches the event, so this degrades to a no-op there.
+  ctx.effect(
+    () => ctx.on('approval/request', (request, next) =>
+      onApprovalRequest(request, next), { prepend: true }),
+    'dsh-bridge: approval answerer',
+  )
+
   // Registered inside an effect so a config hot-reload disposes the route
   // before re-applying — a duplicate (kind, path) registration throws.
   ctx.effect(() => webServer.register({
@@ -1536,7 +1686,15 @@ export function apply(ctx: Context): void {
         })
         res.write('retry: 5000\n\n')
         const isBrowser = url.searchParams.get('purpose') === 'draft'
+        // An Emacs stream may declare that it will not answer approvals
+        // (`answer=0`, set when `dsh-bridge-approval-answer` is
+        // `notify-only`). It still receives approval frames for display, but
+        // the host does not count it as an answerer, so an otherwise-claimed
+        // request is delegated to the web UI rather than parked on a client
+        // that has opted out of deciding.
+        const answersApprovals = url.searchParams.get('answer') !== '0'
         ;(isBrowser ? browserSseClients : emacsSseClients).add(res)
+        if (!isBrowser && answersApprovals) approvalAnswerers.add(res)
         if (!isBrowser) {
           // Replay still-pending questions so a reconnecting Emacs re-learns
           // an ask it may have missed. The browser never answers questions,
@@ -1544,6 +1702,14 @@ export function apply(ctx: Context): void {
           for (const [questionId, pending] of pendingQuestions) {
             try {
               res.write(askUserMessage(questionId, pending.sessionId, pending.questions))
+            } catch { dropSseClient(res); break }
+          }
+          // Replay still-pending approvals too, for the same reason: a claimed
+          // approval whose Emacs client died is recovered by reconnecting.
+          for (const [approvalId, pending] of pendingApprovals) {
+            try {
+              res.write(approvalMessage(approvalId, pending.sessionId, pending.toolName,
+                pending.callId, pending.reason, pending.detail))
             } catch { dropSseClient(res); break }
           }
         }
@@ -1618,6 +1784,38 @@ export function apply(ctx: Context): void {
             return
           }
           pending.settle({ ok: true, answers })
+          sendJson(res, 200, { accepted: true })
+        } catch (error: unknown) {
+          sendJson(res, bridgeErrorStatus(error), { error: error instanceof Error ? error.message : String(error) })
+        }
+        return
+      }
+
+      // Settle a pending approval the bridge surfaced to Emacs. `decision` is
+      // one of the harness's three answerable outcomes; first settlement wins,
+      // and a late/duplicate POST (or one naming a different session) reads 404
+      // `not-pending`, so a cross-session answer cannot leak.
+      if (req.method === 'POST' && pathname === '/dsh-bridge/approval') {
+        try {
+          const body = (await readJson(req)) as {
+            approvalId?: unknown; sessionId?: unknown; decision?: unknown
+          } | undefined
+          const approvalId = typeof body?.approvalId === 'string' ? body.approvalId : undefined
+          const sessionId = typeof body?.sessionId === 'string' ? body.sessionId : undefined
+          if (approvalId === undefined || sessionId === undefined) {
+            sendJson(res, 400, { accepted: false, reason: 'bad-response' })
+            return
+          }
+          const pending = pendingApprovals.get(approvalId)
+          if (pending === undefined || pending.sessionId !== sessionId) {
+            sendJson(res, 404, { accepted: false, reason: 'not-pending' })
+            return
+          }
+          if (!approvalDecisionValid(body?.decision)) {
+            sendJson(res, 400, { accepted: false, reason: 'bad-response' })
+            return
+          }
+          pending.settle(body.decision)
           sendJson(res, 200, { accepted: true })
         } catch (error: unknown) {
           sendJson(res, bridgeErrorStatus(error), { error: error instanceof Error ? error.message : String(error) })

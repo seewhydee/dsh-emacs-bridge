@@ -205,6 +205,30 @@ minibuffer.
 To submit the answers, type `C-c C-c`.  Alternatively, type `C-c C-k`
 to decline the query, canceling the tool call.
 
+#### Answering approval requests
+
+Some tools ask for explicit approval before acting — for example, when
+the model requests a one-shot `danger-full-access` sandbox escalation
+for a command.  While an Emacs notification client that will answer is
+connected, the request is surfaced in the DSH-View buffer; type `A`
+here (or in the DSH-Sessions buffer with point on the session) to open
+its approval buffer, which shows the tool, the asker's reason, and the
+pending tool call's arguments.
+
+In the approval buffer, type `y` (or `a`) to allow the operation once,
+`n` (or `r`) to reject it, or `C-c C-k` to cancel the request (the
+asking tool call then fails).  There is no standing grant: each approval
+covers exactly the one operation it names.
+
+While an answering Emacs client is connected the bridge claims each
+request exclusively, so the web UI's own approval panel does not open.
+To have Emacs only display approvals and leave the decision to the web
+UI, customize `dsh-bridge-approval-answer` to `notify-only`: the
+notification connection then tells the host not to claim them.  See
+"Permissions, authentication, and failure bounds" below for the trust
+boundary and the recovery path when a claimed approval outlives its
+Emacs client.
+
 ### DSH-Prompt buffer
 
 This buffer is used to compose a prompt, or reply, for a DSH session.
@@ -302,6 +326,25 @@ Attachment bytes are copied into the content-addressed store under
 verbatim), and one prompt may carry at most 20 attachments and 200 MiB
 per file; the image store applies its own limits (20 MiB per image, 20
 images, 200 MiB of images) and reports violations as 413 or 400.
+
+Approval requests (sandbox escalations and hook-gated tool asks) are
+answered under the same bearer-token boundary, over
+`POST /dsh-bridge/approval`.  Allowing one is a one-shot grant —
+typically a `danger-full-access` escalation for a single command — and
+is exactly what the web UI's own approval panel offers: the harness
+enforces a session's `approval: never` policy before any prompt is
+raised, so Emacs cannot grant more than the web UI could.  With
+`dsh-bridge-approval-answer` at its default `all`, Emacs answers every
+approval.  While an answering Emacs notification client is connected
+the bridge claims each request exclusively, so the browser panel does
+not open; because a claimed request cannot be un-claimed, an Emacs
+client that disconnects without reconnecting leaves the turn parked
+until Emacs reconnects (the pending approval is replayed to the new
+connection) or the turn is cancelled from the web UI.  Customize
+`dsh-bridge-approval-answer` to `notify-only` to avoid that exclusive
+claim: Emacs then displays approvals read-only and the web UI remains
+the answerer (an approval that arrives with no browser open fails
+closed).
 
 ## License
 

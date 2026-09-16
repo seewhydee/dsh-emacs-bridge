@@ -117,9 +117,12 @@ export async function createSession(fixture, path = REPO_ROOT, timeoutMs = 60000
  * the connection (await it before driving a route that gates on client
  * presence, e.g. POST /draft). `close()` aborts the stream. `purpose`
  * ('draft') marks the connection as the browser's draft stream, the way the
- * browser plugin's EventSource identifies itself.
+ * browser plugin's EventSource identifies itself. `answer` ('0') marks an
+ * Emacs stream that will not answer approvals (the `notify-only` posture): it
+ * still receives approval frames, but the host does not count it as an
+ * answerer.
  */
-export function openSse(fixture, { timeoutMs = 15000, purpose } = {}) {
+export function openSse(fixture, { timeoutMs = 15000, purpose, answer } = {}) {
   const controller = new AbortController()
   const frames = []
   const waiters = new Map() // kind -> [{resolve, reject, timer}]
@@ -153,7 +156,7 @@ export function openSse(fixture, { timeoutMs = 15000, purpose } = {}) {
   }
 
   const run = (async () => {
-    const query = `token=${fixture.token}${purpose === undefined ? '' : `&purpose=${purpose}`}`
+    const query = `token=${fixture.token}${purpose === undefined ? '' : `&purpose=${purpose}`}${answer === undefined ? '' : `&answer=${answer}`}`
     const res = await fetch(`${fixture.url}/dsh-bridge/events?${query}`, {
       signal: controller.signal,
       headers: { accept: 'text/event-stream' },
