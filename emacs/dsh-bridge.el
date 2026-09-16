@@ -391,11 +391,6 @@ arrives with no browser open fails closed."
   "Face for the status glyph of an unknown DSH session."
   :group 'dsh-bridge)
 
-(defface dsh-bridge-status-approval-face
-  '((t :foreground "OrangeRed"))
-  "Face for the status glyph of a DSH session parked on an approval."
-  :group 'dsh-bridge)
-
 (defface dsh-bridge-default-target-face
   '((t :inherit font-lock-keyword-face))
   "Face for the default target session in the DSH-Sessions buffer."
@@ -619,27 +614,24 @@ on `unknown'.  No active retrieval is done.  See
       ""
     (let* ((state (cond
 				   ((and session-id
-						 (assoc session-id dsh-bridge--pending-questions))
+						 (or (assoc session-id dsh-bridge--pending-questions)
+							 (assoc session-id dsh-bridge--pending-approvals)))
 					'asking)
-				   ((and session-id
-						 (assoc session-id dsh-bridge--pending-approvals))
-					'approving)
 				   (t (dsh-bridge--status-state session-id))))
 		   (char
 			(pcase dsh-bridge-status-indicator
 			  ('emoji
 			   (pcase state
-				 ('asking "💬") ('approving "🔐") ('idle "🟢") ('running "🟡") (_ "⚪")))
+				 ('asking "💬") ('idle "🟢") ('running "🟡") (_ "⚪")))
 			  ('geometric
 			   (pcase state
-				 ('asking "◌") ('approving "▲") ('idle "●")  ('running "■")  (_ "?")))
+				 ('asking "◌") ('idle "●")  ('running "■")  (_ "?")))
 			  (_
 			   (pcase state
-				 ('asking "A") ('approving "P") ('idle "I")  ('running "R")  (_ "?")))))
+				 ('asking "A") ('idle "I")  ('running "R")  (_ "?")))))
 		   (face
 			(pcase state
 			  ('asking  'dsh-bridge-status-running-face)
-			  ('approving 'dsh-bridge-status-approval-face)
 			  ('idle    'dsh-bridge-status-idle-face)
 			  ('running 'dsh-bridge-status-running-face)
 			  (_        'dsh-bridge-status-unknown-face))))

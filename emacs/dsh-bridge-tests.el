@@ -7104,8 +7104,10 @@ silently.  The defensive turn-complete clear banners the live buffer."
     (should (equal messages 1))
     (should (equal (length (cdr (assoc "s1" dsh-bridge--pending-approvals))) 1))
     (should (equal (plist-get (dsh-bridge--pending-approval "s1") :reason) "second"))
+    ;; Approvals share the ask-user "asking" state: there is no separate
+    ;; approval glyph, so a parked approval lights the same indicator.
     (let ((dsh-bridge-status-indicator 'emoji))
-      (should (string= (dsh-bridge--status-glyph "s1") "🔐")))
+      (should (string= (dsh-bridge--status-glyph "s1") "💬")))
     (with-current-buffer (get-buffer-create "*dsh-bridge-output*")
       (dsh-bridge-view-mode)
       (setq-local dsh-bridge--view-content-session "s1")
