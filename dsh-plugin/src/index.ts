@@ -22,9 +22,9 @@
 //   GET  /dsh-bridge/status                         -> { name, version } (loopback-fenced)
 //   GET  /dsh-bridge/events?token=                  -> EventSource (composer-draft push)
 //        (?purpose=draft marks the browser's own draft stream; an unmarked
-//        connection is Emacs and is eligible to answer ask-user questions,
-//        which coexist with the web UI's own question panel.  &answer=0 marks
-//        an Emacs stream that will not answer approvals — it still receives
+//        connection is Emacs and is eligible to answer ask-user questions and
+//        approvals, both of which coexist with the web UI's own panels.  &answer=0
+//        marks an Emacs stream that will not answer approvals — it still receives
 //        approval frames, but the host delegates the approval to the web UI)
 //   POST /dsh-bridge/send   { text?, sessionId?, attachments?: [{path, name?}] }
 //        -> stage host-local absolute paths into the durable attachment store,
@@ -158,6 +158,7 @@ import {
   KeyedSerial,
   type AttachmentRequest,
   type ApprovalDecision,
+  type ApprovalResolution,
   type ApprovalToolCallDetail,
   type BridgeImageMediaType,
   type LiveSessionLike,
@@ -672,7 +673,7 @@ export function apply(ctx: Context): void {
    * configured `notify-only` connects with `answer=0`: it still receives
    * approval frames (so it can display the request) but is not counted as an
    * answerer, so the host delegates the waterfall to the web UI instead of
-   * exclusively claiming it for a client that has opted out of deciding.
+   * offering the request for a client that has opted out of deciding.
    */
   const approvalAnswerers = new Set<ServerResponse>()
 
@@ -831,18 +832,19 @@ export function apply(ctx: Context): void {
    * Emacs over SSE and settle the waterfall from `/approval`.
    *
    * Registered with `prepend` so it runs OUTSIDE the api-remotes browser
-   * forwarder. Unlike the ask-user answerer — which still offers the request to
-   * an open browser and lets the two presentations race — this listener claims
-   * an approval EXCLUSIVELY while any Emacs SSE client that will answer is
-   * connected (`approvalAnswerers`; a `notify-only` Emacs stream is present but
-   * not counted) and never calls `next()`, so the web UI's own approval panel
-   * never opens. The browser panel has no "resolved elsewhere" event (the
-   * bridge's client `question-dismiss` deliberately ignores approvals), so
-   * racing it would leave a panel stranded after an Emacs answer; exclusive
-   * claim avoids that, at the documented cost of a lockout: a claim cannot be
-   * withdrawn, so an answering Emacs client that dies without reconnecting
-   * parks the turn until Emacs reconnects (the `/events` replay re-delivers the
-   * approval) or the web UI cancels the turn.
+   * forwarder. This mirrors the ask-user answerer: while an answering Emacs SSE
+   * client is connected (`approvalAnswerers`) the bridge registers its own
+   * pending entry, and when the web UI is also open (`browserSseClients`
+   * non-empty) it still calls `next()` so the same request reaches the browser
+   * forwarder and the web UI's own approval panel opens. The two presentations
+   * race: whichever answers first settles the waterfall. The `approval-resolved`
+   * frame lets the browser plugin dismiss its panel after an Emacs answer (the
+   * panel has no "resolved elsewhere" event of its own, so the plugin ends it
+   * through `PendingApproval.abort()`), and lets an Emacs buffer banner a
+   * decision made in the browser. A browser-side rejection — the panel being
+   * dismissed after Emacs already answered, or a transport failure — is
+   * swallowed into a never-settling branch rather than ending the race, so Emacs
+   * stays the deciding answerer.
    *
    * With no answering Emacs client the request delegates via `next()`, and the
    * browser flow is untouched. A `notify-only` Emacs client may still be
@@ -886,29 +888,49 @@ export function apply(ctx: Context): void {
         throw error
       }
     }
+    // One first-call-wins gate for both presentations. Routing every settlement
+    // through one gate (rather than letting each branch assign the outcome)
+    // keeps a late `POST /approval` from overwriting the outcome the finally
+    // broadcasts after the browser already won the race.
     let settled = false
-    let outcome: ApprovalDecision = 'cancelled'
-    let resolveWait!: (decision: ApprovalDecision) => void
-    const wait = new Promise<ApprovalDecision>((resolve) => { resolveWait = resolve })
+    let outcome: ApprovalResolution = 'cancelled'
+    let resolveWait!: (result: ApprovalResolution) => void
+    const wait = new Promise<ApprovalResolution>((resolve) => { resolveWait = resolve })
+    const finish = (result: ApprovalResolution): void => {
+      if (settled) return
+      settled = true
+      pendingApprovals.delete(approvalId)
+      outcome = result
+      resolveWait(result)
+    }
     pendingApprovals.set(approvalId, {
       sessionId,
       toolName: request.toolName,
       callId,
       reason: request.reason,
       detail,
-      settle: (decision) => {
-        if (settled) return
-        settled = true
-        pendingApprovals.delete(approvalId)
-        outcome = decision
-        resolveWait(decision)
-      },
+      settle: decision => finish(decision),
     })
     broadcast(frame)
     const onAbort = (): void => pendingApprovals.get(approvalId)?.settle('cancelled')
     request.signal?.addEventListener('abort', onAbort, { once: true })
+    // Offer the request to the web UI too, but only when the web UI is actually
+    // open (its draft SSE stream is the host-side signal for that): queueing a
+    // browser dispatch with no browser attached would strand it until one
+    // connects and then show an already-resolved approval. A browser-side
+    // rejection must not end the race — Emacs (already registered above)
+    // remains the deciding answerer — so it drains into a never-settling branch.
+    const browserWait: Promise<ApprovalResolution> = browserSseClients.size === 0
+      ? new Promise<ApprovalResolution>(() => {})
+      : next().then(
+        answer => {
+          finish(answer)
+          return answer
+        },
+        () => new Promise<ApprovalResolution>(() => {}),
+      )
     try {
-      return await wait
+      return await Promise.race([wait, browserWait])
     } finally {
       request.signal?.removeEventListener('abort', onAbort)
       pendingApprovals.delete(approvalId)
@@ -1621,10 +1643,11 @@ export function apply(ctx: Context): void {
 
   // Answer approval requests from Emacs (sandbox escalations, hook-gated
   // asks). Prepended like the ask-user listener so the bridge runs outside the
-  // api-remotes browser forwarder; while an Emacs SSE client is connected it
-  // claims the request exclusively and the web panel never opens, otherwise it
-  // delegates via next(). A profile without the user-approval capability simply
-  // never dispatches the event, so this degrades to a no-op there.
+  // api-remotes browser forwarder; while an answering Emacs SSE client is
+  // connected it offers the request to both Emacs and the web panel and races
+  // them, otherwise it delegates via next(). A profile without the
+  // user-approval capability simply never dispatches the event, so this
+  // degrades to a no-op there.
   ctx.effect(
     () => ctx.on('approval/request', (request, next) =>
       onApprovalRequest(request, next), { prepend: true }),
@@ -1689,9 +1712,8 @@ export function apply(ctx: Context): void {
         // An Emacs stream may declare that it will not answer approvals
         // (`answer=0`, set when `dsh-bridge-approval-answer` is
         // `notify-only`). It still receives approval frames for display, but
-        // the host does not count it as an answerer, so an otherwise-claimed
-        // request is delegated to the web UI rather than parked on a client
-        // that has opted out of deciding.
+        // the host does not count it as an answerer, so an approval is
+        // delegated to the web UI rather than offered for Emacs to decide.
         const answersApprovals = url.searchParams.get('answer') !== '0'
         ;(isBrowser ? browserSseClients : emacsSseClients).add(res)
         if (!isBrowser && answersApprovals) approvalAnswerers.add(res)
@@ -1704,7 +1726,7 @@ export function apply(ctx: Context): void {
               res.write(askUserMessage(questionId, pending.sessionId, pending.questions))
             } catch { dropSseClient(res); break }
           }
-          // Replay still-pending approvals too, for the same reason: a claimed
+          // Replay still-pending approvals too, for the same reason: an
           // approval whose Emacs client died is recovered by reconnecting.
           for (const [approvalId, pending] of pendingApprovals) {
             try {

@@ -203,20 +203,21 @@ type `C-c C-k` to decline the query, canceling the tool call.
 
 Some agent tools ask for explicit approval before acting; for example,
 `danger-full-access` asks the user before allowing sandbox escalation.
-Such a request is surfaced in the DSH-View buffer; type `A` here (or
-in the DSH-Sessions buffer with point on the session) to open a buffer
-showing details about the approval request.  In this buffer, type `y`
+Such a request is surfaced in the DSH-View buffer; type the same `a` key
+to open a buffer showing details about the approval request.  A session
+cannot wait on a query and an approval at once, so a pending query takes
+precedence; otherwise `a` opens the approval.  In this buffer, type `y`
 (or `a`) to allow the operation once, `n` (or `r`) to reject it, or
 `C-c C-k` to cancel the request (the asking tool call then fails).
 
-While an answering Emacs client is connected the bridge claims each
-request exclusively, so the web UI's own approval panel does not open.
-To have Emacs only display approvals and leave the decision to the web
-UI, customize `dsh-bridge-approval-answer` to `notify-only`: the
-notification connection then tells the host not to claim them.  See
-"Permissions, authentication, and failure bounds" below for the trust
-boundary and the recovery path when a claimed approval outlives its
-Emacs client.
+Both waits are offered to Emacs and, when the web UI is open, to its own
+panel at the same time: whichever answers first settles the request and
+dismisses the other presentation.  To have Emacs only display approvals
+and leave the decision to the web UI, customize
+`dsh-bridge-approval-answer` to `notify-only`: the notification
+connection then tells the host not to offer approvals to Emacs for a
+decision.  See "Permissions, authentication, and failure bounds" below
+for the trust boundary.
 
 ### DSH-Prompt buffer
 
@@ -315,6 +316,14 @@ Attachment bytes are copied into the content-addressed store under
 verbatim), and one prompt may carry at most 20 attachments and 200 MiB
 per file; the image store applies its own limits (20 MiB per image, 20
 images, 200 MiB of images) and reports violations as 413 or 400.
+
+Approval requests (`approval/request` — for example a one-shot
+`danger-full-access` sandbox escalation) are offered to Emacs and, when
+the web UI is open, to its own panel at the same time; whichever answers
+first settles the request.  Emacs submits the same outcomes the web panel
+offers, over the same bearer-token boundary, so it grants no authority a
+token holder did not already have.  With `dsh-bridge-approval-answer` set
+to `notify-only`, Emacs displays requests but never answers them.
 
 ## License
 

@@ -1041,8 +1041,9 @@ export function approvalMessage(
 
 /**
  * One SSE `data:` frame telling Emacs a pending approval was resolved.
- * `toolName`/`callId` ride along for a browser-side dismissal (unused by the
- * exclusive-claim v1) and for a stale Emacs buffer to banner itself.
+ * `toolName`/`callId` ride along so the browser plugin can dismiss its own
+ * panel (matched on session + tool, plus the call id when present) and so a
+ * stale Emacs buffer can banner itself.
  */
 export function approvalResolvedMessage(
   approvalId: string,

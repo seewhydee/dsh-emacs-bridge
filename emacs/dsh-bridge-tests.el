@@ -5901,8 +5901,8 @@ ask, that question is unambiguous, so it is used."
 
 (ert-deftest dsh-bridge-answer-explicit-session-not-widened ()
   "A view buffer's explicit session is respected, not replaced by a guess.
-Session s1 has no question while s2 does; the command must report s1's lack
-rather than answering s2's question."
+Session s1 has no interaction while s2 does; the command must report s1's
+lack rather than answering s2's question."
   (let ((dsh-bridge--pending-questions (dsh-bridge-test--pending-ask "s2" "Q?"))
         (answered nil) (msg nil))
     (with-temp-buffer
@@ -5914,10 +5914,10 @@ rather than answering s2's question."
                  (lambda (&rest args) (setq msg (apply #'format args)))))
         (dsh-bridge-answer))
       (should-not answered)
-      (should (string-match-p "no pending question" msg)))))
+      (should (string-match-p "no pending query or approval" msg)))))
 
 (ert-deftest dsh-bridge-answer-unbound-no-pending ()
-  "An unbound prompt buffer with no pending question says so, without error."
+  "An unbound prompt buffer with nothing pending says so, without error."
   (let ((dsh-bridge-default-session nil)
         (dsh-bridge--pending-questions nil)
         (msg nil))
@@ -5926,7 +5926,7 @@ rather than answering s2's question."
       (cl-letf (((symbol-function 'message)
                  (lambda (&rest args) (setq msg (apply #'format args)))))
         (dsh-bridge-answer))
-      (should (string-match-p "no pending question" msg)))))
+      (should (string-match-p "no pending query or approval" msg)))))
 
 (ert-deftest dsh-bridge-view-awaiting-ask-frames-refresh-tail ()
   "An ask-user frame flips a following view's running marker to the awaiting
@@ -7258,30 +7258,35 @@ buffer as resolved elsewhere, without moving the user's windows."
     (dsh-bridge-test--kill-approval-buffer "a1")
     (dsh-bridge-test--kill-approval-buffer "a2")))
 
-(ert-deftest dsh-bridge-approve-targeting ()
-  "With no explicit target, `dsh-bridge-approve' opens the only pending
-approval; with several it refuses to guess; a view's explicit session is
-respected even when another session has the only approval."
+(ert-deftest dsh-bridge-answer-targeting-approval ()
+  "With no explicit target, `dsh-bridge-answer' opens the only pending
+approval; with several pending interactions it refuses to guess; a view's
+explicit session is respected even when another session has the only
+pending approval."
   (let ((dsh-bridge-default-session nil))
-    ;; Exactly one pending: unambiguous, so it is used.
-    (let ((dsh-bridge--pending-approvals
+    ;; Exactly one pending approval: unambiguous, so it is used.
+    (let ((dsh-bridge--pending-questions nil)
+          (dsh-bridge--pending-approvals
            (dsh-bridge-test--pending-approval-registry "s1" "a1"))
           (opened nil))
       (with-temp-buffer
         (dsh-bridge-prompt-mode)
         (cl-letf (((symbol-function 'pop-to-buffer) (lambda (b &rest _) (setq opened b))))
-          (dsh-bridge-approve))
+          (dsh-bridge-answer))
         (should (equal (buffer-local-value 'dsh-bridge--approval-id opened) "a1")))
       (dsh-bridge-test--kill-approval-buffer "a1"))
-    ;; Several pending: refuse to guess.
-    (let ((dsh-bridge--pending-approvals
+    ;; Several pending approvals: refuse to guess.
+    (let ((dsh-bridge--pending-questions nil)
+          (dsh-bridge--pending-approvals
            (append (dsh-bridge-test--pending-approval-registry "s1" "a1")
                    (dsh-bridge-test--pending-approval-registry "s2" "a2"))))
       (with-temp-buffer
         (dsh-bridge-prompt-mode)
-        (should-error (dsh-bridge-approve) :type 'user-error)))
-    ;; An explicit view session that has no approval reports that, not a guess.
-    (let ((dsh-bridge--pending-approvals
+        (should-error (dsh-bridge-answer) :type 'user-error)))
+    ;; An explicit view session that has nothing pending reports that, not a
+    ;; guess at another session's approval.
+    (let ((dsh-bridge--pending-questions nil)
+          (dsh-bridge--pending-approvals
            (dsh-bridge-test--pending-approval-registry "s2" "a2"))
           (opened nil) (msg nil))
       (with-temp-buffer
@@ -7290,17 +7295,43 @@ respected even when another session has the only approval."
         (cl-letf (((symbol-function 'pop-to-buffer) (lambda (b &rest _) (setq opened b)))
                   ((symbol-function 'message)
                    (lambda (&rest args) (setq msg (apply #'format args)))))
-          (dsh-bridge-approve))
+          (dsh-bridge-answer))
         (should-not opened)
-        (should (string-match-p "no pending approval" msg))))))
+        (should (string-match-p "no pending query or approval" msg))))))
+
+(ert-deftest dsh-bridge-answer-prefers-question-over-approval ()
+  "A session with both registries populated answers the query, not the
+approval, and the no-target fallback refuses when the union is ambiguous."
+  (let ((dsh-bridge-default-session nil))
+    ;; Same session: the query wins.
+    (let ((dsh-bridge--pending-questions (dsh-bridge-test--pending-ask "s1" "Q?"))
+          (dsh-bridge--pending-approvals
+           (dsh-bridge-test--pending-approval-registry "s1" "a1"))
+          (opened nil))
+      (with-temp-buffer
+        (dsh-bridge-view-mode)
+        (setq-local dsh-bridge--view-content-session "s1")
+        (cl-letf (((symbol-function 'pop-to-buffer) (lambda (b &rest _) (setq opened b))))
+          (dsh-bridge-answer))
+        (should (eq (buffer-local-value 'major-mode opened) 'dsh-bridge-question-mode)))
+      (dsh-bridge-test--kill-approval-buffer "a1")
+      (when (dsh-bridge--question-find-buffer "q1")
+        (kill-buffer (dsh-bridge--question-find-buffer "q1"))))
+    ;; One query and one approval in different sessions: the union is ambiguous.
+    (let ((dsh-bridge--pending-questions (dsh-bridge-test--pending-ask "s1" "Q?"))
+          (dsh-bridge--pending-approvals
+           (dsh-bridge-test--pending-approval-registry "s2" "a2")))
+      (with-temp-buffer
+        (dsh-bridge-prompt-mode)
+        (should-error (dsh-bridge-answer) :type 'user-error)))))
 
 (ert-deftest dsh-bridge-visit-session-pending-approval ()
-  "A pending approval sends RET to the approval buffer, before any resume/fetch."
+  "A pending approval sends RET to the answer buffer, before any resume/fetch."
   (let ((approved nil) (ensured nil) (fetched nil))
     (cl-letf (((symbol-function 'dsh-bridge--pending-question) (lambda (_id) nil))
               ((symbol-function 'dsh-bridge--pending-approval)
                (lambda (id) (and (equal id "s1") (list :tool-name "bash"))))
-              ((symbol-function 'dsh-bridge-approve) (lambda () (setq approved t)))
+              ((symbol-function 'dsh-bridge-answer) (lambda () (setq approved t)))
               ((symbol-function 'dsh-bridge--ensure-session-live)
                (lambda (_id) (setq ensured t) t))
               ((symbol-function 'dsh-bridge--session-turns)
@@ -7312,7 +7343,7 @@ respected even when another session has the only approval."
 
 (ert-deftest dsh-bridge-view-awaiting-approval-tail ()
   "While a session has a pending approval, a running turn's tail reads as the
-approval awaiting note naming the tool and the live `dsh-bridge-approve'
+approval awaiting note naming the tool and the live `dsh-bridge-answer'
 binding; completion drops the tail."
   (let* ((open (dsh-bridge-test--view-turn 7 7000000
                 (list (dsh-bridge-test--view-segment "progress" 7001000 1))))
@@ -7328,7 +7359,7 @@ binding; completion drops the tail."
              (dsh-bridge-test--pending-approval-registry "s1" "a1")))
         (let ((rendered (dsh-bridge-test--view-turn-render open "s1")))
           (should (string-prefix-p "progress\n\n" rendered))
-          (should (string-match-p "Awaiting approval for bash: press A to review" rendered))
+          (should (string-match-p "Awaiting approval for bash: press a to review" rendered))
           (should-not (string-match-p "(continuing\\.\\.\\.)" rendered))
           (should (text-property-any 0 (length rendered)
                                      'dsh-bridge-awaiting t rendered)))

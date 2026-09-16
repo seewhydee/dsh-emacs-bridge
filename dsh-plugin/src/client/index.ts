@@ -25,6 +25,7 @@ import type {} from '@deepseek-ai/dsh-client-locale/client'
 // Type-only: pulls the SlotRegistry service merge (ctx.slots).
 import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 import { en, zh } from './locales.ts'
+import { matchApprovalDismissRecord, type ApprovalDismissRecord } from './approval-dismiss.ts'
 import { matchDismissRecord, type DismissRecord } from './question-dismiss.ts'
 import { SendToEmacs } from './SendToEmacs.tsx'
 
@@ -119,18 +120,25 @@ function applyDraft(ctx: ClientContext, sessionId: string, text: string): void {
   conversation.input.for(actx).setDraft(text)
 }
 
-/** Minimal face of one pending interaction, enough to cancel a resolved question. */
-interface PendingQuestionLike {
+/**
+ * Minimal face of one pending interaction, enough to dismiss a resolution the
+ * host reported. Questions expose `questions` + `cancel()`; approvals expose
+ * `toolName`/`callId` + `abort()`.
+ */
+interface PendingInteractionLike {
   readonly kind: string
   readonly sessionId: string
-  readonly questions: readonly { readonly id?: unknown }[]
-  cancel(): Promise<void>
+  readonly questions?: readonly { readonly id?: unknown }[]
+  readonly toolName?: unknown
+  readonly callId?: unknown
+  cancel?(): Promise<void>
+  abort?(reason: unknown): void
 }
 
 /** Minimal face of the client UI-session service: the pending-interaction registry. */
 interface UiSessionService {
   readonly pendingInteractions: {
-    getSnapshot(): ReadonlyMap<string, PendingQuestionLike>
+    getSnapshot(): ReadonlyMap<string, PendingInteractionLike>
     subscribe(listener: () => void): () => void
   }
 }
@@ -144,14 +152,17 @@ interface UiSessionService {
  */
 const dismissRecords: DismissRecord[] = []
 
+/** Approvals the host reported resolved, retried exactly as questions are. */
+const approvalDismissRecords: ApprovalDismissRecord[] = []
+
 /** How long an unmatched resolution record is retried before being dropped. */
 const DISMISS_RECORD_TTL_MS = 120_000
 
-/** Cancel any browser question panel whose question the host already resolved. */
-function dismissResolvedQuestions(ctx: ClientContext): void {
-  if (dismissRecords.length === 0) return
+/** Cancel any browser panel whose interaction the host already resolved. */
+function dismissResolvedInteractions(ctx: ClientContext): void {
+  if (dismissRecords.length === 0 && approvalDismissRecords.length === 0) return
   // Drop retries whose panel never appeared (e.g. the session was not loaded
-  // when Emacs answered), so a much later re-ask of the same ids is not
+  // when Emacs answered), so a much later re-ask of the same identity is not
   // dismissed by a stale record.
   const now = Date.now()
   for (let index = dismissRecords.length - 1; index >= 0; index -= 1) {
@@ -160,15 +171,35 @@ function dismissResolvedQuestions(ctx: ClientContext): void {
       dismissRecords.splice(index, 1)
     }
   }
+  for (let index = approvalDismissRecords.length - 1; index >= 0; index -= 1) {
+    const record = approvalDismissRecords[index]
+    if (record?.at !== undefined && now - record.at > DISMISS_RECORD_TTL_MS) {
+      approvalDismissRecords.splice(index, 1)
+    }
+  }
   const uiSession = ctx.get('uiSession') as UiSessionService | undefined
   if (uiSession === undefined) return
   for (const pending of uiSession.pendingInteractions.getSnapshot().values()) {
-    const index = matchDismissRecord(dismissRecords, pending)
+    if (pending.kind === 'approval') {
+      const index = matchApprovalDismissRecord(approvalDismissRecords, pending)
+      if (index < 0) continue
+      approvalDismissRecords.splice(index, 1)
+      // `abort()` ends the web panel and rejects its waiter; the host's own
+      // waterfall listener already settled, so the rejection is swallowed
+      // there. It is a no-op when the browser answered first.
+      pending.abort?.(new Error('approval resolved outside this panel'))
+      continue
+    }
+    const index = matchDismissRecord(dismissRecords, {
+      kind: pending.kind,
+      sessionId: pending.sessionId,
+      questions: pending.questions ?? [],
+    })
     if (index < 0) continue
     dismissRecords.splice(index, 1)
     // `cancel()` rejects when the panel already settled (the browser answered
     // first); nothing is left to do then.
-    void pending.cancel().catch(() => {})
+    if (pending.cancel !== undefined) void pending.cancel().catch(() => {})
   }
 }
 
@@ -179,7 +210,20 @@ function noteResolvedQuestion(ctx: ClientContext, sessionId: string, questionIds
   // Bound the retry list: an unmatched record can only matter until its panel
   // appears, and a long-lived tab must not accumulate stale entries.
   if (dismissRecords.length > 32) dismissRecords.shift()
-  dismissResolvedQuestions(ctx)
+  dismissResolvedInteractions(ctx)
+}
+
+/** Remember a host-resolved approval and dismiss its panel if it is already up. */
+function noteResolvedApproval(
+  ctx: ClientContext,
+  sessionId: string,
+  toolName: string,
+  callId: string | undefined,
+): void {
+  if (toolName === '') return
+  approvalDismissRecords.push({ sessionId, toolName, callId, at: Date.now() })
+  if (approvalDismissRecords.length > 32) approvalDismissRecords.shift()
+  dismissResolvedInteractions(ctx)
 }
 
 /** Subscribe to the composer-draft SSE stream and apply drafts to the target session. */
@@ -196,9 +240,9 @@ async function connectDraftStream(ctx: ClientContext): Promise<void> {
   }
   draftSource?.close()
   // `purpose=draft` identifies this connection as the browser's draft stream:
-  // the host's ask-user answerer must not count it as an Emacs client (this
-  // stream exists whenever the web UI is open and never answers questions).
-  // It does receive the host's ask-user frames, which is how a question
+  // the host's answerers must not count it as an Emacs client (this stream
+  // exists whenever the web UI is open and never answers). It does receive
+  // the host's resolution frames, which is how a question or an approval
   // answered in Emacs dismisses the web UI's own panel.
   const source = new EventSource(
     `${location.origin}/dsh-bridge/events?token=${encodeURIComponent(token)}&purpose=draft`)
@@ -206,6 +250,7 @@ async function connectDraftStream(ctx: ClientContext): Promise<void> {
   source.addEventListener('message', (event: MessageEvent<string>) => {
     let payload: {
       kind?: unknown; sessionId?: unknown; text?: unknown; questionIds?: unknown
+      toolName?: unknown; callId?: unknown
     }
     try {
       payload = JSON.parse(event.data) as typeof payload
@@ -221,6 +266,14 @@ async function connectDraftStream(ctx: ClientContext): Promise<void> {
       noteResolvedQuestion(ctx, payload.sessionId, questionIds)
       return
     }
+    if (payload.kind === 'approval-resolved' && typeof payload.sessionId === 'string') {
+      // The frame carries the asker's own tool identity; there is no shared
+      // bridge-minted id, so the panel matches on session + tool (+ call id).
+      const toolName = typeof payload.toolName === 'string' ? payload.toolName : ''
+      const callId = typeof payload.callId === 'string' ? payload.callId : undefined
+      noteResolvedApproval(ctx, payload.sessionId, toolName, callId)
+      return
+    }
     if (payload.kind !== 'draft' || typeof payload.sessionId !== 'string' || typeof payload.text !== 'string') return
     applyDraft(ctx, payload.sessionId, payload.text)
   })
@@ -232,7 +285,7 @@ async function connectDraftStream(ctx: ClientContext): Promise<void> {
  */
 export function apply(ctx: ClientContext): void {
   ctx.effect(() => ctx.locale.register(LOCALE_NS, { zh, en }))
-  // Retry pending dismissals whenever a question panel appears: the host's
+  // Retry pending dismissals whenever an interaction panel appears: the host's
   // resolution frame can reach this SSE stream before the forwarded waterfall
   // reaches the browser's pending-interaction registry. `uiSession` is an
   // optional collaborator here — without it, the web panel simply is not
@@ -241,7 +294,7 @@ export function apply(ctx: ClientContext): void {
     const uiSession = scope.get('uiSession') as UiSessionService | undefined
     if (uiSession === undefined) return
     scope.effect(() => uiSession.pendingInteractions.subscribe(() => {
-      dismissResolvedQuestions(scope)
+      dismissResolvedInteractions(scope)
     }))
   })
   ctx.slots.inject('conversation.chat.assistant-actions', () => {

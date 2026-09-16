@@ -76,6 +76,11 @@ re-verification checklist.
   open) also calls `next()` so the browser panel appears; whichever answers
   first wins and the resolved frame dismisses the other presentation. With no
   Emacs SSE client the bridge delegates to the browser (`next()`) untouched.
+- **Approval coexists the same way**: the bridge offers an approval to Emacs
+  and (when the web UI is open) also calls `next()` so the browser panel
+  appears; whichever answers first wins, and the resolved frame dismisses the
+  other presentation — the web panel through `PendingApproval.abort()`. With
+  no answering Emacs SSE client the bridge delegates untouched.
 - **Plugin management stays user-confirmed.** Installs are validated with
   `dsh --profile <p> --dump-config`; the bridge never auto-restarts a server.
 - **`/output` is kept but unused** — a single-shot "latest text" probe; Emacs
@@ -213,7 +218,9 @@ Mutation from Emacs is deferred: it is a privilege-escalation surface behind
 the same local token file, and the web UI gates full access behind an explicit
 risk acknowledgement. See [Deferred](#deferred).  Answering an on-demand
 `approval/request` (a one-shot sandbox escalation or hook-gated tool ask) is
-a separate, implemented feature — see `approval-handling-plan.md`.
+a separate, implemented feature — see `approval-handling-plan.md` for the
+seam and `approval-race-and-dwim-plan.md` for the dual-presentation race
+(its §4 D1 exclusive-claim decision is superseded) and the DWIM `a` key.
 
 ### 7. `/emacs edit` flow
 

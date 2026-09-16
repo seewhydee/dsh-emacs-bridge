@@ -336,7 +336,7 @@ toggling it takes effect at the next render."
 (defcustom dsh-bridge-approval-auto-pop nil
   "Whether an arriving approval request pops to its approval buffer.
 When nil (the default), a request is announced in the echo area and the
-DSH-View buffer, and the user must run `\\[dsh-bridge-approve]' to review
+DSH-View buffer, and the user must run `\\[dsh-bridge-answer]' to review
 it.  If non-nil, pop to the approval buffer on arrival."
   :type 'boolean
   :group 'dsh-bridge)
@@ -359,7 +359,7 @@ change when the stream is re-established."
 
 (defcustom dsh-bridge-approval-answer 'all
   "How Emacs answers DSH approval requests (sandbox escalations, hook asks).
-The value `all' lets `dsh-bridge-approve' submit every outcome the web UI
+The value `all' lets `dsh-bridge-answer' submit every outcome the web UI
 offers, including a one-shot `danger-full-access' sandbox escalation: a
 token holder can already mutate sessions and run tools, so this grants no
 authority the web UI did not already have.
@@ -2260,7 +2260,7 @@ SESSION-ID is parked on an approval request.  It should instruct the user
 on what to do next."
   (let* ((plist (dsh-bridge--pending-approval session-id))
 		 (tool (or (plist-get plist :tool-name) "a tool"))
-		 (key (substitute-command-keys "\\[dsh-bridge-approve]"))
+		 (key (substitute-command-keys "\\[dsh-bridge-answer]"))
 		 (body (format "(Awaiting approval for %s: press %s to review)"
 					   tool key)))
 	;; Apply both `face' and `font-lock-face' text properties; the
@@ -2808,7 +2808,6 @@ compose a reply (prompt) for the session, etc.
   "g" #'revert-buffer
   "i" #'dsh-bridge-receive
   "a" #'dsh-bridge-answer
-  "A" #'dsh-bridge-approve
   "B" #'dsh-bridge-fork-turn
   "D" #'dsh-bridge-describe-session
   "l" #'dsh-bridge-list-sessions)
@@ -4199,38 +4198,53 @@ answer; an already-resolved question is bannered in place."
 			  (message "dsh-bridge: decline not accepted%s"
 					   (if reason (concat ": " reason) "")))))))))
 
-;; The `a' (answer) key and the question mode --------------------------------
+;; The `a' (answer) key: one DWIM command for query and approval ------------
+
+(defun dsh-bridge--interaction-session ()
+  "The session whose pending interaction the current buffer acts on, or nil.
+A DSH-View buffer acts on its shown session, a DSH-Prompt buffer on its
+effective target, and a DSH-Sessions buffer on the row under point.  The
+display-only fallbacks are deliberately not consulted: this target is used to
+settle a wait, never merely to display one."
+  (cond
+   ((and (eq major-mode 'dsh-bridge-view-mode)
+         dsh-bridge--view-content-session)
+    dsh-bridge--view-content-session)
+   ((eq major-mode 'dsh-bridge-prompt-mode)
+    (dsh-bridge--effective-session))
+   ((eq major-mode 'dsh-bridge-sessions-mode)
+    (tabulated-list-get-id))))
 
 (defun dsh-bridge-answer ()
-  "Open the pending ask-user question buffer for the session at hand.
-In a DSH-View / DSH-Prompt / DSH-Sessions buffer, answers the shown / point
-session.  An unbound DSH-Prompt buffer (one following last-active) answers
-the only session with a pending question, and refuses to guess when several
-are pending.  Otherwise reports that no question is pending."
+  "Handle the pending ask-user query or approval for the session at hand.
+In a DSH-View / DSH-Prompt / DSH-Sessions buffer, acts on the shown / point
+session.  An unbound DSH-Prompt buffer (one following last-active) handles
+the only session with a pending query or approval, and refuses to guess when
+several are pending.  A session cannot be parked on both at once, so a
+pending ask-user query takes precedence over a pending approval.  Otherwise
+reports that nothing is pending."
   (interactive)
-  (let ((session (cond
-                  ((and (eq major-mode 'dsh-bridge-view-mode)
-                        dsh-bridge--view-content-session)
-                   dsh-bridge--view-content-session)
-                  ((eq major-mode 'dsh-bridge-prompt-mode)
-                   (dsh-bridge--effective-session))
-                  ((eq major-mode 'dsh-bridge-sessions-mode)
-                   (tabulated-list-get-id)))))
+  (let ((session (dsh-bridge--interaction-session)))
     (unless session
-      (let ((pending (mapcar #'car dsh-bridge--pending-questions)))
+      (let ((pending (delete-dups
+                      (append (mapcar #'car dsh-bridge--pending-questions)
+                              (mapcar #'car dsh-bridge--pending-approvals)))))
         (cond ((= (length pending) 1)
                (setq session (car pending)))
               ((> (length pending) 1)
-               (user-error "dsh-bridge: %d sessions have pending questions; pick one in DSH-Sessions"
+               (user-error "dsh-bridge: %d sessions have pending queries or approvals; pick one in DSH-Sessions"
                            (length pending))))))
-    (let ((entry (and session (dsh-bridge--pending-question session))))
+    (let ((question (and session (dsh-bridge--pending-question session)))
+          (approval (and session (dsh-bridge--pending-approval-entry session))))
       (cond
-       (entry
-        (pop-to-buffer (dsh-bridge--question-buffer session (car entry) (cdr entry))))
+       (question
+        (pop-to-buffer (dsh-bridge--question-buffer session (car question) (cdr question))))
+       (approval
+        (pop-to-buffer (dsh-bridge--approval-buffer session (car approval) (cdr approval))))
        (session
-        (message "dsh-bridge: session \"%s\" has no pending question"
+        (message "dsh-bridge: session \"%s\" has no pending query or approval"
                  (dsh-bridge--session-label session)))
-       (t (message "dsh-bridge: no pending question"))))))
+       (t (message "dsh-bridge: no pending query or approval"))))))
 
 (defvar-keymap dsh-bridge-question-mode-map
   :parent special-mode-map
@@ -4263,19 +4277,17 @@ an option's number key.  These commands are also available:
 
 ;; The approval path registers an in-process answerer on the host's
 ;; `approval/request` waterfall (ahead of the browser forwarder).  While an
-;; Emacs SSE client that will answer is connected the bridge claims the
-;; request exclusively and the web UI's own approval panel never opens; with
-;; no such client the request delegates to the web UI untouched.  This is
-;; deliberately not the ask-user race: the browser's approval panel has no
-;; "resolved elsewhere" dismissal, so a raced panel would linger.  Once
-;; claimed an approval cannot be un-claimed, so an Emacs client that dies
-;; without reconnecting parks the turn until Emacs reconnects (the host
-;; replays pending approvals) or the web UI cancels the turn.  A decision
-;; travels over the bearer-authed `POST /dsh-bridge/approval' route; a late
-;; or duplicate decision reads 404 `not-pending'.  With
-;; `dsh-bridge-approval-answer' set to `notify-only' the notification stream
-;; declares `answer=0', so the host does not claim the request: Emacs
-;; displays it, but the web UI remains the answerer.
+;; Emacs SSE client that will answer is connected the bridge registers the
+;; request for Emacs and, when the web UI is also open, still lets its own
+;; approval panel appear: the two presentations race, and whichever answers
+;; first settles the request.  A resolution frame lets the web panel dismiss
+;; itself after an Emacs answer, and lets an Emacs buffer banner a decision
+;; made in the web UI.  A decision travels over the bearer-authed
+;; `POST /dsh-bridge/approval' route; a late or duplicate decision reads 404
+;; `not-pending'.  With `dsh-bridge-approval-answer' set to `notify-only' the
+;; notification stream declares `answer=0', so the host does not offer the
+;; request for Emacs to decide: Emacs displays it, but the web UI remains the
+;; answerer.
 
 ;; Approval buffer state -----------------------------------------------------
 
@@ -4358,7 +4370,7 @@ the stored copy, silently, without re-messaging or touching the buffer."
 	  (message "dsh-bridge: session \"%s\" requests approval for %s (press %s to review)"
 			   (dsh-bridge--session-label session-id)
 			   (or (plist-get plist :tool-name) "a tool")
-			   (substitute-command-keys "\\[dsh-bridge-approve]"))
+			   (substitute-command-keys "\\[dsh-bridge-answer]"))
 	  (dsh-bridge--status-event-render session-id)
 	  ;; The DSH-View body must say the session is parked, not "(continuing...)".
 	  (dsh-bridge--view-await-refresh session-id)
@@ -4399,7 +4411,7 @@ on record."
 (defun dsh-bridge--approval-buffer (session-id approval-id plist)
   "Find or create the approval buffer for APPROVAL-ID and return it.
 A live buffer already deciding APPROVAL-ID is returned untouched, so
-burying with `q' and returning with `dsh-bridge-approve' keeps its state."
+burying with `q' and returning with `dsh-bridge-answer' keeps its state."
   (let ((existing (dsh-bridge--approval-find-buffer approval-id)))
 	(if (and existing
 			 (with-current-buffer existing (not dsh-bridge--approval-dead)))
@@ -4569,44 +4581,11 @@ selected afterwards so the continuation follows."
 
 (define-derived-mode dsh-bridge-approval-mode special-mode "DSH-Approval"
   "Major mode for deciding DSH approval requests.
-This buffer is launched when the user calls `dsh-bridge-approve' to
+This buffer is launched when the user calls `dsh-bridge-answer' to
 decide an \"approval/request\" (for example a sandbox escalation).
 
 The buffer is read-only; these commands are available:
 \\{dsh-bridge-approval-mode-map}")
-
-;; The `A' (approval) key and target resolution ------------------------------
-
-(defun dsh-bridge-approve ()
-  "Open the pending approval buffer for the session at hand.
-In a DSH-View / DSH-Prompt / DSH-Sessions buffer, reviews the shown / point
-session.  An unbound DSH-Prompt buffer (one following last-active) reviews
-the only session with a pending approval, and refuses to guess when several
-are pending.  Otherwise reports that no approval is pending."
-  (interactive)
-  (let ((session (cond
-                  ((and (eq major-mode 'dsh-bridge-view-mode)
-                        dsh-bridge--view-content-session)
-                   dsh-bridge--view-content-session)
-                  ((eq major-mode 'dsh-bridge-prompt-mode)
-                   (dsh-bridge--effective-session))
-                  ((eq major-mode 'dsh-bridge-sessions-mode)
-                   (tabulated-list-get-id)))))
-    (unless session
-      (let ((pending (mapcar #'car dsh-bridge--pending-approvals)))
-        (cond ((= (length pending) 1)
-               (setq session (car pending)))
-              ((> (length pending) 1)
-               (user-error "dsh-bridge: %d sessions have pending approvals; pick one in DSH-Sessions"
-                           (length pending))))))
-    (let ((entry (and session (dsh-bridge--pending-approval-entry session))))
-      (cond
-       (entry
-        (pop-to-buffer (dsh-bridge--approval-buffer session (car entry) (cdr entry))))
-       (session
-        (message "dsh-bridge: session \"%s\" has no pending approval"
-                 (dsh-bridge--session-label session)))
-       (t (message "dsh-bridge: no pending approval"))))))
 
 ;;; Prompt-buffer model selection and context occupancy
 
@@ -5198,7 +5177,6 @@ Archived sessions are hidden unless `dsh-bridge--sessions-archived-p' (or
   "u" #'dsh-bridge-clear-default-target
   "f" #'dsh-bridge-peek-session
   "a" #'dsh-bridge-answer
-  "A" #'dsh-bridge-approve
   "v" #'dsh-bridge-toggle-archived-sessions
   "R" #'dsh-bridge-rename-session
   "d" #'dsh-bridge-archive-session
@@ -5297,10 +5275,8 @@ change the default target session."
 
 (defun dsh-bridge-visit-session ()
   "Do the next thing for the session under point in a DSH-Sessions buffer.
-- Waiting on an ask-user question: open its answer buffer
+- Waiting on an ask-user question or approval: open its answer buffer
   (`dsh-bridge-answer' does the work for the row).
-- Waiting on an approval request: open its approval buffer
-  (`dsh-bridge-approve' does the work for the row).
 - Running a turn: show the session's DSH-View in turn-following state,
   with point at the end, exactly as the prompt flow collects a reply.
 - Idle with no output yet: open a prompt in the same window.
@@ -5316,12 +5292,10 @@ is not changed."
 	(cond
 	 ((null id)
 	  (message "dsh-bridge: no session under point"))
-	 ((dsh-bridge--pending-question id)
+	 ((or (dsh-bridge--pending-question id)
+		  (dsh-bridge--pending-approval id))
 	  ;; `dsh-bridge-answer' resolves the row's session itself.
 	  (dsh-bridge-answer))
-	 ((dsh-bridge--pending-approval id)
-	  ;; `dsh-bridge-approve' resolves the row's session itself.
-	  (dsh-bridge-approve))
 	 ((not (dsh-bridge--ensure-session-live id))
 	  (error "dsh-bridge: could not open session \"%s\"" id))
 	 (t

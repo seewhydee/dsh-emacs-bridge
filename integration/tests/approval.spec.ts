@@ -19,12 +19,13 @@
 // `approval/request` waterfall answerer must surface an `approval` SSE frame
 // to Emacs (with the folded tool-call detail, and replaying to a reconnecting
 // Emacs) and settle the turn from `POST /dsh-bridge/approval`.  The bridge
-// claims the request EXCLUSIVELY while an answering Emacs client is connected:
-// the web panel never opens, so a `purpose=draft`-only stream (the browser,
-// which cannot answer) must NOT claim it, and a `answer=0` notify-only Emacs
-// must receive the notification but leave the request to the web UI.  A real
-// state change (a marker file the escalated command touches) proves the
-// decision reached the sandbox, not merely the waterfall.
+// offers the request to Emacs and, when the web UI is open, to the browser
+// forwarder too, so the two presentations race; a `purpose=draft`-only stream
+// (the browser, which cannot answer) must NOT be treated as an Emacs answerer,
+// and an `answer=0` notify-only Emacs must receive the notification but leave
+// the request to the web UI.  A real state change (a marker file the escalated
+// command touches) proves the decision reached the sandbox, not merely the
+// waterfall.
 
 import { describe, it, expect, inject } from 'vitest'
 import { existsSync, rmSync } from 'node:fs'
@@ -192,6 +193,58 @@ describe('approval surfacing', () => {
     expect(existsSync(marker)).toBe(false)
 
     sse.close()
+  }, 90000)
+
+  it('offers the approval to the web UI too, then settles it from Emacs', async () => {
+    const fixture = inject('fixture')
+    const marker = markerPath('raced')
+    rmSync(marker, { force: true })
+
+    // Coexistence: with Emacs AND the web UI open, the bridge must still
+    // surface the approval to Emacs, but it must also hand the request on to
+    // the browser forwarder (next()) so the web UI's own panel appears. The
+    // resolution frame reaches the browser stream with the asker's tool
+    // identity, which is how the browser plugin dismisses that panel once
+    // Emacs answered first.
+    await post(fixture, '/mock-llm/reset', {})
+    await scriptMock(fixture, [
+      bashEscalation(`touch ${JSON.stringify(marker)}`),
+      textReply('Ran it after the race.'),
+    ])
+
+    const emacs = openSse(fixture, { timeoutMs: 8000 })
+    const browser = openSse(fixture, { timeoutMs: 8000, purpose: 'draft' })
+    const sessionId = await createSession(fixture)
+
+    const sent = await post(fixture, '/dsh-bridge/send', { text: 'Touch the marker.', sessionId })
+    expect(sent.status).toBe(200)
+
+    const frame = await emacs.waitFor('approval')
+    expect(frame.toolName).toBe('bash')
+    // The browser stream is notified too (the bridge broadcasts to every
+    // subscriber), though the web panel itself is driven by the forwarded
+    // waterfall rather than this stream.
+    const browserFrame = await browser.waitFor('approval')
+    expect(browserFrame.approvalId).toBe(frame.approvalId)
+
+    const decision = await post(fixture, '/dsh-bridge/approval', {
+      approvalId: frame.approvalId, sessionId, decision: 'allowed-once',
+    })
+    expect(decision.status).toBe(200)
+
+    // The browser stream learns the same approval is resolved, carrying the
+    // tool identity the web panel matches on to dismiss itself.
+    const resolved = await browser.waitFor('approval-resolved')
+    expect(resolved.approvalId).toBe(frame.approvalId)
+    expect(resolved.toolName).toBe('bash')
+    expect(resolved.callId).toBe(frame.callId)
+
+    await emacs.waitFor('turn-complete')
+    expect(existsSync(marker)).toBe(true)
+    rmSync(marker, { force: true })
+
+    emacs.close()
+    browser.close()
   }, 90000)
 
   it('does not claim an approval when only the browser draft stream is connected', async () => {
