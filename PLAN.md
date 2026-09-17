@@ -90,9 +90,9 @@ re-verification checklist.
 
 Ordered by recommended sequence, but out-of-sequence implementation is
 acceptable based on user needs. Harness seams were verified against
-DSH 0.1.5-alpha.1; the peer floor in `dsh-plugin/package.json` is
-pinned to match (node-semver prerelease rules exclude `0.1.5-alpha.1`
-from the old `^0.1.3-alpha.2` floor).
+DSH 0.1.6-alpha.1; the peer floor in `dsh-plugin/package.json` is
+pinned to match (node-semver prerelease rules exclude `0.1.6-alpha.1`
+from the old `^0.1.5-alpha.1` floor).
 
 **Shared prerequisites.** Two small additions unlock several candidates:
 
