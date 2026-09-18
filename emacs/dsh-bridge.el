@@ -5858,7 +5858,7 @@ This does not change the default target; see
     (unless session-id
       (error "dsh-bridge: session creation returned no session id"))
     (dsh-bridge--fetch-sessions)
-    (dsh-bridge--refresh-sessions-buffer)
+    (dsh-bridge--refresh-sessions-buffer session-id)
     (message "dsh-bridge: created a new session")
     session-id))
 
@@ -6327,10 +6327,24 @@ persisted log and is never resumed."
 	  (pop-to-buffer buffer))))
 
 
-(defun dsh-bridge--list-sessions-in-buffer ()
+(defun dsh-bridge--sessions-goto-id (id)
+  "Move point to the DSH-Sessions row for session ID, when it is present.
+Return point, or nil when no row carries ID.  The buffer must already be
+printed."
+  (when id
+	(goto-char (point-min))
+	(catch 'found
+	  (while (not (eobp))
+		(when (equal (tabulated-list-get-id) id)
+		  (throw 'found (point)))
+		(forward-line 1)))))
+
+(defun dsh-bridge--list-sessions-in-buffer (&optional goto-id)
   "Fill `*dsh-bridge-sessions*' with the current session roster.
 Return non-nil if the roster was fetched.  If the fetch fails, leave the
-DSH-Sessions buffer untouched and return nil."
+DSH-Sessions buffer untouched and return nil.  With GOTO-ID, move point to
+that session's row after printing: a freshly created session may sort to a
+different row than the one point held."
   (let ((fetch (dsh-bridge--fetch-sessions)))
 	(when (eq (car fetch) 200)
 	  (let ((visible (seq-filter #'dsh-bridge--session-visible-p
@@ -6349,15 +6363,20 @@ DSH-Sessions buffer untouched and return nil."
 		  (tabulated-list-init-header)
 		  ;; REMEMBER-POS: entry ids are session ids, so an auto-refresh or
 		  ;; post-mutation reprint keeps point on the same session's row.
-		  (tabulated-list-print t))
+		  (tabulated-list-print t)
+		  ;; A newly created session is the exception: it has no previous
+		  ;; row, and the caller wants it selected.
+		  (dsh-bridge--sessions-goto-id goto-id))
 		t))))
 
-(defun dsh-bridge--refresh-sessions-buffer ()
-  "Re-render `*dsh-bridge-sessions*' in place if it is live."
+(defun dsh-bridge--refresh-sessions-buffer (&optional goto-id)
+  "Re-render `*dsh-bridge-sessions*' in place if it is live.
+With GOTO-ID, leave point on that session's row (see
+`dsh-bridge--list-sessions-in-buffer')."
   (when (buffer-live-p (get-buffer "*dsh-bridge-sessions*"))
 	(with-current-buffer "*dsh-bridge-sessions*"
 	  (when (eq major-mode 'dsh-bridge-sessions-mode)
-		(dsh-bridge--list-sessions-in-buffer)))))
+		(dsh-bridge--list-sessions-in-buffer goto-id)))))
 
 (defun dsh-bridge--sessions-format ()
   "The `tabulated-list-format' for the sessions buffer.

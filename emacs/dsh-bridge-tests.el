@@ -2532,7 +2532,7 @@ default target alone (only the dispatcher's titled create binds it)."
                                              (list (cons 'id "w2") (cons 'title "WS B"))))))
                    (cons 201 (list (cons 'sessionId "s-new"))))))
               ((symbol-function 'dsh-bridge--fetch-sessions) (lambda () nil))
-              ((symbol-function 'dsh-bridge--refresh-sessions-buffer) (lambda () nil))
+              ((symbol-function 'dsh-bridge--refresh-sessions-buffer) (lambda (&optional _) nil))
               ((symbol-function 'dsh-bridge-set-default-target)
                (lambda (id) (setq bound-target id))))
       ;; Without SET-TITLE: the DSH-Sessions "+" route, which never asks.
@@ -2568,7 +2568,7 @@ This is the transient dispatcher's route, which must produce a completable
                (lambda (&rest _) (setq prompts (1+ prompts))
                  (nth (1- prompts) '("" "   " "My New Session"))))
               ((symbol-function 'dsh-bridge--fetch-sessions) (lambda () nil))
-              ((symbol-function 'dsh-bridge--refresh-sessions-buffer) (lambda () nil)))
+              ((symbol-function 'dsh-bridge--refresh-sessions-buffer) (lambda (&optional _) nil)))
       (let ((dsh-bridge-default-session nil))
         (dsh-bridge-create-session t)))
     (let ((create (cadr (assoc "/sessions/create"
@@ -2610,7 +2610,7 @@ matches no workspace names a new one."
                      (cons 200 (list (cons 'workspaces nil)))
                    (cons 201 (list (cons 'sessionId "s-new"))))))
               ((symbol-function 'dsh-bridge--fetch-sessions) (lambda () nil))
-              ((symbol-function 'dsh-bridge--refresh-sessions-buffer) (lambda () nil)))
+              ((symbol-function 'dsh-bridge--refresh-sessions-buffer) (lambda (&optional _) nil)))
       (let ((dsh-bridge-default-session nil))
         (dsh-bridge-create-session)))
     ;; An empty roster yields an empty candidate list, not a sentinel entry.
@@ -2645,7 +2645,7 @@ The host's workspace registry rejects a path that is not fully qualified."
                      (cons 200 (list (cons 'workspaces nil)))
                    (cons 201 (list (cons 'sessionId "s-new"))))))
               ((symbol-function 'dsh-bridge--fetch-sessions) (lambda () nil))
-              ((symbol-function 'dsh-bridge--refresh-sessions-buffer) (lambda () nil)))
+              ((symbol-function 'dsh-bridge--refresh-sessions-buffer) (lambda (&optional _) nil)))
       (let ((dsh-bridge-default-session nil))
         (dsh-bridge-create-session)))
     (let ((create (cadr (assoc "/sessions/create"
@@ -2685,13 +2685,46 @@ The host's workspace registry rejects a path that is not fully qualified."
     (should (string-match-p "workspace named WS A exists"
                             (error-message-string caught)))))
 
+(ert-deftest dsh-bridge-create-session-selects-new-row ()
+  "After `+' creates a session, point is on the new session's row.
+The new row sorts to the top, where `tabulated-list-print''s REMEMBER-POS
+would otherwise leave point on the row that held the line before."
+  (when (get-buffer "*dsh-bridge-sessions*")
+    (kill-buffer "*dsh-bridge-sessions*"))
+  (let* ((created nil)
+         (dsh-bridge-default-session nil)
+         (old '((id . "s-old") (title . "Old") (live . t) (lastActive . 1000)
+                (cwd . "/a") (workspace . "WS")))
+         (new '((id . "s-new") (title . "New") (live . t) (lastActive . 2000)
+                (cwd . "/a") (workspace . "WS"))))
+    (cl-letf (((symbol-function 'dsh-bridge--read-workspace)
+               (lambda (_prompt) "w1"))
+              ((symbol-function 'dsh-bridge--request)
+               (lambda (_method path _payload)
+                 (if (equal path "/sessions/create")
+                     (cons 201 (list (cons 'sessionId "s-new")))
+                   (cons 200 nil))))
+              ((symbol-function 'dsh-bridge--fetch-sessions)
+               (lambda () (cons 200 (if created (list new old) (list old))))))
+      ;; Point starts on the only existing row.
+      (with-current-buffer (get-buffer-create "*dsh-bridge-sessions*")
+        (dsh-bridge-sessions-mode)
+        (dsh-bridge--list-sessions-in-buffer)
+        (should (dsh-bridge--sessions-goto-id "s-old"))
+        (should (equal (tabulated-list-get-id) "s-old")))
+      (setq created t)
+      (dsh-bridge-create-session)
+      (with-current-buffer "*dsh-bridge-sessions*"
+        (should (equal (tabulated-list-get-id) "s-new"))))
+    (kill-buffer "*dsh-bridge-sessions*")))
+
 (ert-deftest dsh-bridge-create-session-default-accepts-ret ()
   "RET (the prompt default) addresses the default workspace by id.
 The default is the effective session's workspace, verified against the fresh
 roster, so accepting it skips name matching entirely."
   (let ((called nil) (seen-prompt nil))
     (cl-letf (((symbol-function 'dsh-bridge--fetch-sessions) (lambda () nil))
-              ((symbol-function 'dsh-bridge--refresh-sessions-buffer) (lambda () nil))
+              ((symbol-function 'dsh-bridge--refresh-sessions-buffer) (lambda (&optional _) nil))
               ((symbol-function 'dsh-bridge--request)
                (lambda (method path payload)
                  (push (list method path payload) called)
@@ -2821,7 +2854,7 @@ other; the directory must come from the prompt."
                      (cons 200 (list (cons 'workspaces nil)))
                    (cons 201 (list (cons 'sessionId "s-new"))))))
               ((symbol-function 'dsh-bridge--fetch-sessions) (lambda () nil))
-              ((symbol-function 'dsh-bridge--refresh-sessions-buffer) (lambda () nil)))
+              ((symbol-function 'dsh-bridge--refresh-sessions-buffer) (lambda (&optional _) nil)))
       (let ((dsh-bridge-default-session nil))
         (dsh-bridge-create-session)))
     (should prompted)
