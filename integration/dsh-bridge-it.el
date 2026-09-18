@@ -712,7 +712,7 @@ provenance against the live `/turns' epoch and `(step . time)' segments."
           (should (equal (plist-get prov :turn) 1))
           (should (numberp (plist-get prov :epoch)))
           (should (equal (plist-get prov :epoch)
-                         (dsh-bridge--turns-cache-epoch session-id)))
+                         (car (dsh-bridge--turns-cache-entry session-id))))
           (should (equal (length (plist-get prov :keys)) 1)))
         ;; Plant a marker inside the rendered body; a rebuild collapses it.
         (setq probe (copy-marker (+ (point-min) 4))))

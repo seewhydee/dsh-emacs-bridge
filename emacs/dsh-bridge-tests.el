@@ -4899,7 +4899,7 @@ A changed epoch, an unknown epoch, and an explicit empty list still replace."
     ;; Stale same-epoch response: ignored.
     (dsh-bridge--turns-cache-store "s1" (list t1) 5)
     (should (equal (funcall turns) (list t2 t1)))
-    (should (equal (dsh-bridge--turns-cache-epoch "s1") 5))
+    (should (equal (car (dsh-bridge--turns-cache-entry "s1")) 5))
     ;; A newer same-epoch response still updates.
     (dsh-bridge--turns-cache-store "s1" (list t3 t2 t1) 5)
     (should (equal (funcall turns) (list t3 t2 t1)))
@@ -4950,7 +4950,7 @@ stored `epoch'; the response epoch is stored."
       ;; Boundary turn replaced in full, newer turn prepended, older kept.
       (should (equal (dsh-bridge--turns-cache-turns "s1")
                      (list new-8 grown-7 older-5)))
-      (should (equal (dsh-bridge--turns-cache-epoch "s1") 3))
+      (should (equal (car (dsh-bridge--turns-cache-entry "s1")) 3))
       ;; Idempotent: a second incremental fetch (now since=8) changes nothing.
       (dsh-bridge--view-turns-cache-refresh "s1")
       (should (equal (dsh-bridge--turns-cache-turns "s1")
@@ -5026,7 +5026,7 @@ replaces the whole entry and records the new epoch."
                             (list fresh) 9 nil)))))
       (dsh-bridge--view-turns-cache-refresh "s1")
       (should (equal (dsh-bridge--turns-cache-turns "s1") (list fresh)))
-      (should (equal (dsh-bridge--turns-cache-epoch "s1") 9)))))
+      (should (equal (car (dsh-bridge--turns-cache-entry "s1")) 9)))))
 
 (ert-deftest dsh-bridge-turns-cache-known-empty-repopulates ()
   "A known-empty entry (full compaction) is authoritative until a forced
@@ -5057,13 +5057,13 @@ refresh returns content again — the epoch is kept and then updated."
         (dsh-bridge--view-turns-cache-refresh "s1")
         (should (assoc "s1" dsh-bridge--turns-cache))
         (should (null (dsh-bridge--turns-cache-turns "s1")))
-        (should (equal (dsh-bridge--turns-cache-epoch "s1") 4))
+        (should (equal (car (dsh-bridge--turns-cache-entry "s1")) 4))
         ;; The view has no turns to navigate; position shows nothing.
         (should (equal (dsh-bridge--view-turn-position) nil))
         ;; A forced refresh refetches and repopulates.
         (dsh-bridge--view-turns-cache-refresh "s1")
         (should (equal (dsh-bridge--turns-cache-turns "s1") (list fresh-8)))
-        (should (equal (dsh-bridge--turns-cache-epoch "s1") 5)))
+        (should (equal (car (dsh-bridge--turns-cache-entry "s1")) 5)))
       (kill-buffer "*dsh-bridge-output*"))))
 
 (ert-deftest dsh-bridge-view-next-reply-from-rest-steps-to-newer ()
