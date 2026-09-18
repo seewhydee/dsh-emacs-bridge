@@ -69,6 +69,21 @@ re-verification checklist.
 - **Host-side targeting, Emacs-side selection.** The host resolves a missing
   `sessionId` to last-active (falling back to the most recent cold session);
   Emacs keeps a default target plus per-buffer bindings.
+- **The session picker offers sessions, not binding modes.** Neither
+  `(default)` nor `(last-active)` is a completion entry: the first is the
+  absence of a chosen session and the second the absence of a default target,
+  so both are category errors in a session list and, sorting first, invite
+  accidental selection. Clearing the default target stays on `u`
+  (`dsh-bridge-clear-default-target`), and an interactive prompt-buffer rebind
+  always picks an explicit session. A title shared by several sessions is one
+  candidate that says how many match; choosing it prompts again with the
+  distinguishing workspace (or, when workspaces do not distinguish, the
+  shortest pairwise-distinct id tails) as the only candidates, so the shared
+  title is never repeated as a useless prefix. Disambiguation stays scoped to
+  the colliding group rather than merging suffixed candidates into the
+  all-sessions list: a fabricated `title · suffix` can equal another session's
+  real title (titles are free-form and may contain the separator), and no
+  fixed suffix scheme is injective.
 - **First lazy send is convenient; later ones are not lazy.** A DSH-Prompt
   buffer with no binding and no default sends without a target (the host
   picks), then adopts the session id the response reports, so follow-up sends

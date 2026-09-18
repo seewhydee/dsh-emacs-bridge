@@ -1445,97 +1445,164 @@ the last-active session (as a fallback)."
 		  (concat " " status " " label)
 		label))))
 
-(defun dsh-bridge--session-annotation (session)
-  "One-line completion annotation for SESSION: workspace, running, age."
-  (let ((ts (or (alist-get 'lastActive session)
-				(alist-get 'createdAt session) 0)))
-	(format "	 %s%s%s"
-			(dsh-bridge--workspace-label session)
-			(if (alist-get 'running session) " · running" "")
-			(format " · %s" (dsh-bridge--relative-age ts)))))
+(defun dsh-bridge--session-annotation (session &optional no-workspace)
+  "One-line completion annotation for SESSION: workspace, running, age.
+With NO-WORKSPACE, omit the workspace label, for a candidate that is
+already the workspace."
+  (let* ((ts (or (alist-get 'lastActive session)
+				 (alist-get 'createdAt session) 0))
+		 (parts (seq-filter
+				 (lambda (part) (and part (not (string-empty-p part))))
+				 (list (unless no-workspace
+						 (dsh-bridge--workspace-label session))
+					   (and (alist-get 'running session) "running")
+					   (dsh-bridge--relative-age ts)))))
+	(format "\t %s" (string-join parts " · "))))
 
-(defun dsh-bridge--session-completion-table (choices)
-  "Completion table over CHOICES, an alist of (STRING . SESSION).
-Entries whose cdr is nil (e.g. a pseudo-entry) get no annotation."
-  (let ((annots '()))
-	(dolist (c choices)
-	  (when (cdr c)
-		(push (cons (car c) (dsh-bridge--session-annotation (cdr c)))
-			  annots)))
-	(lambda (string pred action)
-	  (if (eq action 'metadata)
-		  `(metadata (annotation-function .
-					  ,(lambda (choice)
-						 (let ((a (assoc choice annots)))
-						   (and a (cdr a))))))
-		(complete-with-action action choices string pred)))))
+(defun dsh-bridge--completion-table (choices annotate)
+  "Completion table over CHOICES, an alist of (STRING . VALUE).
+ANNOTATE is called with a candidate's VALUE and returns its annotation
+string, or nil when it has none."
+  (lambda (string pred action)
+	(if (eq action 'metadata)
+		`(metadata (annotation-function .
+					,(lambda (choice)
+					   (let ((c (assoc choice choices)))
+						 (and c (funcall annotate (cdr c)))))))
+	  (complete-with-action action choices string pred))))
 
-(defun dsh-bridge--id-tail (id)
-  "A short stable suffix of session id ID, for display disambiguation.
-DSH ids \"session-<uuid>\", so the leading characters are identical.
-For this purpose, we extract the last 6 characters from the end."
-  (substring id (max 0 (- (length id) 6))))
+(defun dsh-bridge--group-annotation (sessions)
+  "Annotation for a title shared by several SESSIONS.
+Names the suffixes the follow-up prompt will offer, so the degeneracy is
+visible before the user commits to it."
+  (let* ((suffixes (cdr (dsh-bridge--disambiguation-suffixes sessions)))
+		 (shown (if (> (length suffixes) 4)
+					(append (seq-take suffixes 4) (list "…"))
+				  suffixes)))
+	(format "\t %d sessions — choose: %s"
+			(length sessions) (string-join shown ", "))))
+
+(defun dsh-bridge--id-tail (id &optional length)
+  "A stable suffix of session id ID, for display disambiguation.
+DSH ids are \"session-<uuid>\", so the leading characters are identical.
+LENGTH defaults to 6; a longer tail is used when 6 would collide."
+  (let ((n (min (or length 6) (length id))))
+	(substring id (- (length id) n))))
+
+(defun dsh-bridge--distinct-id-tails (sessions)
+  "Shortest id tails for SESSIONS that are pairwise distinct.
+SESSIONS are assumed to have distinct ids, so the full id always works."
+  (let* ((ids (mapcar (lambda (s) (alist-get 'id s)) sessions))
+		 (maxlen (apply #'max 1 (mapcar #'length ids)))
+		 (len 1)
+		 tails)
+	(while (and (<= len maxlen)
+				(progn
+				  (setq tails (mapcar (lambda (id) (dsh-bridge--id-tail id len)) ids))
+				  (/= (length tails) (length (seq-uniq tails)))))
+	  (setq len (1+ len)))
+	tails))
 
 (defun dsh-bridge--disambiguation-suffixes (sessions)
   "Distinct display suffixes for SESSIONS (which share a title).
-Uses each session's workspace label when they are all distinct and non-empty;
-otherwise falls back to a short id suffix, which is always distinct."
+Return (KIND . SUFFIXES).  KIND is `workspace' when the sessions'
+workspace labels are all distinct and non-empty, and SUFFIXES are those
+labels; otherwise KIND is `id' and SUFFIXES are the shortest id tails
+that stay pairwise distinct."
   (let ((labels (mapcar #'dsh-bridge--workspace-label sessions)))
 	(if (and (= (length labels) (length (seq-uniq labels)))
 			 (not (seq-some #'string-empty-p labels)))
-		labels
-	  (mapcar (lambda (s) (dsh-bridge--id-tail (alist-get 'id s)))
-			  sessions))))
+		(cons 'workspace labels)
+	  (cons 'id (dsh-bridge--distinct-id-tails sessions)))))
+
+(defun dsh-bridge--show-choices-p (window)
+  "Whether WINDOW's minibuffer should have its completions shown.
+A live-display UI sets `completion-auto-help' to nil buffer-locally and is
+then responsible for showing the candidates itself."
+  (and window
+	   (with-current-buffer (window-buffer window)
+		 completion-auto-help)))
+
+(defun dsh-bridge--show-choices-later ()
+  "Arrange for the active minibuffer's completions to appear at once.
+Deferred to a timer so that other setup hooks, including a completion
+UI's own, have run first."
+  (run-at-time
+   0 nil
+   (lambda ()
+	 (let ((window (active-minibuffer-window)))
+	   (when (dsh-bridge--show-choices-p window)
+		 (with-selected-window window
+		   (minibuffer-completion-help)))))))
+
+(defun dsh-bridge--read-choices (prompt table)
+  "Read a required choice from TABLE, showing the candidates immediately.
+Only the built-in completion UI is helped; a live-display UI shows TABLE
+itself and is recognized by its nil `completion-auto-help'."
+  (minibuffer-with-setup-hook #'dsh-bridge--show-choices-later
+	(completing-read prompt table nil t)))
 
 (defun dsh-bridge--read-ambiguous-session (title sessions)
   "Read one of SESSIONS (which share TITLE) via a second completing-read.
-Each candidate appends a distinct suffix (workspace label, else id tail) and
-is annotated with workspace, running state, and age.  Returns the chosen
-session's id."
-  (let* ((suffixes (dsh-bridge--disambiguation-suffixes sessions))
-		 (choices (seq-mapn (lambda (s suffix)
-							(cons (format "%s · %s" title suffix) s))
-						  sessions suffixes))
-		 (table (dsh-bridge--session-completion-table choices)))
+Candidates are the sessions' distinguishing suffixes (workspace labels,
+else id tails); the shared title is named in the prompt rather than
+repeated in every candidate, so the completions window is useful as soon
+as it opens.  Returns the chosen session's id."
+  (let* ((disamb (dsh-bridge--disambiguation-suffixes sessions))
+		 (kind (car disamb))
+		 (suffixes (cdr disamb))
+		 (choices (seq-mapn (lambda (s suffix) (cons suffix s))
+							sessions suffixes))
+		 (prompt (if (eq kind 'workspace)
+					 (format "Which workspace for %S? " title)
+				   (format "Which session named %S? " title)))
+		 (table (dsh-bridge--completion-table
+				 choices
+				 (lambda (session)
+				   (dsh-bridge--session-annotation
+					session (eq kind 'workspace))))))
 	(alist-get 'id
-			   (cdr (assoc (completing-read (format "Which %S? " title)
-											table nil t)
+			   (cdr (assoc (dsh-bridge--read-choices prompt table)
 						   choices)))))
 
-(defun dsh-bridge--read-session-id (prompt &optional pseudo-entry)
+(defun dsh-bridge--session-groups (sessions)
+  "Group SESSIONS into an alist (TITLE . SESSIONS), one entry per title.
+Untitled sessions are dropped.  Titles and the sessions within each group
+keep the roster's order."
+  (let (groups)
+	(dolist (session sessions)
+	  (let ((title (dsh-bridge--session-label session t)))
+		(when title
+		  (let ((cell (assoc title groups)))
+			(if cell
+				(setcdr cell (append (cdr cell) (list session)))
+			  (push (cons title (list session)) groups))))))
+	(nreverse groups)))
+
+(defun dsh-bridge--read-session-id (prompt)
   "Read a session id via completing-read, disambiguating duplicate titles.
 Each candidate is annotated with its workspace, age, and running state.
 Both live and saved (cold) sessions are valid completions; if the
-request targets a saved session, it is resumed.  If several sessions
-share a title, a second completing-read resolves the collision.
-Untitled sessions are not offered for completion.
-
-PSEUDO-ENTRY, if non-nil, is an extra choice that returns nil, such as
-\"(last-active)\" or \"(default)\").  With no candidate sessions and no
-PSEUDO-ENTRY, signal an error."
+request targets a saved session, it is resumed.  A title shared by
+several sessions is offered once and says so; choosing it prompts again
+for the distinguishing workspace or id suffix.  Untitled sessions are
+not offered for completion."
   (let* ((sessions (cdr (dsh-bridge--fetch-sessions)))
-		 (choices (seq-filter
-				   #'car ; drop untitled sessions, whose label is nil
-				   (mapcar (lambda (s) ; return (LABEL . SESSION-DATA)
-							 (cons (dsh-bridge--session-label s t) s))
-						   sessions)))
-		 (all (append choices
-					  (and pseudo-entry (list (cons pseudo-entry nil)))))
-		 (table (dsh-bridge--session-completion-table all)))
-	(if (null all)
+		 (groups (dsh-bridge--session-groups sessions))
+		 (table (dsh-bridge--completion-table
+				 groups
+				 (lambda (group)
+				   (cond ((null group) nil)
+						 ((cdr group) (dsh-bridge--group-annotation group))
+						 (t (dsh-bridge--session-annotation (car group))))))))
+	(if (null groups)
 		(user-error "dsh-bridge: no sessions")
-	  (let ((label (completing-read prompt table nil t)))
+	  (let* ((title (completing-read prompt table nil t))
+			 (group (cdr (assoc title groups))))
 		(cond
-		 ((equal label pseudo-entry) nil)
-		 (t (let ((matches (seq-filter
-							 (lambda (s)
-							   (equal (dsh-bridge--session-label s t)
-									  label))
-							 sessions)))
-			  (cond
-			   ((null matches) nil)
-			   ((null (cdr matches)) (alist-get 'id (car matches)))
-			   (t (dsh-bridge--read-ambiguous-session label matches))))))))))
+		 ((null group) nil)
+		 ((null (cdr group)) (alist-get 'id (car group)))
+		 (t (dsh-bridge--read-ambiguous-session title group)))))))
 
 (defun dsh-bridge--read-session-override (prompt)
   "With a prefix argument, read a session for one-shot use.
@@ -5380,7 +5447,7 @@ session, attaching a file, selecting a model, etc.
 	["Select Model…" dsh-bridge-select-model
 	 :help "Change the session's model and reasoning effort"]
 	["Set Prompt Session…" dsh-bridge-set-prompt-session
-	 :help "Rebind this buffer's session (or follow the default target)"]
+	 :help "Rebind this buffer to another DSH session"]
 	["List Sessions" dsh-bridge-list-sessions
 	 :help "Browse DSH sessions"]
 	"---"
@@ -5412,8 +5479,7 @@ session, attaching a file, selecting a model, etc.
 If SESSION-ID is nil, the buffer instead follows the default target.
 Updates the header and the session directory, and resets the
 prompt-history walk when the binding changes."
-  (interactive (list (dsh-bridge--read-session-id "Switch to Session: "
-												  "(default)")))
+  (interactive (list (dsh-bridge--read-session-id "Switch to Session: ")))
   (unless (eq major-mode 'dsh-bridge-prompt-mode)
 	(user-error "dsh-bridge: not a DSH-Prompt buffer"))
   (unless (equal session-id dsh-bridge--prompt-session)
@@ -5435,11 +5501,13 @@ prompt-history walk when the binding changes."
 (defun dsh-bridge-set-default-target (session-id)
   "Set the DSH bridge's default target session to SESSION-ID.
 SESSION-ID is a session id string, or nil to clear the default target (fall
-back to last-active).  A saved (cold) id binds directly; the host resumes it
-when the next request targets it.  Emacs-local only: there is no host-side
-pin to write, and clearing has no host round-trip."
+back to last-active); interactively a session is always read, so use
+`dsh-bridge-clear-default-target' to clear.  A saved (cold) id binds
+directly; the host resumes it when the next request targets it.
+Emacs-local only: there is no host-side pin to write, and clearing has no
+host round-trip."
   (interactive
-   (list (dsh-bridge--read-session-id "Default target: " "(last-active)")))
+   (list (dsh-bridge--read-session-id "Default target: ")))
   (setq dsh-bridge-default-session session-id)
   (dsh-bridge--refresh-view-headers)
   (dsh-bridge--refresh-sessions-buffer)

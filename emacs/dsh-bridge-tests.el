@@ -210,7 +210,7 @@ round-trip."
   (should (null dsh-bridge-default-session)))
 
 (ert-deftest dsh-bridge-set-default-target-offers-saved-sessions ()
-  "Completion offers live and saved sessions (plus the last-active choice)."
+  "Completion offers live and saved sessions, and only sessions."
   (let ((table-seen nil)
         (dsh-bridge-default-session nil))
     (cl-letf (((symbol-function 'dsh-bridge--fetch-sessions)
@@ -221,10 +221,9 @@ round-trip."
               ((symbol-function 'completing-read)
                (lambda (_prompt table &rest _rest)
                  (setq table-seen table)
-                 "(last-active)")))
+                 "A")))
       (call-interactively #'dsh-bridge-set-default-target))
-    (should (equal (all-completions "" table-seen)
-                   '("A" "B" "(last-active)")))))
+    (should (equal (all-completions "" table-seen) '("A" "B")))))
 
 (ert-deftest dsh-bridge-dispatcher-header-labels ()
   "The dispatcher header labels the effective session with the right qualifier.
@@ -426,28 +425,99 @@ Excluding them is why the dispatcher's create verb demands a title."
                (lambda (prompt table &rest _rest)
                  (setq table-seen table seen-prompt prompt)
                  "T")))
-      (should (equal (dsh-bridge--read-session-id "Default target: " "(last-active)")
-                     "s1")))
-    ;; The pseudo-entry stays; the two untitled rows do not.
-    (should (equal (all-completions "" table-seen) '("T" "(last-active)")))))
+      (should (equal (dsh-bridge--read-session-id "Default target: ") "s1")))
+    ;; The two untitled rows do not become candidates.
+    (should (equal (all-completions "" table-seen) '("T")))))
 
 (ert-deftest dsh-bridge-read-session-id-untitled-only-signals ()
-  "A roster of only untitled sessions leaves no session candidate.
-The pseudo-entry alone still completes, but picking it returns nil."
-  (let ((table-seen nil) (dsh-bridge-default-session nil))
-    (cl-letf (((symbol-function 'dsh-bridge--fetch-sessions)
-               (lambda () (cons 200 '(((id . "s2") (live . t) (cwd . "/b"))))))
-              ((symbol-function 'completing-read)
-               (lambda (_prompt table &rest _rest)
-                 (setq table-seen table)
-                 "(last-active)")))
-      (should (null (dsh-bridge--read-session-id "Default target: " "(last-active)"))))
-    (should (equal (all-completions "" table-seen) '("(last-active)"))))
-  ;; With no pseudo-entry there is nothing to choose, which is an error.
+  "A roster of only untitled sessions leaves no session candidate, so the
+reader signals rather than offering a non-session sentinel."
   (cl-letf (((symbol-function 'dsh-bridge--fetch-sessions)
              (lambda () (cons 200 '(((id . "s2") (live . t) (cwd . "/b")))))))
     (should-error (dsh-bridge--read-session-id "Default target: ")
                   :type 'user-error)))
+
+(ert-deftest dsh-bridge-read-session-id-offers-sessions-only ()
+  "The session reader offers sessions only, never a (default) sentinel."
+  (let ((table-seen nil) (dsh-bridge-default-session nil))
+    (cl-letf (((symbol-function 'dsh-bridge--fetch-sessions)
+               (lambda ()
+                 (cons 200 '(((id . "s1") (title . "A") (live . t) (cwd . "/a"))))))
+              ((symbol-function 'completing-read)
+               (lambda (_prompt table &rest _rest)
+                 (setq table-seen table) "A")))
+      (should (equal (dsh-bridge--read-session-id "Session: ") "s1")))
+    (should (equal (all-completions "" table-seen) '("A")))))
+
+(ert-deftest dsh-bridge-read-session-id-disambiguates-duplicates ()
+  "A shared title is one candidate that says how many sessions match;
+choosing it prompts for the distinguishing workspace, and the workspace
+alone is the follow-up candidate."
+  (let ((tables '()) (answers '("T" "WS-B")) (dsh-bridge-default-session nil))
+    (cl-letf (((symbol-function 'dsh-bridge--fetch-sessions)
+               (lambda ()
+                 (cons 200
+                       '(((id . "s1") (title . "T") (live . t) (cwd . "/a")
+                          (workspace . "WS-A"))
+                         ((id . "s2") (title . "T") (live . t) (cwd . "/b")
+                          (workspace . "WS-B"))))))
+              ((symbol-function 'completing-read)
+               (lambda (prompt table &rest _rest)
+                 (push (cons prompt table) tables)
+                 (pop answers))))
+      (should (equal (dsh-bridge--read-session-id "Session: ") "s2")))
+    ;; Stage 2 ran second, so it is the most recent push.
+    (let ((stage2 (car tables)) (stage1 (cadr tables)))
+      ;; Stage 1 offers the shared title once, annotated with the degeneracy.
+      (should (equal (all-completions "" (cdr stage1)) '("T")))
+      (should (string-match-p
+               "2 sessions"
+               (funcall (cdr (assq 'annotation-function
+                                   (funcall (cdr stage1) "" nil 'metadata)))
+                        "T")))
+      ;; Stage 2 offers the workspace labels only and names the title.
+      (should (equal (all-completions "" (cdr stage2)) '("WS-A" "WS-B")))
+      (should (string-match-p "workspace" (car stage2))))))
+
+(ert-deftest dsh-bridge-read-session-id-falls-back-to-id-tails ()
+  "Workspace labels that do not distinguish fall back to id tails, and the
+tails lengthen until they are pairwise distinct."
+  (let ((table-seen nil) (answers '("T" "0abcdef"))
+        (dsh-bridge-default-session nil))
+    (cl-letf (((symbol-function 'dsh-bridge--fetch-sessions)
+               (lambda ()
+                 (cons 200
+                       '(((id . "session-0abcdef") (title . "T") (live . t)
+                          (cwd . "/a") (workspace . "same"))
+                         ((id . "session-1abcdef") (title . "T") (live . t)
+                          (cwd . "/b") (workspace . "same"))))))
+              ((symbol-function 'completing-read)
+               (lambda (_prompt table &rest _rest)
+                 (setq table-seen table)
+                 (pop answers))))
+      (should (equal (dsh-bridge--read-session-id "Session: ")
+                     "session-0abcdef")))
+    (should (equal (all-completions "" table-seen) '("0abcdef" "1abcdef")))))
+
+(ert-deftest dsh-bridge-group-annotation-names-suffixes ()
+  "A shared title's annotation says how many sessions match and which
+suffixes the follow-up prompt will offer."
+  (let ((sessions '(((id . "s1") (title . "T") (workspace . "WS-A") (cwd . "/a"))
+                    ((id . "s2") (title . "T") (workspace . "WS-B") (cwd . "/b")))))
+    (let ((annotation (dsh-bridge--group-annotation sessions)))
+      (should (string-match-p "2 sessions" annotation))
+      (should (string-match-p "WS-A" annotation))
+      (should (string-match-p "WS-B" annotation)))))
+
+(ert-deftest dsh-bridge-show-choices-p-respects-completion-ui ()
+  "The built-in completions window is only forced on when the completion
+UI wants it; a live-display UI sets `completion-auto-help' to nil."
+  (with-temp-buffer
+    (let ((completion-auto-help t))
+      (should (dsh-bridge--show-choices-p (selected-window))))
+    (let ((completion-auto-help nil))
+      (should-not (dsh-bridge--show-choices-p (selected-window)))))
+  (should-not (dsh-bridge--show-choices-p nil)))
 
 (ert-deftest dsh-bridge-workspace-label ()
   "The workspace label is the title, else the cwd basename, else the cwd."
@@ -914,11 +984,21 @@ bare; the cache arms only predict what a target-less send would hit."
     (with-temp-buffer
       (dsh-bridge-prompt-mode)
       (cl-letf (((symbol-function 'dsh-bridge--read-session-id)
-                 (lambda (_prompt _pseudo) "live-1"))
+                 (lambda (_prompt) "live-1"))
                 ((symbol-function 'dsh-bridge--refresh-prompt-metadata)
                  #'ignore))
         (call-interactively #'dsh-bridge-set-prompt-session))
       (should (equal dsh-bridge--prompt-session "live-1")))))
+
+(ert-deftest dsh-bridge-set-prompt-session-needs-a-session ()
+  "Interactively the prompt session is always an explicit session, so an
+empty roster errors instead of yielding a follow-the-default binding."
+  (with-temp-buffer
+    (dsh-bridge-prompt-mode)
+    (cl-letf (((symbol-function 'dsh-bridge--fetch-sessions)
+               (lambda () (cons 200 nil))))
+      (should-error (call-interactively #'dsh-bridge-set-prompt-session)
+                    :type 'user-error))))
 
 (ert-deftest dsh-bridge-prompt-history-navigation ()
   "M-p/M-n cycle the prompt buffer through the session's prompt history."
