@@ -41,12 +41,19 @@
 //   GET  /dsh-bridge/prompts?sessionId=           -> user prompts, newest first
 //   GET  /dsh-bridge/turns?sessionId=             -> turn-aggregated assistant
 //        replies, newest first (each turn: { turn, startedAt, endedAt?,
-//        reason?, endSeq?, segments: [{ text, time, step }] }; endSeq is the
-//        turn/end event's seq — the session/fork anchor — and is absent while
-//        the turn is open) plus running, epoch, title and cwd.  Optional
+//        reason?, endSeq?, segments: [{ text, time, step }], files?:
+//        [{ path, op }] }; endSeq is the turn/end event's seq — the
+//        session/fork anchor — and is absent while the turn is open; files is
+//        the changed-files fold's per-turn attribution, absent when the turn
+//        changed nothing) plus running, epoch, title and cwd.  Optional
 //        since=<turn>&epoch=<n> request the incremental suffix: turns with
 //        turn >= since when the epoch matches the surface's replaceGeneration,
 //        else the full list (incremental: true|false)
+//   GET  /dsh-bridge/changes?sessionId=&path=     -> the recorded before/after
+//        hunks for one path the session changed ({ path, absolute, hunks:
+//        [{ turn, tool, op, oldText, newText }], truncated }; read-only, never
+//        resumes; 404 unknown session or a path the fold did not change (the
+//        log is its only source, so an untraceable `bash` edit is 404)
 //   POST /dsh-bridge/draft { text, sessionId? }   -> push a composer draft (SSE)
 //   GET  /dsh-bridge/outbox                       -> collect DSH->Emacs entries
 //   POST /dsh-bridge/outbox { text | messageId, sessionId, source? }
@@ -84,7 +91,7 @@ import { createReadStream, existsSync, mkdirSync, readFileSync, writeFileSync } 
 import { open, readFile, stat } from 'node:fs/promises'
 import { randomBytes, randomUUID } from 'node:crypto'
 import type { IncomingMessage, ServerResponse } from 'node:http'
-import { basename, dirname, isAbsolute, join } from 'node:path'
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent, AgentOptions, ModelSelection, ModelSelectionRef } from '@deepseek-ai/dsh-agent'
 import { installModelSelection } from '@deepseek-ai/dsh-agent'
@@ -118,11 +125,13 @@ import {
   assistantTurns,
   attachmentErrorHttpStatus,
   catalogModelName,
+  changedFiles,
   classifySessionId,
   contextMessage,
   contextUsedTokens,
   currentModelSelection,
   draftMessage,
+  hunksForPath,
   imageInputUnsupported,
   isLoopbackAddress,
   isQuestionCancelRejection,
@@ -1623,6 +1632,65 @@ export function apply(ctx: Context): void {
     return report
   }
 
+  /**
+   * Read SESSION-ID's raw event log and cwd for the read-only `/changes` route.
+   * Never resumes: the optional `sessionQuery` observation is live-preferred and
+   * never published; the fallbacks are a live `snapshotEvents()` and a
+   * `sessionPersistence` read handle (always closed). `resolveReadId` alone does
+   * not reject a subagent origin, so this helper checks the header itself,
+   * exactly as `/session` does: 404 unknown (or a header with no cwd), 409
+   * subagent-owned.
+   */
+  async function readChangesLog(
+    id: string,
+  ): Promise<{ events: readonly SessionEventLike[]; cwd: string }> {
+    const sessionQuery = ctx.get('sessionQuery') as SessionQueryService | undefined
+    if (sessionQuery !== undefined) {
+      let observation: SessionObservationLease
+      try {
+        observation = await sessionQuery.observeSession(id, { projectionMode: 'none' })
+      } catch (error: unknown) {
+        if (isSessionQueryNotFound(error)) throw new BridgeError(404, `session ${id} is not live`)
+        throw error
+      }
+      try {
+        if (observation.header.cwd === undefined) {
+          throw new BridgeError(404, `session ${id} is not live`)
+        }
+        if (observation.header.origin === 'subagent') {
+          throw new BridgeError(409, `session ${id} is owned by a subagent`)
+        }
+        return { events: observation.events ?? [], cwd: observation.header.cwd }
+      } finally {
+        observation[Symbol.dispose]()
+      }
+    }
+    const live = sessions.list().find(session => String(session.id) === id)
+    if (live !== undefined) {
+      if (live.header.origin === 'subagent') {
+        throw new BridgeError(409, `session ${id} is owned by a subagent`)
+      }
+      if (live.header.cwd === undefined) {
+        throw new BridgeError(404, `session ${id} is not live`)
+      }
+      return { events: live.snapshotEvents() as readonly SessionEventLike[], cwd: live.header.cwd }
+    }
+    const snapshot = await sessionPersistence.stat(id)
+    if (snapshot === undefined || snapshot.header.cwd === undefined) {
+      throw new BridgeError(404, `session ${id} is not live`)
+    }
+    if (snapshot.header.origin === 'subagent') {
+      throw new BridgeError(409, `session ${id} is owned by a subagent`)
+    }
+    const handle = await sessionPersistence.open(id, 'read')
+    try {
+      const { events } = await handle.read()
+      return { events, cwd: handle.header.cwd ?? snapshot.header.cwd }
+    } finally {
+      await handle.close()
+    }
+  }
+
   /** Whether a request carries the shared token as a bearer credential. */
   function authorized(req: IncomingMessage): boolean {
     const provided = parseBearerAuthorization(req.headers.authorization)
@@ -2103,8 +2171,21 @@ export function apply(ctx: Context): void {
           const target = await resolveTarget(url.searchParams.get('sessionId') ?? undefined)
           const session = target.session
           const epoch = session.surface.replaceGeneration
+          const events = session.snapshotEvents() as readonly SessionEventLike[]
+          // The changed-files fold walks the raw log (`tool/call` is log-only),
+          // unlike the surface-walking turn fold it is merged into. Only
+          // paths and ops ride this hot route; hunks are lazy on /changes.
+          const fold = changedFiles(events, session.header.cwd)
+          const records = assistantTurns({ nodes: session.surface.nodes, events })
+            .reverse()
+            .map((turn) => {
+              const files = fold.byTurn.get(turn.turn)
+              return files === undefined
+                ? turn
+                : { ...turn, files: files.map(file => ({ path: file.path, op: file.op })) }
+            })
           const { incremental, turns } = turnsSince(
-            assistantTurns({ nodes: session.surface.nodes, events: session.snapshotEvents() }).reverse(),
+            records,
             epoch,
             { since: url.searchParams.get('since') ?? undefined, epoch: url.searchParams.get('epoch') ?? undefined },
           )
@@ -2116,6 +2197,45 @@ export function apply(ctx: Context): void {
             incremental,
             running: ctx.agents.get(String(session.id))?.status === 'running',
             epoch,
+          })
+        } catch (error: unknown) {
+          sendJson(res, bridgeErrorStatus(error), { error: error instanceof Error ? error.message : String(error) })
+        }
+        return
+      }
+
+      // The lazy per-file diff behind the DSH-View footer: the recorded
+      // before/after hunks for one path the session changed. Read-only and
+      // never resuming (`resolveReadId` + `readChangesLog`, so a cold session's
+      // log is read without spawning it). A path the raw-log fold never saw is
+      // 404 `not-changed`: the log is the only source, so an untraceable `bash`
+      // edit reads exactly like an unknown path.
+      if (req.method === 'GET' && pathname === '/dsh-bridge/changes') {
+        try {
+          const ids = url.searchParams.getAll('sessionId')
+          if (ids.length > 1 || (ids.length === 1 && ids[0] === '')) {
+            sendJson(res, 400, { error: 'sessionId must be a single non-empty string' })
+            return
+          }
+          const paths = url.searchParams.getAll('path')
+          if (paths.length !== 1 || paths[0] === undefined || paths[0] === '') {
+            sendJson(res, 400, { error: 'path must be a single non-empty string' })
+            return
+          }
+          const path = paths[0]
+          const id = await resolveReadId(ids[0])
+          const { events, cwd } = await readChangesLog(id)
+          const { hunks, truncated } = hunksForPath(events, path)
+          if (hunks.length === 0) {
+            sendJson(res, 404, { error: `session ${id} did not change ${path}`, code: 'not-changed' })
+            return
+          }
+          sendJson(res, 200, {
+            sessionId: id,
+            path,
+            absolute: resolve(cwd, path),
+            hunks,
+            truncated,
           })
         } catch (error: unknown) {
           sendJson(res, bridgeErrorStatus(error), { error: error instanceof Error ? error.message : String(error) })

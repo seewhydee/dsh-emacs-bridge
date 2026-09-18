@@ -16,7 +16,7 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 import { timingSafeEqual } from 'node:crypto'
-import { isAbsolute } from 'node:path'
+import { isAbsolute, resolve } from 'node:path'
 
 /** One content block, narrowed to the fields the bridge reads. */
 export interface MessageBlockLike {
@@ -294,6 +294,12 @@ export interface SessionEventLike {
    * seq-indexed, so it also equals the array index); optional here so
    * structural fixtures need not carry it. */
   seq?: number
+  /**
+   * How a message-producing event entered the surface: `'append'` or a
+   * replacement descriptor. The changed-files fold reads it to ignore
+   * compaction replacement copies (see `isAppendSurfaceEvent` in the harness).
+   */
+  surfaceOp?: unknown
 }
 
 /** Structural view of one live session, enough for targeting and listing. */
@@ -336,6 +342,447 @@ export function sessionPreset(
     if (typeof preset === 'string') return preset
   }
   return header.agentPreset
+}
+
+// -- Changed files (the DSH-View footer's attribution) -----------------------
+//
+// The fold walks the *raw log*, not the session surface: `tool/call` is
+// log-only (it never becomes a surface node), so a surface walk could never see
+// the arguments that name a mutated file. This is a deliberate difference from
+// `assistantTurns`, which walks the surface.
+//
+// The mutation vocabulary replicated below lives in the web client's
+// turn-deliverables fold
+// (`packages/client/ui-deliverables/src/client/turn-deliverables.ts`) — it is
+// client-side, not a host contract, so it is mirrored here rather than
+// imported. Re-verify it (and the `tool/result.meta.diffs` shape) on every DSH
+// version bump; see AGENTS.md.
+
+/** Maximum changed files named by one session's fold. */
+export const MAX_CHANGED_FILES = 200
+
+/** Maximum changed files attributed to one turn by the fold. */
+export const MAX_CHANGED_FILES_PER_TURN = 50
+
+/**
+ * One file a session's `write` / `edit` / mutating `str_replace_editor` calls
+ * successfully modified. Paths keep first-seen order and appear once, so a file
+ * written and then edited in the same turn is one entry.
+ */
+export interface ChangedFile {
+  /** The exact path spelling the tool call carried. */
+  path: string
+  /** `resolve(cwd, path)`, or the logged spelling when no cwd is known. */
+  absolute: string
+  /** The mutation operation that first named the file, e.g. `write`,
+   * `edit`, `str_replace_editor:create`. */
+  op: string
+  /** The first turn in which the file was changed. */
+  firstTurn: number
+  /** The last turn in which the file was changed. */
+  lastTurn: number
+  /** Every turn in which the file was changed, ascending. */
+  turns: number[]
+  /** Whether a `deliverables/presented` event names the file. */
+  delivered?: boolean
+}
+
+/** The bounded result of the changed-files fold. */
+export interface ChangedFilesResult {
+  /** Changed files in first-seen order. */
+  files: ChangedFile[]
+  /** Per-turn attribution: turn number -> the files changed in it. */
+  byTurn: Map<number, ChangedFile[]>
+  /** Whether a cap or hunk bound dropped part of the result. */
+  truncated: boolean
+}
+
+/** One supported mutation call's path and operation label. */
+interface MutationCall {
+  path: string
+  op: string
+}
+
+/** One `tool/call` event's pairing facts, or null when malformed. */
+interface ToolCallFact {
+  callId: string
+  name: string
+  arguments: string
+  turn: number
+}
+
+/** One `tool/result` event's pairing facts, or null when malformed. */
+interface ToolResultFact {
+  callId: string
+  failed: boolean
+}
+
+/** Whether VALUE is a plain (non-array) object. */
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+/** The pairing facts of one `tool/call` event, or null. */
+function toolCallFact(event: SessionEventLike): ToolCallFact | null {
+  if (event.type !== 'tool/call') return null
+  const data = event.data
+  if (!isRecord(data)) return null
+  const { callId, name, turn } = data
+  const argsRaw = data.arguments
+  if (typeof callId !== 'string' || typeof name !== 'string'
+    || typeof argsRaw !== 'string' || typeof turn !== 'number') return null
+  return { callId, name, arguments: argsRaw, turn }
+}
+
+/**
+ * The pairing facts of one `tool/result` event, or null. Only an append-origin
+ * result counts: a compaction replacement copy must not settle a mutation call
+ * a second time (the harness's `isAppendSurfaceEvent`). The call id is read from
+ * `message.source.callId`, falling back to the block's own `toolCallId`.
+ */
+function toolResultFact(event: SessionEventLike): ToolResultFact | null {
+  if (event.type !== 'tool/result' || event.surfaceOp !== 'append') return null
+  const data = event.data
+  if (!isRecord(data)) return null
+  const message = data.message
+  if (!isRecord(message)) return null
+  const content = message.content
+  const block = Array.isArray(content) ? content[0] : undefined
+  const failed = isRecord(block) && block.isError === true
+  const source = message.source
+  const callId = isRecord(source) && typeof source.callId === 'string'
+    ? source.callId
+    : isRecord(block) && typeof block.toolCallId === 'string' ? block.toolCallId : null
+  return callId === null ? null : { callId, failed }
+}
+
+/** A non-blank path preserves the exact spelling supplied to the tool. */
+function pathValue(value: unknown): string | null {
+  return typeof value === 'string' && value.trim().length > 0 ? value : null
+}
+
+/** Validate the fields an `edit` execution requires. */
+function validEditArgs(args: Record<string, unknown>): boolean {
+  return typeof args.old_string === 'string'
+    && args.old_string.length > 0
+    && typeof args.new_string === 'string'
+    && args.old_string !== args.new_string
+    && (args.replace_all === undefined || typeof args.replace_all === 'boolean')
+}
+
+/** Extract a path only from a complete mutating editor command. */
+function editorMutationCall(args: Record<string, unknown>): MutationCall | null {
+  const path = pathValue(args.path)
+  if (path === null) return null
+  switch (args.command) {
+    case 'create':
+      return typeof args.file_text === 'string'
+        ? { path, op: 'str_replace_editor:create' } : null
+    case 'str_replace':
+      return typeof args.old_str === 'string'
+        && args.old_str.length > 0
+        && (args.new_str === undefined || typeof args.new_str === 'string')
+        ? { path, op: 'str_replace_editor:str_replace' } : null
+    case 'insert':
+      return typeof args.insert_line === 'number'
+        && Number.isInteger(args.insert_line)
+        && args.insert_line >= 0
+        && typeof args.new_str === 'string'
+        ? { path, op: 'str_replace_editor:insert' } : null
+    default:
+      return null
+  }
+}
+
+/**
+ * Extract the path and operation from a supported first-party mutation call,
+ * replicating the web client's `mutationPath`. Reads, malformed calls,
+ * unsupported tools, and incomplete commands contribute nothing.
+ */
+function mutationCall(name: string, argsRaw: string): MutationCall | null {
+  let args: unknown
+  try {
+    args = JSON.parse(argsRaw) as unknown
+  } catch {
+    return null
+  }
+  if (!isRecord(args)) return null
+  switch (name) {
+    case 'write': {
+      const path = typeof args.content === 'string' ? pathValue(args.file_path) : null
+      return path === null ? null : { path, op: 'write' }
+    }
+    case 'edit': {
+      if (!validEditArgs(args)) return null
+      const path = pathValue(args.file_path)
+      return path === null ? null : { path, op: 'edit' }
+    }
+    case 'str_replace_editor':
+      return editorMutationCall(args)
+    default:
+      return null
+  }
+}
+
+/**
+ * Fold a session log into the files its tool calls successfully changed.
+ *
+ * Walks `events` in log order, pairing each `tool/call` that names a mutation
+ * with a later successful, append-surface `tool/result` for the same call id.
+ * A file is recorded once per turn (first-seen order) and once in `files`
+ * (first-seen order), with every turn that touched it. `deliverables/presented`
+ * marks a file `delivered` when its path (or its resolution against CWD)
+ * matches. Bounded by `MAX_CHANGED_FILES` and `MAX_CHANGED_FILES_PER_TURN`;
+ * `truncated` reports a dropped entry rather than growing without limit.
+ *
+ * @param events - the session's raw event log (log-only events included).
+ * @param cwd - the session working directory, for the `absolute` resolution.
+ *   Absent (a header without a cwd) keeps the logged path verbatim.
+ */
+export function changedFiles(
+  events: readonly SessionEventLike[],
+  cwd?: string,
+): ChangedFilesResult {
+  const resolvePath = (path: string): string => cwd === undefined ? path : resolve(cwd, path)
+  const pending = new Map<string, MutationCall & { turn: number }>()
+  const files: ChangedFile[] = []
+  const byPath = new Map<string, ChangedFile>()
+  const byTurn = new Map<number, ChangedFile[]>()
+  const seenPerTurn = new Map<number, Set<string>>()
+  let truncated = false
+
+  for (const event of events) {
+    if (event.type === 'tool/call') {
+      const call = toolCallFact(event)
+      if (call !== null) {
+        const mutation = mutationCall(call.name, call.arguments)
+        if (mutation !== null) pending.set(call.callId, { ...mutation, turn: call.turn })
+      }
+      continue
+    }
+    if (event.type === 'tool/result') {
+      const result = toolResultFact(event)
+      if (result === null || result.failed) continue
+      const call = pending.get(result.callId)
+      if (call === undefined) continue
+      let seen = seenPerTurn.get(call.turn)
+      if (seen === undefined) {
+        seen = new Set()
+        seenPerTurn.set(call.turn, seen)
+      }
+      if (seen.has(call.path)) continue
+      if (seen.size >= MAX_CHANGED_FILES_PER_TURN) {
+        truncated = true
+        continue
+      }
+      let file = byPath.get(call.path)
+      if (file === undefined) {
+        if (files.length >= MAX_CHANGED_FILES) {
+          truncated = true
+          continue
+        }
+        file = {
+          path: call.path,
+          absolute: resolvePath(call.path),
+          op: call.op,
+          firstTurn: call.turn,
+          lastTurn: call.turn,
+          turns: [call.turn],
+        }
+        files.push(file)
+        byPath.set(call.path, file)
+      } else if (!file.turns.includes(call.turn)) {
+        file.turns.push(call.turn)
+        file.lastTurn = call.turn
+      }
+      seen.add(call.path)
+      const attributed = byTurn.get(call.turn)
+      if (attributed === undefined) byTurn.set(call.turn, [file])
+      else if (!attributed.includes(file)) attributed.push(file)
+      continue
+    }
+    if (event.type === 'deliverables/presented') {
+      const data = event.data
+      if (!isRecord(data) || !Array.isArray(data.files)) continue
+      for (const entry of data.files) {
+        if (!isRecord(entry) || typeof entry.path !== 'string') continue
+        const file = byPath.get(entry.path)
+          ?? files.find(candidate => candidate.absolute === resolvePath(entry.path as string))
+        if (file !== undefined) file.delivered = true
+      }
+    }
+  }
+  return { files, byTurn, truncated }
+}
+
+/** Maximum recorded hunks returned for one changed file. */
+export const MAX_CHANGED_HUNKS = 100
+
+/** Maximum characters kept for one side of a recorded hunk. */
+export const MAX_CHANGED_HUNK_CHARS = 65536
+
+/** Maximum total characters of hunk text returned for one file. */
+export const MAX_CHANGED_HUNK_TOTAL_CHARS = 1024 * 1024
+
+/** One recorded hunk of a changed file: the log's before/after text. */
+export interface ChangedHunk {
+  /** The turn whose tool call produced the hunk. */
+  turn: number
+  /** The tool that produced it (`write`, `edit`, `str_replace_editor`). */
+  tool: string
+  /** The mutation operation label (see `ChangedFile.op`). */
+  op: string
+  /** The before text, or null for an insertion/creation. */
+  oldText: string | null
+  /** The after text. */
+  newText: string
+}
+
+/** The bounded result of the per-path hunk fold. */
+export interface ChangedHunksResult {
+  hunks: ChangedHunk[]
+  truncated: boolean
+}
+
+/** One diff pair, whether from `meta.diffs` or the call arguments. */
+interface HunkTexts {
+  oldText: string | null
+  newText: string
+}
+
+/**
+ * Narrow a `tool/result`'s opaque `meta` to non-empty `{ diff }` pairs. The
+ * producing `write`/`edit` tools attach `{ diffs: FileDiff[] }`
+ * (`packages/fs/tool-fs/src/diff.ts`), one entry per applied hunk with 3
+ * context lines; malformed or absent metadata reads as undefined so the caller
+ * falls back instead of throwing.
+ */
+function diffsFromMeta(meta: unknown): HunkTexts[] | undefined {
+  if (!isRecord(meta)) return undefined
+  const diffs = meta.diffs
+  if (!Array.isArray(diffs) || diffs.length === 0) return undefined
+  const pairs: HunkTexts[] = []
+  for (const diff of diffs) {
+    if (!isRecord(diff)) return undefined
+    const { oldText, newText } = diff
+    if (oldText !== null && typeof oldText !== 'string') return undefined
+    if (typeof newText !== 'string') return undefined
+    pairs.push({ oldText: oldText as string | null, newText })
+  }
+  return pairs
+}
+
+/**
+ * The fallback hunk a tool's own result presenter would show when no applied
+ * `meta` exists: `write` shows its content, `edit` its literal replacement, and
+ * `str_replace_editor` (which attaches no `meta` at all) its command's text.
+ */
+function argumentHunks(tool: string, args: Record<string, unknown>): HunkTexts[] {
+  switch (tool) {
+    case 'write':
+      return [{ oldText: null, newText: typeof args.content === 'string' ? args.content : '' }]
+    case 'edit':
+      return [{
+        oldText: typeof args.old_string === 'string' ? args.old_string : null,
+        newText: typeof args.new_string === 'string' ? args.new_string : '',
+      }]
+    case 'str_replace_editor':
+      switch (args.command) {
+        case 'create':
+          return [{ oldText: null, newText: typeof args.file_text === 'string' ? args.file_text : '' }]
+        case 'str_replace':
+          return [{
+            oldText: typeof args.old_str === 'string' ? args.old_str : null,
+            newText: typeof args.new_str === 'string' ? args.new_str : '',
+          }]
+        case 'insert':
+          return [{ oldText: null, newText: typeof args.new_str === 'string' ? args.new_str : '' }]
+        default:
+          return []
+      }
+    default:
+      return []
+  }
+}
+
+/** Cap TEXT at `MAX_CHANGED_HUNK_CHARS` without splitting a surrogate pair. */
+function capHunkText(value: string): string {
+  if (value.length <= MAX_CHANGED_HUNK_CHARS) return value
+  let end = MAX_CHANGED_HUNK_CHARS
+  const code = value.charCodeAt(end - 1)
+  if (code >= 0xd800 && code <= 0xdbff) end -= 1
+  return value.slice(0, end)
+}
+
+/**
+ * Collect the recorded hunks for one changed file, oldest first.
+ *
+ * `write`/`edit` use the result's `meta.diffs` when present; an empty diff set
+ * (a whole-file create, or an identical overwrite) falls back to the call
+ * arguments exactly as those tools' own `presentResult` does.
+ * `str_replace_editor` attaches no meta, so its hunks always come from the call
+ * arguments. The payload is bounded by `MAX_CHANGED_HUNKS`,
+ * `MAX_CHANGED_HUNK_CHARS`, and `MAX_CHANGED_HUNK_TOTAL_CHARS`; `truncated`
+ * reports a dropped or clipped hunk.
+ *
+ * @param events - the session's raw event log.
+ * @param path - the exact logged path spelling to collect hunks for.
+ */
+export function hunksForPath(
+  events: readonly SessionEventLike[],
+  path: string,
+): ChangedHunksResult {
+  const pending = new Map<string, { tool: string; op: string; turn: number; args: Record<string, unknown> }>()
+  const hunks: ChangedHunk[] = []
+  let truncated = false
+  let totalChars = 0
+  const push = (hunk: ChangedHunk): void => {
+    if (hunks.length >= MAX_CHANGED_HUNKS || totalChars >= MAX_CHANGED_HUNK_TOTAL_CHARS) {
+      truncated = true
+      return
+    }
+    const oldText = hunk.oldText === null ? null : capHunkText(hunk.oldText)
+    const newText = capHunkText(hunk.newText)
+    if ((oldText !== null && oldText.length !== hunk.oldText!.length)
+      || newText.length !== hunk.newText.length) truncated = true
+    totalChars += (oldText?.length ?? 0) + newText.length
+    hunks.push({ ...hunk, oldText, newText })
+  }
+
+  for (const event of events) {
+    if (event.type === 'tool/call') {
+      const call = toolCallFact(event)
+      if (call === null) continue
+      const mutation = mutationCall(call.name, call.arguments)
+      if (mutation === null || mutation.path !== path) continue
+      let parsed: unknown
+      try {
+        parsed = JSON.parse(call.arguments) as unknown
+      } catch {
+        parsed = undefined
+      }
+      pending.set(call.callId, {
+        tool: call.name,
+        op: mutation.op,
+        turn: call.turn,
+        args: isRecord(parsed) ? parsed : {},
+      })
+      continue
+    }
+    if (event.type !== 'tool/result') continue
+    const result = toolResultFact(event)
+    if (result === null || result.failed) continue
+    const call = pending.get(result.callId)
+    if (call === undefined) continue
+    const meta = isRecord(event.data) ? event.data.meta : undefined
+    const pairs = call.tool === 'write' || call.tool === 'edit'
+      ? diffsFromMeta(meta) ?? argumentHunks(call.tool, call.args)
+      : argumentHunks(call.tool, call.args)
+    for (const pair of pairs) {
+      push({ turn: call.turn, tool: call.tool, op: call.op, ...pair })
+    }
+  }
+  return { hunks, truncated }
 }
 
 /** One entry in the merged session inventory handed to Emacs. */

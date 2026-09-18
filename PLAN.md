@@ -253,19 +253,25 @@ candidates above.
   catalog in the transient. Parity-plus: Emacs completion beats the web
   command palette for keyboard users.
 
-### 9. Changed-files review
+### 9. Changed-files review (**Implemented**)
 
 - **Data** — a pure fold in `logic.ts` over the session log's file-touching
-  tool calls (the same log the `/turns` fold already walks), producing
-  per-turn and per-session lists of modified paths resolved against the
-  session cwd. Pin down the exact tool-event vocabulary (which events carry
-  paths) at implementation time.
-- **UX** — to be scoped out. The DSH-View buffer should contain a list
-  of changed files, clickable (with RET) to visit them.  Possibly
-  offer additional keybindings to view the files as a bundle, or a
-  diff of the changes (using VC package or something else?).  To do:
-  analyze existing Emacs packages for UX ideas, and offer something in
-  the same flavor.
+  tool calls (the raw log, since `tool/call` is log-only and never reaches the
+  surface), producing per-turn and per-session lists of modified paths resolved
+  against the session cwd. The mutation vocabulary (`write`, `edit`, mutating
+  `str_replace_editor`) is replicated from the web client's turn-deliverables
+  fold and pinned by the version-bump checklist. `/turns` carries the per-turn
+  `files: [{path, op}]` attribution; `GET /changes?sessionId=&path=` serves the
+  recorded before/after hunks lazily (read-only, never resuming).
+- **UX** — the DSH-View buffer ends a changed turn with a `Changed files:`
+  footer: a button per file that visits it, a `[diff]` button that opens the
+  recorded log hunks in a DSH-Changes buffer, and a `[VC diff]` button (also
+  `V`) that runs `vc-root-diff` in the session directory. The recorded hunks
+  are deliberately not `diff-mode` (the log has no line numbers); VC is the
+  real, navigable diff that also catches untraceable (`bash`) changes. A
+  dedicated DSH-Changes review buffer, `deliverables/presented` display beyond
+  a marker, and a live `files-changed` SSE nudge remain deferred.
+
 
 ### 10. Cross-session search
 

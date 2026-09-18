@@ -174,6 +174,7 @@ The following commands are available in a DSH-View buffer:
 * `B` — branch the shown turn into a new session.
 * `i` — receive the latest "Send to Emacs" message (see below).
 * `D` — describe the current session.
+* `V` — run a VC worktree diff for the session directory.
 * `M-p`/`M-n` — cycle the current session's turns (older / newer).
 * `l` — open the DSH-Sessions buffer.
 * `q` — quit the window and bury the buffer.
@@ -187,6 +188,33 @@ To customize this behavior, change `dsh-bridge-view-follow-at-newest`.
 If Markdown mode is installed, and `dsh-bridge-view-gfm` is non-nil,
 the reply is font-locked as GitHub-Flavored Markdown (the dividers use
 GFM horizontal-rule syntax, so they render cleanly).
+
+#### Changed files
+
+A turn whose tool calls successfully changed files ends with a
+`Changed files:` footer, showing one entry per file: the operation that
+first named it (`write`, `edit`, `str_replace_editor:create`, …) and two
+buttons.  Clicking the file's `[path]` button (or typing `RET` with
+point on it) visits the file, resolved against the session directory.
+Clicking `[diff]` opens a read-only DSH-Changes buffer with the
+before/after hunks the session log recorded for that file, with `n`/`p`
+moving between hunks, `g` refetching, and `RET` visiting the file.  The
+session-level `[VC diff]` button (or `V` in the DSH-View buffer) runs
+`vc-root-diff` in the session directory instead, for a real, navigable
+`diff-mode` view of the current worktree.
+
+The two diffs answer different questions.  The recorded hunks come from
+the agent's own logged tool calls, so they work in a cold session and a
+non-VC directory, but they cannot see changes made by other means (a
+`bash` command that wrote a file) and carry no line numbers, so they
+deliberately do not support `diff-apply-hunk` or `diff-goto-source`.  The
+VC diff reflects the current worktree and catches those untraceable
+changes.
+
+Customize `dsh-bridge-view-changed-files` to `nil` to omit the footer.
+A turn that produced no assistant text is absent from the turn list
+altogether, so a purely file-changing turn has no footer; refresh (`g`)
+after a turn completes to pick up its files.
 
 #### Agent queries and approval requests
 
@@ -284,46 +312,20 @@ committing a host-plugin change and before a release.
 
 ## Permissions, authentication, and failure bounds
 
-The DSH plugin registers its routes on the DSH web server's loopback
-listener, and the browser plugin calls only same-origin
-`/dsh-bridge/*` routes.  No third-party service is contacted.
+The bridge listens on the DSH web server's loopback interface and
+never contacts a third-party service.  Every route is gated by a
+shared bearer token, generated on first use and stored with owner-only
+permissions at `~/.dsh/dsh-bridge-token`.  Emacs reads that file
+directly, and the browser plugin fetches it from a route fenced to
+loopback peers and same-origin pages.  Request bodies are capped at 1
+MiB, and messages waiting for Emacs sit in a bounded outbox that
+evicts the oldest entries (with a warning).
 
-Every `/dsh-bridge` route requires a shared bearer token stored at
-`~/.dsh/dsh-bridge-token`, generated on first use in mode 0600.  Emacs
-reads this file directly, while the browser plugin fetches it from the
-loopback-only `GET /dsh-bridge/token` route (peer- and origin-fenced).
-
-HTTP request bodies are capped at 1 MiB; larger bodies get a 413
-error.  DSH-to-Emacs messages are held in a bounded outbox (100
-unacknowledged entries); overflow evicts the oldest entries and is
-reported to Emacs, which warns on receive when entries were dropped.
-Naming a cold (persisted-only) session from Emacs resumes it on
-demand, matching the web UI; an id neither live nor persisted is 404,
-a subagent-owned session is 409, and a draft push fails with 409 when
-no browser client is subscribed.  The read-only session report and the
-`POST /dsh-bridge/fork` source read are the exceptions: each observes
-a cold session's persisted log without resuming it.
-
-`POST /dsh-bridge/send` also accepts an `attachments` list of absolute
-host-local paths and reads those files itself, so attachment bytes never
-travel through the 1 MiB JSON body.  This is within the same
-bearer-token trust boundary as every other route (a token holder can
-already mutate sessions and, through the model's tools, read files), but
-it is a route-level file read, so it is stated here.  The bridge and the
-DSH host must share a filesystem; a path the host cannot read is a 400.
-Attachment bytes are copied into the content-addressed store under
-`$DSH_HOME/attachments/v1` (images as normalized images, other files
-verbatim), and one prompt may carry at most 20 attachments and 200 MiB
-per file; the image store applies its own limits (20 MiB per image, 20
-images, 200 MiB of images) and reports violations as 413 or 400.
-
-Approval requests (`approval/request` — for example a one-shot
-`danger-full-access` sandbox escalation) are offered to Emacs and, when
-the web UI is open, to its own panel at the same time; whichever answers
-first settles the request.  Emacs submits the same outcomes the web panel
-offers, over the same bearer-token boundary, so it grants no authority a
-token holder did not already have.  With `dsh-bridge-approval-answer` set
-to `notify-only`, Emacs displays requests but never answers them.
+Note that any third party with access to the token can do everything
+this Emacs package can: send prompts, read session logs (including
+persisted ones), answer the model's questions and approval requests,
+name files for the host to attach, etc.  However, approvals submitted
+via this route grant no authority the web UI could not grant.
 
 ## License
 

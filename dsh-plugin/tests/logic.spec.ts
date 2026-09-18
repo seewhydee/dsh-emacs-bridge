@@ -26,12 +26,14 @@ import {
   assistantMessageText,
   assistantTextForMessage,
   assistantTurns,
+  changedFiles,
   classifySessionId,
   contextMessage,
   contextUsedTokens,
   currentModelSelection,
   draftMessage,
   hostnameOf,
+  hunksForPath,
   isLoopbackAddress,
   isLoopbackHostname,
   isLoopbackOrigin,
@@ -64,6 +66,11 @@ import {
   KeyedSerial,
   MAX_ATTACHMENTS,
   MAX_APPROVAL_DETAIL_CHARS,
+  MAX_CHANGED_FILES,
+  MAX_CHANGED_FILES_PER_TURN,
+  MAX_CHANGED_HUNKS,
+  MAX_CHANGED_HUNK_CHARS,
+  MAX_CHANGED_HUNK_TOTAL_CHARS,
   parseAttachmentRequests,
   sniffImageMediaType,
   toolCallForId,
@@ -1345,5 +1352,305 @@ describe('KeyedSerial', () => {
     expect(results.filter(result => result === 'claimed')).toHaveLength(1)
     expect(results.filter(result => result === 'taken')).toHaveLength(1)
     expect(title).toBe('dup')
+  })
+})
+
+// -- changed-files fold ------------------------------------------------------
+// The fold walks the raw log, pairing `tool/call` (log-only, never a surface
+// node) with a successful append-surface `tool/result`. These builders mirror
+// the harness shapes the wiring passes in.
+
+/** One `tool/call` log event. ARGS is an object, or a raw string for malformed JSON. */
+function toolCall(
+  turn: number,
+  step: number,
+  callId: string,
+  name: string,
+  args: unknown,
+): SessionEventLike {
+  return {
+    time: 1000,
+    type: 'tool/call',
+    data: {
+      turn,
+      step,
+      callId,
+      name,
+      arguments: typeof args === 'string' ? args : JSON.stringify(args),
+    },
+  }
+}
+
+/** A `tool/result` for CALL-ID; append-surface and successful unless overridden. */
+function mutatingResult(
+  turn: number,
+  step: number,
+  callId: string,
+  opts: { failed?: boolean; meta?: unknown; surfaceOp?: unknown } = {},
+): SessionEventLike {
+  return {
+    time: 1000,
+    type: 'tool/result',
+    surfaceOp: opts.surfaceOp ?? 'append',
+    data: {
+      turn,
+      step,
+      message: {
+        role: 'user',
+        content: [{ type: 'tool-result', toolCallId: callId, ...(opts.failed ? { isError: true } : {}) }],
+        source: { kind: 'tool', callId },
+      },
+      ...(opts.meta === undefined ? {} : { meta: opts.meta }),
+    },
+  }
+}
+
+/** A `deliverables/presented` event naming FILES. */
+function presented(turn: number, files: string[]): SessionEventLike {
+  return { time: 1000, type: 'deliverables/presented', data: { turn, callId: 'c1', files: files.map(path => ({ path })) } }
+}
+
+/** A settled `write` call for PATH with CONTENT. */
+function writeCall(turn: number, callId: string, path: string, content: string): SessionEventLike[] {
+  return [
+    toolCall(turn, 1, callId, 'write', { file_path: path, content }),
+    mutatingResult(turn, 1, callId),
+  ]
+}
+
+describe('changedFiles', () => {
+  it('records successful write/edit mutations with per-turn attribution', () => {
+    const result = changedFiles([
+      toolCall(1, 1, 'c1', 'write', { file_path: 'src/a.ts', content: 'one' }),
+      mutatingResult(1, 1, 'c1', { meta: { diffs: [{ path: 'src/a.ts', oldText: null, newText: 'one' }] } }),
+      toolCall(1, 2, 'c2', 'edit', { file_path: 'src/b.ts', old_string: 'x', new_string: 'y' }),
+      mutatingResult(1, 2, 'c2'),
+      toolCall(2, 1, 'c3', 'edit', { file_path: 'src/a.ts', old_string: 'one', new_string: 'two' }),
+      mutatingResult(2, 1, 'c3'),
+    ], '/w')
+    expect(result.files).toEqual([
+      {
+        path: 'src/a.ts', absolute: '/w/src/a.ts', op: 'write',
+        firstTurn: 1, lastTurn: 2, turns: [1, 2],
+      },
+      {
+        path: 'src/b.ts', absolute: '/w/src/b.ts', op: 'edit',
+        firstTurn: 1, lastTurn: 1, turns: [1],
+      },
+    ])
+    expect(result.byTurn.get(1)?.map(file => file.path)).toEqual(['src/a.ts', 'src/b.ts'])
+    expect(result.byTurn.get(2)?.map(file => file.path)).toEqual(['src/a.ts'])
+    expect(result.truncated).toBe(false)
+  })
+
+  it('ignores reads, failures, replacement-surface results, unknown call ids, and malformed calls', () => {
+    const result = changedFiles([
+      // A read never names a mutation.
+      toolCall(1, 1, 'r1', 'read', { file_path: 'src/read.ts' }),
+      mutatingResult(1, 1, 'r1'),
+      // A failed write contributes nothing.
+      toolCall(1, 2, 'f1', 'write', { file_path: 'src/fail.ts', content: 'x' }),
+      mutatingResult(1, 2, 'f1', { failed: true }),
+      // A compaction replacement copy must not settle the call.
+      toolCall(1, 3, 'f2', 'write', { file_path: 'src/replaced.ts', content: 'x' }),
+      mutatingResult(1, 3, 'f2', { surfaceOp: { op: 'replace', startSeq: 1, endSeq: 2 } }),
+      // A result whose call was never seen contributes nothing.
+      mutatingResult(1, 4, 'ghost'),
+      // Malformed arguments JSON.
+      toolCall(1, 5, 'm1', 'write', '{not json'),
+      mutatingResult(1, 5, 'm1'),
+      // An incomplete edit (identical strings) contributes nothing.
+      toolCall(1, 6, 'm2', 'edit', { file_path: 'src/same.ts', old_string: 'x', new_string: 'x' }),
+      mutatingResult(1, 6, 'm2'),
+      // An empty path contributes nothing.
+      toolCall(1, 7, 'm3', 'write', { file_path: '  ', content: 'x' }),
+      mutatingResult(1, 7, 'm3'),
+      // An unsupported tool contributes nothing.
+      toolCall(1, 8, 'm4', 'bash', { command: 'rm src/x' }),
+      mutatingResult(1, 8, 'm4'),
+    ], '/w')
+    expect(result.files).toEqual([])
+    expect(result.byTurn.size).toBe(0)
+  })
+
+  it('accepts exactly the mutating str_replace_editor commands', () => {
+    const result = changedFiles([
+      toolCall(1, 1, 'e1', 'str_replace_editor', { command: 'create', path: '/w/new.ts', file_text: 'hi' }),
+      mutatingResult(1, 1, 'e1'),
+      toolCall(1, 2, 'e2', 'str_replace_editor', { command: 'str_replace', path: '/w/ed.ts', old_str: 'a', new_str: 'b' }),
+      mutatingResult(1, 2, 'e2'),
+      // A `str_replace` may omit `new_str` (deletion).
+      toolCall(1, 3, 'e3', 'str_replace_editor', { command: 'str_replace', path: '/w/del.ts', old_str: 'a' }),
+      mutatingResult(1, 3, 'e3'),
+      toolCall(1, 4, 'e4', 'str_replace_editor', { command: 'insert', path: '/w/ins.ts', insert_line: 0, new_str: 'x' }),
+      mutatingResult(1, 4, 'e4'),
+      // Non-mutating or incomplete commands contribute nothing.
+      toolCall(1, 5, 'v1', 'str_replace_editor', { command: 'view', path: '/w/view.ts' }),
+      mutatingResult(1, 5, 'v1'),
+      toolCall(1, 6, 'v2', 'str_replace_editor', { command: 'create', path: '/w/bad.ts' }),
+      mutatingResult(1, 6, 'v2'),
+      toolCall(1, 7, 'v3', 'str_replace_editor', { command: 'str_replace', path: '/w/bad2.ts', old_str: '' }),
+      mutatingResult(1, 7, 'v3'),
+      toolCall(1, 8, 'v4', 'str_replace_editor', { command: 'insert', path: '/w/bad3.ts', insert_line: -1, new_str: 'x' }),
+      mutatingResult(1, 8, 'v4'),
+    ], '/w')
+    expect(result.files.map(file => [file.path, file.op])).toEqual([
+      ['/w/new.ts', 'str_replace_editor:create'],
+      ['/w/ed.ts', 'str_replace_editor:str_replace'],
+      ['/w/del.ts', 'str_replace_editor:str_replace'],
+      ['/w/ins.ts', 'str_replace_editor:insert'],
+    ])
+  })
+
+  it('deduplicates within a turn and keeps the exact path spelling', () => {
+    const result = changedFiles([
+      ...writeCall(1, 'c1', './src/a.ts', 'one'),
+      toolCall(1, 2, 'c2', 'edit', { file_path: './src/a.ts', old_string: 'one', new_string: 'two' }),
+      mutatingResult(1, 2, 'c2'),
+    ], '/w')
+    expect(result.files).toHaveLength(1)
+    expect(result.files[0]!.path).toBe('./src/a.ts')
+    expect(result.files[0]!.absolute).toBe('/w/src/a.ts')
+    expect(result.files[0]!.turns).toEqual([1])
+    expect(result.byTurn.get(1)).toHaveLength(1)
+  })
+
+  it('marks a delivered file from deliverables/presented, matching the resolved path', () => {
+    const result = changedFiles([
+      ...writeCall(1, 'c1', 'src/a.ts', 'one'),
+      presented(1, ['src/a.ts']),
+      ...writeCall(1, 'c2', 'src/b.ts', 'two'),
+      // A presented absolute path still matches a relative mutation path.
+      presented(1, ['/w/src/b.ts']),
+    ], '/w')
+    expect(result.files.map(file => [file.path, file.delivered])).toEqual([
+      ['src/a.ts', true],
+      ['src/b.ts', true],
+    ])
+  })
+
+  it('falls back to the logged spelling when no cwd is known', () => {
+    const result = changedFiles(writeCall(1, 'c1', '/abs/a.ts', 'one'))
+    expect(result.files[0]!.absolute).toBe('/abs/a.ts')
+  })
+
+  it('bounds the total and per-turn files, reporting truncation', () => {
+    const events: SessionEventLike[] = []
+    for (let i = 0; i < MAX_CHANGED_FILES_PER_TURN + 1; i += 1) {
+      events.push(...writeCall(1, `p${i}`, `src/turn-${i}.ts`, 'x'))
+    }
+    const perTurn = changedFiles(events, '/w')
+    expect(perTurn.files).toHaveLength(MAX_CHANGED_FILES_PER_TURN)
+    expect(perTurn.truncated).toBe(true)
+
+    const many: SessionEventLike[] = []
+    for (let i = 0; i < MAX_CHANGED_FILES + 1; i += 1) {
+      many.push(...writeCall(i + 1, `t${i}`, `src/total-${i}.ts`, 'x'))
+    }
+    const total = changedFiles(many, '/w')
+    expect(total.files).toHaveLength(MAX_CHANGED_FILES)
+    expect(total.truncated).toBe(true)
+  })
+})
+
+describe('hunksForPath', () => {
+  const META = {
+    diffs: [
+      { path: 'src/a.ts', oldText: 'before', newText: 'after' },
+      { path: 'src/a.ts', oldText: null, newText: 'added' },
+    ],
+  }
+
+  it('uses the write/edit result metadata when present', () => {
+    const events = [
+      toolCall(3, 1, 'c1', 'write', { file_path: 'src/a.ts', content: 'after' }),
+      mutatingResult(3, 1, 'c1', { meta: META }),
+    ]
+    expect(hunksForPath(events, 'src/a.ts')).toEqual({
+      hunks: [
+        { turn: 3, tool: 'write', op: 'write', oldText: 'before', newText: 'after' },
+        { turn: 3, tool: 'write', op: 'write', oldText: null, newText: 'added' },
+      ],
+      truncated: false,
+    })
+  })
+
+  it('falls back to the call arguments when the result carries no usable diffs', () => {
+    const create = hunksForPath([
+      toolCall(1, 1, 'c1', 'write', { file_path: 'src/new.ts', content: 'whole file' }),
+      mutatingResult(1, 1, 'c1', { meta: { diffs: [] } }),
+    ], 'src/new.ts')
+    expect(create).toEqual({
+      hunks: [{ turn: 1, tool: 'write', op: 'write', oldText: null, newText: 'whole file' }],
+      truncated: false,
+    })
+
+    const edit = hunksForPath([
+      toolCall(1, 1, 'c2', 'edit', { file_path: 'src/a.ts', old_string: 'x', new_string: 'y' }),
+      mutatingResult(1, 1, 'c2'),
+    ], 'src/a.ts')
+    expect(edit.hunks).toEqual([
+      { turn: 1, tool: 'edit', op: 'edit', oldText: 'x', newText: 'y' },
+    ])
+  })
+
+  it('builds str_replace_editor hunks from the call arguments (no meta exists)', () => {
+    const events = [
+      toolCall(1, 1, 'e1', 'str_replace_editor', { command: 'create', path: '/w/new.ts', file_text: 'hi' }),
+      mutatingResult(1, 1, 'e1'),
+      toolCall(1, 2, 'e2', 'str_replace_editor', { command: 'str_replace', path: '/w/new.ts', old_str: 'hi', new_str: 'ho' }),
+      mutatingResult(1, 2, 'e2'),
+      toolCall(1, 3, 'e3', 'str_replace_editor', { command: 'insert', path: '/w/new.ts', insert_line: 2, new_str: 'more' }),
+      mutatingResult(1, 3, 'e3'),
+    ]
+    expect(hunksForPath(events, '/w/new.ts').hunks).toEqual([
+      { turn: 1, tool: 'str_replace_editor', op: 'str_replace_editor:create', oldText: null, newText: 'hi' },
+      { turn: 1, tool: 'str_replace_editor', op: 'str_replace_editor:str_replace', oldText: 'hi', newText: 'ho' },
+      { turn: 1, tool: 'str_replace_editor', op: 'str_replace_editor:insert', oldText: null, newText: 'more' },
+    ])
+  })
+
+  it('ignores calls for other paths, failures, and replacement results', () => {
+    const events = [
+      toolCall(1, 1, 'c1', 'write', { file_path: 'src/other.ts', content: 'x' }),
+      mutatingResult(1, 1, 'c1'),
+      toolCall(1, 2, 'c2', 'write', { file_path: 'src/a.ts', content: 'x' }),
+      mutatingResult(1, 2, 'c2', { failed: true }),
+      toolCall(1, 3, 'c3', 'write', { file_path: 'src/a.ts', content: 'x' }),
+      mutatingResult(1, 3, 'c3', { surfaceOp: { op: 'replace', startSeq: 1, endSeq: 2 } }),
+    ]
+    expect(hunksForPath(events, 'src/a.ts')).toEqual({ hunks: [], truncated: false })
+  })
+
+  it('bounds the number and size of hunks, reporting truncation', () => {
+    const many: SessionEventLike[] = []
+    for (let i = 0; i < MAX_CHANGED_HUNKS + 1; i += 1) {
+      many.push(...writeCall(1, `h${i}`, 'src/a.ts', 'x'))
+    }
+    const bounded = hunksForPath(many, 'src/a.ts')
+    expect(bounded.hunks).toHaveLength(MAX_CHANGED_HUNKS)
+    expect(bounded.truncated).toBe(true)
+
+    const huge = 'x'.repeat(MAX_CHANGED_HUNK_CHARS + 10)
+    const clipped = hunksForPath([
+      toolCall(1, 1, 'c1', 'write', { file_path: 'src/big.ts', content: huge }),
+      mutatingResult(1, 1, 'c1', { meta: { diffs: [] } }),
+    ], 'src/big.ts')
+    expect(clipped.hunks[0]!.newText).toHaveLength(MAX_CHANGED_HUNK_CHARS)
+    expect(clipped.truncated).toBe(true)
+
+    // The total payload is bounded too: many near-cap hunks stop early.
+    const bulk: SessionEventLike[] = []
+    const chunk = 'y'.repeat(MAX_CHANGED_HUNK_CHARS - 1)
+    for (let i = 0; i < 40; i += 1) {
+      bulk.push(...writeCall(1, `bulk${i}`, 'src/bulk.ts', chunk))
+    }
+    const budgeted = hunksForPath(bulk, 'src/bulk.ts')
+    expect(budgeted.truncated).toBe(true)
+    expect(budgeted.hunks.length).toBeLessThan(40)
+    const total = budgeted.hunks.reduce((sum, hunk) => sum + hunk.newText.length, 0)
+    expect(total).toBeLessThanOrEqual(
+      MAX_CHANGED_HUNK_TOTAL_CHARS + MAX_CHANGED_HUNK_CHARS,
+    )
   })
 })

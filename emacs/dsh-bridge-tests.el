@@ -1402,17 +1402,24 @@ buffer and reports the missing id."
         (cons 'time (or time 1000))
         (cons 'step (or step 1))))
 
-(defun dsh-bridge-test--view-turn (turn started-at segments &optional ended-at reason)
+(defun dsh-bridge-test--view-turn (turn started-at segments &optional ended-at reason files)
   "A turn-record alist: TURN number, STARTED-AT ms-epoch, SEGMENTS oldest first.
 The turn is open (running) unless ENDED-AT is given; REASON defaults to
-\"completed\"."
+\"completed\".  FILES, when non-nil, is the changed-files list `GET /turns'
+attaches to a turn that mutated files, as `((path . P) (op . O))' alists."
   (let ((record (list (cons 'turn turn)
                       (cons 'startedAt started-at)
                       (cons 'segments segments))))
-    (if ended-at
-        (append record (list (cons 'endedAt ended-at)
-                             (cons 'reason (or reason "completed"))))
-      record)))
+    (when ended-at
+      (setq record (append record (list (cons 'endedAt ended-at)
+                                        (cons 'reason (or reason "completed"))))))
+    (when files
+      (setq record (append record (list (cons 'files files)))))
+    record))
+
+(defun dsh-bridge-test--view-file (path &optional op)
+  "A changed-file row for the DSH-View footer: PATH with OP (default \"write\")."
+  (list (cons 'path path) (cons 'op (or op "write"))))
 
 ;; The canonical s1 turn list for the navigation tests: three completed turns,
 ;; newest first.  Turn 30 has two segments (to exercise divider rendering in
@@ -7447,6 +7454,269 @@ reads the posture at subscribe time) and leaves a paused one alone."
               (dsh-bridge--approval-answer-set 'dsh-bridge-approval-answer 'all)
               (should (equal restarted 0)))))
       (set-default 'dsh-bridge-approval-answer old))))
+
+;;; Changed files (the DSH-View footer)
+
+(ert-deftest dsh-bridge-view-changed-files-footer ()
+  "A turn that changed files renders a footer after its body: a visit button
+per file, its operation, a recorded-hunks button, and a session VC button.  A
+completed turn with no changes stays clean, and the footer is opt-out."
+  (let* ((files (list (dsh-bridge-test--view-file "src/a.ts" "write")
+                      (dsh-bridge-test--view-file "src/b.ts" "edit")))
+         (changed (dsh-bridge-test--view-turn
+                   7 7000000
+                   (list (dsh-bridge-test--view-segment "done" 7001000 1))
+                   7002000 nil files))
+         (plain (dsh-bridge-test--view-turn
+                 7 7000000
+                 (list (dsh-bridge-test--view-segment "done" 7001000 1))
+                 7002000))
+         (expected (concat "Changed files: [src/a.ts] (write) [diff]  "
+                           "[src/b.ts] (edit) [diff]  [VC diff]")))
+    (with-temp-buffer
+      (dsh-bridge-view-mode)
+      (setq-local dsh-bridge--view-content-session "s1")
+      (let ((suffix (dsh-bridge--view-changed-files changed "s1")))
+        (should (equal (substring-no-properties suffix) expected))
+        ;; Every bracketed label is a live text button.
+        (with-temp-buffer
+          (insert suffix)
+          (goto-char (point-min))
+          (while (search-forward "[" nil t)
+            (should (button-at (1- (point)))))))
+      ;; A completed turn composes body + blank line + footer, and no marker.
+      (let ((render (dsh-bridge-test--view-turn-render changed "s1")))
+        (should (equal render (concat "done\n\n" expected)))
+        (should-not (text-property-any 0 (length render)
+                                       'dsh-bridge-turn-marker t render)))
+      ;; No changes: no footer, and the completed turn renders cleanly.
+      (should (null (dsh-bridge--view-changed-files plain "s1")))
+      (should (equal (dsh-bridge--view-turn-suffix plain "s1") ""))
+      ;; The option turns the footer off.
+      (let ((dsh-bridge-view-changed-files nil))
+        (should (null (dsh-bridge--view-changed-files changed "s1")))
+        (should (equal (dsh-bridge--view-turn-suffix changed "s1") ""))))))
+
+(ert-deftest dsh-bridge-view-changed-files-open-turn-order ()
+  "For an open turn the footer sits between the body and the terminal
+furniture, and the marker stays last; the awaiting note still wins the
+furniture slot.  A completed turn shows no awaiting note even while one is
+pending (the note belongs to a later, open turn)."
+  (let* ((seg (dsh-bridge-test--view-segment "progress" 7001000 1))
+         (files (list (dsh-bridge-test--view-file "src/a.ts")))
+         (open (dsh-bridge-test--view-turn 7 7000000 (list seg) nil nil files))
+         (done (dsh-bridge-test--view-turn 7 7000000 (list seg) 8000000 nil files))
+         (footer (substring-no-properties (dsh-bridge--view-changed-files open "s1"))))
+    (with-temp-buffer
+      (dsh-bridge-view-mode)
+      (setq-local dsh-bridge--view-content-session "s1")
+      ;; Open turn: body, footer, marker.
+      (let ((suffix (dsh-bridge--view-turn-suffix open "s1")))
+        (should (equal (substring-no-properties suffix)
+                       (concat "\n\n" footer "\n\n(continuing...)")))
+        (should (text-property-any 0 (length suffix)
+                                   'dsh-bridge-turn-marker t suffix)))
+      ;; A pending question replaces only the marker, after the footer.
+      (let ((dsh-bridge--pending-questions
+             (dsh-bridge-test--pending-ask "s1" "Approve?")))
+        (let ((suffix (dsh-bridge--view-turn-suffix open "s1")))
+          (should (equal (substring-no-properties suffix)
+                         (concat "\n\n" footer
+                                 "\n\n(Awaiting response: press a to view and answer)")))
+          (should (text-property-any 0 (length suffix)
+                                     'dsh-bridge-awaiting t suffix))
+          (should-not (string-match-p "(continuing" suffix))))
+      ;; A completed turn drops the awaiting note but keeps the footer.
+      (let ((dsh-bridge--pending-questions
+             (dsh-bridge-test--pending-ask "s1" "Approve?")))
+        (should (equal (substring-no-properties (dsh-bridge--view-turn-suffix done "s1"))
+                       (concat "\n\n" footer)))))))
+
+(ert-deftest dsh-bridge-view-changed-files-buttons ()
+  "The footer's buttons carry the expected actions: visit the file, open its
+recorded hunks, and run the session VC diff."
+  (let* ((files (list (dsh-bridge-test--view-file "src/a.ts" "write")))
+         (turn (dsh-bridge-test--view-turn
+                7 7000000
+                (list (dsh-bridge-test--view-segment "done" 7001000 1))
+                7002000 nil files))
+         (visited nil)
+         (hunks nil)
+         (vc 0)
+         (suffix (dsh-bridge--view-changed-files turn "s1")))
+    (with-temp-buffer
+      (insert suffix)
+      (goto-char (point-min))
+      (cl-letf (((symbol-function 'dsh-bridge--view-visit-changed)
+                 (lambda (path) (setq visited path)))
+                ((symbol-function 'dsh-bridge--view-changed-hunks)
+                 (lambda (session path) (setq hunks (list session path))))
+                ((symbol-function 'dsh-bridge-view-vc-diff)
+                 (lambda () (setq vc (1+ vc)))))
+        (search-forward "[src/a.ts]")
+        (button-activate (button-at (match-beginning 0)))
+        (search-forward "[diff]")
+        (button-activate (button-at (match-beginning 0)))
+        (search-forward "[VC diff]")
+        (button-activate (button-at (match-beginning 0)))))
+    (should (equal visited "src/a.ts"))
+    (should (equal hunks '("s1" "src/a.ts")))
+    (should (equal vc 1))))
+
+(ert-deftest dsh-bridge-view-changed-files-default-directory ()
+  "Rendering sets the view's `default-directory' to the session cwd, so the
+footer's visit button resolves a relative path against it at click time."
+  (let* ((files (list (dsh-bridge-test--view-file "src/a.ts")))
+         (turn (dsh-bridge-test--view-turn
+                7 7000000
+                (list (dsh-bridge-test--view-segment "done" 7001000 1))
+                7002000 nil files))
+         (opened nil))
+    (with-temp-buffer
+      (dsh-bridge-view-mode)
+      (dsh-bridge--view-fill "s1" turn nil "/tmp/dsh-session" t)
+      (should (equal default-directory "/tmp/dsh-session/"))
+      (cl-letf (((symbol-function 'find-file) (lambda (file) (setq opened file))))
+        (goto-char (point-min))
+        (search-forward "[src/a.ts]")
+        (button-activate (button-at (match-beginning 0))))
+      (should (equal opened "/tmp/dsh-session/src/a.ts")))))
+
+(ert-deftest dsh-bridge-view-changed-files-splice ()
+  "An incremental fill replaces the footer with the grown turn's list and keeps
+the recorded body/tail lengths in step, leaving a mid-body point alone."
+  (let* ((seg1 (dsh-bridge-test--view-segment "first" 7001000 1))
+         (seg2 (dsh-bridge-test--view-segment "second" 7002000 2))
+         (one (dsh-bridge-test--view-turn
+               7 7000000 (list seg1) nil nil
+               (list (dsh-bridge-test--view-file "src/a.ts"))))
+         (two (dsh-bridge-test--view-turn
+               7 7000000 (list seg1 seg2) nil nil
+               (list (dsh-bridge-test--view-file "src/a.ts")
+                     (dsh-bridge-test--view-file "src/b.ts"))))
+         (dsh-bridge--turns-cache (dsh-bridge-test--view-cache (list two one))))
+    (with-temp-buffer
+      (dsh-bridge-view-mode)
+      (dsh-bridge--view-fill "s1" one nil nil t)
+      (goto-char 3)
+      (dsh-bridge--view-fill "s1" two nil nil t t)
+      (should (equal (buffer-string)
+                     (dsh-bridge-test--view-turn-render two "s1")))
+      (should (equal (point) 3))
+      (let ((prov dsh-bridge--view-provenance))
+        (should (equal (plist-get prov :body-length)
+                       (length (dsh-bridge--view-turn-body two))))
+        (should (equal (plist-get prov :tail-length)
+                       (length (dsh-bridge--view-turn-suffix two "s1"))))))))
+
+(ert-deftest dsh-bridge-view-changed-files-pushed-message ()
+  "A pushed message has no turn identity, so it never renders a footer."
+  (should (equal (dsh-bridge--view-turn-suffix nil "s1") ""))
+  (let ((dsh-bridge--turns-cache nil))
+    (with-temp-buffer
+      (dsh-bridge-view-mode)
+      (dsh-bridge--view-fill "s1" "pushed text" 12345)
+      (should (equal (buffer-string) "pushed text")))))
+
+(ert-deftest dsh-bridge-view-changed-hunks-renders ()
+  "The recorded-hunks buffer shows each hunk's removed and added blocks with
+the diff faces, `n'/`p' walk the headings, `RET' visits the file, and `g'
+refetches."
+  (require 'vc)
+  (let* ((response (list (cons 'sessionId "s1")
+                         (cons 'path "src/a.ts")
+                         (cons 'absolute "/tmp/dsh-session/src/a.ts")
+                         (cons 'truncated nil)
+                         (cons 'hunks
+                               (list (list (cons 'turn 3) (cons 'tool "write")
+                                           (cons 'op "write")
+                                           (cons 'oldText nil) (cons 'newText "one"))
+                                     (list (cons 'turn 4) (cons 'tool "edit")
+                                           (cons 'op "edit")
+                                           (cons 'oldText "one") (cons 'newText "two"))))))
+         (requests 0)
+         (opened nil))
+    (unwind-protect
+        (progn
+          (cl-letf (((symbol-function 'dsh-bridge--request)
+                     (lambda (_method path _payload)
+                       (setq requests (1+ requests))
+                       (should (equal path
+                                      "/changes?sessionId=s1&path=src%2Fa.ts"))
+                       (cons 200 response)))
+                    ((symbol-function 'find-file)
+                     (lambda (file) (setq opened file))))
+            (dsh-bridge--view-changed-hunks "s1" "src/a.ts")
+            (with-current-buffer dsh-bridge-changes-buffer-name
+              (should (derived-mode-p 'dsh-bridge-changes-mode))
+              (should (string-match-p "Recorded changes for src/a\\.ts"
+                                      (buffer-string)))
+              (should (string-match-p "^--- hunk 1: write (write, turn 3) ---$"
+                                      (buffer-string)))
+              (should (string-match-p "^- one$" (buffer-string)))
+              (should (string-match-p "^\\+ two$" (buffer-string)))
+              (goto-char (point-min))
+              (search-forward "- one")
+              (should (eq (get-text-property (match-beginning 0) 'font-lock-face)
+                          'diff-removed))
+              (goto-char (point-min))
+              (search-forward "+ two")
+              (should (eq (get-text-property (match-beginning 0) 'font-lock-face)
+                          'diff-added))
+              (goto-char (point-min))
+              (dsh-bridge-changes-next-hunk)
+              (should (looking-at-p "--- hunk 1:"))
+              (dsh-bridge-changes-next-hunk)
+              (should (looking-at-p "--- hunk 2:"))
+              (dsh-bridge-changes-previous-hunk)
+              (should (looking-at-p "--- hunk 1:"))
+              (dsh-bridge-changes-visit-file)
+              (should (equal opened "/tmp/dsh-session/src/a.ts"))
+              (dsh-bridge-changes-refresh)
+              (should (equal requests 2)))))
+      (when (get-buffer dsh-bridge-changes-buffer-name)
+        (kill-buffer dsh-bridge-changes-buffer-name)))))
+
+(ert-deftest dsh-bridge-view-changed-hunks-absent ()
+  "A 404 from /changes messages instead of opening the buffer."
+  (let ((msgs nil))
+    (cl-letf (((symbol-function 'dsh-bridge--request)
+               (lambda (&rest _) (cons 404 (list (cons 'error "not-changed")))))
+              ((symbol-function 'message)
+               (lambda (&rest args) (push (apply #'format args) msgs))))
+      (dsh-bridge--view-changed-hunks "s1" "src/gone.ts"))
+    (should (string-match-p "records no change" (car msgs)))))
+
+(ert-deftest dsh-bridge-view-vc-diff ()
+  "V runs the session directory's VC root diff, and signals outside a repo."
+  (require 'vc)
+  (let ((calls 0) (arg :unset))
+    (cl-letf (((symbol-function 'vc-root-dir) (lambda () "/tmp/repo/"))
+              ((symbol-function 'vc-root-diff)
+               (lambda (a) (setq calls (1+ calls) arg a))))
+      (dsh-bridge-view-vc-diff)
+      (should (equal calls 1))
+      (should (null arg)))
+    (cl-letf (((symbol-function 'vc-root-dir) (lambda () nil)))
+      (should-error (dsh-bridge-view-vc-diff) :type 'user-error))))
+
+(ert-deftest dsh-bridge-turns-cache-files-field ()
+  "The `/turns' JSON `files' field survives parsing and is stashed in the turn
+cache — the footer's attribution source."
+  (let* ((json (concat "{\"sessionId\":\"s1\",\"epoch\":0,"
+                       "\"turns\":[{\"turn\":2,\"startedAt\":1000,"
+                       "\"endedAt\":2000,\"reason\":\"completed\","
+                       "\"segments\":[{\"text\":\"done\",\"time\":1500,\"step\":1}],"
+                       "\"files\":[{\"path\":\"src/a.ts\",\"op\":\"write\"}]}]}"))
+         (dsh-bridge--turns-cache nil))
+    (cl-letf (((symbol-function 'dsh-bridge--request)
+               (lambda (_m _p _payload)
+                 (cons 200 (dsh-bridge--parse-json-body json)))))
+      (dsh-bridge--turns-cache-fetch "s1"))
+    (let* ((turn (car (dsh-bridge--turns-cache-turns "s1")))
+           (file (car (alist-get 'files turn))))
+      (should (equal (alist-get 'path file) "src/a.ts"))
+      (should (equal (alist-get 'op file) "write")))))
 
 (provide 'dsh-bridge-tests)
 ;;; dsh-bridge-tests.el ends here
