@@ -69,6 +69,17 @@ re-verification checklist.
 - **Host-side targeting, Emacs-side selection.** The host resolves a missing
   `sessionId` to last-active (falling back to the most recent cold session);
   Emacs keeps a default target plus per-buffer bindings.
+- **First lazy send is convenient; later ones are not lazy.** A DSH-Prompt
+  buffer with no binding and no default sends without a target (the host
+  picks), then adopts the session id the response reports, so follow-up sends
+  from that buffer continue the same conversation. Pre-send naming stays
+  qualified ("last active") because only the response knows where the prompt
+  went; a send through the default target keeps following it rather than
+  pinning. Rejected while settling this: removing the recorded last-active
+  resolution (the dispatcher header and non-prompt send feedback need it),
+  eager pre-send resolution (latency, and it still races POST-time resolution),
+  and confirm-on-lazy-send / refuse-to-send-unbound (friction; the response
+  pin removes the recurrence the confirmation would address).
 - **Cold sessions are first-class.** An explicit cold id resumes on demand;
   subagent-owned sessions are 409.
 - **Ask-user coexists with the web UI while an Emacs SSE client is

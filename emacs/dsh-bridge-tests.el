@@ -302,6 +302,39 @@ recorded."
       (dsh-bridge-send-text "hello"))
     (should (null dsh-bridge--last-resolved-active))))
 
+(ert-deftest dsh-bridge-explicit-target-clears-stale-last-resolved ()
+  "An explicit target that differs from the record retires the record.
+The user's actual activity moved to another session, so the recorded
+resolution must stop shadowing the computed last-active fallback; a send
+to the recorded session itself leaves it in place."
+  (let ((dsh-bridge-default-session "s2")
+        (dsh-bridge--last-resolved-active '("s1" . "T1")))
+    (cl-letf (((symbol-function 'dsh-bridge--http)
+               (lambda (&rest _) (list nil "{\"ok\":true}" 200))))
+      (dsh-bridge-send-text "hello"))
+    (should (null dsh-bridge--last-resolved-active)))
+  (let ((dsh-bridge-default-session "s1")
+        (dsh-bridge--last-resolved-active '("s1" . "T1")))
+    (cl-letf (((symbol-function 'dsh-bridge--http)
+               (lambda (&rest _) (list nil "{\"ok\":true}" 200))))
+      (dsh-bridge-send-text "hello"))
+    (should (equal dsh-bridge--last-resolved-active '("s1" . "T1")))))
+
+(ert-deftest dsh-bridge-draft-explicit-target-clears-stale-last-resolved ()
+  "A draft push to an explicit target retires a differing record too."
+  (let ((dsh-bridge-default-session "s2")
+        (dsh-bridge--last-resolved-active '("s1" . "T1")))
+    (cl-letf (((symbol-function 'dsh-bridge--http)
+               (lambda (&rest _) (list nil "{\"ok\":true}" 200))))
+      (dsh-bridge-send-draft "hello"))
+    (should (null dsh-bridge--last-resolved-active)))
+  (let ((dsh-bridge-default-session "s1")
+        (dsh-bridge--last-resolved-active '("s1" . "T1")))
+    (cl-letf (((symbol-function 'dsh-bridge--http)
+               (lambda (&rest _) (list nil "{\"ok\":true}" 200))))
+      (dsh-bridge-send-draft "hello"))
+    (should (equal dsh-bridge--last-resolved-active '("s1" . "T1")))))
+
 (ert-deftest dsh-bridge-send-text-missing-response-session ()
   "A response without a `sessionId' falls back to the requested target; with
 neither, the send is still reported but no session state is touched."
@@ -832,7 +865,10 @@ binds the compose keys plus fetch/set-session/list."
               #'dsh-bridge-prompt-next-history)))
 
 (ert-deftest dsh-bridge-prompt-header-session-label ()
-  "The prompt header names the effective session, without qualifiers."
+  "The prompt header qualifies a guessed last-active session.
+A bound session is a true binding, and one reached through the default
+target does get sent as an explicit target, so both name the session
+bare; the cache arms only predict what a target-less send would hit."
   (let ((dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t))))
         (dsh-bridge--session-status nil))
     ;; Bound buffer session: plain label (header refreshes after binding).
@@ -846,14 +882,30 @@ binds the compose keys plus fetch/set-session/list."
         (should (string-match-p " T$" (dsh-bridge--prompt-header-line)))
         (should-not (string-match-p "(default)"
                                     (dsh-bridge--prompt-header-line)))))
+    ;; Unbound, but the host's recorded resolution names a session.
+    (with-temp-buffer
+      (let ((dsh-bridge-default-session nil)
+            (dsh-bridge--last-resolved-active '("s1" . "T")))
+        (dsh-bridge-prompt-mode)
+        (should (string-match-p " T (last active)$"
+                                (dsh-bridge--prompt-header-line)))))
+    ;; Unbound and unresolved: the computed cache arm is likewise a guess.
     (with-temp-buffer
       (let ((dsh-bridge-default-session nil)
             (dsh-bridge--last-resolved-active nil)
             (dsh-bridge-status-indicator 'geometric))
         (dsh-bridge-prompt-mode)
-        ;; Nothing bound and nothing resolved: the header shows only the status.
-        (should (string-match-p "●" (dsh-bridge--prompt-header-line)))
-        (should-not (string-match-p "Untitled"
+        (should (string-match-p "● T (last active)$"
+                                (dsh-bridge--prompt-header-line)))))
+    ;; Nothing bound, resolved, or live: no session label, only the status
+    ;; glyph for the unresolved session.
+    (with-temp-buffer
+      (let ((dsh-bridge-default-session nil)
+            (dsh-bridge--last-resolved-active nil)
+            (dsh-bridge--sessions-cache nil))
+        (dsh-bridge-prompt-mode)
+        (should-not (string-match-p "Untitled" (dsh-bridge--prompt-header-line)))
+        (should-not (string-match-p "\\(last active\\)"
                                     (dsh-bridge--prompt-header-line)))))))
 
 (ert-deftest dsh-bridge-set-prompt-session-binds ()
@@ -2756,6 +2808,31 @@ empties the status tracker (a wiped roster must not linger)."
     (should (null dsh-bridge--sessions-cache))
     (should (null dsh-bridge--session-status))))
 
+(ert-deftest dsh-bridge-fetch-sessions-clears-vanished-last-resolved ()
+  "A roster without the recorded session retires the record.
+The recorded id then names a deleted session, which must not keep shadowing
+the live replica; a record that is merely not the newest stays, since
+naming the host's own resolution is its purpose."
+  (let ((dsh-bridge--sessions-cache nil)
+        (dsh-bridge--session-status nil)
+        (dsh-bridge--last-resolved-active '("s9" . "Gone")))
+    (cl-letf (((symbol-function 'dsh-bridge--request)
+               (lambda (&rest _)
+                 (cons 200 (list (cons 'sessions
+                                       (list (list (cons 'id "s1") (cons 'live t)))))))))
+      (dsh-bridge--fetch-sessions))
+    (should (null dsh-bridge--last-resolved-active)))
+  (let ((dsh-bridge--sessions-cache nil)
+        (dsh-bridge--session-status nil)
+        (dsh-bridge--last-resolved-active '("s1" . "Older")))
+    (cl-letf (((symbol-function 'dsh-bridge--request)
+               (lambda (&rest _)
+                 (cons 200 (list (cons 'sessions
+                                       (list (list (cons 'id "s1") (cons 'live t))
+                                             (list (cons 'id "s2") (cons 'live t)))))))))
+      (dsh-bridge--fetch-sessions))
+    (should (equal dsh-bridge--last-resolved-active '("s1" . "Older")))))
+
 (ert-deftest dsh-bridge-fetch-sessions-seeds-cache-and-status ()
   "A 200 with sessions returns them and reseeds the cache and status tracker."
   (let ((dsh-bridge--sessions-cache nil)
@@ -3782,6 +3859,108 @@ decide whether the identical-text confirmation fires."
         (should-not asked)
         (should (equal sent "hello"))))))
 
+(defun dsh-bridge-test--lazy-send (prompt-session default-session sent-id)
+  "Send \"hello\" from a fresh prompt buffer and return (SESSION . MESSAGES).
+PROMPT-SESSION is the buffer's binding and DEFAULT-SESSION the global
+default target; the stubbed host reports SENT-ID for the send.  SESSION is
+the buffer's binding after the send and MESSAGES the list of `message'
+strings it saw."
+  (dsh-bridge-test--kill-prompt-buffer)
+  (let ((dsh-bridge-prompt-resend-confirm nil)
+        (dsh-bridge--last-sent nil)
+        (dsh-bridge--session-status nil)
+        (dsh-bridge--sessions-cache nil)
+        (dsh-bridge--session-models nil)
+        (dsh-bridge--session-context nil)
+        (dsh-bridge-default-session default-session)
+        (messages '())
+        session)
+    (cl-letf (((symbol-function 'dsh-bridge--http)
+               (lambda (_method _path _payload)
+                 (list nil (format "{\"sessionId\":\"%s\"}" sent-id) 200)))
+              ((symbol-function 'dsh-bridge--prompt-exit) (lambda (&rest _) nil))
+              ((symbol-function 'message)
+               (lambda (fmt &rest args)
+                 (push (apply #'format fmt args) messages))))
+      (with-current-buffer (get-buffer-create "*dsh-bridge-prompt*")
+        (dsh-bridge-prompt-mode)
+        (setq-local dsh-bridge--prompt-session prompt-session)
+        (insert "hello")
+        (dsh-bridge-send-and-exit)
+        (setq session dsh-bridge--prompt-session)))
+    (dsh-bridge-test--kill-prompt-buffer)
+    (cons session (nreverse messages))))
+(ert-deftest dsh-bridge-send-and-exit-pins-lazy-send ()
+  "A target-less send adopts the host-reported session as the buffer binding.
+The response is the only ground truth about where the host put the prompt,
+so the buffer must stop re-rolling the host's last-active resolution on
+every later send from it."
+  (let ((result (dsh-bridge-test--lazy-send nil nil "s1")))
+    (should (equal (car result) "s1"))
+    (should (member "dsh-bridge: prompt buffer bound to session \"s1\""
+                    (cdr result)))))
+
+(ert-deftest dsh-bridge-send-and-exit-does-not-pin-explicit-targets ()
+  "Only a send with no target at all adopts the host's session.
+A send through the default target carries that target explicitly, and a
+bound buffer carries its own: neither may be frozen to the host's answer."
+  ;; The default target supplied the session: keep following the default.
+  (let ((result (dsh-bridge-test--lazy-send nil "s2" "s2")))
+    (should-not (car result))
+    (should-not (seq-some (lambda (m) (string-match-p "bound to session" m))
+                          (cdr result))))
+  ;; The buffer was bound: the binding stands, with no adoption message.
+  (let ((result (dsh-bridge-test--lazy-send "s2" nil "s2")))
+    (should (equal (car result) "s2"))
+    (should-not (seq-some (lambda (m) (string-match-p "bound to session" m))
+                          (cdr result)))))
+
+(ert-deftest dsh-bridge-draft-pins-lazy-push-from-prompt-buffer ()
+  "A target-less draft push from a prompt buffer adopts the host's session.
+The pushed text now lives in that session's composer, so a later send from
+the same buffer must not go elsewhere."
+  (dsh-bridge-test--kill-prompt-buffer)
+  (let ((dsh-bridge-default-session nil)
+        (dsh-bridge--last-resolved-active nil)
+        (dsh-bridge--sessions-cache '(((id . "s1") (title . "T1") (live . t))))
+        (dsh-bridge--session-models nil)
+        (dsh-bridge--session-context nil)
+        (messages '()))
+    (cl-letf (((symbol-function 'dsh-bridge--http)
+               (lambda (_method _path _payload)
+                 (list nil "{\"sessionId\":\"s1\",\"title\":\"T1\"}" 200)))
+              ((symbol-function 'message)
+               (lambda (fmt &rest args)
+                 (push (apply #'format fmt args) messages))))
+      (with-current-buffer (get-buffer-create "*dsh-bridge-prompt*")
+        (dsh-bridge-prompt-mode)
+        (insert "draft text")
+        (dsh-bridge-draft)
+        (should (equal dsh-bridge--prompt-session "s1"))))
+    (should (member "dsh-bridge: prompt buffer bound to session \"T1\""
+                    messages)))
+  (dsh-bridge-test--kill-prompt-buffer))
+
+(ert-deftest dsh-bridge-draft-does-not-pin-other-buffers ()
+  "Only a prompt buffer adopts a draft's host-resolved session."
+  (let ((dsh-bridge-default-session nil)
+        (messages '()))
+    (cl-letf (((symbol-function 'dsh-bridge--http)
+               (lambda (_method _path _payload)
+                 (list nil "{\"sessionId\":\"s1\"}" 200)))
+              ((symbol-function 'message)
+               (lambda (fmt &rest args)
+                 (push (apply #'format fmt args) messages))))
+      (with-temp-buffer
+        (transient-mark-mode 1)
+        (insert "region text")
+        (goto-char (point-min))
+        (set-mark (point-max))
+        (dsh-bridge-draft)
+        (should (null dsh-bridge--prompt-session))))
+    (should-not (seq-some (lambda (m) (string-match-p "bound to session" m))
+                          messages))))
+
 (ert-deftest dsh-bridge-turn-reason-phrase ()
   "The turn-end reason kind maps to a truthful human verb."
   (let ((dsh-bridge--sessions-cache '(((id . "s1") (title . "T")))))
@@ -4218,6 +4397,8 @@ when the caches are empty."
         (dsh-bridge--session-context '(("s1" . (45000 . 100000)))))
     (with-temp-buffer
       (dsh-bridge-prompt-mode)
+      ;; The session binding carries the session explicitly, so the segments
+      ;; describe a session this send will really hit.
       (setq-local dsh-bridge--prompt-session "s1")
       (let ((header (dsh-bridge--prompt-header-line)))
         (should (string-match-p "Model M" header))
@@ -6543,23 +6724,12 @@ parent-session link describes the parent."
 		(kill-buffer dsh-bridge-describe-buffer-name)))))
 
 (ert-deftest dsh-bridge-describe-session-failure-resolves-id-safely ()
-  "The failure path unwraps the last-active cons and tolerates no id at all."
+  "A failed nil-target fetch does not borrow the last-active record's id.
+The recorded id names a session the host may not have resolved this time,
+so the report shows `(unknown)' and `g' retries with no target instead of
+pinning the retry to that id."
   (let ((dsh-bridge--sessions-cache nil)
 		(dsh-bridge--last-resolved-active '("s9" . "last active")))
-	(unwind-protect
-		(cl-letf (((symbol-function 'dsh-bridge--request)
-				   (lambda (&rest _) (cons nil nil))))
-		  (dsh-bridge-describe-session)
-		  (with-current-buffer dsh-bridge-describe-buffer-name
-			(should (equal dsh-bridge--describe-session "s9"))
-			(goto-char (point-min))
-			(search-forward "Id")
-			(search-forward "s9")
-			(should (button-at (match-beginning 0)))))
-	  (when (get-buffer dsh-bridge-describe-buffer-name)
-		(kill-buffer dsh-bridge-describe-buffer-name))))
-  (let ((dsh-bridge--sessions-cache nil)
-		(dsh-bridge--last-resolved-active nil))
 	(unwind-protect
 		(cl-letf (((symbol-function 'dsh-bridge--request)
 				   (lambda (&rest _) (cons nil nil))))
@@ -6979,7 +7149,8 @@ removes them from the kept text."
           (insert "text\n")
           (dsh-bridge--insert-attachment-tag file)
           (cl-letf (((symbol-function 'dsh-bridge-send-draft)
-                     (lambda (text &optional _session-id) (setq captured text)))
+                     (lambda (text &optional _session-id _on-success)
+                       (setq captured text)))
                     ((symbol-function 'message) (lambda (&rest _) nil)))
             (dsh-bridge-draft))
           (should (equal captured "text\n")))

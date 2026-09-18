@@ -27,11 +27,11 @@
 ;; This lets you compose prompts and read DSH's replies within Emacs.
 
 ;; It is bundled with a plugin for DSH, which should be installed with
-;; before using the other commands.  The plugin can be installed by
-;; running \\`M-x dsh-bridge-install-plugin' (that command is in the
-;; `dsh-bridge-install' library, part of this Emacs package).  By
-;; default, this command tries to detect the dsh executable; if that
-;; does not work, customize `dsh-bridge-dsh-command'.
+;; before using the other commands.  The plugin can be installed via
+;; \\`M-x dsh-bridge-install-plugin' (from the `dsh-bridge-install'
+;; library, part of this Emacs package).  By default, this command
+;; tries to detect the dsh executable, but if that does not work,
+;; customize `dsh-bridge-dsh-command'.
 
 ;; The interactive entry points for the DSH-Emacs bridge are:
 ;;
@@ -39,25 +39,25 @@
 ;; `dsh-bridge-list-sessions'	  - browse DSH sessions
 ;; Consider giving one or both of these a global keybinding.
 ;;
-;; \\`M-x dsh-bridge' opens a transient menu that prompts for the next
+;; M-x dsh-bridge opens a transient menu that prompts for the next
 ;; command, with the top line showing the session your next command
 ;; will act on.  From here, you can send the region/buffer to DSH as a
 ;; prompt or draft prompt, fetch output from the session, etc.
 ;;
-;; \\`M-x dsh-bridge-list-sessions' opens a buffer with a tabulated
-;; list of DSH sessions.  You can type \\`f' to fetch output, \\`r' to
-;; compose a reply, etc.
+;; M-x dsh-bridge-list-sessions opens a buffer with a tabulated list
+;; of DSH sessions.  You can type RET to act on the session at point
+;; (a dwim action that fetches, replies, etc.), f to fetch output, r
+;; to compose a reply, etc.
 ;;
 ;; The DSH-View buffer shows assistant text fetched from DSH.
 ;; Typically, each DSH-View buffer contains one turn (i.e., all
 ;; replies from a prompt to an idle reply), with mid-turn segments
-;; separated by dividers.  From here, type `r' to compose a reply for
-;; the session, `M-p'/`M-n' to cycle through the turn history, etc.
+;; separated by dividers.  From here, type "r" to compose a reply for
+;; the session, M-p/M-n to cycle through the turn history, etc.
 ;;
 ;; From the DSH-Prompt buffer, you can type out prompts for DSH and
-;; send them with \\`C-c C-c', or send as draft with \\`C-c C-d'.
-;; Type \\`C-c C-f' to open the corresponding DSH-View buffer,
-;; \\`M-p'/\\`M-n' to cycle through the prompt history, etc.
+;; send them with C-c C-c.  Type C-c C-f to open the corresponding
+;; DSH-View buffer, and M-p/M-n to cycle through the prompt history.
 ;;
 ;; For other keybindings, refer to the menu bar or elisp docs.
 ;; Suggestions for user interface improvements are welcome.
@@ -522,7 +522,14 @@ Set with the command `\\[dsh-bridge-set-default-target].")
   "Cons (ID . LABEL) of the session the host last resolved for us, or nil.
 This is an advisory display cache.  ID is the session id the host
 resolved as last-active for a request without an explicit session.
-LABEL is the session display label.")
+LABEL is the session display label.
+
+The record goes stale and is dropped when another session starts a turn,
+when an explicitly targeted send or draft names a different session, or
+when the session disappears from the roster.  It deliberately outlives a
+newer live session appearing in the roster: naming the host's own
+resolution, including a cold session the local replica cannot see, is
+what it is for.")
 
 (defvar dsh-bridge--view-content-session) ; forward declaration
 
@@ -930,9 +937,8 @@ Currently supported events are:
 		  (dsh-bridge--view-answer-note-clear id)
 		  ;; Clear any recorded last-active resolution, since this
 		  ;; session is the host's newest activity.
-		  (and id dsh-bridge--last-resolved-active
-			   (not (equal (car dsh-bridge--last-resolved-active) id))
-			   (setq dsh-bridge--last-resolved-active nil))
+		  (unless (equal (car-safe dsh-bridge--last-resolved-active) id)
+			(setq dsh-bridge--last-resolved-active nil))
 		  (dsh-bridge--status-set id 'running (alist-get 'time event))
 		  (dsh-bridge--status-event-render id)
 		  (dsh-bridge--models-event-refresh id)
@@ -1259,7 +1265,12 @@ checking STATUS for a failed request."
 										 'idle))))
 		(setq dsh-bridge--session-status
 			  (seq-filter (lambda (entry) (member (car entry) seen))
-						  dsh-bridge--session-status))))
+						  dsh-bridge--session-status))
+		;; A recorded resolution absent from the roster names a deleted
+		;; session, so the record must not keep shadowing the replica.
+		;; A merely older one stays: the record is the host's own answer.
+		(unless (member (car-safe dsh-bridge--last-resolved-active) seen)
+		  (setq dsh-bridge--last-resolved-active nil))))
 	(cons status sessions)))
 
 ;;; Session labels
@@ -1856,7 +1867,12 @@ with the prompt; PATH must be absolute."
 			  (dsh-bridge--status-set sent-id 'running)
 			  (dsh-bridge--status-event-render sent-id)
 			  (message "dsh-bridge: prompt sent")
-			  (unless target
+			  (if target
+				  ;; The user's activity moved elsewhere: the recorded
+				  ;; resolution no longer describes it.
+				  (unless (equal target
+								 (car-safe dsh-bridge--last-resolved-active))
+					(setq dsh-bridge--last-resolved-active nil))
 				;; The host resolved last-active itself: record it.
 				(dsh-bridge--record-last-resolved alist))
 			  ;; An attachment-only send is not a recallable
@@ -1866,9 +1882,13 @@ with the prompt; PATH must be absolute."
 			(when (functionp on-success)
 			  (funcall on-success sent-id)))))))))
 
-(defun dsh-bridge-send-draft (text &optional session-id)
+(defun dsh-bridge-send-draft (text &optional session-id on-success)
   "Send TEXT to the DSH composer as a draft (not submitted).
-SESSION-ID overrides the effective session for this call only."
+SESSION-ID overrides the effective session for this call only.
+
+If ON-SUCCESS is a function, it is called with SENT-SESSION-ID in the
+success branch of the push.  The callback runs in the same buffer that
+was current when this function is called."
   (let* ((target (or session-id (dsh-bridge--effective-session)))
 		 (payload (append (list (cons 'text text))
 						  (and target (list (cons 'sessionId target))))))
@@ -1882,8 +1902,16 @@ SESSION-ID overrides the effective session for this call only."
 		 ((null alist)
 		  (message "dsh-bridge: unreadable response: %s" body))
 		 (t (message "dsh-bridge: draft pushed")
-			(unless target
-			  (dsh-bridge--record-last-resolved alist))))))))
+			(if target
+				;; The user's activity moved elsewhere: the recorded
+				;; resolution no longer describes it.
+				(unless (equal target
+							   (car-safe dsh-bridge--last-resolved-active))
+				  (setq dsh-bridge--last-resolved-active nil))
+			  ;; The host resolved last-active itself: record it.
+			  (dsh-bridge--record-last-resolved alist))
+			(when (functionp on-success)
+			  (funcall on-success (or (alist-get 'sessionId alist) target)))))))))
 
 ;;; Attachments
 
@@ -3364,6 +3392,11 @@ attachment is allowed.
 If `dsh-bridge-prompt-resend-confirm' is non-nil and the text exactly
 matches the session's last-sent text, confirm first.
 
+A send with no target at all (no buffer binding, no default target) is
+resolved by the host, which reports the session it chose; on success the
+buffer is bound to that session, so the next send from the same buffer
+cannot land in a different one.
+
 After a successful send, pop to a DSH-View buffer following the session
 and bury the buffer (see `dsh-bridge--prompt-exit')."
   (interactive)
@@ -3375,7 +3408,13 @@ and bury the buffer (see `dsh-bridge--prompt-exit')."
 		 (attachments (cdr parsed))
 		 ;; Only an explicit binding (or the default target); a guessed last-active
 		 ;; id must not key the guard.
-		 (guard-session (dsh-bridge--effective-session)))
+		 (guard-session dsh-bridge--prompt-session)
+		 ;; Whether this send leaves the choice of session to the host.  The
+		 ;; test is "no explicit target was sent", not "the buffer is
+		 ;; unbound": a send through `dsh-bridge-default-session' must keep
+		 ;; following the default rather than freeze to one session.
+		 (lazy-p (and (null dsh-bridge--prompt-session)
+					  (null dsh-bridge-default-session))))
 	(if (and (string-empty-p text) (null attachments))
 		(user-error "dsh-bridge: no text or attachments to send")
 	  ;; Guard against an identical re-send to the session.
@@ -3399,6 +3438,13 @@ and bury the buffer (see `dsh-bridge--prompt-exit')."
 		 (lambda (sent-id)
 		   ;; This is still the prompt buffer: the ON-SUCCESS callback runs
 		   ;; in the buffer that sent the text (see `dsh-bridge-send-text').
+		   ;; The host's report is the only ground truth about where a
+		   ;; target-less send went, so pin the buffer to it now; the
+		   ;; header, `default-directory', and the history walk follow.
+		   (when (and lazy-p sent-id)
+			 (dsh-bridge-set-prompt-session sent-id)
+			 (message "dsh-bridge: prompt buffer bound to session \"%s\""
+					  (dsh-bridge--session-label sent-id)))
 		   ;; Drop the tags from the kept text, so an immediate resend
 		   ;; cannot re-upload them, then hand the prompt over to the view.
 		   (when attachments
@@ -3485,7 +3531,11 @@ composer for review.  With a prefix argument, choose a session for this call
 only.  Whole-buffer drafts confirm exactly like whole-buffer sends.
 
 Composer drafts carry text only, so attachment tag lines are stripped
-from the pushed text (with a message) rather than uploaded."
+from the pushed text (with a message) rather than uploaded.
+
+A target-less push from a DSH-Prompt buffer is resolved by the host,
+which reports the session it chose; on success the buffer is bound to
+that session, since its text now lives in that session's composer."
   (interactive (list (dsh-bridge--read-session-override "Draft to session: ")))
   (let ((whole (not (use-region-p))))
 	(when (and whole buffer-read-only)
@@ -3496,10 +3546,22 @@ from the pushed text (with a message) rather than uploaded."
 					 (format "Send the whole %s buffer to DSH as a draft? "
 							 (buffer-name)))))
 	  (user-error "dsh-bridge: aborted"))
-	(let ((parsed (dsh-bridge--parse-attachments (dsh-bridge--region-or-buffer))))
+	(let ((parsed (dsh-bridge--parse-attachments (dsh-bridge--region-or-buffer)))
+		  ;; A `dsh-bridge-default-session' push still carries an explicit
+		  ;; target; only a push with no target at all needs the pin.
+		  (lazy-p (and (eq major-mode 'dsh-bridge-prompt-mode)
+					   (null dsh-bridge--prompt-session)
+					   (null dsh-bridge-default-session))))
 	  (when (cdr parsed)
 		(message "dsh-bridge: drafts do not carry attachments; pushing text only"))
-	  (dsh-bridge-send-draft (car parsed) session-id))))
+	  (dsh-bridge-send-draft
+	   (car parsed) session-id
+	   (lambda (sent-id)
+		 ;; Runs in the draft's buffer (see `dsh-bridge-send-draft').
+		 (when (and lazy-p sent-id)
+		   (dsh-bridge-set-prompt-session sent-id)
+		   (message "dsh-bridge: prompt buffer bound to session \"%s\""
+					(dsh-bridge--session-label sent-id))))))))
 
 ;;;###autoload
 (defun dsh-bridge-fetch (&optional session-id same-window)
@@ -5075,6 +5137,10 @@ Discard it? " (buffer-name))))))
 The buffer is bound to the effective session of the current buffer (its
 binding, else the default target, else last-active), so \\`r' from a
 DSH-View or DSH-Sessions buffer continues that session's conversation.
+A buffer left unbound to let the host choose is bound to the session the
+host picked the first time a prompt was sent from it (see
+`dsh-bridge-send-and-exit'), so a later send from it continues that
+conversation rather than re-rolling the host's choice.
 
 A DSH-Prompt buffer already bound to that session is preferred.  Text
 kept from a previous send (or a pristine history entry) is erased
@@ -5180,35 +5246,55 @@ recomputes on the next redisplay)."
   "Return the header line for the DSH-Prompt buffer.
 Header line format:
 
- <status> <label>[ (k/n)][ · <model>][ · <ctx%>][ · 📎N][ ✓ sent HH:MM]
+ <status> <label>[ (last active)][ (k/n)][ · <model>][ · <ctx%>]
+                 [ · 📎N][ ✓ sent HH:MM]
+
+The `(last active)' qualifier marks a session the buffer is not bound
+to: the id is only a prediction of what a target-less send would hit,
+because the host resolves the session when the request arrives.  A
+bound session, and one reached through `dsh-bridge-default-session' (the
+send does carry that target), are unqualified.
 
 The model and context segments stay empty until their first successful
 fetch.  Editing the text clears the sent marker.  The `(k/n)' segment
 appears when walking the prompt history, and `📎N' when the buffer
 carries N attachment tag lines."
-  (let* ((session (or dsh-bridge--prompt-session
-					  dsh-bridge-default-session
-					  (car-safe dsh-bridge--last-resolved-active)
-					  (dsh-bridge--cache-last-active)))
-		 (status (dsh-bridge--status-glyph session))
-		 (label (if session
-					(dsh-bridge--session-link (dsh-bridge--session-label session) session)
+  (let* ((session dsh-bridge--prompt-session)
+		 (qualifier "")
+		 status label)
+	;; The waterfall names the session a target-less send would be
+	;; predicted to hit; remember which arm answered, so the header can
+	;; mark a prediction as one.
+	(unless session
+	  (cond ((setq session dsh-bridge-default-session)
+			 ;; The send does carry this target, so the name is honest
+			 ;; as it stands (the dispatcher header qualifies it instead).
+			 nil)
+			((setq session (car-safe dsh-bridge--last-resolved-active))
+			 (setq qualifier " (last active)"))
+			((setq session (dsh-bridge--cache-last-active))
+			 (setq qualifier " (last active)"))))
+	(setq status (dsh-bridge--status-glyph session))
+	(setq label (if session
+					(concat (dsh-bridge--session-link
+							 (dsh-bridge--session-label session) session)
+							qualifier)
 				  ""))
-		 (model (dsh-bridge--prompt-model-label session))
-		 (context (dsh-bridge--prompt-context-label session))
-		 (attached (let ((count (dsh-bridge--attachment-count)))
-					 (and (> count 0) (format "📎%d" count))))
-		 (sent (dsh-bridge--prompt-sent-marker session))
-		 (hist (dsh-bridge--prompt-history-position)))
-	;; The returned string is %-escaped (see `header-line-format'), so
-	;; turn any % (from context percentage or session title) into %%.
-	(string-replace
-	 "%" "%%"
-	 (concat " " (if (string-empty-p status) label (concat status " " label))
-			 hist (and model (concat " · " model))
-			 (and context (concat " · " context))
-			 (and attached (concat " · " attached))
-			 sent))))
+	(let ((model (dsh-bridge--prompt-model-label session))
+		  (context (dsh-bridge--prompt-context-label session))
+		  (attached (let ((count (dsh-bridge--attachment-count)))
+					  (and (> count 0) (format "📎%d" count))))
+		  (sent (dsh-bridge--prompt-sent-marker session))
+		  (hist (dsh-bridge--prompt-history-position)))
+	  ;; The returned string is %-escaped (see `header-line-format'), so
+	  ;; turn any % (from context percentage or session title) into %%.
+	  (string-replace
+	   "%" "%%"
+	   (concat " " (if (string-empty-p status) label (concat status " " label))
+			   hist (and model (concat " · " model))
+			   (and context (concat " · " context))
+			   (and attached (concat " · " attached))
+			   sent)))))
 
 (defun dsh-bridge--prompt-mode-setup ()
   "Common setup for `dsh-bridge-prompt-mode'."
@@ -6149,8 +6235,7 @@ persisted log and is never resumed."
 		 (alist (cdr result))
 		 (report (and (eq status 200) (listp alist) alist))
 		 (id (or (and report (dsh-bridge--describe-string (alist-get 'sessionId report)))
-				 session-id
-				 (car-safe dsh-bridge--last-resolved-active)))
+				 session-id))
 		 (session (and id (dsh-bridge--session-for-id id)))
 		 (buffer (get-buffer-create dsh-bridge-describe-buffer-name))
 		 (here (eq (current-buffer) buffer)))
