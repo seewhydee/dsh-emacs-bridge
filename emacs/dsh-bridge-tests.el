@@ -1570,16 +1570,23 @@ attaches to a turn that mutated files, as `((path . P) (op . O))' alists."
               (cons 'incremental nil))))
 
 ;; The package renders a turn's body and terminal suffix separately (the
-;; incremental fill needs them apart), so the whole-turn render the tests
-;; assert against is composed here.
+;; incremental fill needs them apart), building the body inline, so the
+;; whole-turn render the tests assert against is composed here.
+
+(defun dsh-bridge-test--view-turn-body (turn)
+  "The segment-joined body of TURN, without any suffix.
+Mirrors the body `dsh-bridge--view-fill' builds."
+  (mapconcat (lambda (seg) (or (alist-get 'text seg) ""))
+             (alist-get 'segments turn)
+             dsh-bridge--view-segment-divider))
 
 (defun dsh-bridge-test--view-turn-render (turn &optional session-id)
   "Buffer text for the whole TURN record, or \"\" for nil.
-A test-local composition of `dsh-bridge--view-turn-body' and
+A test-local composition of `dsh-bridge-test--view-turn-body' and
 `dsh-bridge--view-turn-suffix'."
   (if (null turn)
       ""
-    (concat (dsh-bridge--view-turn-body turn)
+    (concat (dsh-bridge-test--view-turn-body turn)
             (dsh-bridge--view-turn-suffix turn session-id))))
 
 (defconst dsh-bridge-test--view-newest-rendered
@@ -1869,7 +1876,7 @@ waiting placeholder clears it."
         (should (equal (plist-get prov :keys)
                        '((1 . 7001000) (2 . 7002000))))
         (should (equal (plist-get prov :body-length)
-                       (length (dsh-bridge--view-turn-body two))))
+                       (length (dsh-bridge-test--view-turn-body two))))
         (should (plist-get prov :open)))
       ;; A waiting placeholder is not a reconcilable body.
       (dsh-bridge--view-waiting-fill "s1" 7)
@@ -7966,7 +7973,7 @@ the recorded body/tail lengths in step, leaving a mid-body point alone."
       (should (equal (point) 3))
       (let ((prov dsh-bridge--view-provenance))
         (should (equal (plist-get prov :body-length)
-                       (length (dsh-bridge--view-turn-body two))))
+                       (length (dsh-bridge-test--view-turn-body two))))
         (should (equal (plist-get prov :tail-length)
                        (length (dsh-bridge--view-turn-suffix two "s1"))))))))
 

@@ -1315,7 +1315,8 @@ id with no cached row is not \"known untitled\"."
   (let ((alist (if (stringp session)
 				   (dsh-bridge--session-for-id session)
 				 session)))
-	(and alist (null (dsh-bridge--normalized-string (alist-get 'title alist))))))
+	(and alist
+		 (null (dsh-bridge--normalized-string (alist-get 'title alist))))))
 
 (defun dsh-bridge--session-label (session &optional no-default add-fallback-face)
   "Return the display label for SESSION.
@@ -1324,8 +1325,7 @@ the format described in `dsh-bridge--sessions-cache'.
 
 The label is the session's title, falling back on \"[Untitled Session]\"
 if the session is known but untitled.  With NO-DEFAULT, a session that
-is neither titled nor identifiable returns nil instead of using this
-fallback.
+is neither titled nor identifiable returns nil, ignoring this fallback.
 
 If ADD-FALLBACK-FACE is non-nil, apply `dsh-bridge-untitled-face' as a
 face property for any fallback string."
@@ -1431,10 +1431,11 @@ If NODEFAULT is non-nil, return nil if there is no buffer-local session
 binding, without falling back on `dsh-bridge-default-session'."
   (let ((mode (with-current-buffer (or buffer (current-buffer))
 				major-mode)))
-	(or (cond ((eq mode 'dsh-bridge-prompt-mode) dsh-bridge--prompt-session)
-			  ((eq mode 'dsh-bridge-view-mode) dsh-bridge--view-content-session)
-			  ((eq mode 'dsh-bridge-describe-mode) dsh-bridge--describe-session)
-			  (t nil))
+	(or (cond
+		 ((eq mode 'dsh-bridge-prompt-mode) dsh-bridge--prompt-session)
+		 ((eq mode 'dsh-bridge-view-mode) dsh-bridge--view-content-session)
+		 ((eq mode 'dsh-bridge-describe-mode) dsh-bridge--describe-session)
+		 (t nil))
 		(unless nodefault dsh-bridge-default-session))))
 
 (defun dsh-bridge--cache-last-active ()
@@ -1494,7 +1495,7 @@ already the workspace."
 	(format "\t %s" (string-join parts " · "))))
 
 (defun dsh-bridge--completion-table (choices annotate)
-  "Completion table over CHOICES, an alist of (STRING . VALUE).
+  "Return a completion table over CHOICES: an alist of (STRING . VALUE).
 ANNOTATE is called with a candidate's VALUE and returns its annotation
 string, or nil when it has none."
   (lambda (string pred action)
@@ -2444,12 +2445,6 @@ turn-following state for the new turn."
   (setq-local dsh-bridge--view-provenance nil) ; placeholder isn't content
   (setq header-line-format dsh-bridge--view-header-line-format)
   (dsh-bridge--view-ticker-ensure))
-
-(defun dsh-bridge--view-turn-body (turn)
-  "The segment-joined body of TURN (segments oldest first), without any suffix."
-  (mapconcat (lambda (seg) (or (alist-get 'text seg) ""))
-             (alist-get 'segments turn)
-             dsh-bridge--view-segment-divider))
 
 ;;; Changed files (the DSH-View footer)
 
@@ -3939,7 +3934,10 @@ already carries the settled `(k/n)' position."
                       (dsh-bridge--view-provenance-make
                        session-id epoch turn new-keys new-body
                        (length new-suffix))))
-      (let* ((body (and record-p (dsh-bridge--view-turn-body turn)))
+      (let* ((body (when record-p
+					 (mapconcat (lambda (seg) (or (alist-get 'text seg) ""))
+								(alist-get 'segments turn)
+								dsh-bridge--view-segment-divider)))
              (suffix (and record-p
                           (dsh-bridge--view-turn-suffix turn session-id)))
              (new-text (if record-p (concat (or body "") (or suffix "")) turn)))

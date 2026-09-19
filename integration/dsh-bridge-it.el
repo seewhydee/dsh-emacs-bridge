@@ -641,12 +641,14 @@ the tag line."
 
 (defun dsh-bridge-it--turn-render (turn session-id)
   "Buffer text for the whole TURN record, or \"\" for nil.
-A local composition of the package's body and suffix helpers (the package
-renders a turn's body and terminal suffix separately for the incremental
-fill, so it has no whole-turn renderer)."
+A local composition of the turn body, as `dsh-bridge--view-fill' builds it,
+and the suffix helper (the package renders those separately for the
+incremental fill, so it has no whole-turn renderer)."
   (if (null turn)
       ""
-    (concat (dsh-bridge--view-turn-body turn)
+    (concat (mapconcat (lambda (seg) (or (alist-get 'text seg) ""))
+                       (alist-get 'segments turn)
+                       dsh-bridge--view-segment-divider)
             (dsh-bridge--view-turn-suffix turn session-id))))
 
 (defun dsh-bridge-it--prompt-send (session-id text)
