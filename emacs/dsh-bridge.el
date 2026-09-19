@@ -5576,9 +5576,12 @@ session, attaching a file, selecting a model, etc.
   (dsh-bridge--define-prompt-mode text-mode))
 
 (defun dsh-bridge-erase-prompt ()
-  "Erase the contents of the prompt buffer."
+  "Erase the contents of the prompt buffer.
+Ask for confirmation when the buffer is modified."
   (interactive)
-  (erase-buffer))
+  (when (or (not (buffer-modified-p))
+			(yes-or-no-p "Prompt modified; erase anyway? "))
+	(erase-buffer)))
 
 (easy-menu-define dsh-bridge-prompt-menu dsh-bridge-prompt-mode-map
   "Menu bar menu for the DSH-Prompt buffer."
@@ -5602,6 +5605,8 @@ session, attaching a file, selecting a model, etc.
 	 :help "Fetch the effective session's latest turn"]
 	["Describe Session" dsh-bridge-describe-session
 	 :help "Show the effective session's read-only report"]
+	["Stop Session" dsh-bridge-stop-session
+	 :help "Stop the effective session's running turn"]
 	["Select Model…" dsh-bridge-select-model
 	 :help "Change the session's model and reasoning effort"]
 	["Set Prompt Session…" dsh-bridge-set-prompt-session
@@ -5691,8 +5696,9 @@ host round-trip."
 
 (defun dsh-bridge-stop-session (&optional force)
   "Stop the running turn of the session at hand.
-In a DSH-View buffer the session is the one shown; in DSH-Sessions it is
-the row under point.  A session that is not running is left alone: the
+In a DSH-View buffer the session is the one shown; in DSH-Prompt it is
+the buffer's effective session; in DSH-Sessions it is the row under
+point.  A session that is not running is left alone: the
 command reports it and sends nothing.  Otherwise it asks for
 confirmation, then asks the host to stop the session's active turn.
 

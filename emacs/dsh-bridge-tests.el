@@ -924,6 +924,37 @@ binds the compose keys plus fetch/set-session/list."
   (should (eq (lookup-key dsh-bridge-prompt-mode-map (kbd "M-n"))
               #'dsh-bridge-prompt-next-history)))
 
+(ert-deftest dsh-bridge-erase-prompt-confirms-when-modified ()
+  "A modified prompt asks before erasing; declining keeps the text."
+  (let ((asked nil))
+    (cl-letf (((symbol-function 'yes-or-no-p)
+               (lambda (_prompt) (setq asked t) nil)))
+      (with-temp-buffer
+        (dsh-bridge-prompt-mode)
+        (insert "half-written")
+        (set-buffer-modified-p t)
+        (dsh-bridge-erase-prompt)
+        (should asked)
+        (should (equal (buffer-string) "half-written")))))
+  (cl-letf (((symbol-function 'yes-or-no-p) (lambda (_prompt) t)))
+    (with-temp-buffer
+      (dsh-bridge-prompt-mode)
+      (insert "half-written")
+      (set-buffer-modified-p t)
+      (dsh-bridge-erase-prompt)
+      (should (equal (buffer-string) "")))))
+
+(ert-deftest dsh-bridge-erase-prompt-unmodified-erases-silently ()
+  "An unmodified prompt is erased without asking."
+  (cl-letf (((symbol-function 'yes-or-no-p)
+             (lambda (_prompt) (error "should not ask"))))
+    (with-temp-buffer
+      (dsh-bridge-prompt-mode)
+      (insert "text")
+      (set-buffer-modified-p nil)
+      (dsh-bridge-erase-prompt)
+      (should (equal (buffer-string) "")))))
+
 (ert-deftest dsh-bridge-prompt-header-session-label ()
   "The prompt header qualifies a guessed last-active session.
 A bound session is a true binding, and one reached through the default
@@ -2662,6 +2693,26 @@ raw id is not used, so an untitled row reads as untitled."
                              (mapcar (lambda (c) (list (cadr c) c)) calls)))))
       (should (equal (cdr (assoc 'sessionId (caddr stop))) "s1")))))
 
+(ert-deftest dsh-bridge-stop-session-prompt-target ()
+  "In DSH-Prompt the stop targets the buffer's effective session."
+  (let ((calls nil)
+        (dsh-bridge--session-status '(("s1" running . 1000)))
+        (dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t)))))
+    (cl-letf (((symbol-function 'y-or-n-p) (lambda (_prompt) t))
+              ((symbol-function 'dsh-bridge--request)
+               (lambda (method path payload)
+                 (push (list method path payload) calls)
+                 (cons 200 (list (cons 'accepted t) (cons 'running t))))))
+      (with-temp-buffer
+        (dsh-bridge-prompt-mode)
+        (setq-local dsh-bridge--prompt-session "s1")
+        (dsh-bridge-stop-session)))
+    (let ((stop (cadr (assoc "/sessions/stop"
+                             (mapcar (lambda (c) (list (cadr c) c)) calls)))))
+      (should stop)
+      (should (equal (car stop) "POST"))
+      (should (equal (cdr (assoc 'sessionId (caddr stop))) "s1")))))
+
 (ert-deftest dsh-bridge-stop-session-no-target-noop ()
   "With no session at hand the command reports and sends nothing."
   (let ((called nil) (msg nil))
@@ -3697,14 +3748,15 @@ must fall back to the loaded file and never call `file-name-directory' on nil."
 
 (ert-deftest dsh-bridge-mode-menus ()
   "Each dsh-bridge mode installs a menu-bar menu, and the stop command is a
-menu item in the DSH-View and DSH-Sessions menus."
+menu item in the DSH-View, DSH-Prompt, and DSH-Sessions menus."
   (let ((key (vector 'menu-bar (intern "dsh bridge"))))
     (dolist (map (list dsh-bridge-sessions-mode-map
                        dsh-bridge-view-mode-map
                        dsh-bridge-prompt-mode-map))
       (should (lookup-key map key)))
     (dolist (map (list dsh-bridge-sessions-mode-map
-                       dsh-bridge-view-mode-map))
+                       dsh-bridge-view-mode-map
+                       dsh-bridge-prompt-mode-map))
       (should (lookup-key map (vconcat key (vector (intern "Stop Session"))))))))
 
 ;;; SSE machinery (unchanged behavior)
