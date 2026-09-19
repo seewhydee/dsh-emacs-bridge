@@ -1524,23 +1524,20 @@ that stay pairwise distinct."
 
 (defun dsh-bridge--read-ambiguous-session (title sessions)
   "Read one of SESSIONS (which share TITLE) via a second completing-read.
-Candidates are the sessions' distinguishing suffixes (workspace labels,
-else id tails); the shared title is named in the prompt rather than
-repeated in every candidate, so the completions window is useful as soon
-as it opens.  Returns the chosen session's id."
+The candidates are built from the sessions' distinguishing suffixes:
+workspace labels, else id tails.  Return the chosen session id."
   (let* ((disamb (dsh-bridge--disambiguation-suffixes sessions))
-		 (kind (car disamb))
+		 (is-workspace (eq (car disamb) 'workspace))
 		 (suffixes (cdr disamb))
 		 (choices (seq-mapn (lambda (s suffix) (cons suffix s))
 							sessions suffixes))
-		 (prompt (if (eq kind 'workspace)
+		 (prompt (if is-workspace
 					 (format "Which workspace for %S? " title)
 				   (format "Which session named %S? " title)))
 		 (table (dsh-bridge--completion-table
 				 choices
 				 (lambda (session)
-				   (dsh-bridge--session-annotation
-					session (eq kind 'workspace)))))
+				   (dsh-bridge--session-annotation session is-workspace))))
 		 (chosen (minibuffer-with-setup-hook
 					 #'dsh-bridge--show-choices-later
 				   (completing-read prompt table nil t))))
@@ -1550,30 +1547,26 @@ as it opens.  Returns the chosen session's id."
   "Group SESSIONS into an alist (TITLE . SESSIONS), one entry per title.
 Untitled sessions are dropped.  Titles and the sessions within each group
 keep the roster's order."
-  (let (groups)
+  (let (groups title cell)
 	(dolist (session sessions)
-	  (let ((title (dsh-bridge--session-label session t)))
-		(when title
-		  (let ((cell (assoc title groups)))
-			(if cell
-				(setcdr cell (append (cdr cell) (list session)))
-			  (push (cons title (list session)) groups))))))
+	  (when (setq title (dsh-bridge--session-label session t))
+		(if (setq cell (assoc title groups))
+			(setcdr cell (append (cdr cell) (list session)))
+		  (push (cons title (list session)) groups))))
 	(nreverse groups)))
 
 (defun dsh-bridge--read-session-id (prompt)
   "Read a session id via completing-read, disambiguating duplicate titles.
 Each candidate is annotated with its workspace, age, and running state.
-Both live and saved (cold) sessions are valid completions; if the
-request targets a saved session, it is resumed.  A title shared by
-several sessions is offered once and says so; choosing it prompts again
-for the distinguishing workspace or id suffix.  Untitled sessions are
-not offered for completion."
+A title shared by several sessions is offered once, with an indicator
+that it is non-unique; choosing it prompts again to disambiguate.
+Untitled sessions are not offered for completion."
   (let* ((sessions (cdr (dsh-bridge--fetch-sessions)))
 		 (groups (dsh-bridge--session-groups sessions))
 		 (table (dsh-bridge--completion-table
 				 groups
 				 (lambda (group)
-				   (cond ((null group) nil)
+				   (cond ((null group) nil) ; ignore untitled sessions
 						 ((cdr group) (dsh-bridge--group-annotation group))
 						 (t (dsh-bridge--session-annotation (car group))))))))
 	(if (null groups)
