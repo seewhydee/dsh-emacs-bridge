@@ -856,5 +856,47 @@ collapses, and the view lands at the new turn's tail."
           (should (equal (marker-position probe) (point-min)))))
       (set-marker probe nil))))
 
+(ert-deftest dsh-bridge-it-stop-session ()
+  "Stopping a hung turn works end to end and a second stop is a no-op.
+The mock hangs the turn, so the only way it can end is the stop route; the
+turn must close with the web UI's stop reason (`aborted'), and the live
+status must return to idle."
+  (dsh-bridge-it--with-fixture
+    (dsh-bridge-it--script-mock (vector (list :kind "hang")))
+    (let ((session-id (dsh-bridge-it--create-session
+                       (expand-file-name "../" dsh-bridge-it--directory))))
+      (dsh-bridge-it--notifications-start)
+      (dsh-bridge-it--prompt-send session-id "Run forever.")
+      (should (dsh-bridge-it--wait
+               (lambda ()
+                 (let* ((body (dsh-bridge-it--get "/dsh-bridge/sessions"))
+                        (row (seq-find (lambda (r) (equal (alist-get 'id r) session-id))
+                                       (alist-get 'sessions body))))
+                   (alist-get 'running row)))
+               30000))
+      ;; The stop reports the pre-stop running state and is admitted.  Parse
+      ;; with the package's own reader so JSON false reads as nil.
+      (let ((body (dsh-bridge--parse-json-body
+                   (dsh-bridge-it--post "/dsh-bridge/sessions/stop"
+                                        (list (cons 'sessionId session-id))))))
+        (should (eq (alist-get 'accepted body) t))
+        (should (eq (alist-get 'running body) t)))
+      ;; The hung turn closes with the stop reason the web UI produces.
+      (should (dsh-bridge-it--wait
+               (lambda ()
+                 (let* ((result (dsh-bridge--request
+                                 "GET" (dsh-bridge--path "/turns" session-id) nil))
+                        (turns (alist-get 'turns (cdr result))))
+                   (seq-some (lambda (turn)
+                               (equal (alist-get 'reason turn) "aborted"))
+                             turns)))
+               30000))
+      ;; A second stop finds an attached but idle agent: accepted, not running.
+      (let ((body (dsh-bridge--parse-json-body
+                   (dsh-bridge-it--post "/dsh-bridge/sessions/stop"
+                                        (list (cons 'sessionId session-id))))))
+        (should (eq (alist-get 'accepted body) t))
+        (should-not (alist-get 'running body))))))
+
 (provide 'dsh-bridge-it)
 ;;; dsh-bridge-it.el ends here

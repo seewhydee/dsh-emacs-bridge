@@ -1131,7 +1131,7 @@ draft when the entry shown is pristine."
 ;;; The view buffers
 
 (ert-deftest dsh-bridge-view-mode-basics ()
-  "The view mode is read-only and binds g/q/r/w/B/i/l plus M-p/M-n — and no
+  "The view mode is read-only and binds g/q/r/k/B/i/l plus M-p/M-n — and no
 compose/fetch/targeting verbs."
   (with-temp-buffer
     (dsh-bridge-view-mode)
@@ -1140,6 +1140,8 @@ compose/fetch/targeting verbs."
   (should (eq (lookup-key dsh-bridge-view-mode-map (kbd "g")) #'revert-buffer))
   (should (eq (lookup-key dsh-bridge-view-mode-map (kbd "q")) #'quit-window))
   (should (eq (lookup-key dsh-bridge-view-mode-map (kbd "r")) #'dsh-bridge-reply))
+  (should (eq (lookup-key dsh-bridge-view-mode-map (kbd "k"))
+              #'dsh-bridge-stop-session))
   (should (eq (lookup-key dsh-bridge-view-mode-map (kbd "B"))
               #'dsh-bridge-fork-turn))
   (should (eq (lookup-key dsh-bridge-view-mode-map (kbd "i"))
@@ -1902,9 +1904,9 @@ not the top: the flip is a provenance-mismatch rebuild under follow."
 ;;; The sessions list
 
 (ert-deftest dsh-bridge-sessions-keymap ()
-  "RET visits, r opens, t sets the default target, u clears it, f peeks, v
-toggles archived visibility, R renames, d archives, + creates, W renames the
-workspace, and p is previous-line again."
+  "RET visits, r opens, t sets the default target, u clears it, f peeks, k
+stops a running session, v toggles archived visibility, R renames, d archives,
++ creates, W renames the workspace, and p is previous-line again."
   (should (eq (lookup-key dsh-bridge-sessions-mode-map (kbd "RET"))
               #'dsh-bridge-visit-session))
   (should (eq (lookup-key dsh-bridge-sessions-mode-map (kbd "r"))
@@ -1915,6 +1917,8 @@ workspace, and p is previous-line again."
               #'dsh-bridge-clear-default-target))
   (should (eq (lookup-key dsh-bridge-sessions-mode-map (kbd "f"))
               #'dsh-bridge-peek-session))
+  (should (eq (lookup-key dsh-bridge-sessions-mode-map (kbd "k"))
+              #'dsh-bridge-stop-session))
   (should (eq (lookup-key dsh-bridge-sessions-mode-map (kbd "v"))
               #'dsh-bridge-toggle-archived-sessions))
   (should (eq (lookup-key dsh-bridge-sessions-mode-map (kbd "R"))
@@ -2493,6 +2497,183 @@ raw id is not used, so an untitled row reads as untitled."
         (goto-char (point-min))
         (dsh-bridge-archive-session)))
     (should (null called))))
+
+;;; Stopping a running session
+
+(ert-deftest dsh-bridge-stop-session-marshals-args ()
+  "Stop confirms, then POSTs the view's shown session to /sessions/stop."
+  (let ((calls nil) (msg nil)
+        (dsh-bridge--session-status '(("s1" running . 1000)))
+        (dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t)))))
+    (cl-letf (((symbol-function 'y-or-n-p) (lambda (_prompt) t))
+              ((symbol-function 'dsh-bridge--request)
+               (lambda (method path payload)
+                 (push (list method path payload) calls)
+                 (cons 200 (list (cons 'accepted t) (cons 'running t)))))
+              ((symbol-function 'message)
+               (lambda (&rest args) (setq msg (apply #'format args)))))
+      (with-temp-buffer
+        (dsh-bridge-view-mode)
+        (setq-local dsh-bridge--view-content-session "s1")
+        (dsh-bridge-stop-session)))
+    (let ((stop (cadr (assoc "/sessions/stop"
+                             (mapcar (lambda (c) (list (cadr c) c)) calls)))))
+      (should stop)
+      (should (equal (car stop) "POST"))
+      (should (equal (cdr (assoc 'sessionId (caddr stop))) "s1"))
+      (should (string-match-p "stop requested" msg)))))
+
+(ert-deftest dsh-bridge-stop-session-not-running-noop ()
+  "A session that is not running is reported and never contacted."
+  (let ((called nil) (msg nil)
+        (dsh-bridge--session-status nil)
+        (dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t)))))
+    (cl-letf (((symbol-function 'dsh-bridge--request)
+               (lambda (&rest args) (setq called args) (cons 200 nil)))
+              ((symbol-function 'message)
+               (lambda (&rest args) (setq msg (apply #'format args)))))
+      (with-temp-buffer
+        (dsh-bridge-view-mode)
+        (setq-local dsh-bridge--view-content-session "s1")
+        (dsh-bridge-stop-session)))
+    (should-not called)
+    (should (string-match-p "is not running" msg))))
+
+(ert-deftest dsh-bridge-stop-session-aborts-on-no ()
+  "Declining the confirmation sends nothing."
+  (let ((called nil) (msg nil)
+        (dsh-bridge--session-status '(("s1" running . 1000)))
+        (dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t)))))
+    (cl-letf (((symbol-function 'y-or-n-p) (lambda (_prompt) nil))
+              ((symbol-function 'dsh-bridge--request)
+               (lambda (&rest args) (setq called args) (cons 200 nil)))
+              ((symbol-function 'message)
+               (lambda (&rest args) (setq msg (apply #'format args)))))
+      (with-temp-buffer
+        (dsh-bridge-view-mode)
+        (setq-local dsh-bridge--view-content-session "s1")
+        (dsh-bridge-stop-session)))
+    (should-not called)
+    (should (string-match-p "aborted" msg))))
+
+(ert-deftest dsh-bridge-stop-session-race-reports-no-longer-running ()
+  "A host that settled the stop as a no-op is reported honestly."
+  (let ((msg nil)
+        (dsh-bridge--session-status '(("s1" running . 1000)))
+        (dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t)))))
+    (cl-letf (((symbol-function 'y-or-n-p) (lambda (_prompt) t))
+              ((symbol-function 'dsh-bridge--request)
+               (lambda (&rest _) (cons 200 (list (cons 'accepted t)))))
+              ((symbol-function 'message)
+               (lambda (&rest args) (setq msg (apply #'format args)))))
+      (with-temp-buffer
+        (dsh-bridge-view-mode)
+        (setq-local dsh-bridge--view-content-session "s1")
+        (dsh-bridge-stop-session)))
+    (should (string-match-p "no longer running" msg))))
+
+(ert-deftest dsh-bridge-stop-session-route-errors ()
+  "Route failures surface the matching message, including version skew."
+  (dolist (case '((409 . "owned by a subagent")
+                  (501 . "no session controller")))
+    (let ((msg nil)
+          (dsh-bridge--session-status '(("s1" running . 1000)))
+          (dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t)))))
+      (cl-letf (((symbol-function 'y-or-n-p) (lambda (_prompt) t))
+                ((symbol-function 'dsh-bridge--request)
+                 (lambda (&rest _) (cons (car case) (list (cons 'error "boom")))))
+                ((symbol-function 'message)
+                 (lambda (&rest args) (setq msg (apply #'format args)))))
+        (with-temp-buffer
+          (dsh-bridge-view-mode)
+          (setq-local dsh-bridge--view-content-session "s1")
+          (dsh-bridge-stop-session)))
+      (should (string-match-p (cdr case) msg))))
+  ;; A 404 while the session still reads as live means the installed plugin
+  ;; predates the route.
+  (let ((msg nil)
+        (dsh-bridge--session-status '(("s1" running . 1000)))
+        (dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t)))))
+    (cl-letf (((symbol-function 'y-or-n-p) (lambda (_prompt) t))
+              ((symbol-function 'dsh-bridge--request)
+               (lambda (&rest _) (cons 404 (list (cons 'error "not found")))))
+              ((symbol-function 'message)
+               (lambda (&rest args) (setq msg (apply #'format args)))))
+      (with-temp-buffer
+        (dsh-bridge-view-mode)
+        (setq-local dsh-bridge--view-content-session "s1")
+        (dsh-bridge-stop-session)))
+    (should (string-match-p "does not support stopping" msg)))
+  ;; A forced stop on a session with no known live state is just an error.
+  (let ((msg nil)
+        (dsh-bridge--session-status nil)
+        (dsh-bridge--sessions-cache nil))
+    (cl-letf (((symbol-function 'y-or-n-p) (lambda (_prompt) t))
+              ((symbol-function 'dsh-bridge--request)
+               (lambda (&rest _) (cons 404 (list (cons 'error "unknown session")))))
+              ((symbol-function 'message)
+               (lambda (&rest args) (setq msg (apply #'format args)))))
+      (with-temp-buffer
+        (dsh-bridge-view-mode)
+        (setq-local dsh-bridge--view-content-session "s1")
+        (dsh-bridge-stop-session t)))
+    (should (string-match-p "HTTP 404" msg))))
+
+(ert-deftest dsh-bridge-stop-session-force-bypasses-local-check ()
+  "A prefix argument stops without consulting the cached status."
+  (let ((calls nil))
+    (let ((dsh-bridge--session-status nil)
+          (dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t)))))
+      (cl-letf (((symbol-function 'y-or-n-p) (lambda (_prompt) t))
+                ((symbol-function 'dsh-bridge--request)
+                 (lambda (method path payload)
+                   (push (list method path payload) calls)
+                   (cons 200 (list (cons 'accepted t) (cons 'running nil)))))
+                ((symbol-function 'message) #'ignore))
+        (with-temp-buffer
+          (dsh-bridge-view-mode)
+          (setq-local dsh-bridge--view-content-session "s1")
+          (dsh-bridge-stop-session t))))
+    (should (assoc "/sessions/stop"
+                   (mapcar (lambda (c) (list (cadr c) c)) calls)))))
+
+(ert-deftest dsh-bridge-stop-session-sessions-row-target ()
+  "In DSH-Sessions the stop targets the row under point."
+  (let ((calls nil)
+        (dsh-bridge--sessions-cache
+         '(((id . "s1") (title . "T") (live . t) (running . t)
+            (lastActive . 1000)))))
+    (cl-letf (((symbol-function 'y-or-n-p) (lambda (_prompt) t))
+              ((symbol-function 'dsh-bridge--fetch-sessions)
+               (lambda () (cons 200 dsh-bridge--sessions-cache)))
+              ((symbol-function 'dsh-bridge--request)
+               (lambda (method path payload)
+                 (push (list method path payload) calls)
+                 (cons 200 (list (cons 'accepted t) (cons 'running t))))))
+      (unwind-protect
+          (with-current-buffer (get-buffer-create "*dsh-bridge-sessions*")
+            (dsh-bridge-sessions-mode)
+            (dsh-bridge--list-sessions-in-buffer)
+            (should (dsh-bridge--sessions-goto-id "s1"))
+            (dsh-bridge-stop-session))
+        (when (buffer-live-p (get-buffer "*dsh-bridge-sessions*"))
+          (kill-buffer "*dsh-bridge-sessions*"))))
+    (let ((stop (cadr (assoc "/sessions/stop"
+                             (mapcar (lambda (c) (list (cadr c) c)) calls)))))
+      (should (equal (cdr (assoc 'sessionId (caddr stop))) "s1")))))
+
+(ert-deftest dsh-bridge-stop-session-no-target-noop ()
+  "With no session at hand the command reports and sends nothing."
+  (let ((called nil) (msg nil))
+    (cl-letf (((symbol-function 'dsh-bridge--request)
+               (lambda (&rest args) (setq called args) (cons 200 nil)))
+              ((symbol-function 'message)
+               (lambda (&rest args) (setq msg (apply #'format args)))))
+      (with-temp-buffer
+        (dsh-bridge-view-mode)
+        (dsh-bridge-stop-session)))
+    (should-not called)
+    (should (string-match-p "no session to stop" msg))))
 
 (ert-deftest dsh-bridge-rename-workspace-marshals-args ()
   "Rename-workspace POSTs the row's workspace id and new title."
@@ -3507,6 +3688,7 @@ must fall back to the loaded file and never call `file-name-directory' on nil."
   (should (transient-get-suffix 'dsh-bridge "r"))
   (should (transient-get-suffix 'dsh-bridge "t"))
   (should (transient-get-suffix 'dsh-bridge "u"))
+  (should (transient-get-suffix 'dsh-bridge "k"))
   ;; `transient-get-suffix' signals when the key is absent.
   (dolist (absent '("p" "i" "S"))
     (should-not (condition-case nil
@@ -3514,12 +3696,16 @@ must fall back to the loaded file and never call `file-name-directory' on nil."
                   (error nil)))))
 
 (ert-deftest dsh-bridge-mode-menus ()
-  "Each dsh-bridge mode installs a menu-bar menu."
+  "Each dsh-bridge mode installs a menu-bar menu, and the stop command is a
+menu item in the DSH-View and DSH-Sessions menus."
   (let ((key (vector 'menu-bar (intern "dsh bridge"))))
     (dolist (map (list dsh-bridge-sessions-mode-map
                        dsh-bridge-view-mode-map
                        dsh-bridge-prompt-mode-map))
-      (should (lookup-key map key)))))
+      (should (lookup-key map key)))
+    (dolist (map (list dsh-bridge-sessions-mode-map
+                       dsh-bridge-view-mode-map))
+      (should (lookup-key map (vconcat key (vector (intern "Stop Session"))))))))
 
 ;;; SSE machinery (unchanged behavior)
 

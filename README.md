@@ -128,6 +128,7 @@ menu:
 * `D` — describe the session.
 * `t` — set the default target session.
 * `u` — clear the default target session.
+* `k` — stop the running session.
 * `l` — open the DSH-Sessions buffer.
 * `+` — create a new session, prompting for its workspace and its title;
         the new session becomes the default target.
@@ -146,6 +147,7 @@ live status.  The following commands are available from here:
 * `r` — open a buffer to type a prompt for the session at point.
 * `f` — fetch and display the output from the session at point.
 * `a` — answer a pending user query for the session at point.
+* `k` — stop the session at point if it is running.
 * `t` — set the session at point as the default target.
 * `u` — clear the default target.
 * `v` — toggle whether archived sessions are shown (hidden by default).
@@ -172,6 +174,7 @@ The following commands are available in a DSH-View buffer:
 * `g` — re-fetch the current session's newest turn.
 * `r` — open a DSH-Prompt buffer for the current session.
 * `B` — branch the shown turn into a new session.
+* `k` — stop the shown session's running turn.
 * `i` — receive the latest "Send to Emacs" message (see below).
 * `D` — describe the current session.
 * `V` — run a VC worktree diff for the session directory.
@@ -324,8 +327,9 @@ evicts the oldest entries (with a warning).
 Note that any third party with access to the token can do everything
 this Emacs package can: send prompts, read session logs (including
 persisted ones), answer the model's questions and approval requests,
-name files for the host to attach, etc.  However, approvals submitted
-via this route grant no authority the web UI could not grant.
+interrupt running turns, name files for the host to attach, etc.
+However, approvals submitted via this route grant no authority the web
+UI could not grant.
 
 ## License
 

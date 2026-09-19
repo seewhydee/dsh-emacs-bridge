@@ -73,6 +73,12 @@
 //   POST /dsh-bridge/sessions/resume { sessionId }        -> resume a cold session
 //   POST /dsh-bridge/sessions/rename { sessionId, title } -> rename (resumes cold)
 //   POST /dsh-bridge/sessions/archive { sessionId }       -> archive (one-way)
+//   POST /dsh-bridge/sessions/stop { sessionId }
+//        -> stop the session's active turn (the web UI's stop button; proxies
+//        sessionController.cancel with keepInbox semantics, so queued input
+//        survives for a later turn).  A live but idle agent settles as a no-op
+//        and is reported as { accepted: true, running: false }; 404 unknown or
+//        not-attached, 409 subagent-owned, 501 without a session controller.
 //   POST /dsh-bridge/sessions/create { workspaceId | path, workspaceTitle?, title? }
 //        -> create a session in a workspace (exactly one of the two keys);
 //        `title` names the new session when the profile mounts a session
@@ -319,13 +325,16 @@ interface SessionTitleService {
 }
 
 /**
- * Minimal face of the optional `sessionController` service (fork). Read via
- * `ctx.get`; a profile without the service answers `/fork` with 501 and the
- * rest of the bridge is unaffected. Call `fork` as a method on the service
- * (its prototype method needs the receiver), never destructured.
+ * Minimal face of the optional `sessionController` service (fork and stop).
+ * Read via `ctx.get`; a profile without the service answers `/fork` and
+ * `/sessions/stop` with 501 and the rest of the bridge is unaffected. Call
+ * its methods on the service (their prototype methods need the receiver),
+ * never destructured. `cancel` is the same seam the web UI's stop button
+ * uses, so its subagent-ownership fence applies here too.
  */
 interface SessionControllerService {
   fork(request: { sessionId: SessionId; atSeq?: number }): Promise<{ sessionId: SessionId }>
+  cancel(request: { sessionId: SessionId }): { accepted: true }
 }
 
 /**
@@ -426,6 +435,22 @@ function forkErrorStatus(error: unknown): number {
   if (isRemoteErrorCode(error, 'session/not-found')) return 404
   if (isRemoteErrorCode(error, 'gateway/bad-request')) return 400
   if (isRemoteErrorCode(error, 'session/workspace-attach-failed')) return 502
+  return 500
+}
+
+/**
+ * The HTTP status for a `/sessions/stop` failure: bridge errors keep their
+ * status, the cancel seam's taxonomy maps to the route's conventions, and
+ * anything else is 500. `session/agent-busy` is the subagent-ownership
+ * rejection (`apiSessionSubagentOwnershipError`), which the web UI answers by
+ * routing through `subagents.interruptByParent` instead — a seam this bridge
+ * deliberately does not expose.
+ */
+function stopErrorStatus(error: unknown): number {
+  if (error instanceof BridgeError) return error.status
+  if (isRemoteErrorCode(error, 'session/not-found')) return 404
+  if (isRemoteErrorCode(error, 'session/agent-busy')) return 409
+  if (isRemoteErrorCode(error, 'gateway/bad-request')) return 400
   return 500
 }
 
@@ -2401,6 +2426,33 @@ export function apply(ctx: Context): void {
         } catch (error: unknown) {
           const status = isWorkspaceUnknownSessionError(error) ? 404 : bridgeErrorStatus(error)
           sendJson(res, status, { error: error instanceof Error ? error.message : String(error) })
+        }
+        return
+      }
+
+      if (req.method === 'POST' && pathname === '/dsh-bridge/sessions/stop') {
+        try {
+          const body = (await readJson(req)) as { sessionId?: unknown } | undefined
+          const id = typeof body?.sessionId === 'string' && body.sessionId !== '' ? body.sessionId : null
+          if (id === null) {
+            sendJson(res, 400, { error: 'sessionId is required' })
+            return
+          }
+          const sessionController = ctx.get('sessionController') as SessionControllerService | undefined
+          if (sessionController === undefined) {
+            sendJson(res, 501, { error: 'profile lacks a session controller (no stop support)' })
+            return
+          }
+          // Read-only status probe: lets the caller distinguish a real stop
+          // from a race the controller settles as a no-op. The controller
+          // still owns the not-found and subagent-ownership fences.
+          const wasRunning = ctx.agents.get(id as SessionId)?.status === 'running'
+          sessionController.cancel({ sessionId: id as SessionId })
+          sendJson(res, 200, { accepted: true, running: wasRunning })
+        } catch (error: unknown) {
+          sendJson(res, stopErrorStatus(error), {
+            error: error instanceof Error ? error.message : String(error),
+          })
         }
         return
       }

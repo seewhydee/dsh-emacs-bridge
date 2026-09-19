@@ -1,0 +1,13 @@
+{
+  "name": "stop",
+  "description": "Stop a hung turn from Emacs, as the web UI's stop button does.",
+  "mockScript": [
+    { "kind": "hang" }
+  ],
+  "steps": [
+    { "action": "send", "text": "Run until I stop you." },
+    { "observe": "The DSH-View shows the running placeholder and the header's turn time counts up." },
+    { "observe": "Press `k' in the view (or M-x dsh-bridge-stop-session) and confirm: the turn stops, the placeholder clears, and the header flips to done:." },
+    { "observe": "Press `k' again: the command reports that the session is not running and sends nothing." }
+  ]
+}

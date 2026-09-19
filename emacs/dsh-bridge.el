@@ -16,7 +16,7 @@
 ;; along with this program.	 If not, see <https://www.gnu.org/licenses/>.
 
 ;; Author: Chong Yidong <cyd@stupidchicken.com>
-;; Version: 0.11.0
+;; Version: 0.12.0
 ;; Package-Requires: ((emacs "29.1"))
 ;; Keywords: tools, convenience
 
@@ -77,7 +77,7 @@
 
 ;;; Common utility functions/variables
 
-(defconst dsh-bridge-version "0.11.0"
+(defconst dsh-bridge-version "0.12.0"
   "Version string for the DSH-Bridge package.
 This should match the version reported by the running DSH plugin.")
 
@@ -2169,6 +2169,7 @@ the visited file (not the buffer text) is attached."
 	  ("D" dsh-bridge-describe-session :description "describe session")
 	  ("t" dsh-bridge-set-default-target :description "set default target")
 	  ("u" dsh-bridge-clear-default-target :description "clear default target")
+	  ("k" dsh-bridge-stop-session :description "stop running session")
 	  ("l" dsh-bridge-list-sessions :description "list sessions")
 	  ("+" dsh-bridge-create-titled-session :description "create session"))
 	"Suffix specs for the `dsh-bridge' dispatcher.
@@ -2192,6 +2193,7 @@ these letters; this table serves the dispatcher's layout alone.")
 			 (vconcat (list "Sessions"
 							(dsh-bridge--layout-verb "t")
 							(dsh-bridge--layout-verb "u")
+							(dsh-bridge--layout-verb "k")
 							(dsh-bridge--layout-verb "l")
 							(dsh-bridge--layout-verb "+")))
 			 (vconcat (list '("q" transient-quit-one :description "quit"))))
@@ -3311,6 +3313,7 @@ compose a reply (prompt) for the session, etc.
   "g" #'revert-buffer
   "i" #'dsh-bridge-receive
   "a" #'dsh-bridge-answer
+  "k" #'dsh-bridge-stop-session
   "B" #'dsh-bridge-fork-turn
   "D" #'dsh-bridge-describe-session
   "V" #'dsh-bridge-view-vc-diff
@@ -3334,6 +3337,8 @@ compose a reply (prompt) for the session, etc.
 	 :help "Bind the prompt buffer to the shown session"]
 	["Branch Turn" dsh-bridge-fork-turn
 	 :help "Branch the shown turn into a new session"]
+	["Stop Session" dsh-bridge-stop-session
+	 :help "Stop the shown session's running turn"]
 	["VC Diff" dsh-bridge-view-vc-diff
 	 :help "Show the session directory's VC worktree diff"]
 	["Receive Message…" dsh-bridge-receive
@@ -5682,6 +5687,61 @@ host round-trip."
   (interactive)
   (dsh-bridge-set-default-target nil))
 
+;;; Stopping a running session
+
+(defun dsh-bridge-stop-session (&optional force)
+  "Stop the running turn of the session at hand.
+In a DSH-View buffer the session is the one shown; in DSH-Sessions it is
+the row under point.  A session that is not running is left alone: the
+command reports it and sends nothing.  Otherwise it asks for
+confirmation, then asks the host to stop the session's active turn.
+
+Stopping aborts only the active turn.  Input already queued for the
+session survives and can start a new turn right after the stop, matching
+the web UI's stop button.
+
+With FORCE (a prefix argument), skip the local \"is it running?\" check
+and ask the host anyway, for when Emacs' cached status is stale.  The
+confirmation prompt still applies, and the host still settles an idle
+agent as a no-op."
+  (interactive "P")
+  (let ((id (dsh-bridge--interaction-session)))
+	(cond
+	 ((null id)
+	  (message "dsh-bridge: no session to stop"))
+	 ((and (not force) (not (eq (dsh-bridge--status-state id) 'running)))
+	  (message "dsh-bridge: session \"%s\" is not running"
+			   (dsh-bridge--session-label id)))
+	 ((not (y-or-n-p (format "Stop running session %s?"
+							 (dsh-bridge--session-label id))))
+	  (message "dsh-bridge: aborted"))
+	 (t
+	  (let* ((result (dsh-bridge--request
+					  "POST" "/sessions/stop"
+					  (list (cons 'sessionId id))))
+			 (status (car result))
+			 (alist (cdr result)))
+		(cond
+		 ((and (eq status 200) (eq t (alist-get 'running alist)))
+		  (message "dsh-bridge: stop requested for session \"%s\""
+				   (dsh-bridge--session-label id)))
+		 ((eq status 200)
+		  (message "dsh-bridge: session \"%s\" was no longer running"
+				   (dsh-bridge--session-label id)))
+		 ;; A 404 while the session still has a known live state means the
+		 ;; route itself is missing: the installed plugin predates it.
+		 ((and (eq status 404)
+			   (memq (dsh-bridge--status-state id) '(running idle)))
+		  (message "dsh-bridge: the installed DSH plugin does not support stopping sessions; re-run M-x dsh-bridge-install-plugin"))
+		 ((eq status 409)
+		  (message "dsh-bridge: session \"%s\" is owned by a subagent"
+				   (dsh-bridge--session-label id)))
+		 ((eq status 501)
+		  (message "dsh-bridge: this DSH profile has no session controller"))
+		 (t
+		  (message "dsh-bridge: %s"
+				   (dsh-bridge--error-message nil status alist)))))))))
+
 ;;; The sessions buffer
 
 (defun dsh-bridge--default-target-marker (session)
@@ -5738,6 +5798,7 @@ Archived sessions are hidden unless `dsh-bridge--sessions-archived-p' (or
   "u" #'dsh-bridge-clear-default-target
   "f" #'dsh-bridge-peek-session
   "a" #'dsh-bridge-answer
+  "k" #'dsh-bridge-stop-session
   "v" #'dsh-bridge-toggle-archived-sessions
   "R" #'dsh-bridge-rename-session
   "d" #'dsh-bridge-archive-session
@@ -5768,6 +5829,8 @@ Archived sessions are hidden unless `dsh-bridge--sessions-archived-p' (or
 	 :help "Toggle whether archived sessions are shown"]
 	["Rename Session…" dsh-bridge-rename-session
 	 :help "Rename the session under point"]
+	["Stop Session" dsh-bridge-stop-session
+	 :help "Stop the session under point if it is running"]
 	["Archive Session" dsh-bridge-archive-session
 	 :help "Archive the session under point (one-way: no unarchive)"]
 	["Create Session…" dsh-bridge-create-session
@@ -6733,7 +6796,7 @@ The header shows the effective session of the buffer the dispatcher was
 invoked from; the verbs act on it.	`s' sends the region or buffer as a
 prompt, `d' sends it as a draft, `r' opens the prompt buffer for the
 effective session, `f' fetches the latest turn, `t' sets the default target,
-`u' clears it, `l' lists sessions."
+`u' clears it, `k' stops the running session, `l' lists sessions."
   dsh-bridge--dispatcher-layout)
 
 ;;; Menu bar (under Tools)
@@ -6755,6 +6818,8 @@ effective session, `f' fetches the latest turn, `t' sets the default target,
 	  :help "Fetch the latest assistant turn into a DSH-View buffer"]
 	 ["Describe Session" dsh-bridge-describe-session
 	  :help "Show a read-only report for a session"]
+	 ["Stop Running Session" dsh-bridge-stop-session
+	  :help "Stop the effective session's running turn"]
 	 ["Receive Message…" dsh-bridge-receive
 	  :help "Receive the latest message sent from DSH to Emacs"]
 	 ["Set Default Target Session" dsh-bridge-set-default-target
