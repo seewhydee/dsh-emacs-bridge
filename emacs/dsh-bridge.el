@@ -3169,70 +3169,67 @@ A greedy leading segment (typically a long session title) must not push a
 later flexible segment (the workspace) off the line entirely.")
 
 (defun dsh-bridge--header-line-join (cells width)
-  "Join CELLS with \" · \" so the line fits WIDTH display columns.
-Each CELL is (TEXT FLEX SUFFIX): TEXT is the segment, FLEX non-nil marks
-it as variable-length, and SUFFIX (optional) is pinned to it and never
-truncated.  Cells with an empty TEXT are dropped.  A nil WIDTH disables
-truncation.
+  "Join CELLS to make a header-line fitting WIDTH display columns.
+The resulting header-line might still exceed WIDTH, in which case the
+display engine clips it.  A nil WIDTH disables truncation.
 
-Fixed cells always survive.  Flexible cells are shortened — TEXT only,
-never SUFFIX — to the columns the fixed cells leave, in cell order, so an
-earlier flexible cell has first claim.  Each flexible cell holds
-`dsh-bridge--header-flex-floor' columns back for the flexible cells that
-follow it, unless doing so would leave it less than four columns of its
-own; a cell that cannot get at least four columns is dropped.  The result
-can still exceed WIDTH when the fixed cells alone do; the display engine
-then clips the line."
+Each cell in CELLS is (TEXT FLEX SUFFIX), where TEXT is a string (the
+header-line segment), FLEX is non-nil if the segment is variable-length,
+and SUFFIX (optional) is a string that is appended to the segment
+without truncation.  Segments are separated by \" · \" strings.  Cells
+with empty TEXT are dropped.
+
+Flexible cells occurring earlier in CELLS have priority for using column
+space, but the variable `dsh-bridge--header-flex-floor' reserves some
+space for subsequent flexible cells."
   (let* ((cells (seq-filter (lambda (cell)
 							  (dsh-bridge--normalized-string (car cell)))
 							cells))
 		 (sep " · ")
 		 (sep-width (string-width sep))
-		 (left (and width
-					(- width
-					   (apply #'+ 0
-							  (mapcar (lambda (cell)
-										(+ (string-width (car cell))
-										   (string-width (or (nth 2 cell) ""))))
-									  (seq-remove (lambda (cell) (nth 1 cell)) cells)))
-					   (apply #'+ 0
-							  (mapcar (lambda (cell)
-										(string-width (or (nth 2 cell) "")))
-									  (seq-filter (lambda (cell) (nth 1 cell)) cells)))
-					   (* sep-width (max 0 (1- (length cells)))))))
-		 ;; RESERVES[N] is the floor total of the flexible cells after N.
-		 (reserves (let ((acc 0) result)
-					 (dolist (cell (reverse cells) result)
-					   (push acc result)
-					   (when (and (nth 1 cell)
-								  (dsh-bridge--normalized-string (car cell)))
-						 (setq acc (+ acc (min dsh-bridge--header-flex-floor
-											   (string-width (car cell)))))))))
-		 (pieces
-		  (cl-loop for cell in cells
-				   for reserve in reserves
-				   collect
-				   (let* ((text (car cell))
-						  (suffix (or (nth 2 cell) ""))
-						  (text-width (string-width text))
-						  ;; Hold the floor back only when that still leaves
-						  ;; this cell a usable stub; otherwise it has
-						  ;; priority over the cells after it.
-						  (allow (cond ((null left) nil)
-									   ((> (- left reserve) 3) (- left reserve))
-									   (t left))))
-					 (cond
-					  ((or (not (nth 1 cell)) (null left))
-					   (concat text suffix))
-					  ((<= text-width allow)
-					   (setq left (- left text-width))
-					   (concat text suffix))
-					  ((> allow 3)
-					   (setq left (- left allow))
-					   (concat (dsh-bridge--truncate-to-width text allow)
-							   suffix))
-					  (t nil))))))
-	(mapconcat #'identity (seq-keep #'identity pieces) sep)))
+		 (reserves '())
+		 left)
+	;; Calculate space left after separators + suffixes + fixed cells:
+	(when width
+	  (setq left (- width (* sep-width (max 0 (1- (length cells))))))
+	  (dolist (cell cells)
+		(setq left (- left (string-width (or (nth 2 cell) ""))))
+		(unless (nth 1 cell) ; fixed-width cell:
+		  (setq left (- left (string-width (car cell)))))))
+	;; RESERVES[N] is the floor total of the flexible cells after N.
+	(let ((acc 0))
+	  (dolist (cell (reverse cells))
+		(push acc reserves)
+		(when (and (nth 1 cell)
+				   (dsh-bridge--normalized-string (car cell)))
+		  (setq acc (+ acc (min dsh-bridge--header-flex-floor
+								(string-width (car cell))))))))
+	(let ((rest reserves)
+		  (pieces '()))
+	  (dolist (cell cells)
+		(let* ((reserve (car rest))
+			   (text (car cell))
+			   (suffix (or (nth 2 cell) ""))
+			   (text-width (string-width text))
+			   ;; Hold the floor back only when that still leaves this
+			   ;; cell a usable stub; otherwise it has priority over
+			   ;; the cells after it.
+			   (allow (cond ((null left) nil)
+							((> (- left reserve) 3) (- left reserve))
+							(t left))))
+		  ;; Accumulate substrings into PIECES, in reverse order.
+		  (cond
+		   ((or (not (nth 1 cell)) (null left))
+			(push (concat text suffix) pieces))
+		   ((<= text-width allow)
+			(setq left (- left text-width))
+			(push (concat text suffix) pieces))
+		   ((> allow 3)
+			(setq left (- left allow))
+			(push (concat (dsh-bridge--truncate-to-width text allow) suffix)
+				  pieces)))
+		  (setq rest (cdr rest))))
+	  (mapconcat #'identity (nreverse pieces) sep))))
 
 (defun dsh-bridge--view-header-line (&optional width)
   "Return the header line for a DSH-View buffer.
