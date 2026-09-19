@@ -509,16 +509,6 @@ suffixes the follow-up prompt will offer."
       (should (string-match-p "WS-A" annotation))
       (should (string-match-p "WS-B" annotation)))))
 
-(ert-deftest dsh-bridge-show-choices-p-respects-completion-ui ()
-  "The built-in completions window is only forced on when the completion
-UI wants it; a live-display UI sets `completion-auto-help' to nil."
-  (with-temp-buffer
-    (let ((completion-auto-help t))
-      (should (dsh-bridge--show-choices-p (selected-window))))
-    (let ((completion-auto-help nil))
-      (should-not (dsh-bridge--show-choices-p (selected-window)))))
-  (should-not (dsh-bridge--show-choices-p nil)))
-
 (ert-deftest dsh-bridge-workspace-label ()
   "The workspace label is the title, else the cwd basename, else the cwd."
   (should (equal (dsh-bridge--workspace-label '((workspace . "proj") (cwd . "/x/y")))
@@ -2771,24 +2761,6 @@ RET then has no default to accept, so it is refused."
       (let ((dsh-bridge--sessions-cache
              '(((id . "s1") (workspace . "WS gone") (workspaceId . "w-gone")))))
 	(should-error (dsh-bridge-create-session) :type 'user-error)))))
-
-(ert-deftest dsh-bridge-workspace-helpers ()
-  "`dsh-bridge--workspace-matches' matches titles and paths exactly."
-  (let ((workspaces '(((id . "w1") (title . "WS A") (path . "/a"))
-                      ((id . "w2") (title . "WS B") (path . "/b")))))
-    ;; Exact title or path; no prefix or case folding.
-    (should (equal (mapcar (lambda (w) (alist-get 'id w))
-                           (dsh-bridge--workspace-matches "WS A" workspaces))
-                   '("w1")))
-    (should (equal (mapcar (lambda (w) (alist-get 'id w))
-                           (dsh-bridge--workspace-matches "/b" workspaces))
-                   '("w2")))
-    (should-not (dsh-bridge--workspace-matches "WS" workspaces))
-    ;; Duplicate titles are a roster anomaly, but must still disambiguate.
-    (should (= (length (dsh-bridge--workspace-matches
-			"WS A"
-			(append workspaces '(((id . "w3") (title . "WS A") (path . "/c"))))))
-               2))))
 
 (ert-deftest dsh-bridge-workspace-default-verifies-roster ()
   "The default is the effective session's workspace, when the fresh roster has

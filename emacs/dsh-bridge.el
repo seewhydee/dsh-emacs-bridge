@@ -1515,32 +1515,12 @@ that stay pairwise distinct."
 		(cons 'workspace labels)
 	  (cons 'id (dsh-bridge--distinct-id-tails sessions)))))
 
-(defun dsh-bridge--show-choices-p (window)
-  "Whether WINDOW's minibuffer should have its completions shown.
-A live-display UI sets `completion-auto-help' to nil buffer-locally and is
-then responsible for showing the candidates itself."
-  (and window
-	   (with-current-buffer (window-buffer window)
-		 completion-auto-help)))
-
 (defun dsh-bridge--show-choices-later ()
-  "Arrange for the active minibuffer's completions to appear at once.
-Deferred to a timer so that other setup hooks, including a completion
-UI's own, have run first."
-  (run-at-time
-   0 nil
-   (lambda ()
-	 (let ((window (active-minibuffer-window)))
-	   (when (dsh-bridge--show-choices-p window)
-		 (with-selected-window window
-		   (minibuffer-completion-help)))))))
-
-(defun dsh-bridge--read-choices (prompt table)
-  "Read a required choice from TABLE, showing the candidates immediately.
-Only the built-in completion UI is helped; a live-display UI shows TABLE
-itself and is recognized by its nil `completion-auto-help'."
-  (minibuffer-with-setup-hook #'dsh-bridge--show-choices-later
-	(completing-read prompt table nil t)))
+  "Arrange for the active minibuffer's completions to appear immediately."
+  (let ((window (active-minibuffer-window)))
+	(and window
+		 (with-current-buffer (window-buffer window) completion-auto-help)
+		 (with-selected-window window (minibuffer-completion-help)))))
 
 (defun dsh-bridge--read-ambiguous-session (title sessions)
   "Read one of SESSIONS (which share TITLE) via a second completing-read.
@@ -1560,10 +1540,11 @@ as it opens.  Returns the chosen session's id."
 				 choices
 				 (lambda (session)
 				   (dsh-bridge--session-annotation
-					session (eq kind 'workspace))))))
-	(alist-get 'id
-			   (cdr (assoc (dsh-bridge--read-choices prompt table)
-						   choices)))))
+					session (eq kind 'workspace)))))
+		 (chosen (minibuffer-with-setup-hook
+					 #'dsh-bridge--show-choices-later
+				   (completing-read prompt table nil t))))
+	(alist-get 'id (cdr (assoc chosen choices)))))
 
 (defun dsh-bridge--session-groups (sessions)
   "Group SESSIONS into an alist (TITLE . SESSIONS), one entry per title.
@@ -1612,13 +1593,6 @@ then uses the effective session)."
 	(dsh-bridge--read-session-id prompt)))
 
 ;;; Workspace selection
-
-(defun dsh-bridge--workspace-matches (label workspaces)
-  "The workspaces sharing display LABEL, an exact title or path match."
-  (seq-filter (lambda (w)
-                (or (equal (alist-get 'title w) label)
-                    (equal (alist-get 'path w) label)))
-              workspaces))
 
 (defun dsh-bridge--read-ambiguous-workspace (label workspaces)
   "Read one of WORKSPACES (which share display LABEL) via a second prompt.
@@ -1682,7 +1656,10 @@ matches no workspace names a new one, whose directory is then read."
                   choices))
          (trimmed (string-trim answer))
          (matches (and (not (string-empty-p trimmed))
-                       (dsh-bridge--workspace-matches trimmed workspaces))))
+					   (seq-filter (lambda (w)
+									 (or (equal (alist-get 'title w) trimmed)
+										 (equal (alist-get 'path w) trimmed)))
+								   workspaces))))
     (cond
      ((string-empty-p trimmed)
       (or default-id (user-error "dsh-bridge: a workspace name is required")))
