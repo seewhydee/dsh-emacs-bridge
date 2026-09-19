@@ -585,7 +585,9 @@ the tag line."
               (dsh-bridge-prompt)
               (insert "Look at this.\n")
               (dsh-bridge-attach-file (list png))
-              (should (string-match-p "📎1" (dsh-bridge--prompt-header-line)))
+              ;; Attachments no longer get a header segment; the tag line in
+              ;; the buffer is the visible record of what is attached.
+              (should-not (string-match-p "📎" (dsh-bridge--prompt-header-line)))
               (dsh-bridge-send-and-exit)
               (should (dsh-bridge-it--wait-for-turns session-id 30000))
               ;; The tag is stripped from the text the host logged (the

@@ -257,9 +257,10 @@ the DSH-View buffer untouched, apart from updating the status glyph."
   :group 'dsh-bridge)
 
 (defcustom dsh-bridge-view-elapsed-ticker t
-  "Whether the DSH-View header shows a live elapsed-time segment.
-If non-nil, a running turn's elapsed time is shown in the DSH-View
-header and refreshed by a short repeating timer."
+  "Whether the DSH-View header shows a live elapsed time for a running turn.
+If non-nil, the run duration of the turn a DSH-View buffer displays is
+shown and refreshed by a short repeating timer; if nil, the header says
+only that the turn is running."
   :type 'boolean
   :group 'dsh-bridge)
 
@@ -1376,6 +1377,39 @@ NOW is the reference time in seconds (default: the current time)."
 	 ((< secs (* 365 86400)) (format "%dmo" (floor (/ secs (* 30 86400)))))
 	 (t (format "%dy" (floor (/ secs (* 365 86400))))))))
 
+(defun dsh-bridge--format-run-duration (seconds)
+  "Format SECONDS as a compact run duration.
+The result is \"9s\", \"2m5s\", or \"1h2m3s\"; units with a zero value
+lead to the next smaller unit, and no unit is zero-padded."
+  (let* ((secs (max 0 (floor seconds)))
+		 (hours (floor (/ secs 3600)))
+		 (minutes (floor (/ (% secs 3600) 60)))
+		 (rest (% secs 60)))
+	(cond ((> hours 0) (format "%dh%dm%ds" hours minutes rest))
+		  ((> minutes 0) (format "%dm%ds" minutes rest))
+		  (t (format "%ds" rest)))))
+
+(defun dsh-bridge--format-clock (ms &optional now)
+  "Format ms-epoch MS as a compact wall clock, e.g. \"9/14 21:44\".
+A year prefix is added when MS does not fall in NOW's calendar year;
+NOW defaults to the current time."
+  (let* ((then (decode-time (seconds-to-time (/ ms 1000.0))))
+		 (now (decode-time (or now (current-time))))
+		 (year (nth 5 then)))
+	(format "%s%d/%d %02d:%02d"
+			(if (= year (nth 5 now)) "" (format "%d-" year))
+			(nth 4 then) (nth 3 then) (nth 2 then) (nth 1 then))))
+
+(defun dsh-bridge--workspace-label-for (session-id)
+  "Return the workspace label for SESSION-ID, or nil.
+The label comes from the sessions cache: the workspace title, else the
+cwd basename, else the raw cwd (see `dsh-bridge--workspace-label').  A
+session the cache does not know, or one with no workspace recorded, has
+no label."
+  (when session-id
+	(dsh-bridge--normalized-string
+	 (dsh-bridge--workspace-label (dsh-bridge--session-for-id session-id)))))
+
 (defun dsh-bridge--workspace-label (session)
   "Return the workspace label for SESSION.
 SESSION should be an alist; see `dsh-bridge--sessions-cache'.
@@ -2190,16 +2224,8 @@ The verbs are defined in `dsh-bridge--verb-suffixes'."))
 ;; Arriving segments are spliced in place, so that the user can tail
 ;; the buffer by parking the cursor on the run-status line.
 
-(defvar-local dsh-bridge--view-timestamp nil
-  "Time the current DSH-View buffer was last refreshed, or nil.")
-
 (defvar-local dsh-bridge--view-content-session nil
   "Session the DSH-View buffer's content came from, or nil.")
-
-(defvar-local dsh-bridge--view-received-at nil
-  "ms-epoch time the DSH-View buffer's contents were sent to Emacs.
-This is set via a \"Send to Emacs\" push; if the contents were fetched
-by an Emacs command, the value is nil.")
 
 (defvar dsh-bridge--turns-cache nil
   "Alist of cached DSH-View turns, in the form (SESSION-ID EPOCH . TURNS).
@@ -2266,6 +2292,13 @@ segment in front of the recorded body end.")
 
 (defvar dsh-bridge--view-ticker-timer nil
   "Repeating timer to repaint the DSH-View header, or nil.")
+
+(defconst dsh-bridge--view-header-line-format
+  '(:eval (dsh-bridge--view-header-line (dsh-bridge--header-window-width)))
+  "Value of `header-line-format' in DSH-View buffers.
+The `:eval' form runs once for each window being redisplayed, with that
+window selected, so the line is truncated to the width of the window it
+is drawn in.")
 
 (defvar dsh-bridge--view-segment-divider "\n\n---\n"
   "Text between two segments of the same turn in DSH-View buffers.
@@ -2400,7 +2433,7 @@ awaiting note if a question is already pending), and then turns on
 turn-following state for the new turn."
   ;; The fill clears the waiting state and `dsh-bridge--view-turn';
   ;; reset both afterwards.
-  (dsh-bridge--view-fill session-id nil nil cwd t)
+  (dsh-bridge--view-fill session-id nil cwd t)
   (setq-local dsh-bridge--view-turn (1+ (or base 0)))
   (setq-local dsh-bridge--view-waiting t)
   (setq-local dsh-bridge--view-follow t)
@@ -2409,7 +2442,7 @@ turn-following state for the new turn."
     (insert (dsh-bridge--view-turn-suffix 'new session-id))
     (goto-char (point-min)))
   (setq-local dsh-bridge--view-provenance nil) ; placeholder isn't content
-  (setq header-line-format (dsh-bridge--view-header-line))
+  (setq header-line-format dsh-bridge--view-header-line-format)
   (dsh-bridge--view-ticker-ensure))
 
 (defun dsh-bridge--view-turn-body (turn)
@@ -2762,17 +2795,57 @@ This function uses the turns cache only, and does no synchronous I/O."
 						 turns dsh-bridge--view-turn)))
 				 (if k (format " (%d/%d)" (1+ k) total)))))))))
 
-(defun dsh-bridge--view-elapsed-label (session-id)
-  "The view header's elapsed-turn segment for SESSION-ID, or nil.
-Returns \" ⏱ MM:SS\" while the session is running and a turn-start time is
-known; nil when idle, unknown, or Emacs attached mid-turn (no t0).  Reads only
-the status tracker — no I/O in a display path."
-  (let ((start (and dsh-bridge-view-elapsed-ticker
-					(eq (dsh-bridge--status-state session-id) 'running)
+(defun dsh-bridge--view-turn-record (&optional session-id)
+  "The turn record the current DSH-View buffer displays, or nil.
+SESSION-ID defaults to the buffer's content session.  The record is
+looked up in the turns cache, so the turn of a view still waiting for its
+first reply — and a pushed message with no turn identity — yields nil."
+  (let ((id (or session-id dsh-bridge--view-content-session))
+		(turn dsh-bridge--view-turn))
+	(and id (numberp turn)
+		 (seq-find (lambda (record)
+					 (equal (alist-get 'turn record) turn))
+				   (dsh-bridge--turns-cache-turns id)))))
+
+(defun dsh-bridge--view-turn-end-time (record)
+  "The ms-epoch time RECORD's turn finished, or nil.
+Prefers the `turn/end' `endedAt'; falls back on the time of the turn's
+last committed segment."
+  (or (alist-get 'endedAt record)
+	  (alist-get 'time (car (last (alist-get 'segments record))))))
+
+(defun dsh-bridge--view-turn-time-label (session-id)
+  "The DSH-View header's turn-time segment for SESSION-ID, or nil.
+Describes the *displayed* turn, not the session: \"running: DURATION\"
+while that turn is open (timed from its `startedAt'), or \"done: M/D
+HH:MM\" once it has an end time.  A waiting view whose start time the
+status tracker knows is \"running: DURATION\" too; one whose start is
+unknown is \"running\".  Nil when the view shows no turn (a pushed
+message).  With `dsh-bridge-view-elapsed-ticker' off, a running turn
+degrades to \"running\" rather than showing a duration that never
+advances.
+
+Reads only the turns cache and status tracker — no I/O in a display path."
+  (let ((record (dsh-bridge--view-turn-record session-id))
+		(start (and dsh-bridge-view-elapsed-ticker
 					(dsh-bridge--status-turn-start session-id))))
-	(when (and start (numberp start))
-	  (let ((secs (max 0 (floor (- (float-time) (/ start 1000.0))))))
-		(format " ⏱ %02d:%02d" (floor (/ secs 60.0)) (% secs 60))))))
+	(cond
+	 ((and record (dsh-bridge--view-turn-open-p record))
+	  (let ((started (alist-get 'startedAt record)))
+		(if (and dsh-bridge-view-elapsed-ticker (numberp started))
+			(format "running: %s"
+					(dsh-bridge--format-run-duration (- (float-time) (/ started 1000.0))))
+		  "running")))
+	 (record
+	  (let ((end (dsh-bridge--view-turn-end-time record)))
+		(when (numberp end)
+		  (format "done: %s" (dsh-bridge--format-clock end)))))
+	 (dsh-bridge--view-waiting
+	  (if (and dsh-bridge-view-elapsed-ticker (numberp start))
+		  (format "running: %s"
+				  (dsh-bridge--format-run-duration (- (float-time) (/ start 1000.0))))
+		"running"))
+	 (t nil))))
 
 (defun dsh-bridge--view-buffers ()
   "Return all live buffers in `dsh-bridge-view-mode'."
@@ -2820,8 +2893,8 @@ marker."
     (setq-local dsh-bridge--view-browsing nil)
     (when turns
       (dsh-bridge--view-fill dsh-bridge--view-content-session
-							 (car turns) nil nil t))
-    (setq header-line-format (dsh-bridge--view-header-line))
+							 (car turns) nil t))
+    (setq header-line-format dsh-bridge--view-header-line-format)
     (dsh-bridge--view-ticker-ensure)
     (message "dsh-bridge: following the newest turn")))
 
@@ -2866,10 +2939,10 @@ to pop to the buffer using the same window.  Return the buffer."
 		(dsh-bridge--turns-cache-store id turns
 									   (alist-get 'epoch session-alist)))
 	  (with-current-buffer buffer
-		(dsh-bridge--view-fill id (car-safe turns) nil cwd t)
+		(dsh-bridge--view-fill id (car-safe turns) cwd t)
 		(when follow
 		  (setq-local dsh-bridge--view-follow t))
-		(setq header-line-format (dsh-bridge--view-header-line))
+		(setq header-line-format dsh-bridge--view-header-line-format)
 		(dsh-bridge--view-ticker-ensure))
 	  (funcall (if same-window
 				   #'pop-to-buffer-same-window
@@ -2951,11 +3024,11 @@ collected in the view."
 		  ;; The turn has started but committed nothing: show the same
 		  ;; placeholder the prompt flow uses, and follow.
 		  (dsh-bridge--view-waiting-fill session-id nil (alist-get 'cwd alist))
-		(dsh-bridge--view-fill session-id (car-safe turns) nil
+		(dsh-bridge--view-fill session-id (car-safe turns)
 							   (alist-get 'cwd alist) t t)
 		(when (or running (and turns (dsh-bridge--view-turn-open-p (car-safe turns))))
 		  (setq-local dsh-bridge--view-follow t))
-		(setq header-line-format (dsh-bridge--view-header-line))
+		(setq header-line-format dsh-bridge--view-header-line-format)
 		(dsh-bridge--view-ticker-ensure)))
 	buf))
 
@@ -2989,7 +3062,7 @@ performing any further network request."
 				 (and (numberp turn)
 					  (numberp dsh-bridge--view-turn)
 					  (>= turn dsh-bridge--view-turn)))
-			 (dsh-bridge--view-fill session-id newest nil nil t t))))))
+			 (dsh-bridge--view-fill session-id newest nil t t))))))
 
 (defun dsh-bridge--turns-changed (session-id)
   "Handle one `replies-changed' frame for SESSION-ID.
@@ -3005,15 +3078,29 @@ then refill every turn-following view."
 	(cancel-timer dsh-bridge--view-ticker-timer)
 	(setq dsh-bridge--view-ticker-timer nil)))
 
+(defun dsh-bridge--view-running-duration-p (&optional buffer)
+  "Whether BUFFER's DSH-View header shows a running elapsed duration.
+That is exactly when the header changes from one tick to the next: the
+displayed turn is open with a known `startedAt', or the buffer is waiting
+for a new turn's first reply and the status tracker knows its start.
+A view browsing an older, settled turn while the session runs a newer one
+does not tick — the header describes the displayed turn."
+  (with-current-buffer (or buffer (current-buffer))
+	(and dsh-bridge-view-elapsed-ticker
+		 (let ((record (dsh-bridge--view-turn-record)))
+		   (cond
+			((and record (dsh-bridge--view-turn-open-p record))
+			 (numberp (alist-get 'startedAt record)))
+			((and dsh-bridge--view-waiting (null record))
+			 (numberp (dsh-bridge--status-turn-start
+					   dsh-bridge--view-content-session)))
+			(t nil))))))
+
 (defun dsh-bridge--view-ticking-buffers ()
-  "Live DSH-View buffers showing a running session in a visible window."
+  "Live DSH-View buffers showing a running elapsed clock in a visible window."
   (seq-filter (lambda (buf)
 				(and (get-buffer-window buf 'visible)
-					 (with-current-buffer buf
-					   (and dsh-bridge--view-content-session
-							(eq (dsh-bridge--status-state
-								 dsh-bridge--view-content-session)
-								'running)))))
+					 (dsh-bridge--view-running-duration-p buf)))
 			  (dsh-bridge--view-buffers)))
 
 (defun dsh-bridge--view-ticker-ensure ()
@@ -3029,7 +3116,9 @@ otherwise — so it provably never runs for a session no one is looking at."
 			(run-at-time 1 nil #'dsh-bridge--view-ticker-tick)))))
 
 (defun dsh-bridge--view-ticker-tick ()
-  "Ticker body: repaint each ticking view's header, or cancel the timer."
+  "Ticker body: repaint each ticking view's header, or cancel the timer.
+The header is a `:eval' form, so repainting only needs to ask for a
+redisplay of the line; the form recomputes the elapsed time itself."
   (setq dsh-bridge--view-ticker-timer nil)
   (let ((bufs (and dsh-bridge-view-elapsed-ticker
                    (dsh-bridge--view-ticking-buffers))))
@@ -3037,7 +3126,7 @@ otherwise — so it provably never runs for a session no one is looking at."
         (dsh-bridge--view-ticker-maybe-cancel)
       (dolist (buf bufs)
         (with-current-buffer buf
-          (setq header-line-format (dsh-bridge--view-header-line))))
+          (force-mode-line-update)))
       (setq dsh-bridge--view-ticker-timer
             (run-at-time 1 nil #'dsh-bridge--view-ticker-tick)))))
 
@@ -3052,36 +3141,142 @@ one view never freezes another view's elapsed clock — and killing the
 last ticking view still cancels the timer."
   (run-at-time 0 nil #'dsh-bridge--view-ticker-ensure))
 
-(defun dsh-bridge--view-header-line ()
+(defun dsh-bridge--header-window-width ()
+  "The display columns available to the header line being drawn, or nil.
+Called from a `header-line-format' `:eval' form, `selected-window' is the
+window whose header line is being redisplayed, so the result is that
+window's width — the same buffer shown in two windows of different widths
+gets two different answers.  One column is subtracted to stay clear of a
+right window divider.  Nil when there is no live selected window (a
+header builder called outside redisplay)."
+  (let ((window (selected-window)))
+	(and (windowp window)
+		 (window-live-p window)
+		 (max 1 (1- (window-total-width window 'floor))))))
+
+(defun dsh-bridge--header-text (string)
+  "Return STRING with line breaks collapsed to spaces, for a header line.
+A header line is a single row, so a newline in a session title or
+workspace label would otherwise corrupt it."
+  (and (stringp string)
+	   (replace-regexp-in-string "[\n\r\t]+" " " string)))
+
+(defun dsh-bridge--truncate-to-width (string width)
+  "Truncate STRING to WIDTH display columns, ending with an ellipsis.
+Text properties on the kept characters are preserved."
+  (if (< width 1)
+	  ""
+	(truncate-string-to-width string width nil nil t)))
+
+(defconst dsh-bridge--header-flex-floor 8
+  "Columns held back for a flexible header segment that follows another.
+A greedy leading segment (typically a long session title) must not push a
+later flexible segment (the workspace) off the line entirely.")
+
+(defun dsh-bridge--header-line-join (cells width)
+  "Join CELLS with \" · \" so the line fits WIDTH display columns.
+Each CELL is (TEXT FLEX SUFFIX): TEXT is the segment, FLEX non-nil marks
+it as variable-length, and SUFFIX (optional) is pinned to it and never
+truncated.  Cells with an empty TEXT are dropped.  A nil WIDTH disables
+truncation.
+
+Fixed cells always survive.  Flexible cells are shortened — TEXT only,
+never SUFFIX — to the columns the fixed cells leave, in cell order, so an
+earlier flexible cell has first claim.  Each flexible cell holds
+`dsh-bridge--header-flex-floor' columns back for the flexible cells that
+follow it, unless doing so would leave it less than four columns of its
+own; a cell that cannot get at least four columns is dropped.  The result
+can still exceed WIDTH when the fixed cells alone do; the display engine
+then clips the line."
+  (let* ((cells (seq-filter (lambda (cell)
+							  (dsh-bridge--normalized-string (car cell)))
+							cells))
+		 (sep " · ")
+		 (sep-width (string-width sep))
+		 (left (and width
+					(- width
+					   (apply #'+ 0
+							  (mapcar (lambda (cell)
+										(+ (string-width (car cell))
+										   (string-width (or (nth 2 cell) ""))))
+									  (seq-remove (lambda (cell) (nth 1 cell)) cells)))
+					   (apply #'+ 0
+							  (mapcar (lambda (cell)
+										(string-width (or (nth 2 cell) "")))
+									  (seq-filter (lambda (cell) (nth 1 cell)) cells)))
+					   (* sep-width (max 0 (1- (length cells)))))))
+		 ;; RESERVES[N] is the floor total of the flexible cells after N.
+		 (reserves (let ((acc 0) result)
+					 (dolist (cell (reverse cells) result)
+					   (push acc result)
+					   (when (and (nth 1 cell)
+								  (dsh-bridge--normalized-string (car cell)))
+						 (setq acc (+ acc (min dsh-bridge--header-flex-floor
+											   (string-width (car cell)))))))))
+		 (pieces
+		  (cl-loop for cell in cells
+				   for reserve in reserves
+				   collect
+				   (let* ((text (car cell))
+						  (suffix (or (nth 2 cell) ""))
+						  (text-width (string-width text))
+						  ;; Hold the floor back only when that still leaves
+						  ;; this cell a usable stub; otherwise it has
+						  ;; priority over the cells after it.
+						  (allow (cond ((null left) nil)
+									   ((> (- left reserve) 3) (- left reserve))
+									   (t left))))
+					 (cond
+					  ((or (not (nth 1 cell)) (null left))
+					   (concat text suffix))
+					  ((<= text-width allow)
+					   (setq left (- left text-width))
+					   (concat text suffix))
+					  ((> allow 3)
+					   (setq left (- left allow))
+					   (concat (dsh-bridge--truncate-to-width text allow)
+							   suffix))
+					  (t nil))))))
+	(mapconcat #'identity (seq-keep #'identity pieces) sep)))
+
+(defun dsh-bridge--view-header-line (&optional width)
   "Return the header line for a DSH-View buffer.
 Header line format:
 
- <status> <session-pos> <label> · HH:MM:SS[ · <ctx%>][ ⏱ MM:SS][ ⤓]
+ <status> <session-pos> <label> · <workspace> · <time>[ · <await>]
+
+WIDTH, if non-nil, is the display columns available; the session label
+and workspace label are shortened to fit it.
 
 The session-pos segment is the position in the session's turn history (see
-`dsh-bridge--view-turn-position'); the context % is the live context occupancy
-(see `dsh-bridge--prompt-context-label'); the elapsed segment and the
-turn-following marker appear while the shown session runs."
+`dsh-bridge--view-turn-position'); the time segment describes the displayed
+turn (see `dsh-bridge--view-turn-time-label'); the await segment appears
+while a question or approval is pending.  The line is %-escaped for
+`header-line-format'."
   (let* ((id dsh-bridge--view-content-session)
 		 (status (dsh-bridge--status-glyph id))
-		 (pos (or (dsh-bridge--view-turn-position) ""))
-		 (label (dsh-bridge--session-link (dsh-bridge--session-label id) id))
-		 (context (and id (dsh-bridge--prompt-context-label id)))
-		 (elapsed (and id (dsh-bridge--view-elapsed-label id)))
+		 (pos (string-trim (or (dsh-bridge--view-turn-position) "")))
+		 (label (dsh-bridge--session-link
+				 (dsh-bridge--header-text (dsh-bridge--session-label id)) id))
+		 (workspace (dsh-bridge--header-text
+					 (dsh-bridge--workspace-label-for id)))
+		 (time (and id (dsh-bridge--view-turn-time-label id)))
 		 (await (and id
 					 (cond ((assoc id dsh-bridge--pending-questions)
-							" · waiting for answer")
+							"waiting for answer")
 						   ((assoc id dsh-bridge--pending-approvals)
-							" · awaiting approval"))))
-		 (time (if dsh-bridge--view-received-at
-				   (format-time-string
-					"%H:%M:%S" (/ dsh-bridge--view-received-at 1000))
-				 (or dsh-bridge--view-timestamp "")))
-		 (follow (if dsh-bridge--view-follow " ⤓" "")))
-	(string-replace "%" "%%"
-					(concat " " status " " pos " " label " · " time
-							(and context (concat " · " context))
-							await elapsed follow))))
+							"awaiting approval"))))
+		 (identity (string-join (seq-remove #'string-empty-p (list status pos)) " "))
+		 (prefix (if (string-empty-p identity) " " (concat " " identity " "))))
+	(string-replace
+	 "%" "%%"
+	 (concat prefix
+			 (dsh-bridge--header-line-join
+			  (list (list label t)
+					(list workspace t)
+					(list time)
+					(list await))
+			  (and width (max 1 (- width (string-width prefix)))))))))
 
 ;; A conditional expression cannot go directly in the parent slot of
 ;; `define-derived-mode', since the macro quotes it into the mode
@@ -3324,7 +3519,7 @@ neither shown nor cached, it is left alone."
                            (dsh-bridge--view-turn-index-of
                             turns dsh-bridge--view-turn)
                            t)))
-              (setq header-line-format (dsh-bridge--view-header-line))))
+              (setq header-line-format dsh-bridge--view-header-line-format)))
           (dsh-bridge--view-ticker-ensure)
           turns)))))
 
@@ -3333,10 +3528,10 @@ neither shown nor cached, it is left alone."
 Manual navigation enters browsing state, always leaves turn-following
 state, and ends any waiting state (`dsh-bridge--view-waiting')."
   (dsh-bridge--view-fill dsh-bridge--view-content-session (nth index turns)
-						 nil nil t)
+						 nil t)
   (setq-local dsh-bridge--view-browsing t)
   (setq-local dsh-bridge--view-follow nil)
-  (setq header-line-format (dsh-bridge--view-header-line))
+  (setq header-line-format dsh-bridge--view-header-line-format)
   (dsh-bridge--view-ticker-ensure))
 
 (defun dsh-bridge-view-previous-reply ()
@@ -3506,7 +3701,7 @@ non-nil, is the ms-epoch at which the prompt was sent."
 			;; in view.  The explicit `goto-char' also covers a fresh buffer,
 			;; where the fill itself drops the stale follow state.
 			(progn
-			  (dsh-bridge--view-fill session-id newest nil
+			  (dsh-bridge--view-fill session-id newest
 									 (alist-get 'cwd alist) t t)
 			  (goto-char (point-max)))
 		  ;; Otherwise, populate with a "running..." message.
@@ -3514,7 +3709,7 @@ non-nil, is the ms-epoch at which the prompt was sent."
 		   session-id (and newest (alist-get 'turn newest))
 		   (alist-get 'cwd alist)))
 		(setq-local dsh-bridge--view-follow t)
-		(setq header-line-format (dsh-bridge--view-header-line))
+		(setq header-line-format dsh-bridge--view-header-line-format)
 		(dsh-bridge--view-ticker-ensure))
 	  buf)))
 
@@ -3649,7 +3844,7 @@ yourself; the SSE listener calls it automatically unless
 			(when (alist-get 'overflowed alist)
 			  (message "dsh-bridge: the host dropped older messages (outbox overflow)")))))))))
 
-(defun dsh-bridge--view-fill (session-id turn received-at &optional cwd no-turns-refresh preserve-point)
+(defun dsh-bridge--view-fill (session-id turn &optional cwd no-turns-refresh preserve-point)
   "Fill the current buffer with TURN as the shown content of SESSION-ID.
 The current buffer, which the caller is responsible for selecting and/or
 creating, is put into `dsh-bridge-view-mode' if it is not already.  This
@@ -3657,8 +3852,6 @@ function does not perform any window-management.
 
 TURN is either a turn record (see `dsh-bridge--turns-cache'), a raw text
 string (a pushed message with no turn identity), or nil (empty content).
-
-RECEIVED-AT is the ms-epoch send time for a pushed message, or nil.
 
 CWD is the session's current working directory.
 
@@ -3693,11 +3886,9 @@ already carries the settled `(k/n)' position."
   ;; rather than waiting for the next ticker repaint; `--view-waiting-fill'
   ;; re-sets the state and the awaited turn after its own fill.
   (setq-local dsh-bridge--view-waiting nil)
-  (setq-local dsh-bridge--view-received-at received-at)
   (setq-local dsh-bridge--view-browsing nil)
   (setq-local dsh-bridge--view-turn
 			(and (not (stringp turn)) (alist-get 'turn turn)))
-  (setq-local dsh-bridge--view-timestamp (format-time-string "%H:%M:%S"))
   (dsh-bridge--apply-session-directory session-id cwd (current-buffer))
   (when (and session-id (not no-turns-refresh) (not (stringp turn)))
     (dsh-bridge--view-turns-refresh t))
@@ -3763,7 +3954,7 @@ already carries the settled `(k/n)' position."
                          (dsh-bridge--view-provenance-make
                           session-id epoch turn new-keys
                           (length (or body "")) (length (or suffix ""))))))))
-  (setq header-line-format (dsh-bridge--view-header-line))
+  (setq header-line-format dsh-bridge--view-header-line-format)
   (dsh-bridge--view-ticker-ensure))
 
 (defun dsh-bridge--display-received (entries)
@@ -3784,7 +3975,7 @@ known, the default buffer is used."
 	(unless entry-id
 	  (message "dsh-bridge: message received without a session id"))
 	(with-current-buffer buf
-	  (dsh-bridge--view-fill session-id text (alist-get 'ts entry)))
+	  (dsh-bridge--view-fill session-id text))
 	buf))
 
 (defun dsh-bridge--view-await-refresh (session-id)
@@ -3807,7 +3998,7 @@ no-op for sessions no view shows in either state."
           (goto-char (point-min)))
         ;; Rewritten outside `dsh-bridge--view-fill': nothing to reconcile.
         (setq-local dsh-bridge--view-provenance nil)
-        (setq header-line-format (dsh-bridge--view-header-line)))
+        (setq header-line-format dsh-bridge--view-header-line-format))
        (t
         (let* ((turns (dsh-bridge--turns-cache-turns session-id))
                (record (and dsh-bridge--view-turn
@@ -3816,7 +4007,7 @@ no-op for sessions no view shows in either state."
                                                dsh-bridge--view-turn))
                                       turns))))
           (when (and record (dsh-bridge--view-turn-open-p record))
-            (dsh-bridge--view-fill session-id record nil nil t t))))))))
+            (dsh-bridge--view-fill session-id record nil t t))))))))
 
 ;;; Ask-user questions (the DSH `ask_user_question` tool)
 
@@ -5262,12 +5453,15 @@ recomputes on the next redisplay)."
 		(format " ✓ sent %s" (format-time-string "%H:%M" (cdr (cdr entry))))
 	  "")))
 
-(defun dsh-bridge--prompt-header-line ()
+(defun dsh-bridge--prompt-header-line (&optional width)
   "Return the header line for the DSH-Prompt buffer.
 Header line format:
 
- <status> <label>[ (last active)][ (k/n)][ · <model>][ · <ctx%>]
-                 [ · 📎N][ ✓ sent HH:MM]
+ <status> <label>[ (last active)][ (k/n)] · <workspace>
+                 [ · <model>][ · <ctx%>][ ✓ sent HH:MM]
+
+WIDTH, if non-nil, is the display columns available; the session label
+and workspace label are shortened to fit it.
 
 The `(last active)' qualifier marks a session the buffer is not bound
 to: the id is only a prediction of what a target-less send would hit,
@@ -5277,8 +5471,8 @@ send does carry that target), are unqualified.
 
 The model and context segments stay empty until their first successful
 fetch.  Editing the text clears the sent marker.  The `(k/n)' segment
-appears when walking the prompt history, and `📎N' when the buffer
-carries N attachment tag lines."
+appears when walking the prompt history.  Attachments are not shown here:
+their tag lines are visible in the buffer itself."
   (let* ((session dsh-bridge--prompt-session)
 		 (qualifier "")
 		 status label)
@@ -5295,30 +5489,41 @@ carries N attachment tag lines."
 			((setq session (dsh-bridge--cache-last-active))
 			 (setq qualifier " (last active)"))))
 	(setq status (dsh-bridge--status-glyph session))
+	;; The qualifier and history position hang off the name with a plain
+	;; space, so they ride along as the name's untruncated suffix.
 	(setq label (if session
-					(concat (dsh-bridge--session-link
-							 (dsh-bridge--session-label session) session)
-							qualifier)
+					(dsh-bridge--session-link
+					 (dsh-bridge--header-text (dsh-bridge--session-label session))
+					 session)
 				  ""))
-	(let ((model (dsh-bridge--prompt-model-label session))
-		  (context (dsh-bridge--prompt-context-label session))
-		  (attached (let ((count (dsh-bridge--attachment-count)))
-					  (and (> count 0) (format "📎%d" count))))
-		  (sent (dsh-bridge--prompt-sent-marker session))
-		  (hist (dsh-bridge--prompt-history-position)))
+	(let* ((model (dsh-bridge--prompt-model-label session))
+		   (context (dsh-bridge--prompt-context-label session))
+		   (sent (dsh-bridge--prompt-sent-marker session))
+		   (hist (dsh-bridge--prompt-history-position))
+		   (suffix (concat qualifier hist))
+		   (identity (if (dsh-bridge--normalized-string label)
+						 (list label t suffix)
+					   (list suffix t)))
+		   (prefix (if (string-empty-p status) " " (concat " " status " "))))
 	  ;; The returned string is %-escaped (see `header-line-format'), so
 	  ;; turn any % (from context percentage or session title) into %%.
 	  (string-replace
 	   "%" "%%"
-	   (concat " " (if (string-empty-p status) label (concat status " " label))
-			   hist (and model (concat " · " model))
-			   (and context (concat " · " context))
-			   (and attached (concat " · " attached))
+	   (concat prefix
+			   (dsh-bridge--header-line-join
+				(list identity
+					  (list (dsh-bridge--header-text
+							 (dsh-bridge--workspace-label-for session))
+							t)
+					  (list model)
+					  (list context))
+				(and width
+					 (max 1 (- width (string-width prefix) (string-width sent)))))
 			   sent)))))
 
 (defun dsh-bridge--prompt-mode-setup ()
   "Common setup for `dsh-bridge-prompt-mode'."
-  (setq-local header-line-format '(:eval (dsh-bridge--prompt-header-line)))
+  (setq-local header-line-format '(:eval (dsh-bridge--prompt-header-line (dsh-bridge--header-window-width))))
   (setq-local revert-buffer-function #'dsh-bridge--revert-prompt-buffer)
   (font-lock-add-keywords
    nil
@@ -5420,12 +5625,12 @@ session, attaching a file, selecting a model, etc.
   "Refresh header lines of live bridge buffers after a retarget."
   (dolist (buf (dsh-bridge--view-buffers))
 	(with-current-buffer buf
-	  (setq header-line-format (dsh-bridge--view-header-line))))
+	  (setq header-line-format dsh-bridge--view-header-line-format)))
   (dolist (buf (buffer-list))
 	(with-current-buffer buf
 	  (when (eq major-mode 'dsh-bridge-prompt-mode)
 		(setq header-line-format
-			  '(:eval (dsh-bridge--prompt-header-line)))))))
+			  '(:eval (dsh-bridge--prompt-header-line (dsh-bridge--header-window-width))))))))
 
 (defun dsh-bridge-set-prompt-session (session-id)
   "Bind the current buffer, which must be a DSH-Prompt buffer, to SESSION-ID.
@@ -5440,7 +5645,7 @@ prompt-history walk when the binding changes."
 	(setq-local dsh-bridge--prompt-history-index nil)
 	(setq-local dsh-bridge--prompt-draft nil))
   (setq-local dsh-bridge--prompt-session session-id)
-  (setq header-line-format '(:eval (dsh-bridge--prompt-header-line)))
+  (setq header-line-format '(:eval (dsh-bridge--prompt-header-line (dsh-bridge--header-window-width))))
   (dsh-bridge--apply-session-directory session-id nil (current-buffer))
   (dsh-bridge--refresh-prompt-metadata)
   (when (called-interactively-p 'any)
@@ -6379,7 +6584,7 @@ sessions list re-prints only the affected row.  The prompt buffer's
 ensures that paint lands in the same tick as the other surfaces."
   (dolist (buf (dsh-bridge--session-views session-id))
 	(with-current-buffer buf
-	  (setq header-line-format (dsh-bridge--view-header-line))))
+	  (setq header-line-format dsh-bridge--view-header-line-format)))
   (dsh-bridge--view-ticker-ensure)
   (when (buffer-live-p (get-buffer "*dsh-bridge-sessions*"))
 	(with-current-buffer "*dsh-bridge-sessions*"
@@ -6495,7 +6700,7 @@ when the content merely changed in place)."
 			   ;; If there are already segments, continue filling.
 			   ((null dsh-bridge--view-waiting)
 				(when newest
-				  (dsh-bridge--view-fill shown-id newest nil nil t t)))
+				  (dsh-bridge--view-fill shown-id newest nil t t)))
 			   ;; If the buffer is being prepped for a fresh turn,
 			   ;; insert the new segment if it's for the awaited turn
 			   ;; (or a later one, should the awaited turn stay textless).
@@ -6503,11 +6708,11 @@ when the content merely changed in place)."
 					 (numberp turn)
 					 (numberp dsh-bridge--view-turn)
 					 (>= turn dsh-bridge--view-turn))
-				(dsh-bridge--view-fill shown-id newest nil nil t t))
+				(dsh-bridge--view-fill shown-id newest nil t t))
 			   ;; Otherwise the content is not the new turn's (or
 			   ;; there is none): blank the view to idle.
 			   (t
-				(dsh-bridge--view-fill shown-id nil nil nil t))))))))))
+				(dsh-bridge--view-fill shown-id nil nil t))))))))))
 
 ;;;###autoload
 (defun dsh-bridge-list-sessions ()
