@@ -2067,8 +2067,6 @@ stops a running session, v toggles archived visibility, R renames, d archives,
               #'dsh-bridge-create-session))
   (should (eq (lookup-key dsh-bridge-sessions-mode-map (kbd "W"))
               #'dsh-bridge-rename-workspace))
-  (should (eq (lookup-key dsh-bridge-sessions-mode-map (kbd "w"))
-              #'dsh-bridge-copy-session-id))
   (should (eq (lookup-key dsh-bridge-sessions-mode-map (kbd "D"))
               #'dsh-bridge-describe-session))
   ;; `p' inherits previous-line from tabulated-list-mode again.
@@ -7386,8 +7384,6 @@ parent-session link describes the parent."
     (should buffer-read-only)
     (should (derived-mode-p 'help-mode))
     (should (eq major-mode 'dsh-bridge-describe-mode)))
-  (should (eq (lookup-key dsh-bridge-describe-mode-map (kbd "w"))
-              #'dsh-bridge--describe-copy-id))
   (should (eq (lookup-key dsh-bridge-describe-mode-map (kbd "f"))
               #'dsh-bridge--describe-open-view))
   (should (eq (lookup-key dsh-bridge-describe-mode-map (kbd "o"))
@@ -8731,7 +8727,7 @@ cache — the footer's attribution source."
     (should (keymapp tool-bar-map))
     (should (equal (dsh-bridge-test--tool-bar-commands tool-bar-map)
                    '(dsh-bridge--describe-open-view dsh-bridge--describe-open-prompt
-                     dsh-bridge--describe-copy-id revert-buffer quit-window)))
+                     revert-buffer quit-window)))
     (should (eq (lookup-key tool-bar-map [Latest\ Turn])
                 #'dsh-bridge--describe-open-view))))
 

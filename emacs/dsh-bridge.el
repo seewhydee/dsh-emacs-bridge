@@ -6041,7 +6041,6 @@ Archived sessions are hidden unless `dsh-bridge--sessions-archived-p' (or
   "d" #'dsh-bridge-archive-session
   "+" #'dsh-bridge-create-session
   "W" #'dsh-bridge-rename-workspace
-  "w" #'dsh-bridge-copy-session-id
   "D" #'dsh-bridge-describe-session)
 
 ;; Defined after the mode's menu (from-menu items resolve the menu bindings
@@ -6079,8 +6078,6 @@ Archived sessions are hidden unless `dsh-bridge--sessions-archived-p' (or
 	 :help "Create a new untitled session, optionally in a new workspace"]
 	["Rename Workspace…" dsh-bridge-rename-workspace
 	 :help "Rename the workspace of the session under point"]
-	["Copy Session Id" dsh-bridge-copy-session-id
-	 :help "Copy the session id under point"]
 	["Describe Session" dsh-bridge-describe-session
 	 :help "Show the session's read-only report"]
 	"---"
@@ -6387,16 +6384,6 @@ The row's workspace id comes from the cached session; prompts for the new title
 				(message "dsh-bridge: %s"
 						 (dsh-bridge--error-message nil status alist))))))))))
 
-(defun dsh-bridge-copy-session-id ()
-  "Copy the raw DSH session id under point to the kill ring."
-  (interactive)
-  (let ((id (tabulated-list-get-id)))
-	(if id
-		(progn
-		  (kill-new id)
-		  (message "dsh-bridge: copied session id %s" id))
-	  (message "dsh-bridge: no session under point"))))
-
 ;;; Session report (DSH-Describe)
 
 (defvar-local dsh-bridge--describe-session nil
@@ -6405,7 +6392,6 @@ The row's workspace id comes from the cached session; prompts for the new title
 (defvar-keymap dsh-bridge-describe-mode-map
   :parent help-mode-map
   :doc "Keymap for `dsh-bridge-describe-mode'."
-  "w" #'dsh-bridge--describe-copy-id
   "f" #'dsh-bridge--describe-open-view
   "o" #'dsh-bridge--describe-open-prompt
   "D" #'revert-buffer)
@@ -6422,8 +6408,6 @@ The row's workspace id comes from the cached session; prompts for the new title
 (easy-menu-define dsh-bridge-describe-menu dsh-bridge-describe-mode-map
   "Menu bar menu for the `*dsh-bridge-describe*' buffer."
   '("DSH Bridge"
-	["Copy Session Id" dsh-bridge--describe-copy-id
-	 :help "Copy the described session's raw id"]
 	["Open Prompt Buffer" dsh-bridge--describe-open-prompt
 	 :help "Open a DSH-Prompt buffer for the described session"]
 	["Latest Turn" dsh-bridge--describe-open-view
@@ -6445,8 +6429,6 @@ The row's workspace id comes from the cached session; prompts for the new title
 				   dsh-bridge-describe-mode-map :vert-only t)
     (tool-bar-local-item-from-menu 'dsh-bridge--describe-open-prompt
 				   "mail/compose" map
-				   dsh-bridge-describe-mode-map :vert-only t)
-    (tool-bar-local-item-from-menu 'dsh-bridge--describe-copy-id "copy" map
 				   dsh-bridge-describe-mode-map :vert-only t)
     (define-key-after map [separator-1] menu-bar-separator)
     (tool-bar-local-item-from-menu 'revert-buffer "refresh" map
@@ -6743,13 +6725,11 @@ failure reason, never a fake zero."
 	(dsh-bridge--describe-context report)
 	(dsh-bridge--describe-actions id)))
 
-(defun dsh-bridge--describe-copy-id (&optional id)
-  "Copy the described session's raw id to the kill ring."
-  (interactive)
-  (let ((id (or id dsh-bridge--describe-session)))
-	(if id
-		(progn (kill-new id) (message "dsh-bridge: copied session id %s" id))
-	  (message "dsh-bridge: no session"))))
+(defun dsh-bridge--describe-copy-id (id)
+  "Copy session ID to the kill ring; message instead when ID is nil."
+  (if id
+	  (progn (kill-new id) (message "dsh-bridge: copied session id %s" id))
+	(message "dsh-bridge: no session")))
 
 (defun dsh-bridge--describe-open-directory (directory)
   "Open DIRECTORY in Dired, or as a file when it is not a directory."
@@ -7073,8 +7053,8 @@ In the session list: `RET' opens the session under point (resuming a saved
 session on demand; the default target is untouched), `t' sets the default
 target, `u' clears it, `f' peeks the session's latest turn, `v' toggles
 archived-session visibility, `R' renames the session, `d' archives it, `+'
-creates a session, `W' renames the row's workspace, `w' copies the session id,
-`D' shows session details, `g' re-fetches, `S' sorts by column.	 Legend: `*' =
+creates a session, `W' renames the row's workspace, `D' shows session
+details, `g' re-fetches, `S' sorts by column.	 Legend: `*' =
 default target, `…' = running."
   (interactive)
   (if (dsh-bridge--list-sessions-in-buffer)
