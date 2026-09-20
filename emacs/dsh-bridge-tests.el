@@ -8672,5 +8672,76 @@ cache — the footer's attribution source."
       (should (equal (alist-get 'path file) "src/a.ts"))
       (should (equal (alist-get 'op file) "write")))))
 
+;;; Tool bars
+
+(defun dsh-bridge-test--tool-bar-commands (map)
+  "The ordered command list of tool-bar MAP, separators skipped."
+  (let (commands)
+    (dolist (item (cdr map))
+      (when (and (consp item)
+                 (consp (cdr item))
+                 (eq (car (cdr item)) 'menu-item))
+        (push (nth 2 (cdr item)) commands)))
+    (nreverse commands)))
+
+(ert-deftest dsh-bridge-view-tool-bar ()
+  "DSH-View installs a buffer-local tool bar with the expected commands."
+  (with-temp-buffer
+    (dsh-bridge-view-mode)
+    (should (local-variable-p 'tool-bar-map))
+    (should (keymapp tool-bar-map))
+    (should (equal (dsh-bridge-test--tool-bar-commands tool-bar-map)
+                   '(dsh-bridge-view-previous-reply dsh-bridge-view-next-reply
+                     dsh-bridge-reply dsh-bridge-stop-session
+                     dsh-bridge-list-sessions revert-buffer quit-window)))
+    ;; From-menu items are keyed by the menu label.
+    (should (eq (lookup-key tool-bar-map [Reply]) #'dsh-bridge-reply))))
+
+(ert-deftest dsh-bridge-prompt-tool-bar ()
+  "DSH-Prompt installs a buffer-local tool bar with the expected commands."
+  (with-temp-buffer
+    (dsh-bridge-prompt-mode)
+    (should (local-variable-p 'tool-bar-map))
+    (should (keymapp tool-bar-map))
+    (should (equal (dsh-bridge-test--tool-bar-commands tool-bar-map)
+                   '(dsh-bridge-send-and-exit dsh-bridge-draft
+                     dsh-bridge-attach-file dsh-bridge-prompt-stop-or-erase
+                     dsh-bridge-list-sessions quit-window)))
+    (should (eq (lookup-key tool-bar-map [Send]) #'dsh-bridge-send-and-exit))))
+
+(ert-deftest dsh-bridge-sessions-tool-bar ()
+  "DSH-Sessions installs a buffer-local tool bar with the expected commands."
+  (with-temp-buffer
+    (dsh-bridge-sessions-mode)
+    (should (local-variable-p 'tool-bar-map))
+    (should (keymapp tool-bar-map))
+    (should (equal (dsh-bridge-test--tool-bar-commands tool-bar-map)
+                   '(dsh-bridge-visit-session dsh-bridge-open-session
+                     dsh-bridge-create-session dsh-bridge-stop-session
+                     dsh-bridge-archive-session dsh-bridge-describe-session
+                     revert-buffer quit-window)))
+    (should (eq (lookup-key tool-bar-map [Archive\ Session])
+                #'dsh-bridge-archive-session))))
+
+(ert-deftest dsh-bridge-describe-tool-bar ()
+  "DSH-Describe installs a buffer-local tool bar with the expected commands."
+  (with-temp-buffer
+    (dsh-bridge-describe-mode)
+    (should (local-variable-p 'tool-bar-map))
+    (should (keymapp tool-bar-map))
+    (should (equal (dsh-bridge-test--tool-bar-commands tool-bar-map)
+                   '(dsh-bridge--describe-open-view dsh-bridge--describe-open-prompt
+                     dsh-bridge--describe-copy-id revert-buffer quit-window)))
+    (should (eq (lookup-key tool-bar-map [Latest\ Turn])
+                #'dsh-bridge--describe-open-view))))
+
+(ert-deftest dsh-bridge-tool-bar-other-modes-default ()
+  "Changes/question/approval buffers keep the global tool bar."
+  (dolist (mode '(dsh-bridge-changes-mode dsh-bridge-question-mode
+                  dsh-bridge-approval-mode))
+    (with-temp-buffer
+      (funcall mode)
+      (should-not (local-variable-p 'tool-bar-map)))))
+
 (provide 'dsh-bridge-tests)
 ;;; dsh-bridge-tests.el ends here

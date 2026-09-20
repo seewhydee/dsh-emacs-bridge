@@ -3334,7 +3334,8 @@ When invoked, the DSH-View buffer is typically bound to a DSH session;
 the commands below let you cycle through the session's turn history,
 compose a reply (prompt) for the session, etc.
 \\{dsh-bridge-view-mode-map}"
-	 (setq buffer-read-only t)))
+	 (setq buffer-read-only t)
+	 (setq-local tool-bar-map dsh-bridge--view-tool-bar-map)))
 
 ;; The mode and its `gfm-view-mode' parent are chosen at load time, so the
 ;; byte-compiler cannot see them through the conditional macro expansion;
@@ -3345,6 +3346,10 @@ compose a reply (prompt) for the session, etc.
 ;; The parent keymap is named only in the branch that required markdown-mode,
 ;; so declare it for the byte-compiler.
 (defvar gfm-view-mode-map)
+
+;; Defined after the mode's menu (from-menu items resolve the menu bindings
+;; at load time); declare it for the byte-compiler.
+(defvar dsh-bridge--view-tool-bar-map)
 
 (defvar-keymap dsh-bridge-view-mode-map
   :doc "Keymap for `dsh-bridge-view-mode'."
@@ -3395,6 +3400,34 @@ compose a reply (prompt) for the session, etc.
 	 :help "Re-fetch the shown session's newest turn"]
 	["Quit Window" quit-window
 	 :help "Dismiss this buffer"]))
+
+;; Placed after the menu: `tool-bar-local-item-from-menu' resolves the menu
+;; bindings at load time.
+(defvar dsh-bridge--view-tool-bar-map
+  (let ((map (make-sparse-keymap)))
+    (tool-bar-local-item "left-arrow" #'dsh-bridge-view-previous-reply
+			 'dsh-bridge-view-previous-reply map
+			 :rtl "right-arrow" :vert-only t
+			 :help "View previous reply")
+    (tool-bar-local-item "right-arrow" #'dsh-bridge-view-next-reply
+			 'dsh-bridge-view-next-reply map
+			 :rtl "left-arrow" :vert-only t
+			 :help "View next reply")
+    (define-key-after map [separator-1] menu-bar-separator)
+    (tool-bar-local-item-from-menu 'dsh-bridge-reply "mail/reply" map
+				   dsh-bridge-view-mode-map :vert-only t)
+    (tool-bar-local-item-from-menu 'dsh-bridge-stop-session "cancel" map
+				   dsh-bridge-view-mode-map :vert-only t)
+    (define-key-after map [separator-2] menu-bar-separator)
+    (tool-bar-local-item-from-menu 'dsh-bridge-list-sessions "index" map
+				   dsh-bridge-view-mode-map :vert-only t)
+    (tool-bar-local-item-from-menu 'revert-buffer "refresh" map
+				   dsh-bridge-view-mode-map :vert-only t)
+    (define-key-after map [separator-3] menu-bar-separator)
+    (tool-bar-local-item-from-menu 'quit-window "exit" map
+				   dsh-bridge-view-mode-map :vert-only t)
+    map)
+  "Tool bar for DSH-View buffers.")
 
 (defun dsh-bridge--revert-output (&rest _)
   "Re-fetch the newest turn into the current DSH-View buffer."
@@ -5623,10 +5656,15 @@ their tag lines are visible in the buffer itself."
 					 (max 1 (- width (string-width prefix) (string-width sent)))))
 			   sent)))))
 
+;; Defined after the mode's menu (from-menu items resolve the menu bindings
+;; at load time); declare it for the byte-compiler.
+(defvar dsh-bridge--prompt-tool-bar-map)
+
 (defun dsh-bridge--prompt-mode-setup ()
   "Common setup for `dsh-bridge-prompt-mode'."
   (setq-local header-line-format '(:eval (dsh-bridge--prompt-header-line (dsh-bridge--header-window-width))))
   (setq-local revert-buffer-function #'dsh-bridge--revert-prompt-buffer)
+  (setq-local tool-bar-map dsh-bridge--prompt-tool-bar-map)
   (font-lock-add-keywords
    nil
    '((dsh-bridge--attachment-tag-search
@@ -5749,6 +5787,29 @@ FORCE argument of `dsh-bridge-stop-session'."
 	"---"
 	["Set Default Target…" dsh-bridge-set-default-target
 	 :help "Set the bridge-wide default target (completing-read)"]))
+
+;; Placed after the menu: `tool-bar-local-item-from-menu' resolves the menu
+;; bindings at load time.
+(defvar dsh-bridge--prompt-tool-bar-map
+  (let ((map (make-sparse-keymap)))
+    (tool-bar-local-item-from-menu 'dsh-bridge-send-and-exit "mail/send" map
+				   dsh-bridge-prompt-mode-map :vert-only t)
+    (tool-bar-local-item-from-menu 'dsh-bridge-draft "mail/save-draft" map
+				   dsh-bridge-prompt-mode-map :vert-only t)
+    (tool-bar-local-item-from-menu 'dsh-bridge-attach-file "attach" map
+				   dsh-bridge-prompt-mode-map :vert-only t)
+    (tool-bar-local-item "cancel" #'dsh-bridge-prompt-stop-or-erase
+			 'dsh-bridge-prompt-stop-or-erase map
+			 :vert-only t
+			 :help "Stop the running turn, or erase the prompt")
+    (define-key-after map [separator-1] menu-bar-separator)
+    (tool-bar-local-item-from-menu 'dsh-bridge-list-sessions "index" map
+				   dsh-bridge-prompt-mode-map :vert-only t)
+    (define-key-after map [separator-2] menu-bar-separator)
+    (tool-bar-local-item "close" #'quit-window 'quit-window map
+			 :vert-only t :help "Quit window")
+    map)
+  "Tool bar for DSH-Prompt buffers.")
 
 ;;; Session targeting
 
@@ -5983,10 +6044,15 @@ Archived sessions are hidden unless `dsh-bridge--sessions-archived-p' (or
   "w" #'dsh-bridge-copy-session-id
   "D" #'dsh-bridge-describe-session)
 
+;; Defined after the mode's menu (from-menu items resolve the menu bindings
+;; at load time); declare it for the byte-compiler.
+(defvar dsh-bridge--sessions-tool-bar-map)
+
 (define-derived-mode dsh-bridge-sessions-mode tabulated-list-mode "DSH-Sessions"
   "Major mode for browsing DSH sessions.
 \\{dsh-bridge-sessions-mode}"
-  (setq-local dsh-bridge--sessions-archived-p dsh-bridge-sessions-show-archived))
+  (setq-local dsh-bridge--sessions-archived-p dsh-bridge-sessions-show-archived)
+  (setq-local tool-bar-map dsh-bridge--sessions-tool-bar-map))
 
 (easy-menu-define dsh-bridge-sessions-menu dsh-bridge-sessions-mode-map
   "Menu bar menu for the `*dsh-bridge-sessions*' buffer."
@@ -6025,6 +6091,33 @@ Archived sessions are hidden unless `dsh-bridge--sessions-archived-p' (or
 	 :help "Choose the default target (completing-read)"]
 	["DSH Bridge Dispatcher…" dsh-bridge
 	 :help "Open the dispatcher"]))
+
+;; Placed after the menu: `tool-bar-local-item-from-menu' resolves the menu
+;; bindings at load time.
+(defvar dsh-bridge--sessions-tool-bar-map
+  (let ((map (make-sparse-keymap)))
+    (tool-bar-local-item-from-menu 'dsh-bridge-visit-session "jump-to" map
+				   dsh-bridge-sessions-mode-map :vert-only t)
+    (tool-bar-local-item-from-menu 'dsh-bridge-open-session "mail/compose" map
+				   dsh-bridge-sessions-mode-map :vert-only t)
+    (tool-bar-local-item-from-menu 'dsh-bridge-create-session "new" map
+				   dsh-bridge-sessions-mode-map :vert-only t)
+    (define-key-after map [separator-1] menu-bar-separator)
+    (tool-bar-local-item-from-menu 'dsh-bridge-stop-session "cancel" map
+				   dsh-bridge-sessions-mode-map :vert-only t)
+    (tool-bar-local-item-from-menu 'dsh-bridge-archive-session "delete" map
+				   dsh-bridge-sessions-mode-map :vert-only t)
+    (tool-bar-local-item-from-menu 'dsh-bridge-describe-session "describe" map
+				   dsh-bridge-sessions-mode-map :vert-only t)
+    (define-key-after map [separator-2] menu-bar-separator)
+    (tool-bar-local-item-from-menu 'revert-buffer "refresh" map
+				   dsh-bridge-sessions-mode-map :vert-only t)
+    (define-key-after map [separator-3] menu-bar-separator)
+    ;; The sessions menu has no quit item, so there is nothing to copy.
+    (tool-bar-local-item "close" #'quit-window 'quit-window map
+			 :vert-only t :help "Quit window")
+    map)
+  "Tool bar for DSH-Sessions buffers.")
 
 (defun dsh-bridge--resume-session (id)
   "Resume the cold session ID via POST /sessions/resume.
@@ -6317,9 +6410,14 @@ The row's workspace id comes from the cached session; prompts for the new title
   "o" #'dsh-bridge--describe-open-prompt
   "D" #'revert-buffer)
 
+;; Defined after the mode's menu (from-menu items resolve the menu bindings
+;; at load time); declare it for the byte-compiler.
+(defvar dsh-bridge--describe-tool-bar-map)
+
 (define-derived-mode dsh-bridge-describe-mode help-mode "DSH-Describe"
   "Major mode for the read-only DSH session report.
-\\{dsh-bridge-describe-mode}")
+\\{dsh-bridge-describe-mode}"
+  (setq-local tool-bar-map dsh-bridge--describe-tool-bar-map))
 
 (easy-menu-define dsh-bridge-describe-menu dsh-bridge-describe-mode-map
   "Menu bar menu for the `*dsh-bridge-describe*' buffer."
@@ -6338,6 +6436,26 @@ The row's workspace id comes from the cached session; prompts for the new title
 	"---"
 	["Quit Window" quit-window
 	 :help "Dismiss this buffer"]))
+
+;; Placed after the menu: `tool-bar-local-item-from-menu' resolves the menu
+;; bindings at load time.
+(defvar dsh-bridge--describe-tool-bar-map
+  (let ((map (make-sparse-keymap)))
+    (tool-bar-local-item-from-menu 'dsh-bridge--describe-open-view "show" map
+				   dsh-bridge-describe-mode-map :vert-only t)
+    (tool-bar-local-item-from-menu 'dsh-bridge--describe-open-prompt
+				   "mail/compose" map
+				   dsh-bridge-describe-mode-map :vert-only t)
+    (tool-bar-local-item-from-menu 'dsh-bridge--describe-copy-id "copy" map
+				   dsh-bridge-describe-mode-map :vert-only t)
+    (define-key-after map [separator-1] menu-bar-separator)
+    (tool-bar-local-item-from-menu 'revert-buffer "refresh" map
+				   dsh-bridge-describe-mode-map :vert-only t)
+    (define-key-after map [separator-2] menu-bar-separator)
+    (tool-bar-local-item "close" #'quit-window 'quit-window map
+			 :vert-only t :help "Quit window")
+    map)
+  "Tool bar for DSH-Describe buffers.")
 
 (define-button-type 'dsh-bridge-describe-session-xref
   :supertype 'help-xref
