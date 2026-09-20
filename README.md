@@ -12,8 +12,7 @@ It consists of two components:
 - `dsh-plugin/` — a DeepSeek Harness plugin (`dsh-emacs-bridge`).
 - `emacs/dsh-bridge.el` — an Emacs package to interact with the
   harness.  A companion library, `dsh-bridge-install.el`, is loaded on
-  demand and provides commands installing and uninstalling the DSH
-  plugin.
+  demand and provides commands to install/uninstall the DSH plugin.
 
 ## Installation
 
