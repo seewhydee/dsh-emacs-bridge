@@ -10,9 +10,10 @@ voluminous LLM outputs through Emacs.
 It consists of two components:
 
 - `dsh-plugin/` — a DeepSeek Harness plugin (`dsh-emacs-bridge`).
-- `emacs/dsh-bridge.el` — an Emacs package to interact with the harness.
-- `emacs/dsh-bridge-install.el` — its optional companion library for
-  installing and uninstalling the DSH plugin, loaded on demand.
+- `emacs/dsh-bridge.el` — an Emacs package to interact with the
+  harness.  A companion library, `dsh-bridge-install.el`, is loaded on
+  demand and provides commands installing and uninstalling the DSH
+  plugin.
 
 ## Installation
 
