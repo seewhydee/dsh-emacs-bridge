@@ -6434,10 +6434,6 @@ The row's workspace id comes from the cached session; prompts for the new title
   'help-function #'dsh-bridge-describe-session
   'help-echo "mouse-1/RET: describe this session")
 
-(defun dsh-bridge--describe-string (value)
-  "Return VALUE when it is a non-empty string, else nil."
-  (and (stringp value) (not (string-empty-p value)) value))
-
 (defun dsh-bridge--format-number (n)
   "Format number N with comma thousands separators; non-numbers -> \"—\"."
   (if (not (numberp n)) "—"
@@ -6529,10 +6525,10 @@ an optional `help-echo' string covering the value."
 (defun dsh-bridge--describe-model-label (report)
   "The model display line for REPORT, or nil when no selection is known."
   (let* ((model (alist-get 'model report))
-		 (name (dsh-bridge--describe-string (alist-get 'modelName report)))
-		 (provider (dsh-bridge--describe-string (alist-get 'provider model)))
-		 (id (dsh-bridge--describe-string (alist-get 'model model)))
-		 (effort (dsh-bridge--describe-string (alist-get 'reasoningEffort model))))
+		 (name (dsh-bridge--normalized-string (alist-get 'modelName report)))
+		 (provider (dsh-bridge--normalized-string (alist-get 'provider model)))
+		 (id (dsh-bridge--normalized-string (alist-get 'model model)))
+		 (effort (dsh-bridge--normalized-string (alist-get 'reasoningEffort model))))
 	(when (or name provider id)
 	  (concat (or name (if (and provider id) (format "%s/%s" provider id)
 						 (or provider id)))
@@ -6541,14 +6537,14 @@ an optional `help-echo' string covering the value."
 (defun dsh-bridge--describe-permission-label (report)
   "Return (NAME . DESCRIPTION) for REPORT's current permission, or nil."
   (let* ((permissions (alist-get 'permissions report))
-		 (current (dsh-bridge--describe-string (alist-get 'currentValue permissions)))
+		 (current (dsh-bridge--normalized-string (alist-get 'currentValue permissions)))
 		 (options (alist-get 'options permissions)))
 	(when current
 	  (let ((match (seq-find (lambda (option)
 							   (equal (alist-get 'value option) current))
 							 options)))
-		(cons (or (dsh-bridge--describe-string (alist-get 'name match)) current)
-			  (dsh-bridge--describe-string (alist-get 'description match)))))))
+		(cons (or (dsh-bridge--normalized-string (alist-get 'name match)) current)
+			  (dsh-bridge--normalized-string (alist-get 'description match)))))))
 
 (defun dsh-bridge--describe-stats (report)
   "Insert the Stats section of REPORT."
@@ -6661,20 +6657,20 @@ failure reason, never a fake zero."
 		 (failure (unless report
 					(or (dsh-bridge--error-message nil status alist)
 						"request failed or timed out")))
-		 (title (or (dsh-bridge--describe-string (alist-get 'title report))
+		 (title (or (dsh-bridge--normalized-string (alist-get 'title report))
 					(dsh-bridge--normalized-string (alist-get 'title session))
 					"[Untitled Session]"))
 		 (live (if report (eq (alist-get 'live report) t)
 				 (and session (alist-get 'live session))))
 		 (running (and report (eq (alist-get 'running report) t)))
-		 (cwd (or (dsh-bridge--describe-string (alist-get 'cwd report))
-				  (dsh-bridge--describe-string (alist-get 'cwd session))))
-		 (workspace (dsh-bridge--describe-string (alist-get 'workspace report)))
+		 (cwd (or (dsh-bridge--normalized-string (alist-get 'cwd report))
+				  (dsh-bridge--normalized-string (alist-get 'cwd session))))
+		 (workspace (dsh-bridge--normalized-string (alist-get 'workspace report)))
 		 (created (or (alist-get 'createdAt report) (alist-get 'createdAt session)))
 		 (last-active (or (alist-get 'lastActive report)
 						  (alist-get 'lastActive session)))
-		 (parent (dsh-bridge--describe-string (alist-get 'parentSession report)))
-		 (preset (dsh-bridge--describe-string (alist-get 'agentPreset report)))
+		 (parent (dsh-bridge--normalized-string (alist-get 'parentSession report)))
+		 (preset (dsh-bridge--normalized-string (alist-get 'agentPreset report)))
 		 (model (dsh-bridge--describe-model-label report))
 		 (permissions (dsh-bridge--describe-permission-label report)))
 	(insert (propertize (format "DSH session %s" title)
@@ -6801,7 +6797,7 @@ persisted log and is never resumed."
 		 (status (car result))
 		 (alist (cdr result))
 		 (report (and (eq status 200) (listp alist) alist))
-		 (id (or (and report (dsh-bridge--describe-string (alist-get 'sessionId report)))
+		 (id (or (and report (dsh-bridge--normalized-string (alist-get 'sessionId report)))
 				 session-id))
 		 (session (and id (dsh-bridge--session-for-id id)))
 		 (buffer (get-buffer-create dsh-bridge-describe-buffer-name))
