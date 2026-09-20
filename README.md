@@ -235,20 +235,23 @@ type `C-c C-k` to decline the query, canceling the tool call.
 Some agent tools ask for explicit approval before acting; for example,
 `danger-full-access` asks the user before allowing sandbox escalation.
 Such a request is surfaced in the DSH-View buffer; type the same `a` key
-to open a buffer showing details about the approval request.  A session
-cannot wait on a query and an approval at once, so a pending query takes
-precedence; otherwise `a` opens the approval.  In this buffer, type `y`
-(or `a`) to allow the operation once, `n` (or `r`) to reject it, or
-`C-c C-k` to cancel the request (the asking tool call then fails).
+to see the request's details and decide.  A session cannot wait on a
+query and an approval at once, so a pending query takes precedence;
+otherwise `a` shows the approval.  The details (the tool, the asker's
+reason, and the tool call's arguments) appear in a help window while
+the minibuffer prompts: type `y` to allow the operation once, `n` to
+reject it, or `c` to cancel the request (the asking tool call then
+fails).  Quitting the prompt (e.g. with `C-g`) leaves the approval
+pending; run `a` again to re-read the details and decide.
 
 Both waits are offered to Emacs and, when the web UI is open, to its own
 panel at the same time: whichever answers first settles the request and
 dismisses the other presentation.  To have Emacs only display approvals
 and leave the decision to the web UI, customize
-`dsh-bridge-approval-answer` to `notify-only`: the notification
-connection then tells the host not to offer approvals to Emacs for a
-decision.  See "Permissions, authentication, and failure bounds" below
-for the trust boundary.
+`dsh-bridge-approval-answer` to `notify-only`: `a` then shows the
+details read-only, and the notification connection tells the host not
+to offer approvals to Emacs for a decision.  See "Permissions,
+authentication, and failure bounds" below for the trust boundary.
 
 ### DSH-Prompt buffer
 

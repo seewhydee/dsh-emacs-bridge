@@ -364,14 +364,6 @@ toggling it takes effect at the next render."
   :type 'boolean
   :group 'dsh-bridge)
 
-(defcustom dsh-bridge-approval-auto-pop nil
-  "Whether an arriving approval request pops to its approval buffer.
-When nil (the default), a request is announced in the echo area and the
-DSH-View buffer, and the user must run `\\[dsh-bridge-answer]' to review
-it.  If non-nil, pop to the approval buffer on arrival."
-  :type 'boolean
-  :group 'dsh-bridge)
-
 ;; Forward declaration: the notification machinery (and its restart helper)
 ;; is defined further down, but the option below must be able to consult it.
 ;; It is bound (not merely declared) because `custom-declare-variable' runs
@@ -396,10 +388,10 @@ token holder can already mutate sessions and run tools, so this grants no
 authority the web UI did not already have.
 
 The value `notify-only' still displays a request (the echo area, the
-DSH-View marker, and the approval buffer) but never submits a decision.
-The notification connection then tells the host not to claim the request,
-so the web UI's own approval panel remains the answerer; a request that
-arrives with no browser open fails closed."
+DSH-View marker, and the read-only details shown by `dsh-bridge-answer')
+but never submits a decision.  The notification connection then tells the
+host not to claim the request, so the web UI's own approval panel remains
+the answerer; a request that arrives with no browser open fails closed."
   :type '(choice (const :tag "Answer all requests" all)
 				 (const :tag "Notify only; never submit" notify-only))
   :set #'dsh-bridge--approval-answer-set
@@ -4873,8 +4865,13 @@ In a DSH-View / DSH-Prompt / DSH-Sessions buffer, acts on the shown / point
 session.  An unbound DSH-Prompt buffer (one following last-active) handles
 the only session with a pending query or approval, and refuses to guess when
 several are pending.  A session cannot be parked on both at once, so a
-pending ask-user query takes precedence over a pending approval.  Otherwise
-reports that nothing is pending."
+pending ask-user query takes precedence over a pending approval.
+
+A query opens its DSH-Question buffer.  An approval is decided with a
+minibuffer prompt that shows the request's details; with
+`dsh-bridge-approval-answer' at `notify-only' the details are only displayed,
+read-only, and the web UI decides.  Otherwise reports that nothing is
+pending."
   (interactive)
   (let ((session (dsh-bridge--interaction-session)))
     (unless session
@@ -4892,7 +4889,13 @@ reports that nothing is pending."
        (question
         (pop-to-buffer (dsh-bridge--question-buffer session (car question) (cdr question))))
        (approval
-        (pop-to-buffer (dsh-bridge--approval-buffer session (car approval) (cdr approval))))
+        (if (eq dsh-bridge-approval-answer 'notify-only)
+            (progn
+              (dsh-bridge--approval-show session (cdr approval))
+              (message (concat "dsh-bridge: approval answering is disabled "
+                               "(dsh-bridge-approval-answer is notify-only); "
+                               "resolve this request in the web UI")))
+          (dsh-bridge--approval-prompt session (car approval) (cdr approval))))
        (session
         (message "dsh-bridge: session \"%s\" has no pending query or approval"
                  (dsh-bridge--session-label session)))
@@ -4933,33 +4936,27 @@ an option's number key.  These commands are also available:
 ;; request for Emacs and, when the web UI is also open, still lets its own
 ;; approval panel appear: the two presentations race, and whichever answers
 ;; first settles the request.  A resolution frame lets the web panel dismiss
-;; itself after an Emacs answer, and lets an Emacs buffer banner a decision
-;; made in the web UI.  A decision travels over the bearer-authed
+;; itself after an Emacs answer, and retires Emacs's pending record when the
+;; web UI won.  A decision travels over the bearer-authed
 ;; `POST /dsh-bridge/approval' route; a late or duplicate decision reads 404
 ;; `not-pending'.  With `dsh-bridge-approval-answer' set to `notify-only' the
 ;; notification stream declares `answer=0', so the host does not offer the
 ;; request for Emacs to decide: Emacs displays it, but the web UI remains the
 ;; answerer.
+;;
+;; An approval is a decision, not a document: `dsh-bridge-answer' renders the
+;; request's details and prompts for the three-way choice in the minibuffer
+;; (`dsh-bridge--approval-prompt'), re-fetching the details on every
+;; invocation instead of keeping a buffer to revisit.  The read-only buffer
+;; named by `dsh-bridge--approval-buffer-name' serves only the `notify-only'
+;; display path, where the decision belongs to the web UI.
 
-;; Approval buffer state -----------------------------------------------------
+;; Approval request state ----------------------------------------------------
 
-(defvar-local dsh-bridge--approval-id nil
-  "The approval id (bridge-minted) this buffer decides.")
-(defvar-local dsh-bridge--approval-session nil
-  "The session id this approval buffer acts on.")
-(defvar-local dsh-bridge--approval-plist nil
-  "The pending approval's plist, as stored in `dsh-bridge--pending-approvals'.")
-(defvar-local dsh-bridge--approval-dead nil
-  "Non-nil once the approval this buffer decides is resolved.")
-(defvar-local dsh-bridge--approval-sent nil
-  "What this buffer itself did, as a message, once it POSTs a decision.
-Set before the POST leaves: the host's `approval-resolved' frame races the
-POST's own response, and `dsh-bridge--approval-resolved' then banners this
-buffer with what it did rather than with \"resolved elsewhere\".")
-(defvar-local dsh-bridge--approval-banner nil
-  "The resolution banner rendered at the top of the buffer, or nil while open.")
-
-;; Registry maintenance ------------------------------------------------------
+(defconst dsh-bridge--approval-buffer-name "*dsh-bridge-approval*"
+  "Name of the read-only buffer showing a pending approval's details.
+Used only by the `notify-only' display path; a decision is prompted in
+the minibuffer instead.")
 
 (defun dsh-bridge--pending-approval-entry (session-id)
   "The first (APPROVAL-ID . PLIST) pending for SESSION-ID, or nil."
@@ -4970,47 +4967,33 @@ buffer with what it did rather than with \"resolved elsewhere\".")
   "The first pending approval's plist for SESSION-ID, or nil."
   (cdr (dsh-bridge--pending-approval-entry session-id)))
 
-(defun dsh-bridge--approval-find-buffer (approval-id)
-  "The live approval buffer deciding APPROVAL-ID, or nil."
-  (seq-find (lambda (buffer)
-			  (with-current-buffer buffer
-				(and (eq major-mode 'dsh-bridge-approval-mode)
-					 (equal dsh-bridge--approval-id approval-id))))
-			(buffer-list)))
+;; Registry maintenance ------------------------------------------------------
 
-(defun dsh-bridge--approval-mark-resolved (approval-id message outcome)
-  "Mark APPROVAL-ID's buffer resolved, with banner MESSAGE.
-OUTCOME is `sent', `cancelled', `elsewhere', or `stale'.  Does nothing if
-the buffer was already resolved, and performs no window management; the
-caller is responsible for displaying the result on-screen."
-  (let ((buffer (dsh-bridge--approval-find-buffer approval-id)))
-	(when buffer
-	  (with-current-buffer buffer
-		(unless dsh-bridge--approval-dead
-		  (setq-local dsh-bridge--approval-dead t)
-		  ;; Only a local outcome repeats the decision; `elsewhere' or
-		  ;; `stale' means some other surface settled it.
-		  (setq-local dsh-bridge--approval-banner
-					  (if (memq outcome '(sent cancelled))
-						  (or dsh-bridge--approval-sent message)
-						message))
-		  (dsh-bridge--approval-render))))))
+(defun dsh-bridge--approval-retire (session-id approval-id)
+  "Drop APPROVAL-ID from SESSION-ID's pending approvals and refresh displays.
+Idempotent: a decision POST and the host's `approval-resolved' frame for the
+same approval both call this, in either order."
+  (let ((entry (assoc session-id dsh-bridge--pending-approvals)))
+	(when entry
+	  (setcdr entry (cl-delete approval-id (cdr entry) :key #'car :test #'equal))
+	  (when (null (cdr entry))
+		(setq dsh-bridge--pending-approvals
+			  (assoc-delete-all session-id dsh-bridge--pending-approvals)))))
+  (dsh-bridge--status-event-render session-id)
+  (dsh-bridge--view-await-refresh session-id))
 
 (defun dsh-bridge--approval-session-clear (session-id)
-  "Drop every pending approval for SESSION-ID, bannering any live buffers.
+  "Drop every pending approval for SESSION-ID.
 Defensive cleanup on `turn-complete': a turn that ended without a resolved
 frame cannot still be waiting on an approval."
-  (dolist (pending (cdr (assoc session-id dsh-bridge--pending-approvals)))
-	(dsh-bridge--approval-mark-resolved
-	 (car pending) "This approval is no longer pending." 'stale))
   (setq dsh-bridge--pending-approvals
 		(assoc-delete-all session-id dsh-bridge--pending-approvals)))
 
 (defun dsh-bridge--approval-arrive (session-id approval-id plist)
-  "Record a newly arrived approval, announce it, and render its buffer.
+  "Record a newly arrived approval and announce it.
 An approval-id already in the registry is a replay — the host re-announces
 pending approvals to every reconnecting SSE client — so it just refreshes
-the stored copy, silently, without re-messaging or touching the buffer."
+the stored copy, silently, without re-messaging."
   (let* ((entry (assoc session-id dsh-bridge--pending-approvals))
 		 (slot (and entry (assoc approval-id (cdr entry)))))
 	(if slot
@@ -5025,69 +5008,17 @@ the stored copy, silently, without re-messaging or touching the buffer."
 			   (substitute-command-keys "\\[dsh-bridge-answer]"))
 	  (dsh-bridge--status-event-render session-id)
 	  ;; The DSH-View body must say the session is parked, not "(continuing...)".
-	  (dsh-bridge--view-await-refresh session-id)
-	  (let ((buffer (dsh-bridge--approval-buffer session-id approval-id plist)))
-		(when dsh-bridge-approval-auto-pop
-		  (pop-to-buffer buffer))))))
+	  (dsh-bridge--view-await-refresh session-id))))
 
 (defun dsh-bridge--approval-resolved (session-id approval-id outcome)
-  "Retire a pending approval for SESSION-ID when it was resolved.
-The banner repeats what this buffer did when this Emacs was the one
-deciding: the host's resolved frame races the decision POST's response, so
-\"resolved elsewhere\" is only right when the buffer has no local decision
-on record."
-  (let ((entry (assoc session-id dsh-bridge--pending-approvals)))
-	(when entry
-	  (setcdr entry (cl-delete approval-id (cdr entry) :key #'car :test #'equal))
-	  (when (null (cdr entry))
-		(setq dsh-bridge--pending-approvals
-			  (assoc-delete-all session-id dsh-bridge--pending-approvals)))))
-  (dsh-bridge--status-event-render session-id)
-  (dsh-bridge--view-await-refresh session-id)
-  (let* ((buffer (dsh-bridge--approval-find-buffer approval-id))
-		 (sent (and buffer (buffer-local-value 'dsh-bridge--approval-sent buffer))))
-	(dsh-bridge--approval-mark-resolved
-	 approval-id
-	 (or sent
-		 (pcase outcome
-		   ("allowed-once" "This approval was granted elsewhere (not in this buffer).")
-		   ("rejected" "This approval was denied elsewhere (not in this buffer).")
-		   ("cancelled" "This approval was cancelled.")
-		   (_ "This approval was resolved elsewhere.")))
-	 (cond (sent 'sent)
-		   ((equal outcome "cancelled") 'cancelled)
-		   (t 'elsewhere)))))
+  "Retire a pending approval for SESSION-ID when the host resolved it.
+OUTCOME is accepted but not acted on: when this Emacs was the decider the
+decision POST already told the user what happened, and a request deferred by
+`notify-only' is the web UI's to settle."
+  (ignore outcome)
+  (dsh-bridge--approval-retire session-id approval-id))
 
-;; The approval buffer -------------------------------------------------------
-
-(defun dsh-bridge--approval-buffer (session-id approval-id plist)
-  "Find or create the approval buffer for APPROVAL-ID and return it.
-A live buffer already deciding APPROVAL-ID is returned untouched, so
-burying with `q' and returning with `dsh-bridge-answer' keeps its state."
-  (let ((existing (dsh-bridge--approval-find-buffer approval-id)))
-	(if (and existing
-			 (with-current-buffer existing (not dsh-bridge--approval-dead)))
-		existing
-	  (let* ((base (format "*dsh-bridge-approval: %s*"
-						   (dsh-bridge--session-label session-id)))
-			 (name (if (and (get-buffer base)
-							(with-current-buffer (get-buffer base)
-							  (and (eq major-mode 'dsh-bridge-approval-mode)
-								   (not dsh-bridge--approval-dead))))
-					   (generate-new-buffer-name base)
-					 base))
-			 (buffer (get-buffer-create name)))
-		(with-current-buffer buffer
-		  (unless (eq major-mode 'dsh-bridge-approval-mode)
-			(dsh-bridge-approval-mode))
-		  (setq-local dsh-bridge--approval-id approval-id)
-		  (setq-local dsh-bridge--approval-session session-id)
-		  (setq-local dsh-bridge--approval-plist plist)
-		  (setq-local dsh-bridge--approval-dead nil)
-		  (setq-local dsh-bridge--approval-sent nil)
-		  (setq-local dsh-bridge--approval-banner nil)
-		  (dsh-bridge--approval-render))
-		buffer))))
+;; The approval body ---------------------------------------------------------
 
 (defun dsh-bridge--approval-format-arguments (text)
   "Pretty-print TEXT as JSON when it parses whole, else return TEXT verbatim.
@@ -5101,26 +5032,20 @@ A truncated arguments string is not parseable, so it is shown as received."
 		  (string-trim-right (buffer-string)))
 	  (error text))))
 
-(defun dsh-bridge--approval-render ()
-  "Populate the current approval buffer from its state variables.
-The whole buffer is re-rendered on every change, so markers can never
-drift.  A resolved buffer renders its resolution banner in place of the
-\"waiting\" header."
-  (let ((inhibit-read-only t))
-	(erase-buffer)
-	(if dsh-bridge--approval-dead
-		(when dsh-bridge--approval-banner
-		  (insert (dsh-bridge--question-propertize
-				   dsh-bridge--approval-banner
-				   'dsh-bridge-question-banner-face)
-				  "\n"))
-	  (insert (dsh-bridge--question-propertize
-			   (format "Session \"%s\" requests approval\n"
-					   (dsh-bridge--session-label dsh-bridge--approval-session))
-			   'dsh-bridge-question-heading-face)))
-	(let ((tool (or (plist-get dsh-bridge--approval-plist :tool-name) "a tool"))
-		  (reason (plist-get dsh-bridge--approval-plist :reason))
-		  (detail (plist-get dsh-bridge--approval-plist :detail)))
+(defun dsh-bridge--approval-body (session-id plist)
+  "Return the rendered details of PLIST's approval request.
+SESSION-ID names the asking session.  The string carries faces and ends
+with the `notify-only' explanation when answering is disabled; it is the
+text shown by `dsh-bridge--approval-show' and used as the help text of the
+decision prompt."
+  (with-temp-buffer
+	(insert (dsh-bridge--question-propertize
+			 (format "Session \"%s\" requests approval\n"
+					 (dsh-bridge--session-label session-id))
+			 'dsh-bridge-question-heading-face))
+	(let ((tool (or (plist-get plist :tool-name) "a tool"))
+		  (reason (plist-get plist :reason))
+		  (detail (plist-get plist :detail)))
 	  (insert "\n"
 			  (dsh-bridge--question-propertize "Tool: " 'dsh-bridge-question-furniture-face)
 			  (dsh-bridge--question-propertize tool 'dsh-bridge-question-text-face)
@@ -5137,107 +5062,93 @@ drift.  A resolved buffer renders its resolution banner in place of the
 				  "\n")
 		  (let ((start (point)))
 			(insert (dsh-bridge--approval-format-arguments arguments) "\n")
-			(dsh-bridge--question-add-face start (point) 'dsh-bridge-question-detail-face)))))
-	(unless dsh-bridge--approval-dead
+			(dsh-bridge--question-add-face
+			 start (point) 'dsh-bridge-question-detail-face)))))
+	(when (eq dsh-bridge-approval-answer 'notify-only)
 	  (insert "\n")
 	  (let ((start (point)))
-		(insert (substitute-command-keys
-				 (concat
-				  "\\[dsh-bridge-approval-allow] allows this operation once, "
-				  "\\[dsh-bridge-approval-reject] rejects it, and "
-				  "\\[dsh-bridge-approval-cancel] cancels the request.\n"
-				  (if (eq dsh-bridge-approval-answer 'notify-only)
-					  "Approval answering is disabled \
-(dsh-bridge-approval-answer is notify-only); resolve this request in the web UI.\n"
-					""))))
+		(insert "Approval answering is disabled (dsh-bridge-approval-answer \
+is notify-only); resolve this request in the web UI.\n")
 		(dsh-bridge--question-add-face
 		 start (point) 'dsh-bridge-question-furniture-face)))
-	(goto-char (point-min))))
+	(buffer-string)))
 
-;; Decisions -----------------------------------------------------------------
+;; Showing and deciding ------------------------------------------------------
 
-(defun dsh-bridge--approval-decide (decision message)
-  "POST DECISION for this buffer's approval, bannering MESSAGE on acceptance.
+(defun dsh-bridge--approval-show (session-id plist)
+  "Show PLIST's approval details read-only, without offering a decision.
+SESSION-ID names the asking session.  This is the `notify-only' display path;
+`dsh-bridge-answer' prompts for a decision with `dsh-bridge--approval-prompt'
+instead."
+  (let ((buffer (get-buffer-create dsh-bridge--approval-buffer-name)))
+	(with-current-buffer buffer
+	  (unless (derived-mode-p 'special-mode)
+		(special-mode))
+	  (let ((inhibit-read-only t))
+		(erase-buffer)
+		(insert (dsh-bridge--approval-body session-id plist)))
+	  ;; A long details body must display from its heading, not its tail.
+	  (goto-char (point-min)))
+	(pop-to-buffer buffer)))
+
+(defun dsh-bridge--approval-prompt (session-id approval-id plist)
+  "Prompt in the minibuffer to decide PLIST's approval, then POST the choice.
+SESSION-ID and APPROVAL-ID name the request.  The details are shown
+alongside the prompt, and quitting without a choice (\\[keyboard-quit])
+leaves the approval pending for a later `dsh-bridge-answer'."
+  (let* ((tool (or (plist-get plist :tool-name) "this operation"))
+		 (answer (read-multiple-choice
+				  (format "Approve %s? " tool)
+				  '((?y "allow once" "Allow this operation once (a one-shot grant).")
+					(?n "reject" "Reject this operation.")
+					(?c "cancel" "Cancel the request (the asking tool call fails)."))
+				  (dsh-bridge--approval-body session-id plist)
+				  t)))
+	(pcase (car-safe answer)
+	  (?y (dsh-bridge--approval-decide
+		   session-id approval-id "allowed-once" "You allowed this operation once."))
+	  (?n (dsh-bridge--approval-decide
+		   session-id approval-id "rejected" "You rejected this operation."))
+	  (?c (dsh-bridge--approval-decide
+		   session-id approval-id "cancelled" "You cancelled this request.")))))
+
+(defun dsh-bridge--approval-decide (session-id approval-id decision message)
+  "POST DECISION for APPROVAL-ID of SESSION-ID, reporting MESSAGE on acceptance.
 DECISION is \"allowed-once\", \"rejected\", or \"cancelled\".  Mirrors the
-ask-user submit path: the local outcome is recorded before the POST leaves
-because the host's resolved frame races the response, and the DSH-View is
+ask-user submit path: the session's view note is recorded before the POST
+leaves (the host's resolved frame races the response), and the DSH-View is
 selected afterwards so the continuation follows."
-  (unless (eq major-mode 'dsh-bridge-approval-mode)
-	(user-error "Not in a DSH-Approval buffer"))
-  (cond
-   (dsh-bridge--approval-dead
-	(message "dsh-bridge: this approval was already resolved"))
-   ((eq dsh-bridge-approval-answer 'notify-only)
+  (unless (eq dsh-bridge-approval-answer 'all)
 	(user-error "dsh-bridge: approval answering is disabled (dsh-bridge-approval-answer is notify-only)"))
-   (t
-	(setq dsh-bridge--approval-sent message)
-	;; The view explains why it continues once this decision lands; recorded
-	;; pre-POST for the same race, and dropped on every branch that fails to
-	;; settle the approval.
-	(dsh-bridge--view-note-record dsh-bridge--approval-session message)
-	(let ((window (selected-window)))
-	  (pcase-let ((`(,status ,body ,http-status)
-				   (dsh-bridge--http "POST" "/approval"
-									 (list (cons 'approvalId dsh-bridge--approval-id)
-										   (cons 'sessionId dsh-bridge--approval-session)
-										   (cons 'decision decision)))))
-		(let* ((alist (ignore-errors
-						(json-parse-string body :object-type 'alist
-										   :null-object nil :false-object nil)))
-			   (reason (and alist (alist-get 'reason alist)))
-			   (accepted (and alist (alist-get 'accepted alist))))
-		  (cond
-		   ((and status (null accepted))
-			(dsh-bridge--view-answer-note-clear dsh-bridge--approval-session)
-			(message "dsh-bridge: %s" (dsh-bridge--error-message status http-status alist)))
-		   ((and reason (equal reason "not-pending"))
-			(dsh-bridge--view-answer-note-clear dsh-bridge--approval-session)
-			(message "dsh-bridge: already resolved")
-			(dsh-bridge--approval-mark-resolved
-			 dsh-bridge--approval-id
-			 "This approval was already resolved." 'elsewhere))
-		   (accepted
-			(message "dsh-bridge: %s" message)
-			(dsh-bridge--approval-mark-resolved dsh-bridge--approval-id message 'sent)
-			(dsh-bridge--exit-to-view
-			 (dsh-bridge--view-for-session dsh-bridge--approval-session)
-			 window))
-		   (t (dsh-bridge--view-answer-note-clear dsh-bridge--approval-session)
-			  (message "dsh-bridge: decision not accepted%s"
-					   (if reason (concat ": " reason) ""))))))))))
-
-(defun dsh-bridge-approval-allow ()
-  "Allow the pending approval in this buffer once (a one-shot grant)."
-  (interactive)
-  (dsh-bridge--approval-decide "allowed-once" "You allowed this operation once."))
-
-(defun dsh-bridge-approval-reject ()
-  "Reject the pending approval in this buffer."
-  (interactive)
-  (dsh-bridge--approval-decide "rejected" "You rejected this operation."))
-
-(defun dsh-bridge-approval-cancel ()
-  "Cancel the pending approval in this buffer (the asking tool call fails)."
-  (interactive)
-  (dsh-bridge--approval-decide "cancelled" "You cancelled this request."))
-
-(defvar-keymap dsh-bridge-approval-mode-map
-  :parent special-mode-map
-  :doc "Keymap for `dsh-bridge-approval-mode'."
-  "y" #'dsh-bridge-approval-allow
-  "a" #'dsh-bridge-approval-allow
-  "n" #'dsh-bridge-approval-reject
-  "r" #'dsh-bridge-approval-reject
-  "C-c C-k" #'dsh-bridge-approval-cancel
-  "q" #'quit-window)
-
-(define-derived-mode dsh-bridge-approval-mode special-mode "DSH-Approval"
-  "Major mode for deciding DSH approval requests.
-This buffer is launched when the user calls `dsh-bridge-answer' to
-decide an \"approval/request\" (for example a sandbox escalation).
-
-The buffer is read-only; these commands are available:
-\\{dsh-bridge-approval-mode-map}")
+  (dsh-bridge--view-note-record session-id message)
+  (let ((window (selected-window)))
+	(pcase-let ((`(,status ,body ,http-status)
+				 (dsh-bridge--http "POST" "/approval"
+								   (list (cons 'approvalId approval-id)
+										 (cons 'sessionId session-id)
+										 (cons 'decision decision)))))
+	  (let* ((alist (ignore-errors
+					  (json-parse-string body :object-type 'alist
+										 :null-object nil :false-object nil)))
+			 (reason (and alist (alist-get 'reason alist)))
+			 (accepted (and alist (alist-get 'accepted alist))))
+		(cond
+		 ((and status (null accepted))
+		  (dsh-bridge--view-answer-note-clear session-id)
+		  (message "dsh-bridge: %s" (dsh-bridge--error-message status http-status alist)))
+		 ((and reason (equal reason "not-pending"))
+		  (dsh-bridge--view-answer-note-clear session-id)
+		  (message "dsh-bridge: already resolved")
+		  (dsh-bridge--approval-retire session-id approval-id))
+		 (accepted
+		  (message "dsh-bridge: %s" message)
+		  (dsh-bridge--approval-retire session-id approval-id)
+		  (dsh-bridge--exit-to-view
+		   (dsh-bridge--view-for-session session-id)
+		   window))
+		 (t (dsh-bridge--view-answer-note-clear session-id)
+			(message "dsh-bridge: decision not accepted%s"
+					 (if reason (concat ": " reason) ""))))))))
 
 ;;; Prompt-buffer model selection and context occupancy
 

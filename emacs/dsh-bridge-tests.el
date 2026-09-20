@@ -8053,16 +8053,16 @@ bound to the invoking buffer's effective session, not to the default."
                                     :detail '((name . "bash")
                                               (arguments . "{\"command\":\"true\"}")))))))))
 
-(defun dsh-bridge-test--kill-approval-buffer (approval)
-  "Kill the live approval buffer deciding APPROVAL, if any."
-  (when (dsh-bridge--approval-find-buffer approval)
-    (kill-buffer (dsh-bridge--approval-find-buffer approval))))
+(defun dsh-bridge-test--kill-approval-display ()
+  "Kill the shared read-only approval display buffer, if any."
+  (when (get-buffer dsh-bridge--approval-buffer-name)
+    (kill-buffer (get-buffer dsh-bridge--approval-buffer-name))))
 
 (ert-deftest dsh-bridge-approval-arrive-and-glyph ()
   "An approval frame records a pending approval, lights the awaiting glyph, and
 spells out \"awaiting approval\" in the shown view header; a repeat frame for
 the same approval id (the host's reconnect replay) refreshes the stored copy
-silently.  The defensive turn-complete clear banners the live buffer."
+silently; the defensive turn-complete clear drops the registry."
   (let ((dsh-bridge--pending-approvals nil)
         (dsh-bridge--pending-questions nil)
         (dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t))))
@@ -8086,170 +8086,201 @@ silently.  The defensive turn-complete clear banners the live buffer."
       (setq-local dsh-bridge--view-content-session "s1")
       (should (string-match-p "awaiting approval" (dsh-bridge--view-header-line))))
     (dsh-bridge--approval-session-clear "s1")
-    (with-current-buffer (dsh-bridge--approval-find-buffer "a1")
-      (should dsh-bridge--approval-dead)
-      (should (string-match-p "no longer pending" (buffer-string))))
     (should-not dsh-bridge--pending-approvals)
-    (kill-buffer "*dsh-bridge-output*")
-    (dsh-bridge-test--kill-approval-buffer "a1")))
+    (kill-buffer "*dsh-bridge-output*")))
 
-(ert-deftest dsh-bridge-approval-buffer-renders-tool-reason-and-detail ()
-  "The approval buffer names the tool, the asker's reason, and the pending tool
-call's arguments (pretty-printed JSON), and it is read-only."
-  (let ((dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t)))))
-    (with-current-buffer
-        (dsh-bridge--approval-buffer
-         "s1" "a1"
-         (list :tool-name "bash"
-               :call-id "c1"
-               :reason "escalate sandbox to danger-full-access: need /etc/shadow"
-               :detail '((name . "bash")
-                         (arguments . "{\"command\":\"cat /etc/shadow\"}"))))
-      (should (eq major-mode 'dsh-bridge-approval-mode))
-      (should (string-match-p "requests approval" (buffer-string)))
-      (should (string-match-p "Tool: bash" (buffer-string)))
-      (should (string-match-p "need /etc/shadow" (buffer-string)))
-      (should (string-match-p "cat /etc/shadow" (buffer-string)))
+(ert-deftest dsh-bridge-approval-body-renders-tool-reason-and-detail ()
+  "The approval body names the tool, the asker's reason, and the pending tool
+call's arguments (pretty-printed JSON)."
+  (let ((dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t))))
+        (dsh-bridge-approval-answer 'all))
+    (let ((body (dsh-bridge--approval-body
+                 "s1"
+                 (list :tool-name "bash"
+                       :call-id "c1"
+                       :reason "escalate sandbox to danger-full-access: need /etc/shadow"
+                       :detail '((name . "bash")
+                                 (arguments . "{\"command\":\"cat /etc/shadow\"}"))))))
+      (should (string-match-p "requests approval" body))
+      (should (string-match-p "Tool: bash" body))
+      (should (string-match-p "need /etc/shadow" body))
+      (should (string-match-p "cat /etc/shadow" body))
       ;; The arguments are pretty-printed rather than shown as one long line.
-      (should (string-match-p "{\n  \"command\": \"cat /etc/shadow\"\n}" (buffer-string)))
-      (should (string-match-p "allows this operation once" (buffer-string)))
-      (should buffer-read-only))
-    (dsh-bridge-test--kill-approval-buffer "a1")))
+      (should (string-match-p "{\n  \"command\": \"cat /etc/shadow\"\n}" body))
+      (should-not (string-match-p "Approval answering is disabled" body)))))
 
-(ert-deftest dsh-bridge-approval-notify-only-renders-and-refuses ()
-  "With `dsh-bridge-approval-answer' at `notify-only' the buffer still renders
-the request but says answering is disabled, and no decision command POSTs."
+(ert-deftest dsh-bridge-approval-notify-only-shows-and-refuses ()
+  "With `dsh-bridge-approval-answer' at `notify-only' the details still render
+with a note that answering is disabled, `dsh-bridge-answer' displays them
+instead of prompting, and `dsh-bridge--approval-decide' refuses to POST."
   (let ((dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t))))
         (dsh-bridge-approval-answer 'notify-only)
-        (posted nil))
-    (with-current-buffer
-        (dsh-bridge--approval-buffer "s1" "a1"
-                                     (list :tool-name "bash" :call-id "c1"
-                                           :reason "r" :detail nil))
-      (should (string-match-p "Approval answering is disabled" (buffer-string)))
-      (cl-letf (((symbol-function 'dsh-bridge--http)
-                 (lambda (&rest _) (setq posted t) (list nil "{\"accepted\":true}" 200))))
-        (should-error (dsh-bridge-approval-allow) :type 'user-error)
-        (should-error (dsh-bridge-approval-reject) :type 'user-error)
-        (should-error (dsh-bridge-approval-cancel) :type 'user-error))
-      (should-not posted))
-    (dsh-bridge-test--kill-approval-buffer "a1")))
+        (dsh-bridge--pending-approvals
+         (dsh-bridge-test--pending-approval-registry "s1" "a1"))
+        (posted nil) (prompted nil) (shown nil))
+    (let ((body (dsh-bridge--approval-body
+                 "s1" (list :tool-name "bash" :reason "r" :detail nil))))
+      (should (string-match-p "Approval answering is disabled" body)))
+    (cl-letf (((symbol-function 'dsh-bridge--approval-show)
+               (lambda (session _plist) (setq shown session)))
+              ((symbol-function 'dsh-bridge--approval-prompt)
+               (lambda (&rest _) (setq prompted t)))
+              ((symbol-function 'dsh-bridge--http)
+               (lambda (&rest _) (setq posted t) (list nil "{\"accepted\":true}" 200))))
+      (with-temp-buffer
+        (dsh-bridge-view-mode)
+        (setq-local dsh-bridge--view-content-session "s1")
+        (dsh-bridge-answer))
+      (should (equal shown "s1"))
+      (should-not prompted)
+      (should-error (dsh-bridge--approval-decide "s1" "a1" "allowed-once" "x")
+                    :type 'user-error))
+    (should-not posted)))
 
-(ert-deftest dsh-bridge-approval-decisions-post-wire-payloads ()
-  "Each decision command POSTs `/dsh-bridge/approval' with the approval id,
-session id, and the matching decision string, banners the buffer with the
-local outcome, and exits to the session's view."
-  (dolist (case '(("a-y" dsh-bridge-approval-allow "allowed-once"
-                   "You allowed this operation once.")
-                 ("a-n" dsh-bridge-approval-reject "rejected"
-                   "You rejected this operation.")
-                 ("a-c" dsh-bridge-approval-cancel "cancelled"
-                   "You cancelled this request.")))
-    (let ((dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t))))
-          (dsh-bridge-approval-answer 'all)
+(ert-deftest dsh-bridge-approval-show-renders-read-only ()
+  "The display-only path fills the shared buffer with the request details,
+leaves it read-only, and displays it from the top."
+  (let ((dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t)))))
+    (unwind-protect
+        (save-window-excursion
+          (dsh-bridge--approval-show
+           "s1" (list :tool-name "bash" :reason "need /etc/shadow" :detail nil))
+          (with-current-buffer dsh-bridge--approval-buffer-name
+            (should (eq major-mode 'special-mode))
+            (should buffer-read-only)
+            (should (= (point) (point-min)))
+            (should (string-match-p "Tool: bash" (buffer-string)))
+            (should (string-match-p "need /etc/shadow" (buffer-string)))))
+      (dsh-bridge-test--kill-approval-display))))
+
+(ert-deftest dsh-bridge-approval-prompt-shows-details ()
+  "The decision prompt shows the request's details immediately, alongside the
+three labelled choices."
+  (let ((dsh-bridge-approval-answer 'all)
+        (dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t))))
+        (captured nil))
+    (cl-letf (((symbol-function 'read-multiple-choice)
+               (lambda (&rest args) (setq captured args) nil)))
+      (dsh-bridge--approval-prompt
+       "s1" "a1" (list :tool-name "bash" :reason "need it" :detail nil)))
+    (should (string-match-p "\\`Approve bash\\? " (nth 0 captured)))
+    (should (string-match-p "Tool: bash" (nth 2 captured)))
+    (should (eq (nth 3 captured) t))
+    (should (equal (mapcar #'car (nth 1 captured)) '(?y ?n ?c)))))
+
+(ert-deftest dsh-bridge-approval-prompt-posts-wire-payloads ()
+  "Each decision offered by the prompt POSTs `/dsh-bridge/approval' with the
+approval id, session id, and matching decision string, notes the outcome for
+the view, and exits to the session's view.  A prompt dismissed without a
+choice POSTs nothing."
+  (dolist (case '((?y "allowed-once" "You allowed this operation once.")
+                  (?n "rejected" "You rejected this operation.")
+                  (?c "cancelled" "You cancelled this request.")))
+    (let ((dsh-bridge-approval-answer 'all)
+          (dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t))))
           (dsh-bridge--view-answer-notes nil)
           (payloads nil)
           (exited nil))
-      (with-current-buffer
-          (dsh-bridge--approval-buffer "s1" (nth 0 case)
-                                       (list :tool-name "bash" :call-id "c1"
-                                             :reason "r" :detail nil))
-        (cl-letf (((symbol-function 'dsh-bridge--http)
-                   (lambda (_m path payload)
-                     (push (cons path payload) payloads)
-                     (list nil "{\"accepted\":true}" 200)))
-                  ((symbol-function 'dsh-bridge--view-for-session)
-                   (lambda (session-id) (cons 'view session-id)))
-                  ((symbol-function 'dsh-bridge--exit-to-view)
-                   (lambda (buffer &optional _window) (setq exited buffer))))
-          (funcall (nth 1 case)))
-        (should (equal (car (car payloads)) "/approval"))
-        (should (equal (cdr (assq 'decision (cdr (car payloads)))) (nth 2 case)))
-        (should (equal (cdr (assq 'approvalId (cdr (car payloads)))) (nth 0 case)))
-        (should (equal (cdr (assq 'sessionId (cdr (car payloads)))) "s1"))
-        (should dsh-bridge--approval-dead)
-        (should (string-match-p (regexp-quote (nth 3 case)) (buffer-string)))
-        (should-not (string-match-p "elsewhere" (buffer-string)))
-        (should (equal exited '(view . "s1"))))
-      (dsh-bridge-test--kill-approval-buffer (nth 0 case)))))
+      (cl-letf (((symbol-function 'read-multiple-choice)
+                 (lambda (&rest _) (list (nth 0 case) "name" "desc")))
+                ((symbol-function 'dsh-bridge--http)
+                 (lambda (_m path payload)
+                   (push (cons path payload) payloads)
+                   (list nil "{\"accepted\":true}" 200)))
+                ((symbol-function 'dsh-bridge--view-for-session)
+                 (lambda (session-id) (cons 'view session-id)))
+                ((symbol-function 'dsh-bridge--exit-to-view)
+                 (lambda (buffer &optional _window) (setq exited buffer)))
+                ((symbol-function 'dsh-bridge--status-event-render) #'ignore)
+                ((symbol-function 'dsh-bridge--view-await-refresh) #'ignore))
+        (dsh-bridge--approval-prompt
+         "s1" "a1"
+         (list :tool-name "bash" :call-id "c1" :reason "r" :detail nil)))
+      (should (equal (car (car payloads)) "/approval"))
+      (should (equal (cdr (assq 'decision (cdr (car payloads)))) (nth 1 case)))
+      (should (equal (cdr (assq 'approvalId (cdr (car payloads)))) "a1"))
+      (should (equal (cdr (assq 'sessionId (cdr (car payloads)))) "s1"))
+      (should (equal exited '(view . "s1")))
+      (should (equal (plist-get (cdr (assoc "s1" dsh-bridge--view-answer-notes)) :text)
+                     (nth 2 case)))))
+  ;; A dismissed prompt (RET, or a quit that returns) decides nothing.
+  (let ((dsh-bridge-approval-answer 'all)
+        (dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t))))
+        (posted nil))
+    (cl-letf (((symbol-function 'read-multiple-choice) (lambda (&rest _) nil))
+              ((symbol-function 'dsh-bridge--http)
+               (lambda (&rest _) (setq posted t) (list nil "{}" 200))))
+      (dsh-bridge--approval-prompt "s1" "a1" (list :tool-name "bash" :detail nil)))
+    (should-not posted)))
 
 (ert-deftest dsh-bridge-approval-decide-survives-raced-resolved-frame ()
   "The host's `approval-resolved' frame can outrun the decision POST's own
-response; the buffer then banners what this Emacs did (not \"elsewhere\"), and
-the late acceptance does not banner a second time."
-  (let ((dsh-bridge--pending-approvals nil)
+response; the decision still reports its own outcome, exits to the view, and
+retires the pending approval exactly once."
+  (let ((dsh-bridge--pending-approvals
+         (dsh-bridge-test--pending-approval-registry "s1" "a1"))
         (dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t))))
         (dsh-bridge--view-answer-notes nil)
-        (exited nil))
-    (cl-letf (((symbol-function 'message) (lambda (&rest _) nil))
+        (exited nil) (reported nil))
+    (cl-letf (((symbol-function 'message)
+               (lambda (fmt &rest args) (setq reported (apply #'format fmt args))))
               ((symbol-function 'dsh-bridge--status-event-render) #'ignore)
               ((symbol-function 'dsh-bridge--view-await-refresh) #'ignore)
+              ((symbol-function 'read-multiple-choice)
+               (lambda (&rest _) '(?y "yes" "allow")))
               ((symbol-function 'dsh-bridge--view-for-session)
                (lambda (session-id) (cons 'view session-id)))
               ((symbol-function 'dsh-bridge--exit-to-view)
-               (lambda (buffer &optional _window) (setq exited buffer))))
-      (dsh-bridge--approval-arrive "s1" "a1" (list :tool-name "bash" :call-id "c1"
-                                                   :reason "r" :detail nil))
-      (with-current-buffer (dsh-bridge--approval-find-buffer "a1")
-        (cl-letf (((symbol-function 'dsh-bridge--http)
-                   (lambda (_m _p _payload)
-                     (dsh-bridge--approval-resolved "s1" "a1" "allowed-once")
-                     (list nil "{\"accepted\":true}" 200))))
-          (dsh-bridge-approval-allow)))
-      (with-current-buffer (dsh-bridge--approval-find-buffer "a1")
-        (should (string-match-p "\\`You allowed this operation once\\.\n" (buffer-string)))
-        (should-not (string-match-p "elsewhere" (buffer-string)))
-        (should (equal (how-many "You allowed this operation once\\."
-                                 (point-min) (point-max)) 1))
-        (should (equal exited '(view . "s1")))))
-    (dsh-bridge-test--kill-approval-buffer "a1")))
+               (lambda (buffer &optional _window) (setq exited buffer)))
+              ((symbol-function 'dsh-bridge--http)
+               (lambda (&rest _)
+                 (dsh-bridge--approval-resolved "s1" "a1" "allowed-once")
+                 (list nil "{\"accepted\":true}" 200))))
+      (dsh-bridge--approval-prompt "s1" "a1" (list :tool-name "bash" :detail nil)))
+    (should-not dsh-bridge--pending-approvals)
+    (should (equal reported "dsh-bridge: You allowed this operation once."))
+    (should (equal exited '(view . "s1")))))
 
-(ert-deftest dsh-bridge-approval-resolved-banners-without-jumping ()
-  "An `approval-resolved' frame retires the pending approval and banners the
-buffer as resolved elsewhere, without moving the user's windows."
-  (let ((dsh-bridge--pending-approvals nil)
-        (dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t)))))
-    (cl-letf (((symbol-function 'message) (lambda (&rest _) nil))
-              ((symbol-function 'dsh-bridge--status-event-render) #'ignore)
-              ((symbol-function 'dsh-bridge--view-await-refresh) #'ignore)
+(ert-deftest dsh-bridge-approval-resolved-retires-without-jumping ()
+  "An `approval-resolved' frame retires the pending approval and refreshes the
+status and view, without moving the user's windows."
+  (let ((dsh-bridge--pending-approvals
+         (dsh-bridge-test--pending-approval-registry "s1" "a1"))
+        (rendered 0) (refreshed 0))
+    (cl-letf (((symbol-function 'dsh-bridge--status-event-render)
+               (lambda (_id) (cl-incf rendered)))
+              ((symbol-function 'dsh-bridge--view-await-refresh)
+               (lambda (_id) (cl-incf refreshed)))
               ((symbol-function 'dsh-bridge--exit-to-view)
-               (lambda (&rest _) (ert-fail "a resolved-elsewhere frame must not jump"))))
-      (dsh-bridge--approval-arrive "s1" "a1" (list :tool-name "bash" :call-id "c1"
-                                                   :reason "r" :detail nil))
+               (lambda (&rest _) (ert-fail "a resolved frame must not jump"))))
       (dsh-bridge--approval-resolved "s1" "a1" "rejected"))
     (should-not dsh-bridge--pending-approvals)
-    (with-current-buffer (dsh-bridge--approval-find-buffer "a1")
-      (should dsh-bridge--approval-dead)
-      (should (string-match-p "denied elsewhere" (buffer-string))))
-    ;; A cancelled frame reads as cancelled, not "resolved elsewhere".
-    (cl-letf (((symbol-function 'message) (lambda (&rest _) nil))
-              ((symbol-function 'dsh-bridge--status-event-render) #'ignore)
+    (should (equal rendered 1))
+    (should (equal refreshed 1))
+    ;; A late duplicate frame for the same approval is a harmless no-op.
+    (cl-letf (((symbol-function 'dsh-bridge--status-event-render) #'ignore)
               ((symbol-function 'dsh-bridge--view-await-refresh) #'ignore))
-      (dsh-bridge--approval-arrive "s1" "a2" (list :tool-name "bash" :call-id "c2"
-                                                   :reason "r" :detail nil))
-      (dsh-bridge--approval-resolved "s1" "a2" "cancelled"))
-    (with-current-buffer (dsh-bridge--approval-find-buffer "a2")
-      (should (string-match-p "was cancelled" (buffer-string))))
-    (dsh-bridge-test--kill-approval-buffer "a1")
-    (dsh-bridge-test--kill-approval-buffer "a2")))
+      (dsh-bridge--approval-resolved "s1" "a1" "cancelled"))
+    (should-not dsh-bridge--pending-approvals)))
 
 (ert-deftest dsh-bridge-answer-targeting-approval ()
-  "With no explicit target, `dsh-bridge-answer' opens the only pending
+  "With no explicit target, `dsh-bridge-answer' prompts for the only pending
 approval; with several pending interactions it refuses to guess; a view's
-explicit session is respected even when another session has the only
-pending approval."
+explicit session is respected even when another session has the only pending
+approval."
   (let ((dsh-bridge-default-session nil))
-    ;; Exactly one pending approval: unambiguous, so it is used.
+    ;; Exactly one pending approval: unambiguous, so it is prompted.
     (let ((dsh-bridge--pending-questions nil)
           (dsh-bridge--pending-approvals
            (dsh-bridge-test--pending-approval-registry "s1" "a1"))
-          (opened nil))
+          (prompted nil))
       (with-temp-buffer
         (dsh-bridge-prompt-mode)
-        (cl-letf (((symbol-function 'pop-to-buffer) (lambda (b &rest _) (setq opened b))))
+        (cl-letf (((symbol-function 'dsh-bridge--approval-prompt)
+                   (lambda (session approval-id _plist)
+                     (setq prompted (list session approval-id)))))
           (dsh-bridge-answer))
-        (should (equal (buffer-local-value 'dsh-bridge--approval-id opened) "a1")))
-      (dsh-bridge-test--kill-approval-buffer "a1"))
+        (should (equal prompted '("s1" "a1")))))
     ;; Several pending approvals: refuse to guess.
     (let ((dsh-bridge--pending-questions nil)
           (dsh-bridge--pending-approvals
@@ -8263,15 +8294,16 @@ pending approval."
     (let ((dsh-bridge--pending-questions nil)
           (dsh-bridge--pending-approvals
            (dsh-bridge-test--pending-approval-registry "s2" "a2"))
-          (opened nil) (msg nil))
+          (prompted nil) (msg nil))
       (with-temp-buffer
         (dsh-bridge-view-mode)
         (setq-local dsh-bridge--view-content-session "s1")
-        (cl-letf (((symbol-function 'pop-to-buffer) (lambda (b &rest _) (setq opened b)))
+        (cl-letf (((symbol-function 'dsh-bridge--approval-prompt)
+                   (lambda (&rest _) (setq prompted t)))
                   ((symbol-function 'message)
                    (lambda (&rest args) (setq msg (apply #'format args)))))
           (dsh-bridge-answer))
-        (should-not opened)
+        (should-not prompted)
         (should (string-match-p "no pending query or approval" msg))))))
 
 (ert-deftest dsh-bridge-answer-prefers-question-over-approval ()
@@ -8282,14 +8314,16 @@ approval, and the no-target fallback refuses when the union is ambiguous."
     (let ((dsh-bridge--pending-questions (dsh-bridge-test--pending-ask "s1" "Q?"))
           (dsh-bridge--pending-approvals
            (dsh-bridge-test--pending-approval-registry "s1" "a1"))
-          (opened nil))
+          (opened nil) (prompted nil))
       (with-temp-buffer
         (dsh-bridge-view-mode)
         (setq-local dsh-bridge--view-content-session "s1")
-        (cl-letf (((symbol-function 'pop-to-buffer) (lambda (b &rest _) (setq opened b))))
+        (cl-letf (((symbol-function 'pop-to-buffer) (lambda (b &rest _) (setq opened b)))
+                  ((symbol-function 'dsh-bridge--approval-prompt)
+                   (lambda (&rest _) (setq prompted t))))
           (dsh-bridge-answer))
-        (should (eq (buffer-local-value 'major-mode opened) 'dsh-bridge-question-mode)))
-      (dsh-bridge-test--kill-approval-buffer "a1")
+        (should (eq (buffer-local-value 'major-mode opened) 'dsh-bridge-question-mode))
+        (should-not prompted))
       (when (dsh-bridge--question-find-buffer "q1")
         (kill-buffer (dsh-bridge--question-find-buffer "q1"))))
     ;; One query and one approval in different sessions: the union is ambiguous.
@@ -8371,8 +8405,7 @@ awaiting note; an `approval-resolved' frame flips it back."
           (outcome . "allowed-once"))))
       (with-current-buffer "*dsh-bridge-output*"
         (should (string-match-p "(continuing\\.\\.\\.)" (buffer-string)))))
-    (kill-buffer "*dsh-bridge-output*")
-    (dsh-bridge-test--kill-approval-buffer "a1")))
+    (kill-buffer "*dsh-bridge-output*")))
 
 (ert-deftest dsh-bridge-notifications-answer-posture ()
   "The SSE notification request marks `answer=0' exactly when
@@ -8739,9 +8772,8 @@ cache — the footer's attribution source."
                 #'dsh-bridge--describe-open-view))))
 
 (ert-deftest dsh-bridge-tool-bar-other-modes-default ()
-  "Changes/question/approval buffers keep the global tool bar."
-  (dolist (mode '(dsh-bridge-changes-mode dsh-bridge-question-mode
-                  dsh-bridge-approval-mode))
+  "Changes/question buffers keep the global tool bar."
+  (dolist (mode '(dsh-bridge-changes-mode dsh-bridge-question-mode))
     (with-temp-buffer
       (funcall mode)
       (should-not (local-variable-p 'tool-bar-map)))))
