@@ -1406,18 +1406,6 @@ NOW is the reference time in seconds (default: the current time)."
 	 ((< secs (* 365 86400)) (format "%dmo" (floor (/ secs (* 30 86400)))))
 	 (t (format "%dy" (floor (/ secs (* 365 86400))))))))
 
-(defun dsh-bridge--format-run-duration (seconds)
-  "Format SECONDS as a compact run duration.
-The result is \"9s\", \"2m5s\", or \"1h2m3s\"; units with a zero value
-lead to the next smaller unit, and no unit is zero-padded."
-  (let* ((secs (max 0 (floor seconds)))
-		 (hours (floor (/ secs 3600)))
-		 (minutes (floor (/ (% secs 3600) 60)))
-		 (rest (% secs 60)))
-	(cond ((> hours 0) (format "%dh%dm%ds" hours minutes rest))
-		  ((> minutes 0) (format "%dm%ds" minutes rest))
-		  (t (format "%ds" rest)))))
-
 (defun dsh-bridge--format-clock (ms &optional now)
   "Format ms-epoch MS as a compact wall clock, e.g. \"9/14 21:44\".
 A year prefix is added when MS does not fall in NOW's calendar year;
@@ -2873,7 +2861,8 @@ Reads only the turns cache and status tracker — no I/O in a display path."
 	  (let ((started (alist-get 'startedAt record)))
 		(if (and dsh-bridge-view-elapsed-ticker (numberp started))
 			(format "running: %s"
-					(dsh-bridge--format-run-duration (- (float-time) (/ started 1000.0))))
+					(dsh-bridge--format-duration
+					 (- (* 1000 (float-time)) started) 'compact))
 		  "running")))
 	 (record
 	  (let ((end (dsh-bridge--view-turn-end-time record)))
@@ -2882,7 +2871,8 @@ Reads only the turns cache and status tracker — no I/O in a display path."
 	 (dsh-bridge--view-waiting
 	  (if (and dsh-bridge-view-elapsed-ticker (numberp start))
 		  (format "running: %s"
-				  (dsh-bridge--format-run-duration (- (float-time) (/ start 1000.0))))
+				  (dsh-bridge--format-duration
+				   (- (* 1000 (float-time)) start) 'compact))
 		"running"))
 	 (t nil))))
 
@@ -6461,22 +6451,41 @@ The row's workspace id comes from the cached session; prompts for the new title
 							 result)))
 	  (concat (if negative "-" "") result))))
 
-(defun dsh-bridge--format-duration (ms)
-  "Format millisecond duration MS as \"450 ms\", \"12.3 s\", \"2m 13.4s\",
-or \"1h 35m\"."
+(defun dsh-bridge--format-duration (ms &optional style)
+  "Format millisecond duration MS.
+STYLE `precise' (the default) is the report's static form: \"450ms\",
+\"12.3s\", \"2m 13.4s\", or \"1h 35m\".  STYLE `compact' is the live
+run clock's: \"9s\", \"2m 5s\", or \"1h 2m 3s\".  Both glue a unit
+letter to its number and separate components with a space.  A
+non-number renders as \"—\"; a negative duration counts as zero."
   (if (not (numberp ms)) "—"
-	(let ((seconds (/ ms 1000.0)))
-	  (cond
-	   ((< ms 1000) (format "%.0f ms" ms))
-	   ((< seconds 60) (format "%.1f s" seconds))
-	   ((< seconds 3600)
-		(format "%dm %04.1fs" (floor (/ seconds 60))
-				(- seconds (* 60 (floor (/ seconds 60))))))
-	   (t (let ((hours (floor (/ seconds 3600))))
-			;; `seconds' is a float, so take the remainder by
-			;; subtraction: `%' rejects a float operand.
-			(format "%dh %dm" hours
-					(floor (/ (- seconds (* hours 3600)) 60)))))))))
+	(let* ((ms (max 0 ms))
+		   (seconds (/ ms 1000.0))
+		   ;; Round to the precision a band displays before choosing
+		   ;; it, so a value that rounds up across a unit boundary
+		   ;; (59.999s) is shown as "1m 00.0s", not "60.0s".
+		   (rounded (/ (round (* 10 seconds)) 10.0)))
+	  (if (eq style 'compact)
+		  (let* ((secs (floor seconds))
+				 (hours (floor (/ secs 3600)))
+				 (minutes (floor (/ (% secs 3600) 60)))
+				 (rest (% secs 60)))
+			(cond ((> hours 0) (format "%dh %dm %ds" hours minutes rest))
+				  ((> minutes 0) (format "%dm %ds" minutes rest))
+				  (t (format "%ds" rest))))
+		(cond
+		 ;; The ms band keeps its own boundary; clamping stops a
+		 ;; value like 999.6 from printing "1000ms" inside it.
+		 ((< ms 1000) (format "%.0fms" (min ms 999.0)))
+		 ((< rounded 60) (format "%.1fs" rounded))
+		 ((< rounded 3600)
+		  (format "%dm %04.1fs" (floor (/ rounded 60))
+				  (- rounded (* 60 (floor (/ rounded 60))))))
+		 (t (let ((hours (floor (/ rounded 3600))))
+			  ;; `rounded' is a float, so take the remainder by
+			  ;; subtraction: `%' rejects a float operand.
+			  (format "%dh %dm" hours
+					  (floor (/ (- rounded (* hours 3600)) 60))))))))))
 
 (defun dsh-bridge--format-percent (num den)
   "Format NUM/DEN as a percentage, or nil when DEN is not positive."

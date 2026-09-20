@@ -5966,7 +5966,7 @@ shows its end clock, and a pushed message with no turn shows nothing."
       (setq-local dsh-bridge--view-turn 2)
       (setq-local dsh-bridge--turns-cache
                 '(("s1" 1 ((turn . 2) (startedAt . 1000000) (segments)))))
-      (should (equal (dsh-bridge--view-turn-time-label "s1") "running: 1m5s"))
+      (should (equal (dsh-bridge--view-turn-time-label "s1") "running: 1m 5s"))
       (should (dsh-bridge--view-running-duration-p))
       ;; Disabling the ticker drops the duration but keeps the state.
       (let ((dsh-bridge-view-elapsed-ticker nil))
@@ -5993,7 +5993,7 @@ shows its end clock, and a pushed message with no turn shows nothing."
       (setq-local dsh-bridge--view-turn 3)
       (setq-local dsh-bridge--view-waiting t)
       (setq-local dsh-bridge--turns-cache nil)
-      (should (equal (dsh-bridge--view-turn-time-label "s1") "running: 1m5s"))
+      (should (equal (dsh-bridge--view-turn-time-label "s1") "running: 1m 5s"))
       (should (dsh-bridge--view-running-duration-p)))))
 
 (ert-deftest dsh-bridge-turn-boundary-echo ()
@@ -7600,15 +7600,22 @@ pinning the retry to that id."
   (should (equal (dsh-bridge--format-number 0) "0"))
   (should (equal (dsh-bridge--format-number -1234) "-1,234"))
   (should (equal (dsh-bridge--format-number nil) "—"))
-  (should (equal (dsh-bridge--format-duration 450) "450 ms"))
-  (should (equal (dsh-bridge--format-duration 12300) "12.3 s"))
+  (should (equal (dsh-bridge--format-duration 450) "450ms"))
+  (should (equal (dsh-bridge--format-duration 12300) "12.3s"))
   (should (equal (dsh-bridge--format-duration 133400) "2m 13.4s"))
+  ;; A value that rounds up across a unit boundary is shown in the larger
+  ;; unit, not as "60.0s".
+  (should (equal (dsh-bridge--format-duration 59999) "1m 00.0s"))
+  ;; The compact style is the live run clock's whole-second form.
+  (should (equal (dsh-bridge--format-duration 65000 'compact) "1m 5s"))
+  (should (equal (dsh-bridge--format-duration 3600000 'compact) "1h 0m 0s"))
   ;; A float `seconds' must not reach `%', which only takes integers: a
   ;; long-running session's tool time (here 1h 35m) used to signal
   ;; `wrong-type-argument integer-or-marker-p 5701.55' and abort the report.
   (should (equal (dsh-bridge--format-duration 3600000) "1h 0m"))
   (should (equal (dsh-bridge--format-duration 5701550) "1h 35m"))
   (should (equal (dsh-bridge--format-duration nil) "—"))
+  (should (equal (dsh-bridge--format-duration -5) "0ms"))
   (should (equal (dsh-bridge--format-percent 1 4) "25.0%"))
   (should-not (dsh-bridge--format-percent 1 0))
   (should (equal (dsh-bridge--format-time nil) "—")))
