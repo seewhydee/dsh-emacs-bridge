@@ -346,14 +346,6 @@ the synchronous request never runs inside the SSE process filter."
   :type 'boolean
   :group 'dsh-bridge)
 
-(defcustom dsh-bridge-question-auto-pop nil
-  "Whether an arriving ask-user question pops to its question buffer.
-When nil (the default), an ask is announced in the echo area and the
-DSH-View buffer, and the user must run ``\\[dsh-bridge-answer]' to
-answer it.  If non-nil, pop to the question buffer on arrival."
-  :type 'boolean
-  :group 'dsh-bridge)
-
 (defcustom dsh-bridge-question-markdown t
   "Whether to fontify an ask-user question's `detail' as Markdown.
 When non-nil and `markdown-mode' is installed, a plan-review question's
@@ -4223,10 +4215,15 @@ frame cannot still be waiting on the user."
 		(assoc-delete-all session-id dsh-bridge--pending-questions)))
 
 (defun dsh-bridge--ask-user-arrive (session-id question-id questions)
-  "Record a newly arrived ask-user question, announce it, and render its buffer.
+  "Record a newly arrived ask-user question and announce it.
+Only the registry entry is materialized here; the question buffer is created
+on demand when the user runs `\\[dsh-bridge-answer]', so an ask that arrives
+while the user is elsewhere leaves no buffer to go stale, and one that is
+resolved before it is ever opened leaves no trace at all.  The announcement is
+the echo-area message and the DSH-View body.
 A question-id already in the registry is a replay — the plugin re-announces
 pending asks to every reconnecting SSE client — so it just refreshes the
-stored copy, silently, without re-messaging or touching the question buffer."
+stored copy, silently, without re-messaging or re-rendering."
   (let* ((entry (assoc session-id dsh-bridge--pending-questions))
 		 (slot (and entry (assoc question-id (cdr entry)))))
 	(if slot
@@ -4243,10 +4240,7 @@ stored copy, silently, without re-messaging or touching the question buffer."
 				 (substitute-command-keys "\\[dsh-bridge-answer]")))
 	  (dsh-bridge--status-event-render session-id)
 	  ;; The DSH-View body must say the session is parked, not "(continuing...)".
-	  (dsh-bridge--view-await-refresh session-id)
-	  (let ((buffer (dsh-bridge--question-buffer session-id question-id questions)))
-		(when dsh-bridge-question-auto-pop
-		  (pop-to-buffer buffer))))))
+	  (dsh-bridge--view-await-refresh session-id))))
 
 (defun dsh-bridge--ask-user-resolved (session-id question-id outcome)
   "Retire a pending ask for SESSION-ID when it was ANSWERED or CANCELLED.

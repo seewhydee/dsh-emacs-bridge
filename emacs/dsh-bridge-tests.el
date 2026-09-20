@@ -6461,26 +6461,37 @@ buffer is gone); killing the last ticking view cancels the timer."
 
 (ert-deftest dsh-bridge-ask-user-arrive-and-glyph ()
   "An ask-user frame records a pending question, lights the awaiting glyph, and
-spells out 'awaiting your answer' in the shown view header.  A repeat frame
+spells out 'awaiting your answer' in the shown view header.  It creates no
+question buffer — that is deferred to `dsh-bridge-answer' — and a repeat frame
 for the same question id (the plugin's reconnect replay) refreshes the stored
 copy silently instead of duplicating the registry entry."
   (let ((dsh-bridge--pending-questions nil)
         (dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t))))
         (messages 0))
     (cl-letf (((symbol-function 'message) (lambda (&rest _) (cl-incf messages)))
-              ((symbol-function 'dsh-bridge--status-event-render) #'ignore))
+              ((symbol-function 'dsh-bridge--status-event-render) #'ignore)
+              ;; An arriving ask is asynchronous: it must not create, select,
+              ;; or display any buffer, let alone move the user out of the
+              ;; current one.
+              ((symbol-function 'pop-to-buffer)
+               (lambda (&rest _) (ert-fail "an arriving ask must not pop"))))
       (dsh-bridge--ask-user-arrive "s1" "q1" '(( (id . "q1") (question . "Go?") )))
       (dsh-bridge--ask-user-arrive "s1" "q1" '(( (id . "q1") (question . "Go? v2") ))))
     (should (equal messages 1))
     (should (equal (length (cdr (assoc "s1" dsh-bridge--pending-questions))) 1))
+    (should-not (dsh-bridge--question-find-buffer "q1"))
     (let ((dsh-bridge-status-indicator 'emoji))
       (should (string= (dsh-bridge--status-glyph "s1") "💬")))
     (with-current-buffer (get-buffer-create "*dsh-bridge-output*")
       (dsh-bridge-view-mode)
       (setq-local dsh-bridge--view-content-session "s1")
       (should (string-match-p "waiting for answer" (dsh-bridge--view-header-line))))
+    ;; The user opened the question buffer (the `a' path) and then the turn
+    ;; ended without a resolved frame: the defensive clear banners the live
+    ;; buffer it finds, and only that one.
+    (let ((pending (dsh-bridge--pending-question "s1")))
+      (dsh-bridge--question-buffer "s1" (car pending) (cdr pending)))
     (dsh-bridge--ask-user-session-clear "s1")
-    ;; The defensive clear also banners the live question buffer.
     (with-current-buffer (dsh-bridge--question-find-buffer "q1")
       (should dsh-bridge--question-dead)
       (should (string-match-p "no longer pending" (buffer-string))))
@@ -6495,7 +6506,6 @@ copy silently instead of duplicating the registry entry."
 command is unbound — the frame is handled from an arbitrary buffer."
   (let ((dsh-bridge--pending-questions nil)
         (dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t))))
-        (dsh-bridge-question-auto-pop nil)
         (msg nil))
     (cl-letf (((symbol-function 'message)
                (lambda (&rest args) (setq msg (apply #'format args))))
@@ -6525,6 +6535,10 @@ session is waiting for an answer, and nothing jumps: the user did not act."
               ((symbol-function 'dsh-bridge--exit-to-view)
                (lambda (&rest _) (ert-fail "a resolved-elsewhere frame must not jump"))))
       (dsh-bridge--ask-user-arrive "s1" "q1" '(( (id . "q1") (question . "Go?") )))
+      ;; The user had opened the buffer (the `a' path) before it resolved
+      ;; elsewhere; that open buffer is what gets bannered.
+      (let ((pending (dsh-bridge--pending-question "s1")))
+        (dsh-bridge--question-buffer "s1" (car pending) (cdr pending)))
       (dsh-bridge--ask-user-resolved "s1" "q1" "answered"))
     (with-current-buffer (get-buffer "*dsh-bridge-question: T*")
       (should dsh-bridge--question-dead)
@@ -6585,6 +6599,8 @@ without jumping."
               ((symbol-function 'dsh-bridge--exit-to-view)
                (lambda (&rest _) (ert-fail "a cancelled frame must not jump"))))
       (dsh-bridge--ask-user-arrive "s1" "q1" '(( (id . "q1") (question . "Go?") )))
+      (let ((pending (dsh-bridge--pending-question "s1")))
+        (dsh-bridge--question-buffer "s1" (car pending) (cdr pending)))
       (dsh-bridge--ask-user-resolved "s1" "q1" "cancelled")
       (should (null dsh-bridge--pending-questions)))
     (with-current-buffer (get-buffer "*dsh-bridge-question: T*")
