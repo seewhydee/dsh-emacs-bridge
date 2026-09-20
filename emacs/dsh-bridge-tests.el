@@ -910,7 +910,7 @@ binds the compose keys plus fetch/set-session/list."
   (should (eq (lookup-key dsh-bridge-prompt-mode-map (kbd "C-c C-d"))
               #'dsh-bridge-draft))
   (should (eq (lookup-key dsh-bridge-prompt-mode-map (kbd "C-c C-k"))
-              #'dsh-bridge-erase-prompt))
+              #'dsh-bridge-prompt-stop-or-erase))
   (should (eq (lookup-key dsh-bridge-prompt-mode-map (kbd "C-c C-f"))
               #'dsh-bridge-fetch))
   (should (eq (lookup-key dsh-bridge-prompt-mode-map (kbd "C-c C-m"))
@@ -954,6 +954,113 @@ binds the compose keys plus fetch/set-session/list."
       (set-buffer-modified-p nil)
       (dsh-bridge-erase-prompt)
       (should (equal (buffer-string) "")))))
+
+(ert-deftest dsh-bridge-erase-prompt-resets-modified-flag ()
+  "After an erase the buffer is pristine again, so the next erase is silent.
+`erase-buffer' sets the modified flag; an empty buffer must not be left
+looking like an unsent draft."
+  (with-temp-buffer
+    (dsh-bridge-prompt-mode)
+    (insert "text")
+    (set-buffer-modified-p nil)
+    (dsh-bridge-erase-prompt)
+    (should (equal (buffer-string) ""))
+    (should-not (buffer-modified-p)))
+  ;; The same holds after a confirmed erase of modified text.
+  (with-temp-buffer
+    (dsh-bridge-prompt-mode)
+    (insert "draft")
+    (set-buffer-modified-p t)
+    (cl-letf (((symbol-function 'yes-or-no-p) (lambda (_prompt) t)))
+      (dsh-bridge-erase-prompt))
+    (should (equal (buffer-string) ""))
+    (should-not (buffer-modified-p))))
+
+(ert-deftest dsh-bridge-erase-prompt-empty-never-prompts ()
+  "An empty buffer is erased without asking, even with a stray flag."
+  (with-temp-buffer
+    (dsh-bridge-prompt-mode)
+    (set-buffer-modified-p t)
+    (cl-letf (((symbol-function 'yes-or-no-p)
+               (lambda (_prompt) (error "should not ask"))))
+      (dsh-bridge-erase-prompt))
+    (should (equal (buffer-string) ""))
+    (should-not (buffer-modified-p))))
+
+(ert-deftest dsh-bridge-prompt-stop-or-erase-running-stops ()
+  "A running effective session takes the stop branch."
+  (let ((called 'none)
+        (dsh-bridge--session-status '(("s1" running . 1000)))
+        (dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t)))))
+    (cl-letf (((symbol-function 'dsh-bridge-stop-session)
+               (lambda (&optional force) (setq called force))))
+      (with-temp-buffer
+        (dsh-bridge-prompt-mode)
+        (setq-local dsh-bridge--prompt-session "s1")
+        (insert "draft")
+        (dsh-bridge-prompt-stop-or-erase)
+        (should (eq called nil))
+        (should (equal (buffer-string) "draft"))))))
+
+(ert-deftest dsh-bridge-prompt-stop-or-erase-idle-erases ()
+  "An idle session takes the erase branch."
+  (let ((dsh-bridge--session-status nil)
+        (dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t)))))
+    (cl-letf (((symbol-function 'dsh-bridge-stop-session)
+               (lambda (&optional _force) (error "should not stop"))))
+      (with-temp-buffer
+        (dsh-bridge-prompt-mode)
+        (setq-local dsh-bridge--prompt-session "s1")
+        (insert "stale")
+        (set-buffer-modified-p nil)
+        (dsh-bridge-prompt-stop-or-erase)
+        (should (equal (buffer-string) ""))))))
+
+(ert-deftest dsh-bridge-prompt-stop-or-erase-declining-does-not-erase ()
+  "Declining the stop confirmation must not erase the prompt as a fallback."
+  (let ((dsh-bridge--session-status '(("s1" running . 1000)))
+        (dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t)))))
+    (cl-letf (((symbol-function 'y-or-n-p) (lambda (_prompt) nil))
+              ((symbol-function 'dsh-bridge--request)
+               (lambda (&rest _) (cons 200 nil)))
+              ((symbol-function 'message) #'ignore))
+      (with-temp-buffer
+        (dsh-bridge-prompt-mode)
+        (setq-local dsh-bridge--prompt-session "s1")
+        (insert "draft")
+        (set-buffer-modified-p t)
+        (dsh-bridge-prompt-stop-or-erase)
+        (should (equal (buffer-string) "draft"))))))
+
+(ert-deftest dsh-bridge-prompt-stop-or-erase-force-stops-when-idle ()
+  "A prefix argument takes the stop branch despite an idle cached status."
+  (let ((called 'none)
+        (dsh-bridge--session-status nil)
+        (dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t)))))
+    (cl-letf (((symbol-function 'dsh-bridge-stop-session)
+               (lambda (&optional force) (setq called force))))
+      (with-temp-buffer
+        (dsh-bridge-prompt-mode)
+        (setq-local dsh-bridge--prompt-session "s1")
+        (insert "draft")
+        (dsh-bridge-prompt-stop-or-erase t)
+        (should (equal called t))
+        (should (equal (buffer-string) "draft"))))))
+
+(ert-deftest dsh-bridge-prompt-stop-or-erase-unknown-erases ()
+  "A cold (unknown-status) or absent session is never running: erase."
+  (dolist (cache '(nil (((id . "s1") (title . "T")))))
+    (let ((dsh-bridge--session-status nil)
+          (dsh-bridge--sessions-cache cache))
+      (cl-letf (((symbol-function 'dsh-bridge-stop-session)
+                 (lambda (&optional _force) (error "should not stop"))))
+        (with-temp-buffer
+          (dsh-bridge-prompt-mode)
+          (setq-local dsh-bridge--prompt-session "s1")
+          (insert "x")
+          (set-buffer-modified-p nil)
+          (dsh-bridge-prompt-stop-or-erase)
+          (should (equal (buffer-string) "")))))))
 
 (ert-deftest dsh-bridge-prompt-header-session-label ()
   "The prompt header qualifies a guessed last-active session.
@@ -2571,20 +2678,24 @@ raw id is not used, so an untitled row reads as untitled."
     (should (string-match-p "is not running" msg))))
 
 (ert-deftest dsh-bridge-stop-session-aborts-on-no ()
-  "Declining the confirmation sends nothing."
-  (let ((called nil) (msg nil)
+  "Declining the confirmation sends no stop request.  The advisory queue
+read still happens, since it words the confirmation."
+  (let ((calls nil) (msg nil)
         (dsh-bridge--session-status '(("s1" running . 1000)))
         (dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t)))))
     (cl-letf (((symbol-function 'y-or-n-p) (lambda (_prompt) nil))
               ((symbol-function 'dsh-bridge--request)
-               (lambda (&rest args) (setq called args) (cons 200 nil)))
+               (lambda (method path payload)
+                 (push (list method path payload) calls)
+                 (cons 200 nil)))
               ((symbol-function 'message)
                (lambda (&rest args) (setq msg (apply #'format args)))))
       (with-temp-buffer
         (dsh-bridge-view-mode)
         (setq-local dsh-bridge--view-content-session "s1")
         (dsh-bridge-stop-session)))
-    (should-not called)
+    (should-not (assoc "/sessions/stop"
+                       (mapcar (lambda (c) (cadr c)) calls)))
     (should (string-match-p "aborted" msg))))
 
 (ert-deftest dsh-bridge-stop-session-race-reports-no-longer-running ()
@@ -2725,6 +2836,80 @@ raw id is not used, so an untitled row reads as untitled."
         (dsh-bridge-stop-session)))
     (should-not called)
     (should (string-match-p "no session to stop" msg))))
+
+(ert-deftest dsh-bridge-stop-confirmation-names-pending-interaction ()
+  "A pending question or approval is named in the stop confirmation."
+  (let ((dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t)))))
+    (cl-letf (((symbol-function 'dsh-bridge--request)
+               (lambda (&rest _) (cons 200 nil))))
+      (let ((dsh-bridge--pending-questions
+             (list (cons "s1" (list (cons "q1" nil)))))
+            (dsh-bridge--pending-approvals nil))
+        (should (string-match-p "waiting for your answer"
+                                (dsh-bridge--stop-confirmation "s1"))))
+      (let ((dsh-bridge--pending-questions nil)
+            (dsh-bridge--pending-approvals
+             (list (cons "s1" (list (cons "a1" nil))))))
+        (should (string-match-p "waiting for your approval"
+                                (dsh-bridge--stop-confirmation "s1")))))))
+
+(ert-deftest dsh-bridge-stop-confirmation-names-queued-prompts ()
+  "Queued and steering counts are folded into the one confirmation, and a
+zero count for either is omitted."
+  (let ((dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t))))
+        (dsh-bridge--pending-questions nil)
+        (dsh-bridge--pending-approvals nil))
+    (cl-letf (((symbol-function 'dsh-bridge--request)
+               (lambda (&rest _)
+                 (cons 200 (list (cons 'queued 2) (cons 'steering 1))))))
+      (let ((text (dsh-bridge--stop-confirmation "s1")))
+        (should (string-match-p "2 queued prompts will start a new turn" text))
+        (should (string-match-p "1 steering prompt may linger or be discarded"
+                                text))))
+    (cl-letf (((symbol-function 'dsh-bridge--request)
+               (lambda (&rest _)
+                 (cons 200 (list (cons 'queued 1) (cons 'steering 0))))))
+      (let ((text (dsh-bridge--stop-confirmation "s1")))
+        (should (string-match-p "1 queued prompt will start a new turn" text))
+        (should-not (string-match-p "steering" text))))
+    (cl-letf (((symbol-function 'dsh-bridge--request)
+               (lambda (&rest _)
+                 (cons 200 (list (cons 'queued 0) (cons 'steering 3))))))
+      (let ((text (dsh-bridge--stop-confirmation "s1")))
+        (should-not (string-match-p "queued" text))
+        (should (string-match-p "3 steering prompts" text))))))
+
+(ert-deftest dsh-bridge-stop-confirmation-survives-read-failure ()
+  "A queue read that does not answer drops the note and keeps the stop.
+The counts only word the confirmation, so a transport fault, a 404 from an
+old plugin, or an empty body must never block the stop."
+  (let ((dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t))))
+        (dsh-bridge--pending-questions nil)
+        (dsh-bridge--pending-approvals nil))
+    (dolist (result '((nil . nil) (404 . ((error . "not found"))) (200 . nil)))
+      (cl-letf (((symbol-function 'dsh-bridge--request)
+                 (lambda (&rest _) result)))
+        (let ((text (dsh-bridge--stop-confirmation "s1")))
+          (should (string-match-p "Stop running session T" text))
+          (should-not (string-match-p "queued\\|steering" text)))))))
+
+(ert-deftest dsh-bridge-stop-session-prompt-names-queued ()
+  "The command's own confirmation carries the helper's queue note."
+  (let ((prompt nil)
+        (dsh-bridge--session-status '(("s1" running . 1000)))
+        (dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t)))))
+    (cl-letf (((symbol-function 'y-or-n-p) (lambda (p) (setq prompt p) t))
+              ((symbol-function 'dsh-bridge--request)
+               (lambda (method _path _payload)
+                 (if (equal method "GET")
+                     (cons 200 (list (cons 'queued 2)))
+                   (cons 200 (list (cons 'accepted t) (cons 'running t))))))
+              ((symbol-function 'message) #'ignore))
+      (with-temp-buffer
+        (dsh-bridge-view-mode)
+        (setq-local dsh-bridge--view-content-session "s1")
+        (dsh-bridge-stop-session)))
+    (should (string-match-p "2 queued prompts" prompt))))
 
 (ert-deftest dsh-bridge-rename-workspace-marshals-args ()
   "Rename-workspace POSTs the row's workspace id and new title."
@@ -4201,6 +4386,9 @@ end clock; an open turn shows its elapsed run."
 declining aborts, and edited text sends without asking."
   (let ((dsh-bridge-prompt-resend-confirm t)
         (dsh-bridge--last-sent '(("s1" . ("hello" . 1234567.0))))
+        ;; The session reads idle, so the busy choice never prompts.
+        (dsh-bridge--sessions-cache nil)
+        (dsh-bridge--session-status nil)
         (asked nil) (sent nil))
     (with-temp-buffer
       (dsh-bridge-prompt-mode)
@@ -4297,6 +4485,158 @@ bound buffer carries its own: neither may be frozen to the host's answer."
     (should (equal (car result) "s2"))
     (should-not (seq-some (lambda (m) (string-match-p "bound to session" m))
                           (cdr result)))))
+
+(defun dsh-bridge-test--busy-send-and-exit (choice &optional steer option)
+  "Run `dsh-bridge-send-and-exit' from a running session's prompt buffer.
+CHOICE is the value stubbed for `read-multiple-choice'; nil makes any
+prompt an error, for asserting that none happens.  STEER is the prefix
+argument and OPTION overrides `dsh-bridge-send-while-running'.  Return
+the MODE argument handed to `dsh-bridge-send-text', or `none' when
+nothing was sent."
+  (dsh-bridge-test--kill-prompt-buffer)
+  (let ((mode 'none)
+        (dsh-bridge-prompt-resend-confirm nil)
+        (dsh-bridge-send-while-running (or option 'ask))
+        (dsh-bridge--last-sent nil)
+        (dsh-bridge--session-status '(("s1" running . 1000)))
+        (dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t))))
+        (dsh-bridge--bridge-status-cache 'running))
+    (unwind-protect
+        (with-current-buffer (get-buffer-create "*dsh-bridge-prompt*")
+          (dsh-bridge-prompt-mode)
+          (setq-local dsh-bridge--prompt-session "s1")
+          (insert "hello")
+          (cl-letf (((symbol-function 'read-multiple-choice)
+                     (lambda (&rest _)
+                       (if choice choice (error "should not prompt"))))
+                    ((symbol-function 'dsh-bridge-send-text)
+                     (lambda (_text &optional _session-id on-success _attachments m)
+                       (setq mode m)
+                       (when on-success (funcall on-success "s1"))))
+                    ((symbol-function 'dsh-bridge--prompt-exit) #'ignore))
+            (dsh-bridge-send-and-exit steer)))
+      (dsh-bridge-test--kill-prompt-buffer))
+    mode))
+
+(ert-deftest dsh-bridge-send-and-exit-busy-choice-marshals-mode ()
+  "The busy prompt wires q to a queued send and s to a steered send."
+  (should (eq (dsh-bridge-test--busy-send-and-exit '(?q "queue")) 'queue))
+  (should (eq (dsh-bridge-test--busy-send-and-exit '(?s "steer")) 'steer)))
+
+(ert-deftest dsh-bridge-send-and-exit-busy-cancel-keeps-prompt ()
+  "Choosing cancel sends nothing and leaves the prompt untouched."
+  (dsh-bridge-test--kill-prompt-buffer)
+  (let ((sent nil)
+        (dsh-bridge-prompt-resend-confirm nil)
+        (dsh-bridge--last-sent nil)
+        (dsh-bridge--session-status '(("s1" running . 1000)))
+        (dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t))))
+        (dsh-bridge--bridge-status-cache 'running))
+    (unwind-protect
+        (with-current-buffer (get-buffer-create "*dsh-bridge-prompt*")
+          (dsh-bridge-prompt-mode)
+          (setq-local dsh-bridge--prompt-session "s1")
+          (insert "hello")
+          (cl-letf (((symbol-function 'read-multiple-choice)
+                     (lambda (&rest _) (list ?c "cancel")))
+                    ((symbol-function 'dsh-bridge-send-text)
+                     (lambda (&rest _) (setq sent t))))
+            (should-error (dsh-bridge-send-and-exit) :type 'user-error))
+          (should-not sent)
+          (should (equal (buffer-string) "hello")))
+      (dsh-bridge-test--kill-prompt-buffer))))
+
+(ert-deftest dsh-bridge-send-and-exit-steer-prefix-always-steers ()
+  "A prefix argument steers a running session without prompting."
+  (should (eq (dsh-bridge-test--busy-send-and-exit nil t) 'steer)))
+
+(ert-deftest dsh-bridge-send-and-exit-idle-ignores-steer-prefix ()
+  "An idle session sends normally; a steer prefix is silently ignored."
+  (dsh-bridge-test--kill-prompt-buffer)
+  (let ((mode 'none)
+        (dsh-bridge-prompt-resend-confirm nil)
+        (dsh-bridge--last-sent nil)
+        (dsh-bridge--session-status nil)
+        (dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t))))
+        (dsh-bridge--bridge-status-cache 'running))
+    (unwind-protect
+        (with-current-buffer (get-buffer-create "*dsh-bridge-prompt*")
+          (dsh-bridge-prompt-mode)
+          (setq-local dsh-bridge--prompt-session "s1")
+          (insert "hello")
+          (cl-letf (((symbol-function 'read-multiple-choice)
+                     (lambda (&rest _) (error "should not prompt")))
+                    ((symbol-function 'dsh-bridge-send-text)
+                     (lambda (_text &optional _session-id on-success _attachments m)
+                       (setq mode m)
+                       (when on-success (funcall on-success "s1"))))
+                    ((symbol-function 'dsh-bridge--prompt-exit) #'ignore))
+            (dsh-bridge-send-and-exit t)))
+      (dsh-bridge-test--kill-prompt-buffer))
+    (should (eq mode nil))))
+
+(ert-deftest dsh-bridge-send-and-exit-while-running-option ()
+  "A queue/steer option suppresses the busy prompt."
+  (should (eq (dsh-bridge-test--busy-send-and-exit nil nil 'queue) 'queue))
+  (should (eq (dsh-bridge-test--busy-send-and-exit nil nil 'steer) 'steer)))
+
+(ert-deftest dsh-bridge-send-and-exit-steer-refused-on-incompatible-plugin ()
+  "A steer against a known-incompatible plugin is refused, not queued."
+  (dsh-bridge-test--kill-prompt-buffer)
+  (let ((sent nil)
+        (dsh-bridge-prompt-resend-confirm nil)
+        (dsh-bridge--last-sent nil)
+        (dsh-bridge--session-status '(("s1" running . 1000)))
+        (dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t))))
+        (dsh-bridge--bridge-status-cache 'incompatible))
+    (unwind-protect
+        (with-current-buffer (get-buffer-create "*dsh-bridge-prompt*")
+          (dsh-bridge-prompt-mode)
+          (setq-local dsh-bridge--prompt-session "s1")
+          (insert "hello")
+          (cl-letf (((symbol-function 'read-multiple-choice)
+                     (lambda (&rest _) (list ?s "steer")))
+                    ((symbol-function 'dsh-bridge-send-text)
+                     (lambda (&rest _) (setq sent t))))
+            (let ((err (should-error (dsh-bridge-send-and-exit) :type 'user-error)))
+              (should (string-match-p "install-plugin" (error-message-string err)))))
+          (should-not sent)
+          (should (equal (buffer-string) "hello")))
+      (dsh-bridge-test--kill-prompt-buffer))))
+
+(ert-deftest dsh-bridge-send-text-marshals-mode-and-message ()
+  "A steered send carries `mode'; a queued or plain send omits it."
+  (dolist (case '((steer . "steer") (queue . nil) (nil . nil)))
+    (let ((payload nil) (msg nil)
+          (dsh-bridge--prompt-history nil)
+          (dsh-bridge--session-status nil)
+          (dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t)))))
+      (cl-letf (((symbol-function 'dsh-bridge--http)
+                 (lambda (_method _path p)
+                   (setq payload p)
+                   (list nil "{\"ok\":true,\"sessionId\":\"s1\"}" 200)))
+                ((symbol-function 'message)
+                 (lambda (fmt &rest args) (setq msg (apply #'format fmt args)))))
+        (dsh-bridge-send-text "hi" "s1" nil nil (car case)))
+      (should (equal (alist-get 'mode payload) (cdr case)))
+      (should (string-match-p (pcase (car case)
+                                ('steer "steering requested")
+                                ('queue "queued for after the running turn")
+                                (_ "prompt sent"))
+                              msg)))))
+
+(ert-deftest dsh-bridge-send-text-steer-records-history ()
+  "A steered send is recorded in the prompt history like a plain send."
+  (let ((dsh-bridge--prompt-history nil)
+        (dsh-bridge--session-status nil)
+        (dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t)))))
+    (cl-letf (((symbol-function 'dsh-bridge--http)
+               (lambda (&rest _)
+                 (list nil "{\"ok\":true,\"sessionId\":\"s1\"}" 200)))
+              ((symbol-function 'message) #'ignore))
+      (dsh-bridge-send-text "hello" "s1" nil nil 'steer))
+    (should (equal (cdr (assoc "s1" dsh-bridge--prompt-history))
+                   (list "hello")))))
 
 (ert-deftest dsh-bridge-draft-pins-lazy-push-from-prompt-buffer ()
   "A target-less draft push from a prompt buffer adopts the host's session.
@@ -4499,12 +4839,14 @@ replace it (the regression guard for the fix above)."
   (dsh-bridge-test--kill-prompt-buffer)
   (let ((captured 'unset)
         (dsh-bridge-prompt-resend-confirm nil)
+        (dsh-bridge--sessions-cache nil)
+        (dsh-bridge--session-status nil)
         (dsh-bridge--prompt-session "s1"))
     (with-current-buffer (get-buffer-create "*dsh-bridge-prompt*")
       (dsh-bridge-prompt-mode)
       (insert "hello")
       (cl-letf (((symbol-function 'dsh-bridge-send-text)
-                 (lambda (_text &optional _session-id on-success _attachments)
+                 (lambda (_text &optional _session-id on-success _attachments _mode)
                    (when on-success (funcall on-success "s1"))))
                 ((symbol-function 'dsh-bridge--prompt-exit)
                  (lambda (&rest args) (setq captured args))))
@@ -7504,6 +7846,8 @@ removes them from the kept text."
   (let ((file (dsh-bridge-test--temp-file "shot.png" "pngbytes"))
         (captured nil)
         (dsh-bridge-prompt-resend-confirm nil)
+        (dsh-bridge--sessions-cache nil)
+        (dsh-bridge--session-status nil)
         (dsh-bridge--prompt-session "s1")
         (dsh-bridge--last-sent nil))
     (unwind-protect
@@ -7512,7 +7856,7 @@ removes them from the kept text."
           (insert "look at this\n")
           (dsh-bridge--insert-attachment-tag file)
           (cl-letf (((symbol-function 'dsh-bridge-send-text)
-                     (lambda (text &optional session-id on-success attachments)
+                     (lambda (text &optional session-id on-success attachments _mode)
                        (setq captured (list text session-id attachments))
                        (when on-success (funcall on-success "s1"))))
                     ((symbol-function 'dsh-bridge--prompt-exit)
@@ -7532,13 +7876,15 @@ removes them from the kept text."
   (let ((file (dsh-bridge-test--temp-file "only.txt" "x"))
         (captured 'uncalled)
         (dsh-bridge-prompt-resend-confirm nil)
+        (dsh-bridge--sessions-cache nil)
+        (dsh-bridge--session-status nil)
         (dsh-bridge--prompt-session "s1"))
     (unwind-protect
         (with-current-buffer (get-buffer-create "*dsh-bridge-prompt*")
           (dsh-bridge-prompt-mode)
           (dsh-bridge--insert-attachment-tag file)
           (cl-letf (((symbol-function 'dsh-bridge-send-text)
-                     (lambda (text &optional _session-id on-success _attachments)
+                     (lambda (text &optional _session-id on-success _attachments _mode)
                        (setq captured text)
                        (when on-success (funcall on-success "s1"))))
                     ((symbol-function 'dsh-bridge--prompt-exit)
@@ -7559,6 +7905,8 @@ removes them from the kept text."
   (dsh-bridge-test--kill-prompt-buffer)
   (let ((file (dsh-bridge-test--temp-file "keep.txt" "x"))
         (dsh-bridge-prompt-resend-confirm nil)
+        (dsh-bridge--sessions-cache nil)
+        (dsh-bridge--session-status nil)
         (dsh-bridge--prompt-session "s1"))
     (unwind-protect
         (with-current-buffer (get-buffer-create "*dsh-bridge-prompt*")

@@ -122,7 +122,7 @@ menu:
 
 * `q` — exit the transient menu.
 * `r` — open a buffer to type in a prompt.
-* `s` — send the region or buffer as a prompt.
+* `s` — send the region or buffer as a prompt (if the session is busy, the prompt is queued).
 * `d` — send the region or buffer as a draft (can still edit in DSH before submitting).
 * `f` — fetch and display the session's latest reply.
 * `D` — describe the session.
@@ -269,10 +269,15 @@ The following commands are available from the DSH-Prompt buffer:
 * `C-c C-a` — attach a file to the prompt (see below).
 * `C-c C-m` — set the model and reasoning effort.
 * `C-c C-s` — rebind the buffer to another session.
-* `C-c C-k` — erase the buffer.
+* `C-c C-k` — stop the session if it is running, or erase the prompt otherwise.
 * `C-c C-f` — open the DSH-View buffer for this session.
 * `C-c C-l` — open the DSH-Sessions buffer.
 * `M-p`/`M-n` — walk the session's prompt history.
+
+If `C-c C-c` is invoked while the session is running, it asks how to
+send the prompt: queue to run after the current turn, steer the
+running turn, or cancel.  Customize `dsh-bridge-send-while-running` to
+change this behavior.  To unconditionally steer, type `C-u C-c C-c`.
 
 While walking the prompt history with `M-p`/`M-n`, you may edit
 earlier prompts.  This blocks further history navigation; to resume,

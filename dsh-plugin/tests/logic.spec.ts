@@ -45,6 +45,8 @@ import {
   outboxMessage,
   outboxSessionId,
   parseBearerAuthorization,
+  parseSendMode,
+  queueCounts,
   repliesChangedMessage,
   resolveTargetId,
   rpcArgsPayload,
@@ -1271,6 +1273,41 @@ describe('attachmentErrorHttpStatus', () => {
     for (const code of ['ATTACHMENT_WRITE_FAILED', 'ATTACHMENT_CORRUPT', 'ATTACHMENT_NOT_FOUND', 'SOMETHING_ELSE']) {
       expect(attachmentErrorHttpStatus(code)).toBe(500)
     }
+  })
+})
+
+describe('parseSendMode', () => {
+  it('treats absent and null as an ordinary send, and accepts only steer', () => {
+    expect(parseSendMode(undefined)).toEqual({ ok: true, mode: undefined })
+    expect(parseSendMode(null)).toEqual({ ok: true, mode: undefined })
+    expect(parseSendMode('steer')).toEqual({ ok: true, mode: 'steer' })
+  })
+
+  it('rejects any other mode rather than degrading to a queued send', () => {
+    for (const value of ['queue', 'STEER', '', 0, true, ['steer'], { mode: 'steer' }]) {
+      const parsed = parseSendMode(value)
+      expect(parsed.ok).toBe(false)
+      if (!parsed.ok) expect(parsed.error).toContain('steer')
+    }
+  })
+})
+
+describe('queueCounts', () => {
+  const user = { source: { kind: 'user' } }
+  const context = { source: { kind: 'plugin' } }
+
+  it('counts every next-turn item as queued', () => {
+    expect(queueCounts({ nextTurn: [user, user], nextStep: [] }))
+      .toEqual({ queued: 2, steering: 0 })
+  })
+
+  it('counts only user-sourced next-step items as steering', () => {
+    expect(queueCounts({ nextTurn: [], nextStep: [context, user, context, user] }))
+      .toEqual({ queued: 0, steering: 2 })
+  })
+
+  it('reports zeros for an empty inbox', () => {
+    expect(queueCounts({ nextTurn: [], nextStep: [] })).toEqual({ queued: 0, steering: 0 })
   })
 })
 

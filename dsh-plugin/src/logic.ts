@@ -1897,6 +1897,57 @@ export type AttachmentRequestsResult =
   | { ok: true; items: AttachmentRequest[] }
   | { ok: false; error: string }
 
+/** How a `/send` request deposits its prompt into the target agent. */
+export type SendMode = 'steer'
+
+/** The outcome of {@link parseSendMode}. */
+export type ParsedSendMode =
+  | { ok: true; mode: SendMode | undefined }
+  | { ok: false; error: string }
+
+/**
+ * Validate the optional `mode` member of a `/send` body. Absent and JSON
+ * `null` mean the ordinary follow-up send; the only accepted value is
+ * `"steer"`. Anything else is a caller error rather than a silent fallback:
+ * an unrecognized mode (the signature of a version-skewed client) must not
+ * degrade into queueing, which is exactly the behavior steering exists to
+ * avoid.
+ */
+export function parseSendMode(value: unknown): ParsedSendMode {
+  if (value === undefined || value === null) return { ok: true, mode: undefined }
+  if (value === 'steer') return { ok: true, mode: 'steer' }
+  return { ok: false, error: "mode must be absent or \"steer\"" }
+}
+
+/** The only part of a pending inbox message {@link queueCounts} reads. */
+export interface PendingMessageLike {
+  readonly source: { readonly kind: string }
+}
+
+/** A live agent's pending user-prompt counts by placement. */
+export interface QueueCounts {
+  /** Prompts queued for their own later turns. */
+  queued: number
+  /** User prompts parked for the next step boundary (steering). */
+  steering: number
+}
+
+/**
+ * Count one live agent's pending user prompts by placement. Every `nextTurn`
+ * item is a queued prompt. `nextStep` also carries injected model-facing
+ * context (`source.kind !== 'user'`), which is not a user prompt and is
+ * excluded, matching the harness's own `SessionQueuedItem` fold.
+ */
+export function queueCounts(inbox: {
+  readonly nextTurn: readonly PendingMessageLike[]
+  readonly nextStep: readonly PendingMessageLike[]
+}): QueueCounts {
+  return {
+    queued: inbox.nextTurn.length,
+    steering: inbox.nextStep.filter(message => message.source.kind === 'user').length,
+  }
+}
+
 /**
  * Bridge-imposed bound on one prompt's attachment count. Mirrors the store's
  * default `maxImagesPerMessage`, and also bounds the file arm, which the

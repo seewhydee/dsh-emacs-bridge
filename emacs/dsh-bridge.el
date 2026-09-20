@@ -16,7 +16,7 @@
 ;; along with this program.	 If not, see <https://www.gnu.org/licenses/>.
 
 ;; Author: Chong Yidong <cyd@stupidchicken.com>
-;; Version: 0.12.0
+;; Version: 0.13.0
 ;; Package-Requires: ((emacs "29.1"))
 ;; Keywords: tools, convenience
 
@@ -77,7 +77,7 @@
 
 ;;; Common utility functions/variables
 
-(defconst dsh-bridge-version "0.12.0"
+(defconst dsh-bridge-version "0.13.0"
   "Version string for the DSH-Bridge package.
 This should match the version reported by the running DSH plugin.")
 
@@ -310,6 +310,26 @@ for confirmation first.
 
 This option does not affect `\\[dsh-bridge-draft]'."
   :type 'boolean
+  :group 'dsh-bridge)
+
+(defcustom dsh-bridge-send-while-running 'ask
+  "How `\\[dsh-bridge-send-and-exit]' sends to a session that is running.
+This choice applies only to the DSH-Prompt buffer; `\\[dsh-bridge-send]'
+queues a prompt sent from any other buffer on a busy session, silently.
+
+- `ask' prompts, offering to queue the prompt, steer the running turn,
+  or cancel the send.
+- `queue' sends the prompt as an ordinary follow-up turn to run after
+  the current one, without asking.
+- `steer' steers the running turn, without asking.  Steering is
+  best-effort: the host consumes it at the next step boundary when one
+  is open, and otherwise parks or discards it.
+
+A `\\[universal-argument]' prefix argument always steers, whatever this
+option says; if the session is idle, it is an ordinary send either way."
+  :type '(choice (const :tag "Ask" ask)
+                 (const :tag "Queue" queue)
+                 (const :tag "Steer" steer))
   :group 'dsh-bridge)
 
 (defcustom dsh-bridge-describe-timeout 15
@@ -674,9 +694,9 @@ on `unknown'.  No active retrieval is done.  See
 
 (defvar dsh-bridge--bridge-status-cache nil
   "Cached DSH bridge interface state, or nil if not yet probed.
-Possible values are nil, `running', `not-running', `unreachable', and
-`forbidden'.  The cache is set per-session, and reset if a real request
-contradicts it or an install/uninstall runs.")
+Possible values are nil, `running', `incompatible', `not-running',
+`unreachable', and `forbidden'.  The cache is set per-session, and reset if a
+real request contradicts it or an install/uninstall runs.")
 
 (defun dsh-bridge--bridge-status ()
   "Probe the status of the DSH bridge interface.
@@ -717,6 +737,15 @@ response means the route (and hence the plugin) is absent."
 Callers invoke this on a transport failure or a 401/404."
   (if (memq dsh-bridge--bridge-status-cache '(running unreachable))
 	  (setq dsh-bridge--bridge-status-cache nil)))
+
+(defun dsh-bridge--plugin-incompatible-p ()
+  "Whether the installed DSH plugin's version differs from this package's.
+Consult the cached bridge status, probing only on a cold cache.  An
+incompatible plugin may predate the request fields this package sends
+and ignore them, so a caller must not assume such a field is honored."
+  (eq (or dsh-bridge--bridge-status-cache
+		  (setq dsh-bridge--bridge-status-cache (dsh-bridge--bridge-status)))
+	  'incompatible))
 
 (defvar dsh-bridge--plugin-diagnosed nil
   "Non-nil once the DSH plugin's problem has been diagnosed this session.")
@@ -1900,7 +1929,7 @@ If walking through the prompt history, then:
 
 ;;; Text senders (internal)
 
-(defun dsh-bridge-send-text (text &optional session-id on-success attachments)
+(defun dsh-bridge-send-text (text &optional session-id on-success attachments mode)
   "Send TEXT to the DSH session as a prompt.
 SESSION-ID overrides the effective session for this call only.
 
@@ -1909,7 +1938,14 @@ success branch of the send, after the history is recorded.  The callback
 runs in the same buffer that was current when this function is called.
 
 ATTACHMENTS, when non-nil, is a list of plists (:path PATH) to upload
-with the prompt; PATH must be absolute."
+with the prompt; PATH must be absolute.
+
+MODE selects how the host deposits the prompt: nil for an ordinary
+follow-up turn, `queue' for the same deposit with a message saying it
+waits for the running turn, and `steer' to steer the nearest step of a
+running turn (the web UI's \"steer message\").  The host cannot report
+whether a steer reached a step boundary, so a steered send says only
+that steering was requested."
   (let* ((target (or session-id (dsh-bridge--effective-session)))
 		 (payload `((text . ,text))))
 	(when target
@@ -1917,6 +1953,8 @@ with the prompt; PATH must be absolute."
 	(when attachments
 	  (push `(attachments . ,(dsh-bridge--attachment-payload attachments))
 			payload))
+	(when (eq mode 'steer)
+	  (push '(mode . "steer") payload))
 	(pcase-let ((`(,status ,body ,http-status)
 				 (dsh-bridge--http "POST" "/send" payload)))
 	  (let* ((alist (ignore-errors
@@ -1938,7 +1976,11 @@ with the prompt; PATH must be absolute."
 			  ;; A failed turn-start is corrected later.
 			  (dsh-bridge--status-set sent-id 'running)
 			  (dsh-bridge--status-event-render sent-id)
-			  (message "dsh-bridge: prompt sent")
+			  (message "dsh-bridge: %s"
+					   (pcase mode
+						 ('steer "steering requested")
+						 ('queue "prompt queued for after the running turn")
+						 (_ "prompt sent")))
 			  (if target
 				  ;; The user's activity moved elsewhere: the recorded
 				  ;; resolution no longer describes it.
@@ -3585,13 +3627,57 @@ prefix argument, choose a session for this call only.
 
 Attachment tag lines in the sent text (see `dsh-bridge-attach-file') are
 uploaded with the prompt and stripped from its text.  Sending a region
-attaches only the tags inside the region."
+attaches only the tags inside the region.
+
+A send to a session that is already running is queued and runs as its
+own turn after the current one.  This command never steers and never
+prompts for a choice; use `\\[dsh-bridge-send-and-exit]' in a
+DSH-Prompt buffer, or `\\[dsh-bridge-stop-session]', for turn control."
   (interactive (list (dsh-bridge--read-session-override "Send to session: ")))
   (let ((parsed (dsh-bridge--parse-attachments (dsh-bridge--region-or-buffer))))
 	(dsh-bridge-send-text (car parsed) session-id nil (cdr parsed))))
 
+(defun dsh-bridge--busy-send-choice ()
+  "Ask how to send a prompt to a running session.
+Return `queue', `steer', or `cancel'.  Quitting with \\[keyboard-quit]
+also cancels, by aborting the command before anything is sent."
+  (pcase (car (read-multiple-choice
+			   "Session is running; send how? "
+			   '((?q "queue" "Queue the prompt to run after the current turn")
+				 (?s "steer" "Steer the running turn at its next step boundary")
+				 (?c "cancel" "Leave the prompt unsent"))))
+	(?q 'queue)
+	(?s 'steer)
+	(_ 'cancel)))
+
+(defun dsh-bridge--send-and-exit-choice (steer)
+  "Decide how `dsh-bridge-send-and-exit' deposits its prompt.
+STEER is the command's raw prefix argument.  Return `send' for an
+ordinary follow-up turn, `queue' or `steer' for a running session, or
+`cancel' when the user declines to choose.  An idle session (or one
+whose cached status is not `running') always returns `send', ignoring
+STEER."
+  (if (not (eq (dsh-bridge--status-state (dsh-bridge--effective-session))
+			   'running))
+	  'send
+	(cond
+	 (steer 'steer)
+	 ((eq dsh-bridge-send-while-running 'queue) 'queue)
+	 ((eq dsh-bridge-send-while-running 'steer) 'steer)
+	 (t (dsh-bridge--busy-send-choice)))))
+
+(defun dsh-bridge--refuse-steer-if-incompatible ()
+  "Signal when the installed DSH plugin predates steering support.
+An old plugin ignores the unknown `mode' field and silently queues the
+prompt, which is exactly the degradation steering was chosen to avoid,
+so refuse instead of falling back."
+  (when (dsh-bridge--plugin-incompatible-p)
+	(user-error "%s"
+				(concat "dsh-bridge: the installed DSH plugin predates steering; "
+						"re-run M-x dsh-bridge-install-plugin"))))
+
 ;;;###autoload
-(defun dsh-bridge-send-and-exit ()
+(defun dsh-bridge-send-and-exit (&optional steer)
   "Send a DSH-Prompt buffer as a prompt, then bury it and switch away.
 This command must be called in a DSH-Prompt buffer.  Unlike
 `dsh-bridge-send', it always sends the entire buffer contents.
@@ -3609,9 +3695,15 @@ resolved by the host, which reports the session it chose; on success the
 buffer is bound to that session, so the next send from the same buffer
 cannot land in a different one.
 
+A prompt for a session that is already running follows
+`dsh-bridge-send-while-running': ask (the default), queue the prompt
+without asking, or steer the running turn without asking.  With a
+prefix argument STEER, always steer.  An idle session is sent to
+normally, and the prefix argument is then silently ignored.
+
 After a successful send, pop to a DSH-View buffer following the session
 and bury the buffer (see `dsh-bridge--prompt-exit')."
-  (interactive)
+  (interactive "P")
   (unless (eq major-mode 'dsh-bridge-prompt-mode)
 	(user-error "dsh-bridge: not a DSH-Prompt buffer"))
   (let* ((parsed (dsh-bridge--parse-attachments ; strip attachments
@@ -3642,8 +3734,15 @@ and bury the buffer (see `dsh-bridge--prompt-exit')."
 	  ;; instant the prompt leaves: `--after-prompt-view' uses the latter to
 	  ;; recognize the turn this send began even when that turn committed (or
 	  ;; finished) while the synchronous POST was still on the wire.
-	  (let ((window (selected-window))
+	  (let ((choice (dsh-bridge--send-and-exit-choice steer))
+			(window (selected-window))
 			(sent-at (floor (* 1000 (float-time)))))
+		;; Cancelling the busy prompt leaves the buffer and its text
+		;; untouched, like declining the resend guard above.
+		(when (eq choice 'cancel)
+		  (user-error "dsh-bridge: send cancelled"))
+		(when (eq choice 'steer)
+		  (dsh-bridge--refuse-steer-if-incompatible))
 		(dsh-bridge-send-text
 		 text
 		 dsh-bridge--prompt-session
@@ -3662,7 +3761,10 @@ and bury the buffer (see `dsh-bridge--prompt-exit')."
 		   (when attachments
 			 (dsh-bridge--remove-attachment-tags))
 		   (dsh-bridge--prompt-exit sent-id window sent-at))
-		 attachments)))))
+		 attachments
+		 ;; `send' means an ordinary follow-up turn; the mode argument is
+		 ;; the busy choice itself.
+		 (unless (eq choice 'send) choice))))))
 
 (defun dsh-bridge--after-prompt-view (session-id &optional sent-at)
   "Return a DSH-View buffer for SESSION-ID after a prompt.
@@ -5557,7 +5659,7 @@ session, attaching a file, selecting a model, etc.
   "C-c C-c" #'dsh-bridge-send-and-exit
   "C-c C-a" #'dsh-bridge-attach-file
   "C-c C-d" #'dsh-bridge-draft
-  "C-c C-k" #'dsh-bridge-erase-prompt
+  "C-c C-k" #'dsh-bridge-prompt-stop-or-erase
   "C-c C-f" #'dsh-bridge-fetch
   "C-c C-m" #'dsh-bridge-select-model
   "C-c C-s" #'dsh-bridge-set-prompt-session
@@ -5577,11 +5679,35 @@ session, attaching a file, selecting a model, etc.
 
 (defun dsh-bridge-erase-prompt ()
   "Erase the contents of the prompt buffer.
-Ask for confirmation when the buffer is modified."
+Ask for confirmation when the buffer holds modified text.  Pristine text
+\(already sent, or a history entry) is erased silently, and an empty
+buffer has nothing worth confirming."
   (interactive)
-  (when (or (not (buffer-modified-p))
+  (when (or (= (buffer-size) 0)
+			(not (buffer-modified-p))
 			(yes-or-no-p "Prompt modified; erase anyway? "))
-	(erase-buffer)))
+	(erase-buffer)
+	;; `erase-buffer' sets the modified flag; an empty buffer is pristine,
+	;; so clear it.  Otherwise a second erase would confirm about nothing.
+	(set-buffer-modified-p nil)))
+
+(defun dsh-bridge-prompt-stop-or-erase (&optional force)
+  "Stop the prompt buffer's running session, or else erase the prompt.
+The session is the buffer's effective session.  When it is running, ask
+to stop it; declining leaves the prompt alone rather than erasing it as
+a consolation.  An idle or unknown session erases the prompt instead;
+see `dsh-bridge-erase-prompt'.
+
+With FORCE (a prefix argument), take the stop branch whatever the cached
+status says, for when Emacs has not heard that the session is busy; an
+actually idle session settles host-side as a no-op.  This mirrors the
+FORCE argument of `dsh-bridge-stop-session'."
+  (interactive "P")
+  (if (or force
+		  (eq (dsh-bridge--status-state (dsh-bridge--interaction-session))
+			  'running))
+	  (dsh-bridge-stop-session force)
+	(dsh-bridge-erase-prompt)))
 
 (easy-menu-define dsh-bridge-prompt-menu dsh-bridge-prompt-mode-map
   "Menu bar menu for the DSH-Prompt buffer."
@@ -5694,6 +5820,49 @@ host round-trip."
 
 ;;; Stopping a running session
 
+(defun dsh-bridge--pending-prompt-counts (session-id)
+  "Return (QUEUED . STEERING) pending-prompt counts for SESSION-ID.
+The counts are read fresh from `GET /sessions/queue', never cached: they
+word a confirmation about stopping, so they must describe the session as
+it is now.  Return nil when the read does not answer (a transport fault,
+or a plugin that predates the route)."
+  (let ((result (dsh-bridge--request
+				 "GET" (dsh-bridge--path "/sessions/queue" session-id) nil)))
+	(when (eq (car result) 200)
+	  (cons (or (alist-get 'queued (cdr result)) 0)
+			(or (alist-get 'steering (cdr result)) 0)))))
+
+(defun dsh-bridge--stop-confirmation (session-id)
+  "Return the confirmation text for stopping SESSION-ID.
+Name a pending ask-user question or approval, and any prompts already
+pending for the session.  A stop keeps the session's queued prompts, so
+without that note a queued prompt starting a new turn right afterwards
+could make the stop look ineffective.  The pending-prompt counts are
+advisory: a read that fails simply drops that part of the text."
+  (let* ((counts (dsh-bridge--pending-prompt-counts session-id))
+		 (queued (car-safe counts))
+		 (steering (cdr-safe counts))
+		 (waiting (cond ((dsh-bridge--pending-question session-id)
+						 "waiting for your answer")
+						((dsh-bridge--pending-approval-entry session-id)
+						 "waiting for your approval")))
+		 (notes nil))
+	(when (and queued (> queued 0))
+	  (push (format "%d queued prompt%s will start a new turn right after the stop"
+					queued (if (= queued 1) "" "s"))
+			notes))
+	(when (and steering (> steering 0))
+	  (push (format "%d steering prompt%s may linger or be discarded"
+					steering (if (= steering 1) "" "s"))
+			notes))
+	(let ((clauses (if waiting (cons waiting (nreverse notes))
+					 (nreverse notes))))
+	  (format "Stop running session %s%s?"
+			  (dsh-bridge--session-label session-id)
+			  (if clauses
+				  (format " (%s)" (string-join clauses "; "))
+				"")))))
+
 (defun dsh-bridge-stop-session (&optional force)
   "Stop the running turn of the session at hand.
 In a DSH-View buffer the session is the one shown; in DSH-Prompt it is
@@ -5701,6 +5870,8 @@ the buffer's effective session; in DSH-Sessions it is the row under
 point.  A session that is not running is left alone: the
 command reports it and sends nothing.  Otherwise it asks for
 confirmation, then asks the host to stop the session's active turn.
+The confirmation names a pending question or approval, and any prompts
+already queued for the session (see `dsh-bridge--stop-confirmation').
 
 Stopping aborts only the active turn.  Input already queued for the
 session survives and can start a new turn right after the stop, matching
@@ -5718,8 +5889,7 @@ agent as a no-op."
 	 ((and (not force) (not (eq (dsh-bridge--status-state id) 'running)))
 	  (message "dsh-bridge: session \"%s\" is not running"
 			   (dsh-bridge--session-label id)))
-	 ((not (y-or-n-p (format "Stop running session %s?"
-							 (dsh-bridge--session-label id))))
+	 ((not (y-or-n-p (dsh-bridge--stop-confirmation id)))
 	  (message "dsh-bridge: aborted"))
 	 (t
 	  (let* ((result (dsh-bridge--request

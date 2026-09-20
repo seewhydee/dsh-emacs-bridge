@@ -342,6 +342,26 @@ candidates above.
   UX scope. The tags stay in the source buffer after such a send, so a repeat
   region-send re-uploads the bytes.
 
+### 12. Queue visibility and queued-item management
+
+- **Problem** — a prompt sent from Emacs while a turn runs is queued
+  host-side and invisible in Emacs; there is no way to retract, edit, or
+  steer it.
+- **Shapes** — two options, not mutually exclusive: (a) surface the host's
+  `inbox` session projection (already wire-visible) as a queue list with
+  per-item steer/remove plus a header count, mirroring the web UI's
+  QueueDock; (b) a minimal retraction path — return the deposited message id
+  from `/send` and expose a single "steer the last queued prompt" command via
+  `sessionController.updateQueue`.  Option (a) is the real fix; (b) is a
+  cheaper stepping stone.
+- **Seed** — the read half already exists: `GET /dsh-bridge/sessions/queue`
+  reports per-session queued/steering counts (added for the stop
+  confirmation).
+- **Interaction to settle** — after a stop, a previously queued prompt starts
+  a new turn immediately (`cancel` uses `keepInbox: true`), which can make a
+  stop look ineffective; the stop confirmation now warns when that is about
+  to happen.
+
 ### Cut / not planned
 
 - `dsh-bridge-minor-mode` — the transient plus region/buffer send covers it.

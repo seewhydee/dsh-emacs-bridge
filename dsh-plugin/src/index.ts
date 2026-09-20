@@ -26,10 +26,13 @@
 //        approvals, both of which coexist with the web UI's own panels.  &answer=0
 //        marks an Emacs stream that will not answer approvals — it still receives
 //        approval frames, but the host delegates the approval to the web UI)
-//   POST /dsh-bridge/send   { text?, sessionId?, attachments?: [{path, name?}] }
+//   POST /dsh-bridge/send   { text?, sessionId?, attachments?: [{path, name?}],
+//        mode?: 'steer' }
 //        -> stage host-local absolute paths into the durable attachment store,
-//        then Agent.followup() (images sniffed from content and rejected for
-//        text-only models; 501 without an attachment store; 413 over the caps)
+//        then Agent.followup() (or Agent.steer() when `mode` is `"steer"`;
+//        images sniffed from content and rejected for text-only models; 400
+//        for any other `mode`; 501 without an attachment store; 413 over the
+//        caps)
 //   GET  /dsh-bridge/output?sessionId=           -> latest assistant text
 //        (kept deliberately: a single-shot "latest text" probe; the Emacs
 //        package no longer calls it)
@@ -79,6 +82,12 @@
 //        survives for a later turn).  A live but idle agent settles as a no-op
 //        and is reported as { accepted: true, running: false }; 404 unknown or
 //        not-attached, 409 subagent-owned, 501 without a session controller.
+//   GET  /dsh-bridge/sessions/queue?sessionId= -> { queued, steering }
+//        -> the live agent's pending user-prompt counts by placement (steering
+//        is the `nextStep` messages with a user source; injected context is
+//        excluded).  An absent, cold, or not-live id reads as zeros: for an
+//        advisory count, absent and empty are the same answer, so there is
+//        deliberately no 404 distinction here.
 //   POST /dsh-bridge/sessions/create { workspaceId | path, workspaceTitle?, title? }
 //        -> create a session in a workspace (exactly one of the two keys);
 //        `title` names the new session when the profile mounts a session
@@ -150,6 +159,8 @@ import {
   outboxSessionId,
   parseAttachmentRequests,
   parseBearerAuthorization,
+  parseSendMode,
+  queueCounts,
   repliesChangedMessage,
   resolveReadTargetId,
   resolveTargetId,
@@ -2047,8 +2058,13 @@ export function apply(ctx: Context): void {
         const store = ctx.get('attachments') as AttachmentStoreService | undefined
         try {
           const body = (await readJson(req)) as
-            { text?: unknown; sessionId?: unknown; attachments?: unknown } | undefined
+            { text?: unknown; sessionId?: unknown; attachments?: unknown; mode?: unknown } | undefined
           const text = typeof body?.text === 'string' ? body.text : ''
+          const parsedMode = parseSendMode(body?.mode)
+          if (!parsedMode.ok) {
+            sendJson(res, 400, { error: parsedMode.error })
+            return
+          }
           const parsed = parseAttachmentRequests(body?.attachments)
           if (!parsed.ok) {
             sendJson(res, 400, { error: parsed.error })
@@ -2120,7 +2136,12 @@ export function apply(ctx: Context): void {
             ...blocks,
             ...(text === '' ? [] : [{ type: 'text', text }]),
           ] as unknown as ContentBlock[]
-          target.agent.followup(createUserMessage({ content, source: { kind: 'user' } }))
+          const message = createUserMessage({ content, source: { kind: 'user' } })
+          // Steering is best-effort and the host cannot report whether a step
+          // boundary consumed it (a rejected step parks it, and cancellation
+          // may discard it), so the response shape is the same either way.
+          if (parsedMode.mode === 'steer') target.agent.steer(message)
+          else target.agent.followup(message)
           sendJson(res, 200, {
             ok: true,
             sessionId: String(target.session.id),
@@ -2426,6 +2447,23 @@ export function apply(ctx: Context): void {
         } catch (error: unknown) {
           const status = isWorkspaceUnknownSessionError(error) ? 404 : bridgeErrorStatus(error)
           sendJson(res, status, { error: error instanceof Error ? error.message : String(error) })
+        }
+        return
+      }
+
+      // The advisory read half of the queue: how much user input is pending
+      // for the live agent. A missing, cold, or otherwise not-live id reads as
+      // zeros rather than 404 — the caller uses this only to word a
+      // confirmation, where absent and empty are the same answer.
+      if (req.method === 'GET' && pathname === '/dsh-bridge/sessions/queue') {
+        try {
+          const id = url.searchParams.get('sessionId')
+          const agent = id === null || id === '' ? undefined : ctx.agents.get(id as SessionId)
+          sendJson(res, 200, agent === undefined
+            ? { queued: 0, steering: 0 }
+            : queueCounts(agent.inbox))
+        } catch (error: unknown) {
+          sendJson(res, 500, { error: error instanceof Error ? error.message : String(error) })
         }
         return
       }
