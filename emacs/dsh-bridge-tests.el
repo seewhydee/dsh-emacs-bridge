@@ -7873,7 +7873,14 @@ rows; one with stats alone renders the Stats section and no other."
                  (push (list method path payload) calls)
                  (cons 200 '((ok . t) (outcome . "committed"))))))
       (dsh-bridge-toggle-plan-mode -1)
-      (should (equal (car calls) '("POST" "/plan-mode" ((sessionId . "s1") (active)))))))
+      ;; The `json-false' marker, not nil: json.el encodes nil as null,
+      ;; which the host's boolean check rejects; pin the wire shape.
+      (should (equal (car calls)
+                     (list "POST" "/plan-mode"
+                           (list (cons 'sessionId "s1")
+                                 (cons 'active json-false)))))
+      (should (string-match-p "\"active\":false"
+                              (json-encode (nth 2 (car calls)))))))
   ;; A missing plan section is refused, and nothing is sent.
   (let ((posted nil))
     (cl-letf (((symbol-function 'dsh-bridge--interaction-session) (lambda () "s1"))

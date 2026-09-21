@@ -5570,9 +5570,12 @@ and nothing is sent."
     (let* ((active (if arg
                        (> (prefix-numeric-value arg) 0)
                      (not (dsh-bridge--plan-effective plan))))
+           ;; json.el encodes nil as null, which the host rejects; the
+           ;; `json-false' marker encodes as a real JSON boolean.
            (result (dsh-bridge--request
                     "POST" "/plan-mode"
-                    (list (cons 'sessionId session) (cons 'active active))))
+                    (list (cons 'sessionId session)
+                          (cons 'active (if active t json-false)))))
            (status (car result))
            (alist (cdr result)))
       (cond
