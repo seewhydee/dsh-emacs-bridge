@@ -28,27 +28,18 @@ DSH 0.1.6-alpha.1; the peer floor in `dsh-plugin/package.json` is
 pinned to match (node-semver prerelease rules exclude `0.1.6-alpha.1`
 from the old `^0.1.5-alpha.1` floor).
 
-### 1. Plan and goal (display first)
+### 1. Plan and goal
 
-- **Plan mode** — read the `plan` projection (`{active, pending}`). There is
-  no Remote, and the controller is mounted in an entry-local `isolate` realm,
-  so `ctx.get('planMode')` is `undefined`; the sanctioned mutation seam is
-  `ctx.agentPresets.serviceFor(agent,'planMode')` (add `serviceFor` to the
-  bridge's `AgentPresetsService` face). Plan-review questions arrive over the
-  existing `user-questions/request` waterfall, so approving a plan from Emacs
-  already works; a toggle command (`set(agent, bool)`, reporting
-  `committed`/`queued`/`cancelled`/`noop`) can follow.
-- **Goal** — read the `goal` projection: `{goal: {id, revision, objective,
-  phase, blockedReason?, maxGoalRounds}, roundsStarted, createdAt,
-  updatedAt}` (the revision for CAS lives at `goal.revision`). Mutations go
-  through `ctx.goals` (revision-CAS `create/edit/pause/resume/complete/
-  clear`, plus a read-only `get` and host-only `disarm`); prefer projection
-  reads, because `goals/*` resolves `agentId` through `resolveAgent` and can
-  resume a cold session as a side effect. `activation` is process-local (a
-  restored active goal reads disarmed until `resume`) and is deliberately
-  absent from the projection.
-- **UX** — show goal phase and plan state in the DSH-View/Prompt header and
-  `describe-session`; add mutating commands only if demand appears.
+In the web UI both are slash-command surface (`/plan`, `/goal`) over two
+services — the slash handlers are thin text wrappers, so Emacs follows its
+own conventions (no electric slash) and loses nothing: ordinary interactive
+commands, dispatcher/menu/keymap entries, minibuffer reads. Plan-review
+approval already works over the `user-questions/request` waterfall the
+bridge already claims. Two stages: display first (`plan`/`goal` projections
+folded into `SessionReport`, SSE push, header + `describe-session`
+segments), then mutations (`planMode` toggle via
+`agentPresets.serviceFor(agent, 'planMode')`; revision-CAS goal lifecycle
+over `ctx.goals`).
 
 ### 2. Permission mode (display only)
 
@@ -190,7 +181,11 @@ DSH (in `../deepseek-harness/`), per the version pinned in
   the `commands/list`/`execute` Remotes)
 - `packages/host/open-in-app/src/catalog.ts` (editor catalog) and
   `src/shared.ts` (route shapes), `packages/client/ui-message-feedback/`,
-  `ui-goal/`, `ui-plan/`, `ui-permission-presets/`
+  `ui-goal/`, `ui-plan/`
+- `packages/plan/plan-mode/src/index.ts` (`PlanModeController`, `/plan`,
+  `plan/mode` event), `packages/goal/goal/src/` (`GoalService`, the `goal`
+  projection fold, `GoalError` codes), `packages/goal/command-goal/src/`
+  (`/goal` grammar), `ui-permission-presets/`
 - `packages/llm/llm/src/types.ts` (user content blocks: text, image, file)
 - `packages/client/tsdown.client.ts` + `packages/client/web/src/platform.ts`
   (client-bundle artifact contract)

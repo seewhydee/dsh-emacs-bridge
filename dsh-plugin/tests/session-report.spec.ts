@@ -17,6 +17,8 @@
 import { describe, expect, it } from 'vitest'
 import {
   catalogModelName,
+  refinePlanGoal,
+  refinePlanSection,
   resolveReadTargetId,
   sessionReport,
   type LiveSessionLike,
@@ -114,6 +116,19 @@ describe('sessionReport', () => {
     contextPressure: { pressureTokens: 100, projectedTokens: 120, contextWindow: 200 },
     contextBreakdown: { systemTokens: 1, toolsTokens: 2, messageTokens: 3 },
     sessionListMetadata: { blank: false, lastPromptAt: 1234 },
+    plan: { active: true, pending: false },
+    goal: {
+      goal: {
+        id: 'g1',
+        revision: 3,
+        objective: 'fix the build',
+        phase: 'active',
+        maxGoalRounds: 10,
+      },
+      roundsStarted: 2,
+      createdAt: 111,
+      updatedAt: 222,
+    },
   }
 
   const full: SessionObservationLike = {
@@ -170,6 +185,19 @@ describe('sessionReport', () => {
       tokens: values.tokenUsage,
       context: values.contextPressure,
       breakdown: values.contextBreakdown,
+      plan: { active: true },
+      goal: {
+        goal: {
+          id: 'g1',
+          revision: 3,
+          objective: 'fix the build',
+          phase: 'active',
+          maxGoalRounds: 10,
+        },
+        roundsStarted: 2,
+        createdAt: 111,
+        updatedAt: 222,
+      },
     })
   })
 
@@ -182,6 +210,7 @@ describe('sessionReport', () => {
     expect(report.basis).toBe('observation')
     expect(report.missing).toEqual([
       'preset', 'model', 'permissions', 'stats', 'tokens', 'context', 'breakdown', 'lastPromptAt',
+      'plan', 'goal',
     ])
     expect(report.title).toBe('Only a title')
     expect(report.agentPreset).toBeNull()
@@ -221,6 +250,7 @@ describe('sessionReport', () => {
     expect(report.lastActive).toBe(10)
     expect(report.missing).toEqual([
       'title', 'preset', 'model', 'permissions', 'stats', 'tokens', 'context', 'breakdown', 'lastPromptAt',
+      'plan', 'goal',
     ])
     expect(report.running).toBe(false)
     expect(report.workspace).toBeNull()
@@ -273,6 +303,7 @@ describe('sessionReport', () => {
     // The strict labels keep their documented positions in the list.
     expect(report.missing).toEqual([
       'title', 'preset', 'model', 'permissions', 'stats', 'tokens', 'context', 'breakdown', 'lastPromptAt',
+      'plan', 'goal',
     ])
   })
 
@@ -299,6 +330,151 @@ describe('sessionReport', () => {
       projections: { values: { contextPressure: {} } },
     })
     expect(report.context).toBeNull()
+  })
+
+  it('maps a plan projection to active plus a direction-less queued bit', () => {
+    const base: SessionObservationLike = { source: 'live', header: { id: 'p1', createdAt: 1 } }
+    expect(sessionReport({ ...base, projections: { values: { plan: { active: false, pending: false } } } }).plan)
+      .toEqual({ active: false })
+    expect(sessionReport({ ...base, projections: { values: { plan: { active: true, pending: true } } } }).plan)
+      .toEqual({ active: true, queued: true })
+    expect(sessionReport({ ...base, projections: { values: { plan: { active: true, pending: false } } } }).plan)
+      .toEqual({ active: true })
+  })
+
+  it('names a present-but-malformed plan section in missing alongside its null', () => {
+    const report = sessionReport({
+      source: 'live',
+      header: { id: 'p2', createdAt: 1 },
+      projections: { values: { plan: { active: 'yes', pending: false } } },
+    })
+    expect(report.plan).toBeNull()
+    expect(report.missing).toContain('plan')
+  })
+
+  it('parses a goal section; a legitimate null is not missing', () => {
+    const projection = {
+      goal: {
+        id: 'g',
+        revision: 1,
+        objective: 'ship it',
+        phase: 'paused',
+        blockedReason: { code: 'waiting', message: 'on review' },
+        maxGoalRounds: 5,
+      },
+      roundsStarted: 3,
+      createdAt: 10,
+      updatedAt: 20,
+    }
+    const present = sessionReport({
+      source: 'live',
+      header: { id: 'g1', createdAt: 1 },
+      projections: { values: { goal: projection } },
+    })
+    expect(present.goal).toEqual(projection)
+    expect(present.missing).not.toContain('goal')
+    const absent = sessionReport({
+      source: 'live',
+      header: { id: 'g2', createdAt: 1 },
+      projections: { values: { goal: null } },
+    })
+    expect(absent.goal).toBeNull()
+    expect(absent.missing).not.toContain('goal')
+  })
+
+  it('names a present-but-malformed goal section in missing alongside its null', () => {
+    const report = sessionReport({
+      source: 'live',
+      header: { id: 'g3', createdAt: 1 },
+      projections: {
+        values: {
+          goal: {
+            goal: { id: 'g', revision: 0, objective: 'x', phase: 'active', maxGoalRounds: 1 },
+            roundsStarted: 0,
+            createdAt: 1,
+            updatedAt: 1,
+          },
+        },
+      },
+    })
+    expect(report.goal).toBeNull()
+    expect(report.missing).toContain('goal')
+  })
+})
+
+describe('refinePlanGoal', () => {
+  const base = sessionReport({
+    source: 'live',
+    header: { id: 'r1', createdAt: 1 },
+    projections: { values: { plan: { active: false, pending: false } } },
+  })
+
+  it('leaves the durable report alone when no live read is supplied', () => {
+    expect(refinePlanGoal(base, {})).toEqual(base)
+  })
+
+  it('names plan missing when the live controller is definitively absent', () => {
+    const refined = refinePlanGoal(base, { plan: null })
+    expect(refined.plan).toBeNull()
+    expect(refined.missing).toContain('plan')
+  })
+
+  it('overrides the plan with the live wanted direction', () => {
+    const durable = sessionReport({
+      source: 'live',
+      header: { id: 'r2', createdAt: 1 },
+      projections: { values: { plan: { active: true, pending: false } } },
+    })
+    expect(refinePlanGoal(durable, { plan: { active: true } }).plan).toEqual({ active: true })
+    expect(refinePlanGoal(durable, { plan: { active: true, pending: false } }).plan)
+      .toEqual({ active: true, pending: false })
+  })
+
+  it('keeps the projection queued bit when the live read has no pending intent', () => {
+    const durable = sessionReport({
+      source: 'live',
+      header: { id: 'r3', createdAt: 1 },
+      projections: { values: { plan: { active: true, pending: true } } },
+    })
+    expect(refinePlanGoal(durable, { plan: { active: true } }).plan)
+      .toEqual({ active: true, queued: true })
+  })
+
+  it('attaches a live goal activation only when a goal is present', () => {
+    const withGoal = sessionReport({
+      source: 'live',
+      header: { id: 'r4', createdAt: 1 },
+      projections: {
+        values: {
+          goal: {
+            goal: { id: 'g', revision: 1, objective: 'o', phase: 'active', maxGoalRounds: 1 },
+            roundsStarted: 0,
+            createdAt: 1,
+            updatedAt: 1,
+          },
+        },
+      },
+    })
+    expect(refinePlanGoal(withGoal, { goalActivation: 'disarmed' }).goal?.activation).toBe('disarmed')
+    const noGoal = sessionReport({ source: 'live', header: { id: 'r5', createdAt: 1 } })
+    expect(refinePlanGoal(noGoal, { goalActivation: 'armed' }).goal).toBeNull()
+  })
+})
+
+describe('refinePlanSection', () => {
+  it('returns the durable section when no live read is supplied', () => {
+    expect(refinePlanSection({ active: true, queued: true }, undefined)).toEqual({ active: true, queued: true })
+  })
+
+  it('drops the section when the controller is absent', () => {
+    expect(refinePlanSection({ active: true }, null)).toBeNull()
+  })
+
+  it('prefers the live direction and otherwise inherits queued', () => {
+    expect(refinePlanSection({ active: false }, { active: false, pending: true }))
+      .toEqual({ active: false, pending: true })
+    expect(refinePlanSection({ active: true, queued: true }, { active: true }))
+      .toEqual({ active: true, queued: true })
   })
 })
 

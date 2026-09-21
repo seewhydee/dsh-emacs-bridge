@@ -21,6 +21,9 @@
 //   GET  /dsh-bridge/token                          -> vend the token (loopback-fenced)
 //   GET  /dsh-bridge/status                         -> { name, version } (loopback-fenced)
 //   GET  /dsh-bridge/events?token=                  -> EventSource (composer-draft push)
+//        (also carries turn lifecycle, context, plan, goal, goal-activation,
+//        outbox, and sessions-changed frames; the payloads are documented on
+//        their constructors in logic.ts)
 //        (?purpose=draft marks the browser's own draft stream; an unmarked
 //        connection is Emacs and is eligible to answer ask-user questions and
 //        approvals, both of which coexist with the web UI's own panels.  &answer=0
@@ -39,8 +42,10 @@
 //   GET  /dsh-bridge/sessions                     -> live + persisted sessions
 //   GET  /dsh-bridge/session?sessionId=           -> one read-only session report
 //        (identity + lineage + sessionStats/tokenUsage/contextPressure/
-//        contextBreakdown/modelSelection/permissions/title; observes live and
-//        cold sessions without resuming, 404 unknown, 409 subagent-owned)
+//        contextBreakdown/modelSelection/permissions/title/plan/goal; plan
+//        and goal are live-refined with the preset's planMode controller and
+//        the goals activation; observes live and cold sessions without
+//        resuming, 404 unknown, 409 subagent-owned)
 //   GET  /dsh-bridge/prompts?sessionId=           -> user prompts, newest first
 //   GET  /dsh-bridge/turns?sessionId=             -> turn-aggregated assistant
 //        replies, newest first (each turn: { turn, startedAt, endedAt?,
@@ -141,6 +146,8 @@ import {
   contextUsedTokens,
   currentModelSelection,
   draftMessage,
+  goalActivationChangedMessage,
+  goalChangedMessage,
   imageInputUnsupported,
   isLoopbackAddress,
   isQuestionCancelRejection,
@@ -154,8 +161,13 @@ import {
   parseAttachmentRequests,
   parseBearerAuthorization,
   parseSendMode,
+  planChangedMessage,
   queueCounts,
+  refinePlanGoal,
+  refinePlanSection,
   repliesChangedMessage,
+  reportGoal,
+  reportPlan,
   resolveReadTargetId,
   resolveTargetId,
   rpcArgsPayload,
@@ -185,6 +197,7 @@ import {
   type AskUserAnswerItemLike,
   type AskUserQuestionItemLike,
   type MessageBlockLike,
+  type PlanGoalLive,
   type ReadTargetResult,
   type ResolveTargetResult,
   type SessionEventLike,
@@ -192,6 +205,8 @@ import {
   type SessionObservationLike,
   type SessionReport,
   type SessionReportExtras,
+  type SessionReportGoal,
+  type SessionReportPlan,
   type SessionRow,
   type WorkspaceLike,
 } from './logic.ts'
@@ -318,10 +333,43 @@ interface AgentDefaultModelService {
   currentSelection(): ModelSelection
 }
 
+/**
+ * Minimal face of one agent's preset-isolate `planMode` controller, as read
+ * through `agentPresets.serviceFor` (a host row cannot see the service
+ * directly: the preset publishes it inside an entry-local isolate realm).
+ */
+interface PlanModeControllerLike {
+  get(agent: Agent): { active: boolean; pending?: boolean }
+}
+
 /** Minimal face of the optional `agentPresets` service (composition roster). */
 interface AgentPresetsService {
   resolve(id?: string): Promise<{ id: string }>
   mount(agentCtx: Context, id?: string): Promise<unknown>
+  /**
+   * One agent's instance of a service its preset mounted. Read addressing:
+   * undefined means this session's preset mounts none. See AGENTS.md.
+   */
+  serviceFor(agent: { ctx: Context }, name: string): unknown
+}
+
+/**
+ * Minimal face of the optional `goals` service. Read via `ctx.get`; a
+ * profile without the service (or with a session that is not live) yields no
+ * activation, never a fabricated one.
+ */
+interface GoalServiceLike {
+  get(agent: Agent): { activation: 'armed' | 'disarmed' } | undefined
+}
+
+/**
+ * Minimal structural face of the harness `goal/activation-changed` emit event.
+ * Declared here (not imported) so the bridge never takes a runtime dependency
+ * on the goal package; the payload mirrors the harness's wire type.
+ */
+interface GoalActivationChangedLike {
+  sessionId: string
+  goal?: { id: string; revision: number; activation: 'armed' | 'disarmed' }
 }
 
 /** Minimal face of the optional `sessionTitle` service (explicit user rename). */
@@ -1402,27 +1450,98 @@ export function apply(ctx: Context): void {
     }
   })
 
-  // Push live context occupancy onto the SSE stream. The token-meter projection
-  // registry owns the change feed; when the deployment mounts it, every
-  // `contextPressure` update for a targetable session becomes a `context` frame
-  // (matching the web meter's projected value). A profile without the registry
-  // never activates this child, so Emacs simply sees no context frames.
+  /** Refine a plan projection value with the live controller's wanted direction. */
+  function livePlanSection(session: Session, value: unknown): SessionReportPlan | null {
+    const durable = reportPlan(value)
+    const agent = ctx.agents.get(session.id)
+    const presets = ctx.get('agentPresets') as AgentPresetsService | undefined
+    if (agent === undefined || presets === undefined) return durable
+    try {
+      const controller = presets.serviceFor(agent, 'planMode') as PlanModeControllerLike | undefined
+      // A confirmed absence is definitive (the session's preset mounts no plan
+      // mode); a faulting read degrades to the durable projection.
+      return controller === undefined ? null : refinePlanSection(durable, controller.get(agent))
+    } catch {
+      return durable
+    }
+  }
+
+  /** Refine a goal projection value with the process-local live activation. */
+  function liveGoalSection(session: Session, value: unknown): SessionReportGoal | null {
+    const durable = reportGoal(value)
+    if (durable === null) return null
+    const agent = ctx.agents.get(session.id)
+    if (agent === undefined) return durable
+    try {
+      const activation = (ctx.get('goals') as GoalServiceLike | undefined)?.get(agent)?.activation
+      if (activation === 'armed' || activation === 'disarmed') return { ...durable, activation }
+    } catch {
+      // Unknown activation stays absent, never fabricated.
+    }
+    return durable
+  }
+
+  // Push live context occupancy, plan mode, and goal state onto the SSE stream.
+  // The token-meter projection registry owns the change feed; when the
+  // deployment mounts it, every registered key's update for a targetable
+  // session becomes a frame. Plan and goal are refined with the same live reads
+  // the report uses (the projection alone lacks the toggle direction and the
+  // process-local activation). A profile without the registry never activates
+  // this child.
+  const lastPlanFrames = new Map<string, string>()
   ctx.inject(['sessionProjections'], (projectionCtx) => {
     const registry = projectionCtx.get('sessionProjections') as SessionProjectionRegistryService
     registry.onChanged((session, key, value) => {
-      if (key !== 'contextPressure') return
       if (isSubagentChild(session.header.origin, ownedByLiveParent(session))) return
-      const pressure = value as
-        { pressureTokens?: unknown; projectedTokens?: unknown; contextWindow?: unknown } | undefined
-      if (pressure === undefined) return
-      const used = contextUsedTokens(
-        typeof pressure.pressureTokens === 'number' ? pressure.pressureTokens : undefined,
-        typeof pressure.projectedTokens === 'number' ? pressure.projectedTokens : undefined,
-      )
-      const window = typeof pressure.contextWindow === 'number' ? pressure.contextWindow : undefined
-      if (used === undefined || window === undefined) return
-      broadcast(contextMessage(String(session.id), used, window))
+      const id = String(session.id)
+      if (key === 'contextPressure') {
+        const pressure = value as
+          { pressureTokens?: unknown; projectedTokens?: unknown; contextWindow?: unknown } | undefined
+        if (pressure === undefined) return
+        const used = contextUsedTokens(
+          typeof pressure.pressureTokens === 'number' ? pressure.pressureTokens : undefined,
+          typeof pressure.projectedTokens === 'number' ? pressure.projectedTokens : undefined,
+        )
+        const window = typeof pressure.contextWindow === 'number' ? pressure.contextWindow : undefined
+        if (used === undefined || window === undefined) return
+        broadcast(contextMessage(id, used, window))
+        return
+      }
+      if (key === 'plan') {
+        const plan = livePlanSection(session, value)
+        if (plan === null) return
+        // The projection builds a fresh view object, so it fires on state the
+        // bridge does not surface; compare the refined value, not identity.
+        const serialized = JSON.stringify(plan)
+        if (lastPlanFrames.get(id) === serialized) return
+        lastPlanFrames.set(id, serialized)
+        broadcast(planChangedMessage(id, plan))
+        return
+      }
+      if (key === 'goal') {
+        broadcast(goalChangedMessage(id, liveGoalSection(session, value)))
+      }
     })
+  })
+
+  // The goal activation is process-local and deliberately absent from the
+  // projection, so it needs its own edge. The harness event omits `goal` when
+  // none is current (a clear); the durable `goal` frame on the same commit
+  // already cleared the consumer's entry, so no frame is emitted there. The
+  // frame carries the exact goal identity so a late frame can be rejected.
+  const goalEvents = ctx as unknown as {
+    on(
+      event: 'goal/activation-changed',
+      listener: (payload: GoalActivationChangedLike) => void,
+    ): () => void
+  }
+  goalEvents.on('goal/activation-changed', (payload) => {
+    const id = String(payload.sessionId)
+    const session = sessions.list().find(candidate => String(candidate.id) === id)
+    if (session === undefined || isSubagentChild(session.header.origin, ownedByLiveParent(session))) return
+    const goal = payload.goal
+    if (goal === undefined || (goal.activation !== 'armed' && goal.activation !== 'disarmed')) return
+    broadcast(goalActivationChangedMessage(id, goal.activation, goal.id, goal.revision))
   })
 
   // Announce inventory changes: create/dispose and workspace domain mutations
@@ -1624,6 +1743,37 @@ export function apply(ctx: Context): void {
   }
 
   /**
+   * The live facts the report's pure refinement consumes for a live session.
+   * A reachable `planMode` controller supplies the wanted toggle direction
+   * (`pending`); its confirmed absence is `plan: null` (named missing). An
+   * unavailable `agentPresets` service, or a faulting read, leaves `plan`
+   * undefined (projection only). The goal activation is read from `ctx.goals`
+   * and omitted rather than fabricated.
+   */
+  function planGoalLive(id: string): PlanGoalLive {
+    const agent = ctx.agents.get(id as SessionId)
+    if (agent === undefined) return {}
+    const live: PlanGoalLive = {}
+    const presets = ctx.get('agentPresets') as AgentPresetsService | undefined
+    if (presets !== undefined) {
+      try {
+        const controller = presets.serviceFor(agent, 'planMode') as PlanModeControllerLike | undefined
+        if (controller === undefined) live.plan = null
+        else live.plan = controller.get(agent)
+      } catch {
+        // A faulting service read degrades to the durable projection.
+      }
+    }
+    try {
+      const activation = (ctx.get('goals') as GoalServiceLike | undefined)?.get(agent)?.activation
+      if (activation === 'armed' || activation === 'disarmed') live.goalActivation = activation
+    } catch {
+      // Unknown activation stays absent, never fabricated.
+    }
+    return live
+  }
+
+  /**
    * Build one read-only session report. Never resumes: the id is observed
    * through the optional `sessionQuery` service (live or prepared/cold), with
    * the projection-registry and persistence-header fallbacks when it is
@@ -1659,6 +1809,10 @@ export function apply(ctx: Context): void {
     if (report.model !== null) {
       report.modelName = await resolveModelName(report.model.provider, report.model.model)
     }
+    // Live plan/goal facts are unavailable to the pure report fold; merge them
+    // here (a cold session keeps its durable projection values). The merge runs
+    // for both observation paths, which both reach this point.
+    if (report.live) report = refinePlanGoal(report, planGoalLive(id))
     return report
   }
 

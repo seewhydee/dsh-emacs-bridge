@@ -5339,6 +5339,136 @@ to its id for the apply call."
      '(((kind . "context") (sessionId . "s1") (usedTokens . 45) (contextWindow . 100000))))
     (should (equal (assoc "s1" dsh-bridge--session-context) '("s1" 45 . 100000)))))
 
+(ert-deftest dsh-bridge-fetch-plan-goal-read-through ()
+  "The plan/goal seed reads /session once and caches both sections.
+A cold report can fold a whole persisted log, so the seed binds the
+request timeout to the longer describe timeout."
+  (let ((dsh-bridge--session-plan nil)
+        (dsh-bridge--session-goal nil)
+        (calls 0)
+        (seen-timeout nil))
+    (cl-letf (((symbol-function 'dsh-bridge--request)
+               (lambda (_method path _payload)
+                 (setq calls (1+ calls)
+                       seen-timeout dsh-bridge-timeout)
+                 (should (string-match-p "sessionId=s1" path))
+                 (cons 200 '((plan . ((active . t) (pending . nil)))
+                             (goal . ((goal . ((id . "g") (revision . 1)
+                                               (objective . "ship") (phase . "active")
+                                               (maxGoalRounds . 5)))
+                                      (roundsStarted . 0) (createdAt . 1) (updatedAt . 2)
+                                      (activation . "armed"))))))))
+      (let ((result (dsh-bridge--fetch-plan-goal "s1")))
+        (should (eq (alist-get 'active (car result)) t))
+        (should (assoc 'pending (car result)))
+        (should (equal (alist-get 'activation (cdr result)) "armed")))
+      (dsh-bridge--fetch-plan-goal "s1")
+      (should (= calls 1))
+      (should (= seen-timeout dsh-bridge-describe-timeout)))))
+
+(ert-deftest dsh-bridge-notification-plan ()
+  "A plan SSE frame replaces the session-plan cache."
+  (let ((dsh-bridge--session-plan nil))
+    (dsh-bridge--notification-handle-events
+     '(((kind . "plan") (sessionId . "s1") (plan . ((active . t) (pending . :false))))))
+    (should (equal (assoc "s1" dsh-bridge--session-plan)
+                   '("s1" (active . t) (pending . :false))))))
+
+(ert-deftest dsh-bridge-notification-goal-and-activation ()
+  "A goal frame seeds the cache; an activation frame updates one slot.
+A stale activation frame, or a durable frame lacking activation, must
+not clobber the known activation for the same goal."
+  (let ((dsh-bridge--session-goal nil)
+        (goal-section '((goal . ((id . "g1") (revision . 2) (objective . "ship")
+                                 (phase . "active") (maxGoalRounds . 9)))
+                        (roundsStarted . 1) (createdAt . 10) (updatedAt . 20))))
+    (dsh-bridge--notification-handle-events
+     (list (list (cons 'kind "goal") (cons 'sessionId "s1") (cons 'goal goal-section))))
+    (should (null (alist-get 'activation (cdr (assoc "s1" dsh-bridge--session-goal)))))
+    (dsh-bridge--notification-handle-events
+     '(((kind . "goal-activation") (sessionId . "s1") (activation . "armed")
+        (goalId . "g1") (revision . 2))))
+    (should (equal (alist-get 'activation (cdr (assoc "s1" dsh-bridge--session-goal)))
+                   "armed"))
+    ;; A stale revision is ignored.
+    (dsh-bridge--notification-handle-events
+     '(((kind . "goal-activation") (sessionId . "s1") (activation . "disarmed")
+        (goalId . "g1") (revision . 99))))
+    (should (equal (alist-get 'activation (cdr (assoc "s1" dsh-bridge--session-goal)))
+                   "armed"))
+    ;; A durable frame without activation preserves the known one.
+    (dsh-bridge--notification-handle-events
+     (list (list (cons 'kind "goal") (cons 'sessionId "s1") (cons 'goal goal-section))))
+    (should (equal (alist-get 'activation (cdr (assoc "s1" dsh-bridge--session-goal)))
+                   "armed"))))
+
+(ert-deftest dsh-bridge-view-header-plan-cell ()
+  "The view header renders the plan cell from the cached plan section."
+  (let ((dsh-bridge--session-status nil)
+        (dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t))))
+        (dsh-bridge--session-goal nil))
+    (dolist (case '(("active" ((active . t)) "plan")
+                    ("queued on" ((active . nil) (pending . t)) "plan (queued on)")
+                    ("queued off :false" ((active . t) (pending . :false)) "plan (queued off)")
+                    ("queued off nil" ((active . t) (pending . nil)) "plan (queued off)")
+                    ("change queued" ((active . t) (queued . t)) "plan (change queued)")
+                    ("inactive" ((active . nil)) nil)
+                    ("missing" nil nil)))
+      (let ((dsh-bridge--session-plan (list (cons "s1" (cadr case)))))
+        (with-temp-buffer
+          (dsh-bridge-view-mode)
+          (setq-local dsh-bridge--view-content-session "s1")
+          (let ((header (dsh-bridge--view-header-line)))
+            (if (nth 2 case)
+                (should (string-match-p (regexp-quote (nth 2 case)) header))
+              (should-not (string-match-p "plan" header)))))))))
+
+(ert-deftest dsh-bridge-view-header-goal-cell ()
+  "The view header renders the goal cell and hides complete/absent goals."
+  (let ((dsh-bridge--session-status nil)
+        (dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t))))
+        (dsh-bridge--session-plan nil))
+    (let ((dsh-bridge--session-goal
+           (list (cons "s1" '((goal . ((id . "g1") (revision . 1)
+                                      (objective . "fix the build")
+                                      (phase . "active") (maxGoalRounds . 9)))
+                              (roundsStarted . 0) (createdAt . 1) (updatedAt . 2)
+                              (activation . "disarmed"))))))
+      (with-temp-buffer
+        (dsh-bridge-view-mode)
+        (setq-local dsh-bridge--view-content-session "s1")
+        (should (string-match-p (regexp-quote "active: fix the build (disarmed)")
+                                (dsh-bridge--view-header-line)))))
+    (let ((dsh-bridge--session-goal
+           (list (cons "s1" '((goal . ((id . "g2") (revision . 2)
+                                      (objective . "done")
+                                      (phase . "complete") (maxGoalRounds . 9)))
+                              (roundsStarted . 9) (createdAt . 1) (updatedAt . 2))))))
+      (with-temp-buffer
+        (dsh-bridge-view-mode)
+        (setq-local dsh-bridge--view-content-session "s1")
+        (should-not (string-match-p "complete:" (dsh-bridge--view-header-line)))))))
+
+(ert-deftest dsh-bridge-prompt-header-plan-goal ()
+  "The prompt header appends the plan and goal cells when cached."
+  (let ((dsh-bridge--session-status nil)
+        (dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t))))
+        (dsh-bridge--session-models nil)
+        (dsh-bridge--session-context nil)
+        (dsh-bridge--last-sent nil)
+        (dsh-bridge--session-plan (list (cons "s1" '((active . t)))))
+        (dsh-bridge--session-goal
+         (list (cons "s1" '((goal . ((id . "g1") (revision . 1)
+                                    (objective . "ship it")
+                                    (phase . "active") (maxGoalRounds . 9)))
+                            (roundsStarted . 0) (createdAt . 1) (updatedAt . 2))))))
+    (with-temp-buffer
+      (dsh-bridge-prompt-mode)
+      (setq-local dsh-bridge--prompt-session "s1")
+      (let ((header (dsh-bridge--prompt-header-line)))
+        (should (string-match-p (regexp-quote "plan") header))
+        (should (string-match-p (regexp-quote "active: ship it") header))))))
+
 (ert-deftest dsh-bridge-notification-turn-frames-refresh-models ()
   "Turn frames force-refresh a cached session's model entry, and leave
 uncached sessions alone.  `run-at-time' is stubbed to run immediately."
@@ -7657,6 +7787,52 @@ rows; one with stats alone renders the Stats section and no other."
         (should (string-match-p "\f\nStats\n" text))
         (should-not (string-match-p "\f\nTokens\n" text))
         (should-not (string-match-p "\f\nContext\n" text))))))
+
+(ert-deftest dsh-bridge-describe-plan-row ()
+  "describe renders the Plan mode row, with a queued direction or missing."
+  (dsh-bridge-test--with-describe '((plan . ((active . t) (pending . :false))))
+    (dsh-bridge-describe-session "s1")
+    (with-current-buffer dsh-bridge-describe-buffer-name
+      (should (string-match-p "Plan mode\\s-+on (queued off)" (buffer-string)))))
+  (dsh-bridge-test--with-describe '((plan . ((active . nil) (pending . t))))
+    (dsh-bridge-describe-session "s1")
+    (with-current-buffer dsh-bridge-describe-buffer-name
+      (should (string-match-p "Plan mode\\s-+off (queued on)" (buffer-string)))))
+  (dsh-bridge-test--with-describe '((plan . nil) (missing . ("plan")))
+    (dsh-bridge-describe-session "s1")
+    (with-current-buffer dsh-bridge-describe-buffer-name
+      (should (string-match-p "Plan mode\\s-+—" (buffer-string))))))
+
+(ert-deftest dsh-bridge-describe-goal-section ()
+  "describe renders a Goal section (complete included) and omits it without a goal."
+  (dsh-bridge-test--with-describe
+      '((goal . ((goal . ((id . "g1") (revision . 3) (objective . "Fix the flaky test")
+                         (phase . "active")
+                         (blockedReason . ((code . "wait") (message . "on review")))
+                         (maxGoalRounds . 10)))
+                 (roundsStarted . 2) (createdAt . 1700000000000) (updatedAt . 1700000001000)
+                 (activation . "disarmed"))))
+    (dsh-bridge-describe-session "s1")
+    (with-current-buffer dsh-bridge-describe-buffer-name
+      (let ((text (buffer-string)))
+        (should (string-match-p "\f\nGoal\n" text))
+        (should (string-match-p "Objective\\s-+Fix the flaky test" text))
+        (should (string-match-p "Phase\\s-+active" text))
+        (should (string-match-p "Rounds\\s-+2/10" text))
+        (should (string-match-p "Blocked\\s-+wait: on review" text))
+        (should (string-match-p "Armed\\s-+disarmed" text)))))
+  (dsh-bridge-test--with-describe
+      '((goal . ((goal . ((id . "g2") (revision . 4) (objective . "Done")
+                         (phase . "complete") (maxGoalRounds . 3)))
+                 (roundsStarted . 3) (createdAt . 1) (updatedAt . 2))))
+    (dsh-bridge-describe-session "s1")
+    (with-current-buffer dsh-bridge-describe-buffer-name
+      (should (string-match-p "\f\nGoal\n" (buffer-string)))
+      (should (string-match-p "Phase\\s-+complete" (buffer-string)))))
+  (dsh-bridge-test--with-describe '((goal . nil))
+    (dsh-bridge-describe-session "s1")
+    (with-current-buffer dsh-bridge-describe-buffer-name
+      (should-not (string-match-p "\f\nGoal\n" (buffer-string))))))
 
 (ert-deftest dsh-bridge-describe-session-id-is-plain ()
   "The Id row prints the raw id, with no copy button, and keeps its help."

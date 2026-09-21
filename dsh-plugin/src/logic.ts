@@ -1118,6 +1118,45 @@ export function contextMessage(sessionId: string, usedTokens: number, contextWin
 }
 
 /**
+ * One SSE `data:` frame carrying a session's full refined plan section
+ * (`{active, pending?, queued?}`). A live read supplies the wanted `pending`;
+ * a projection-only section carries the direction-less `queued`.
+ */
+export function planChangedMessage(sessionId: string, plan: SessionReportPlan): string {
+  return `data: ${JSON.stringify({ kind: 'plan', sessionId, plan })}\n\n`
+}
+
+/**
+ * One SSE `data:` frame carrying a session's full goal section, or `null` when
+ * the goal was cleared. `activation` is present only when the live read
+ * supplied it (absent means unknown, never `null`).
+ */
+export function goalChangedMessage(sessionId: string, goal: SessionReportGoal | null): string {
+  return `data: ${JSON.stringify({ kind: 'goal', sessionId, goal })}\n\n`
+}
+
+/**
+ * One SSE `data:` frame carrying a process-local goal-activation change. The
+ * durable `goal` frame on the same commit carries the goal itself; this frame
+ * exists for activation edges with no `goal/change`. `goalId`/`revision` let
+ * the consumer reject a frame that arrives after the goal changed again.
+ */
+export function goalActivationChangedMessage(
+  sessionId: string,
+  activation: 'armed' | 'disarmed',
+  goalId?: string,
+  revision?: number,
+): string {
+  return `data: ${JSON.stringify({
+    kind: 'goal-activation',
+    sessionId,
+    activation,
+    ...(goalId === undefined ? {} : { goalId }),
+    ...(revision === undefined ? {} : { revision }),
+  })}\n\n`
+}
+
+/**
  * Minimal structural face of one `ask_user_question` item, enough to rebroadcast
  * it to Emacs. Mirrors `@deepseek-ai/dsh-user-questions`'s wire type, which the
  * `user-questions/request` waterfall carries verbatim; `intent` is only present
@@ -1465,6 +1504,61 @@ export interface SessionReportBreakdown {
 }
 
 /**
+ * Plan mode state for one session: the `plan` projection plus the wiring's
+ * live refinement. The projection's `pending` is direction-less
+ * (`wanted !== active`), so it surfaces as `queued`; a live
+ * `planMode.get(agent)` read supplies the wanted state itself as `pending`.
+ */
+export interface SessionReportPlan {
+  active: boolean
+  /** The wanted state (the toggle's direction): true = queued on, false = queued off. */
+  pending?: boolean
+  /** A change is pending but its direction is unknown (projection only). */
+  queued?: boolean
+}
+
+/** One durable goal snapshot (the `goal` projection's `goal` member). */
+export interface SessionReportGoalSnapshot {
+  id: string
+  revision: number
+  objective: string
+  phase: 'active' | 'paused' | 'blocked' | 'complete'
+  blockedReason?: { code: string; message: string }
+  maxGoalRounds: number
+}
+
+/**
+ * The current goal for one session: the `goal` projection's durable view plus
+ * the wiring's live `activation`. The string activation (not a boolean) keeps
+ * "unknown" (absent) distinct from "disarmed" through both JSON decoders.
+ */
+export interface SessionReportGoal {
+  goal: SessionReportGoalSnapshot
+  roundsStarted: number
+  createdAt: number
+  updatedAt: number
+  /** Process-local continuation activation; present only when a live read supplied it. */
+  activation?: 'armed' | 'disarmed'
+}
+
+/** One live `planMode.get(agent)` read: the logged state plus the wanted direction. */
+export interface PlanLiveRead {
+  active: boolean
+  pending?: boolean
+}
+
+/**
+ * The live facts the wiring can read for a live session, merged into the
+ * durable report by {@link refinePlanGoal}.
+ */
+export interface PlanGoalLive {
+  /** undefined = projection only (cold or no service); null = controller definitively absent. */
+  plan?: PlanLiveRead | null
+  /** Process-local goal activation, when the goal service supplied one. */
+  goalActivation?: 'armed' | 'disarmed'
+}
+
+/**
  * One session's read-only report, the `GET /dsh-bridge/session` body. Every
  * numeric/derived section is null when its projection was unavailable, and
  * `missing` names those keys so the Emacs side can say why rather than showing
@@ -1496,6 +1590,8 @@ export interface SessionReport {
   tokens: SessionReportTokens | null
   context: SessionReportContext | null
   breakdown: SessionReportBreakdown | null
+  plan: SessionReportPlan | null
+  goal: SessionReportGoal | null
 }
 
 function asObject(value: unknown): Record<string, unknown> | undefined {
@@ -1605,15 +1701,63 @@ function reportPermissions(value: unknown): SessionReportPermissions | null {
 }
 
 /**
+ * The plan section: the projection's `{active, pending}` wire view mapped to
+ * `{active, queued}` (its `pending` is direction-less, `wanted !== active`).
+ * A present-but-malformed value is null (the caller names it missing); a
+ * legitimately inactive plan is `{active: false}`, never null. `pending` (the
+ * wanted direction) is filled by the live refinement, never here.
+ */
+export function reportPlan(value: unknown): SessionReportPlan | null {
+  const source = asObject(value)
+  if (source === undefined) return null
+  if (typeof source.active !== 'boolean' || typeof source.pending !== 'boolean') return null
+  return source.pending ? { active: source.active, queued: true } : { active: source.active }
+}
+
+/**
+ * The goal section: the projection's current-goal object, or null when no goal
+ * is current. A present-but-malformed value is null (the caller names it
+ * missing); a legitimate null (no goal) is not. `activation` is filled by the
+ * live refinement, never here.
+ */
+export function reportGoal(value: unknown): SessionReportGoal | null {
+  const source = asObject(value)
+  if (source === undefined) return null
+  const snapshot = asObject(source.goal)
+  const roundsStarted = asNumber(source.roundsStarted)
+  const createdAt = asNumber(source.createdAt)
+  const updatedAt = asNumber(source.updatedAt)
+  if (snapshot === undefined || roundsStarted === null
+    || createdAt === null || updatedAt === null) return null
+  const { id, revision, objective, phase, maxGoalRounds } = snapshot
+  if (typeof id !== 'string' || id === '') return null
+  if (typeof revision !== 'number' || !Number.isInteger(revision) || revision <= 0) return null
+  if (typeof objective !== 'string' || objective === '') return null
+  if (phase !== 'active' && phase !== 'paused' && phase !== 'blocked' && phase !== 'complete') return null
+  if (typeof maxGoalRounds !== 'number' || !Number.isInteger(maxGoalRounds) || maxGoalRounds <= 0) return null
+  const goal: SessionReportGoalSnapshot = { id, revision, objective, phase, maxGoalRounds }
+  if (Object.hasOwn(snapshot, 'blockedReason') && snapshot.blockedReason !== undefined) {
+    const reason = asObject(snapshot.blockedReason)
+    if (reason === undefined
+      || typeof reason.code !== 'string' || typeof reason.message !== 'string') return null
+    goal.blockedReason = { code: reason.code, message: reason.message }
+  }
+  return { goal, roundsStarted, createdAt, updatedAt }
+}
+
+/**
  * Build one session report from an observation (or a header-only stand-in)
  * and caller-supplied extras. Pure: every projection value is narrowed with
  * local guards and an unexpected shape degrades to null. For the strict-schema
- * sections (stats, tokens, breakdown) null is never a legitimate state, so a
- * present-but-malformed value also earns a `missing` entry; the other
+ * sections (stats, tokens, breakdown, plan) null is never a legitimate state,
+ * so a present-but-malformed value also earns a `missing` entry; the other
  * sections' null is a real state (untitled, no selection yet, no pressure
- * sample), so they join `missing` only when the key is absent. The only
- * fallback folds (title, preset) read the log the caller already materialized
- * when it has no projection value to prefer.
+ * sample), so they join `missing` only when the key is absent. `goal` is the
+ * exception: null (no goal) is legitimate, so only a present-but-malformed
+ * value earns `missing`. The live plan/goal refinement is a separate pure
+ * pass ({@link refinePlanGoal}). The only fallback folds (title, preset) read
+ * the log the caller already materialized when it has no projection value to
+ * prefer.
  */
 export function sessionReport(
   observation: SessionObservationLike,
@@ -1624,7 +1768,9 @@ export function sessionReport(
   const stats = reportStats(values?.sessionStats)
   const tokens = reportTokens(values?.tokenUsage)
   const breakdown = reportBreakdown(values?.contextBreakdown)
-  const strict: Record<string, unknown> = { stats, tokens, breakdown }
+  const plan = reportPlan(values?.plan)
+  const goal = reportGoal(values?.goal)
+  const strict: Record<string, unknown> = { stats, tokens, breakdown, plan }
   const missing: string[] = []
   for (const [key, label] of [
     ['title', 'title'],
@@ -1636,9 +1782,13 @@ export function sessionReport(
     ['contextPressure', 'context'],
     ['contextBreakdown', 'breakdown'],
     ['sessionListMetadata', 'lastPromptAt'],
+    ['plan', 'plan'],
   ] as const) {
     if (!has(key) || (Object.hasOwn(strict, label) && strict[label] === null)) missing.push(label)
   }
+  // `goal` alone has a legitimate null (no goal), so only a present but
+  // malformed value earns a `missing` entry.
+  if (!has('goal') || (values?.goal !== null && goal === null)) missing.push('goal')
 
   const rawTitle = values?.title
   const title = has('title')
@@ -1678,7 +1828,48 @@ export function sessionReport(
     tokens,
     context: reportContext(values?.contextPressure),
     breakdown,
+    plan,
+    goal,
   }
+}
+
+/**
+ * Merge one live plan read into a durable plan section. `live` undefined leaves
+ * DURABLE unchanged (projection only); `live` null means the live controller
+ * is definitively absent, so the section is dropped; a read replaces `active`
+ * and carries the wanted direction in `pending`, else inherits the
+ * projection's direction-less `queued`.
+ */
+export function refinePlanSection(
+  durable: SessionReportPlan | null,
+  live: PlanLiveRead | null | undefined,
+): SessionReportPlan | null {
+  if (live === undefined) return durable
+  if (live === null) return null
+  const plan: SessionReportPlan = { active: live.active }
+  if (live.pending !== undefined) plan.pending = live.pending
+  else if (durable?.queued === true) plan.queued = true
+  return plan
+}
+
+/**
+ * Merge the host wiring's live reads into a durable session report. Pure so the
+ * merge is unit-testable without a host. A null `live.plan` names `plan`
+ * missing; an absent `live.plan` leaves the projection section alone. A live
+ * `goalActivation` is attached only when a goal is present.
+ */
+export function refinePlanGoal(report: SessionReport, live: PlanGoalLive): SessionReport {
+  const next: SessionReport = { ...report, missing: [...report.missing] }
+  next.plan = refinePlanSection(report.plan, live.plan)
+  if (next.plan === null) {
+    if (!next.missing.includes('plan')) next.missing.push('plan')
+  } else {
+    next.missing = next.missing.filter(label => label !== 'plan')
+  }
+  if (live.goalActivation !== undefined && next.goal !== null) {
+    next.goal = { ...next.goal, activation: live.goalActivation }
+  }
+  return next
 }
 
 /**

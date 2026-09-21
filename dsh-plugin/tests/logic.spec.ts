@@ -32,6 +32,8 @@ import {
   contextUsedTokens,
   currentModelSelection,
   draftMessage,
+  goalActivationChangedMessage,
+  goalChangedMessage,
   hostnameOf,
   isLoopbackAddress,
   isLoopbackHostname,
@@ -45,6 +47,7 @@ import {
   outboxSessionId,
   parseBearerAuthorization,
   parseSendMode,
+  planChangedMessage,
   queueCounts,
   repliesChangedMessage,
   resolveTargetId,
@@ -973,6 +976,54 @@ describe('contextMessage', () => {
   it('emits one SSE data frame with the occupancy figures', () => {
     expect(contextMessage('session-1', 45000, 100000)).toBe(
       'data: {"kind":"context","sessionId":"session-1","usedTokens":45000,"contextWindow":100000}\n\n',
+    )
+  })
+})
+
+describe('planChangedMessage', () => {
+  it('carries active plus the live wanted direction', () => {
+    expect(planChangedMessage('session-1', { active: false, pending: true })).toBe(
+      'data: {"kind":"plan","sessionId":"session-1","plan":{"active":false,"pending":true}}\n\n',
+    )
+  })
+
+  it('carries the direction-less queued bit', () => {
+    expect(planChangedMessage('session-1', { active: true, queued: true })).toBe(
+      'data: {"kind":"plan","sessionId":"session-1","plan":{"active":true,"queued":true}}\n\n',
+    )
+  })
+})
+
+describe('goalChangedMessage', () => {
+  it('carries the full goal section with its activation', () => {
+    expect(goalChangedMessage('session-1', {
+      goal: { id: 'g1', revision: 2, objective: 'ship', phase: 'active', maxGoalRounds: 9 },
+      roundsStarted: 1,
+      createdAt: 10,
+      updatedAt: 20,
+      activation: 'disarmed',
+    })).toBe(
+      'data: {"kind":"goal","sessionId":"session-1","goal":{"goal":{"id":"g1","revision":2,"objective":"ship","phase":"active","maxGoalRounds":9},"roundsStarted":1,"createdAt":10,"updatedAt":20,"activation":"disarmed"}}\n\n',
+    )
+  })
+
+  it('carries null to clear a cleared goal', () => {
+    expect(goalChangedMessage('session-1', null)).toBe(
+      'data: {"kind":"goal","sessionId":"session-1","goal":null}\n\n',
+    )
+  })
+})
+
+describe('goalActivationChangedMessage', () => {
+  it('carries the activation and the exact goal identity', () => {
+    expect(goalActivationChangedMessage('session-1', 'armed', 'g1', 2)).toBe(
+      'data: {"kind":"goal-activation","sessionId":"session-1","activation":"armed","goalId":"g1","revision":2}\n\n',
+    )
+  })
+
+  it('omits an unknown goal identity', () => {
+    expect(goalActivationChangedMessage('session-1', 'disarmed')).toBe(
+      'data: {"kind":"goal-activation","sessionId":"session-1","activation":"disarmed"}\n\n',
     )
   })
 })

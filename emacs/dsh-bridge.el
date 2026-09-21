@@ -597,6 +597,93 @@ what the user answered.  PLIST is keyed by:
   "Alist storing the token and context window usage in DSH sessions.
 Each entry has the form (SESSION-ID . (USED-TOKENS . CONTEXT-WINDOW)).")
 
+(defvar dsh-bridge--session-plan nil
+  "Alist of cached plan-mode state per DSH session.
+Each entry is (SESSION-ID . PLAN), where PLAN is the `/session`
+report's `plan` alist: `active` plus, when known, `pending` (the
+wanted state, i.e. the toggle's direction) or `queued` (a pending
+change whose direction is unknown).  An entry whose PLAN is nil is a
+known-absent section (the session's preset mounts no plan mode); an
+absent entry means the session has not been seeded.")
+
+(defvar dsh-bridge--session-goal nil
+  "Alist of cached goal state per DSH session.
+Each entry is (SESSION-ID . GOAL), where GOAL is the `/session` report's
+`goal` alist (a null goal clears the entry); an absent entry means the
+session has not been seeded.")
+
+(defun dsh-bridge--alist-set (alist key value)
+  "Return ALIST with KEY set to VALUE, replacing any existing entry."
+  (cons (cons key value) (assoc-delete-all key alist)))
+
+(defun dsh-bridge--json-false-p (value)
+  "Whether VALUE is JSON false as either decoder represents it.
+`dsh-bridge--parse-json-body` maps JSON false to nil, while the SSE
+decoder leaves it as `:false`; callers that must distinguish a
+present false from an absent key test key presence separately."
+  (or (null value) (eq value :false)))
+
+(defun dsh-bridge--goal-section-id (section)
+  "The goal id inside SECTION, a `/session` goal alist, or nil."
+  (and (consp section)
+	   (alist-get 'id (alist-get 'goal section))))
+
+(defun dsh-bridge--goal-replace (session-id new)
+  "Replace SESSION-ID's cached goal with NEW.
+A NEW section lacking `activation` inherits the cached activation only
+when it names the same goal; a new or cleared goal never inherits a
+stale one."
+  (let* ((entry (assoc session-id dsh-bridge--session-goal))
+		 (old (cdr entry)))
+	(when (and (consp new) (consp old)
+			   (null (assoc 'activation new))
+			   (equal (dsh-bridge--goal-section-id new)
+					  (dsh-bridge--goal-section-id old))
+			   (assoc 'activation old))
+	  (setq new (dsh-bridge--alist-set new 'activation (alist-get 'activation old))))
+	(setq dsh-bridge--session-goal
+		  (assoc-delete-all session-id dsh-bridge--session-goal))
+	(push (cons session-id new) dsh-bridge--session-goal)))
+
+(defun dsh-bridge--goal-activation-update (session-id activation goal-id revision)
+  "Set SESSION-ID's cached goal ACTIVATION, when GOAL-ID/REVISION match.
+A frame whose GOAL-ID/REVISION do not name the cached goal is stale and
+ignored; a session with no cached goal is left alone."
+  (let ((entry (assoc session-id dsh-bridge--session-goal)))
+	(when (and entry (consp (cdr entry)))
+	  (let* ((section (cdr entry))
+			 (snapshot (alist-get 'goal section))
+			 (cached-id (alist-get 'id snapshot))
+			 (cached-rev (alist-get 'revision snapshot)))
+		(when (and (or (null goal-id) (equal goal-id cached-id))
+				   (or (null revision) (equal revision cached-rev)))
+		  (setcdr entry (dsh-bridge--alist-set section 'activation activation)))))))
+
+(defun dsh-bridge--plan-goal-store (session-id report)
+  "Seed SESSION-ID's plan and goal caches from REPORT, a `/session` body."
+  (setq dsh-bridge--session-plan
+		(assoc-delete-all session-id dsh-bridge--session-plan))
+  (push (cons session-id (alist-get 'plan report)) dsh-bridge--session-plan)
+  (dsh-bridge--goal-replace session-id (alist-get 'goal report)))
+
+(defun dsh-bridge--fetch-plan-goal (session-id)
+  "Seed the plan and goal caches for SESSION-ID from one `/session` read.
+Read-through: a session already cached is returned as-is.  The request
+binds `dsh-bridge-timeout` to `dsh-bridge-describe-timeout` because a
+cold target folds its whole persisted log.  Returns (PLAN . GOAL), the
+cached sections, which may be nil."
+  (when (and session-id (not (assoc session-id dsh-bridge--session-plan)))
+	(ignore-errors
+	  (let ((dsh-bridge-timeout dsh-bridge-describe-timeout))
+		(let* ((result (dsh-bridge--request
+						"GET" (dsh-bridge--path "/session" session-id) nil))
+			   (status (car result))
+			   (alist (cdr result)))
+		  (when (eq status 200)
+			(dsh-bridge--plan-goal-store session-id alist))))))
+  (cons (cdr (assoc session-id dsh-bridge--session-plan))
+		(cdr (assoc session-id dsh-bridge--session-goal))))
+
 (defun dsh-bridge--status-set (session-id state &optional start-ms)
   "Record SESSION-ID's status as STATE (`running' or `idle').
 START-MS, if non-nil, specifies the ms-epoch turn-start time kept for
@@ -917,6 +1004,12 @@ Currently supported events are:
   was committed mid-turn; the frame's `turn' names the turn that grew).
 - `context': update `dsh-bridge--session-context' and re-render header
   lines reporting that data.
+- `plan': replace `dsh-bridge--session-plan' and re-render the headers and
+  any visible report.
+- `goal': replace `dsh-bridge--session-goal' (a null clears it), preserving
+  a known activation for the same goal, and re-render.
+- `goal-activation': update the cached goal's `activation' slot when the
+  frame names the cached goal, and re-render.
 - `ask-user': record a pending ask-user question and surface it.
 - `ask-user-resolved': retire a pending question (answered or cancelled).
 - `approval': record a pending approval request and surface it.
@@ -979,6 +1072,28 @@ Currently supported events are:
 			;; Redraw the prompt and view headers in the same tick.
 			(dsh-bridge--refresh-view-headers)
 			(force-mode-line-update t))))
+	   ((equal kind "plan")
+		(when id
+		  (setq dsh-bridge--session-plan
+				(assoc-delete-all id dsh-bridge--session-plan))
+		  (push (cons id (alist-get 'plan event)) dsh-bridge--session-plan)
+		  (dsh-bridge--refresh-view-headers)
+		  (force-mode-line-update t)
+		  (dsh-bridge--describe-maybe-refresh id)))
+	   ((equal kind "goal")
+		(when id
+		  (dsh-bridge--goal-replace id (alist-get 'goal event))
+		  (dsh-bridge--refresh-view-headers)
+		  (force-mode-line-update t)
+		  (dsh-bridge--describe-maybe-refresh id)))
+	   ((equal kind "goal-activation")
+		(let ((activation (alist-get 'activation event)))
+		  (when (and id (member activation '("armed" "disarmed")))
+			(dsh-bridge--goal-activation-update
+			 id activation (alist-get 'goalId event) (alist-get 'revision event))
+			(dsh-bridge--refresh-view-headers)
+			(force-mode-line-update t)
+			(dsh-bridge--describe-maybe-refresh id))))
 	   ((equal kind "ask-user")
 		(let ((question-id (alist-get 'questionId event))
 			  (questions (alist-get 'questions event)))
@@ -2747,6 +2862,9 @@ to pop to the buffer using the same window.  Return the buffer."
 	  (when turns-pair
 		(dsh-bridge--turns-cache-store id turns
 									   (alist-get 'epoch session-alist)))
+	  ;; Seed the plan/goal header cells on view-open (read-through, so a
+	  ;; refill of a seeded session never re-fetches).
+	  (dsh-bridge--fetch-plan-goal id)
 	  (with-current-buffer buffer
 		(dsh-bridge--view-fill id (car-safe turns) cwd t)
 		(when follow
@@ -3045,20 +3163,58 @@ space for subsequent flexible cells."
 		  (setq rest (cdr rest))))
 	  (mapconcat #'identity (nreverse pieces) sep))))
 
+(defun dsh-bridge--header-plan-cell (session-id)
+  "The header plan-mode cell for SESSION-ID, or nil.
+Renders `plan' when active; `plan (queued on)'/`plan (queued off)'
+when the live read names the wanted direction; `plan (change queued)'
+when only a direction-less pending change is known."
+  (let ((plan (cdr (assoc session-id dsh-bridge--session-plan))))
+	(when (consp plan)
+	  (let ((pending-pair (assoc 'pending plan))
+			(queued (eq (alist-get 'queued plan) t))
+			(active (eq (alist-get 'active plan) t)))
+		(cond
+		 ((and pending-pair (not (dsh-bridge--json-false-p (cdr pending-pair))))
+		  (list "plan (queued on)"))
+		 (pending-pair (list "plan (queued off)"))
+		 (queued (list "plan (change queued)"))
+		 (active (list "plan")))))))
+
+(defun dsh-bridge--header-goal-cell (session-id)
+  "The header goal cell for SESSION-ID, or nil.
+`<phase>: <objective>' for an active/paused/blocked goal, with a
+` (disarmed)' untruncatable suffix on an active disarmed goal; hidden
+when there is no goal or the goal is complete."
+  (let ((goal (cdr (assoc session-id dsh-bridge--session-goal))))
+	(when (consp goal)
+	  (let* ((snapshot (alist-get 'goal goal))
+			 (phase (alist-get 'phase snapshot))
+			 (objective (alist-get 'objective snapshot)))
+		(when (and (member phase '("active" "paused" "blocked"))
+				   (stringp objective))
+		  (let ((text (concat phase ": " (dsh-bridge--header-text objective)))
+				(disarmed (equal (alist-get 'activation goal) "disarmed")))
+			(if (and disarmed (equal phase "active"))
+				(list text t " (disarmed)")
+			  (list text t))))))))
+
 (defun dsh-bridge--view-header-line (&optional width)
   "Return the header line for a DSH-View buffer.
 Header line format:
 
- <status> <session-pos> <label> · <workspace> · <time>[ · <await>]
+ <status> <session-pos> <label> · <workspace> · <time>
+                 [ · plan][ · goal][ · <await>]
 
 WIDTH, if non-nil, is the display columns available; the session label
 and workspace label are shortened to fit it.
 
 The session-pos segment is the position in the session's turn history (see
 `dsh-bridge--view-turn-position'); the time segment describes the displayed
-turn (see `dsh-bridge--view-turn-time-label'); the await segment appears
-while a question or approval is pending.  The line is %-escaped for
-`header-line-format'."
+turn (see `dsh-bridge--view-turn-time-label'); the plan and goal segments
+report the cached plan-mode and goal state (see
+`dsh-bridge--header-plan-cell' and `dsh-bridge--header-goal-cell'); the
+await segment appears while a question or approval is pending.  The line is
+%-escaped for `header-line-format'."
   (let* ((id dsh-bridge--view-content-session)
 		 (status (dsh-bridge--status-glyph id))
 		 (pos (string-trim (or (dsh-bridge--view-turn-position) "")))
@@ -3067,6 +3223,8 @@ while a question or approval is pending.  The line is %-escaped for
 		 (workspace (dsh-bridge--header-text
 					 (dsh-bridge--workspace-label-for id)))
 		 (time (and id (dsh-bridge--view-turn-time-label id)))
+		 (plan (and id (dsh-bridge--header-plan-cell id)))
+		 (goal (and id (dsh-bridge--header-goal-cell id)))
 		 (await (and id
 					 (cond ((assoc id dsh-bridge--pending-questions)
 							"waiting for answer")
@@ -3081,6 +3239,8 @@ while a question or approval is pending.  The line is %-escaped for
 			  (list (list label t)
 					(list workspace t)
 					(list time)
+					plan
+					goal
 					(list await))
 			  (and width (max 1 (- width (string-width prefix)))))))))
 
@@ -5016,7 +5176,8 @@ failure leaves the header segment empty until the next trigger."
 					 (dsh-bridge--cache-last-active))))
     (when session
       (dsh-bridge--fetch-models session)
-      (dsh-bridge--fetch-context session))))
+      (dsh-bridge--fetch-context session)
+      (dsh-bridge--fetch-plan-goal session))))
 
 (defun dsh-bridge--model-catalog (data)
   "Flatten DATA's model groups into (PROVIDER/MODEL PROVIDER MODEL-ENTRY) triples.
@@ -5273,7 +5434,7 @@ recomputes on the next redisplay)."
 Header line format:
 
  <status> <label>[ (last active)][ (k/n)] · <workspace>
-                 [ · <model>][ · <ctx%>][ ✓ sent HH:MM]
+        [ · <model>][ · <ctx%>][ · plan][ · goal][ ✓ sent HH:MM]
 
 WIDTH, if non-nil, is the display columns available; the session label
 and workspace label are shortened to fit it.
@@ -5313,6 +5474,8 @@ their tag lines are visible in the buffer itself."
 				  ""))
 	(let* ((model (dsh-bridge--prompt-model-label session))
 		   (context (dsh-bridge--prompt-context-label session))
+		   (plan (and session (dsh-bridge--header-plan-cell session)))
+		   (goal (and session (dsh-bridge--header-goal-cell session)))
 		   (sent (dsh-bridge--prompt-sent-marker session))
 		   (hist (dsh-bridge--prompt-history-position))
 		   (suffix (concat qualifier hist))
@@ -5331,7 +5494,9 @@ their tag lines are visible in the buffer itself."
 							 (dsh-bridge--workspace-label-for session))
 							t)
 					  (list model)
-					  (list context))
+					  (list context)
+					  plan
+					  goal)
 				(and width
 					 (max 1 (- width (string-width prefix) (string-width sent)))))
 			   sent)))))
@@ -6244,6 +6409,28 @@ an optional `help-echo' string covering the value."
 		(cons (or (dsh-bridge--normalized-string (alist-get 'name match)) current)
 			  (dsh-bridge--normalized-string (alist-get 'description match)))))))
 
+(defun dsh-bridge--describe-plan-label (report)
+  "Return REPORT's Plan mode row value, or an em dash when it is missing.
+The state is `on'/`off', with a `(queued off)'/`(queued on)'/
+`(change queued)' suffix when a change is pending."
+  (let ((plan (alist-get 'plan report))
+		(missing (alist-get 'missing report)))
+	(cond
+	 ((member "plan" missing) "—")
+	 ((consp plan)
+	  (let ((active (eq (alist-get 'active plan) t))
+			(pending-pair (assoc 'pending plan))
+			(queued (eq (alist-get 'queued plan) t)))
+		(concat (if active "on" "off")
+				(cond
+				 ((and pending-pair
+					   (dsh-bridge--json-false-p (cdr pending-pair)))
+				  " (queued off)")
+				 (pending-pair " (queued on)")
+				 (queued " (change queued)")
+				 (t "")))))
+	 (t "—"))))
+
 (defun dsh-bridge--describe-stats (stats)
   "Insert the Stats section from STATS, the report's `stats' alist."
   (dsh-bridge--describe-section "Stats")
@@ -6322,6 +6509,32 @@ alist, or nil when the host reported none."
 			   (dsh-bridge--format-number (alist-get 'toolsTokens breakdown))
 			   (dsh-bridge--format-number (alist-get 'messageTokens breakdown)))))))
 
+(defun dsh-bridge--describe-goal (goal)
+  "Insert the Goal section for GOAL, the report's `goal' alist."
+  (dsh-bridge--describe-section "Goal")
+  (let* ((snapshot (alist-get 'goal goal))
+		 (objective (dsh-bridge--normalized-string (alist-get 'objective snapshot)))
+		 (phase (dsh-bridge--normalized-string (alist-get 'phase snapshot)))
+		 (blocked (alist-get 'blockedReason snapshot))
+		 (activation (dsh-bridge--normalized-string (alist-get 'activation goal))))
+	(dsh-bridge--describe-row "Objective" (or objective "—"))
+	(dsh-bridge--describe-row "Phase" (or phase "—"))
+	(dsh-bridge--describe-row
+	 "Rounds"
+	 (format "%s/%s"
+			 (dsh-bridge--format-number (alist-get 'roundsStarted goal))
+			 (dsh-bridge--format-number (alist-get 'maxGoalRounds snapshot))))
+	(when (consp blocked)
+	  (dsh-bridge--describe-row
+	   "Blocked"
+	   (format "%s: %s"
+			   (or (dsh-bridge--normalized-string (alist-get 'code blocked)) "?")
+			   (or (dsh-bridge--normalized-string (alist-get 'message blocked)) "?"))))
+	(when (member activation '("armed" "disarmed"))
+	  (dsh-bridge--describe-row "Armed" activation))
+	(dsh-bridge--describe-row "Created" (dsh-bridge--format-time (alist-get 'createdAt goal)))
+	(dsh-bridge--describe-row "Updated" (dsh-bridge--format-time (alist-get 'updatedAt goal)))))
+
 (defun dsh-bridge--describe-insert (id session status alist)
   "Insert the report body for session ID (nil when unknown).
 SESSION is the cached session row or nil; STATUS and ALIST are the
@@ -6346,7 +6559,8 @@ failure reason, never a fake zero."
 		 (parent (dsh-bridge--normalized-string (alist-get 'parentSession report)))
 		 (preset (dsh-bridge--normalized-string (alist-get 'agentPreset report)))
 		 (model (dsh-bridge--describe-model-label report))
-		 (permissions (dsh-bridge--describe-permission-label report)))
+		 (permissions (dsh-bridge--describe-permission-label report))
+		 (plan (dsh-bridge--describe-plan-label report)))
 	(insert (propertize (format "DSH session %s" title)
 						'face 'dsh-bridge-describe-heading-face)
 			"\n\n")
@@ -6385,6 +6599,7 @@ failure reason, never a fake zero."
 	(dsh-bridge--describe-row "Permissions"
 							  (if permissions (car permissions) "—")
 							  (cdr permissions))
+	(dsh-bridge--describe-row "Plan mode" plan)
 	(when parent
 	  (dsh-bridge--describe-row
 	   "Forked from"
@@ -6395,10 +6610,12 @@ failure reason, never a fake zero."
 	(let ((stats   (alist-get 'stats report))
 		  (tokens  (alist-get 'tokens report))
 		  (context (alist-get 'context report))
-		  (breakdown (alist-get 'breakdown report)))
+		  (breakdown (alist-get 'breakdown report))
+		  (goal    (alist-get 'goal report)))
 	  (when stats   (dsh-bridge--describe-stats stats))
 	  (when tokens  (dsh-bridge--describe-tokens tokens))
-	  (when context (dsh-bridge--describe-context context breakdown)))))
+	  (when context (dsh-bridge--describe-context context breakdown))
+	  (when goal    (dsh-bridge--describe-goal goal)))))
 
 (defun dsh-bridge--describe-open-directory (directory)
   "Open DIRECTORY in Dired, or as a file when it is not a directory."
