@@ -3,10 +3,13 @@
 A two-way bridge between an Emacs session and a running DeepSeek Harness (`dsh
 web`) session. The DSH text window is small and typing-poor; Emacs is a full
 editor but lacks DSH's live agent. The bridge moves text in both directions
-over loopback HTTP without window-switching and copy-paste. Emacs is a
-*companion* to a live DSH session (the web UI stays the primary interface),
-not a replacement client — see [Settled decisions](#settled-decisions) for why
-we are not pursuing the Emacs-as-primary-client (ACP-style) model.
+over loopback HTTP without window-switching and copy-paste.
+
+Usage is documented in [README.md](README.md); the architecture rules and the
+harness seams the plugin depends on are in [AGENTS.md](AGENTS.md). This file
+is forward-looking: settled decisions, candidates, and non-goals. The harness
+is pre-release with no compatibility promise; AGENTS.md owns the version-bump
+re-verification checklist.
 
 ## Names (locked)
 
@@ -17,101 +20,6 @@ we are not pursuing the Emacs-as-primary-client (ACP-style) model.
 | DSH plugin (Cordis id) | `dsh-bridge` |
 | Emacs feature / file | `dsh-bridge.el` → feature `dsh-bridge`; optional companion `dsh-bridge-install.el` → feature `dsh-bridge-install`; prefix `dsh-bridge-` |
 
-## Status
-
-Implemented and gated by `make test` (Vitest for the plugin's pure logic, ERT
-for the Elisp) plus the `integration/` seam harness.
-
-- **Host plugin** (`dsh-plugin/src/index.ts`; pure decisions in `logic.ts`,
-  outbox in `outbox.ts`): loopback `/dsh-bridge/*` routes (inventory in the
-  `index.ts` header comment), shared bearer token, host-side target resolution
-  with on-demand resume of cold sessions, SSE turn/status/context/
-  sessions-changed frames, a bounded DSH→Emacs outbox, the model
-  catalog/selection proxied through the host's own Remotes, and ask-user
-  ownership via the `user-questions/request` waterfall.
-- **Client plugin**: "Send to Emacs" assistant action, composer-draft push,
-  token auto-vend.
-- **Emacs package**: transient dispatcher; tabulated session list
-  (RET "next thing" dispatch, open/resume, rename, archive, create,
-  workspace rename, peek/describe); per-turn DSH-View with `M-p`/`M-n`,
-  follow mode and GFM rendering; DSH-Prompt composer with prompt history
-  and model selection; SSE consumer with reconnect; plugin
-  install/diagnosis.
-- **Session report** (candidate 1):
-  `GET /dsh-bridge/session` reads one session through `ctx.sessionQuery`
-  (live or cold, never resuming) and returns identity/lineage plus
-  `sessionStats`/`tokenUsage`/`contextPressure`/`contextBreakdown`/
-  `modelSelection`/`permissions`/`title`; DSH-Describe renders it as a
-  `help-mode` buffer with hyperlinks and back/forward history.
-
-Usage is documented in [README.md](README.md); the architecture rules and the
-harness seams the plugin depends on are in [AGENTS.md](AGENTS.md). This file
-is forward-looking: settled decisions, candidates, and non-goals. The harness
-is pre-release with no compatibility promise; AGENTS.md owns the version-bump
-re-verification checklist.
-
-## Settled decisions
-
-- **Companion, not a replacement client.** The differentiator is attaching to
-  a *live* session (session inventory, draft review, cross-surface push), not
-  an Emacs-driven agent loop. The ACP ecosystem (`agent-shell`/`acp.el`, the
-  harness's own `packages/acp/acp`) already covers Emacs-as-primary-client.
-- **No live tail of assistant text.** Streaming every token into Emacs is
-  DSH's job; Emacs gets turn-completion notices and on-demand turn fetches.
-  (The DSH-View does append each *committed* segment to a followed turn in
-  place and keeps the end in view; that is viewport behavior over the
-  existing per-reply notifications, not token streaming.)
-- **Observation is read-only; mutation is an explicit command.** Reads go
-  through projections (`ctx.sessionQuery.observeSession(id, {projectionMode:
-  'all'})` or `ctx.sessionProjections.stateOf`) so they never resume a cold
-  session as a side effect. Writes are user-initiated commands that report
-  what changed.
-- **Host-side targeting, Emacs-side selection.** The host resolves a missing
-  `sessionId` to last-active (falling back to the most recent cold session);
-  Emacs keeps a default target plus per-buffer bindings.
-- **The session picker offers sessions, not binding modes.** Neither
-  `(default)` nor `(last-active)` is a completion entry: the first is the
-  absence of a chosen session and the second the absence of a default target,
-  so both are category errors in a session list and, sorting first, invite
-  accidental selection. Clearing the default target stays on `u`
-  (`dsh-bridge-clear-default-target`), and an interactive prompt-buffer rebind
-  always picks an explicit session. A title shared by several sessions is one
-  candidate that says how many match; choosing it prompts again with the
-  distinguishing workspace (or, when workspaces do not distinguish, the
-  shortest pairwise-distinct id tails) as the only candidates, so the shared
-  title is never repeated as a useless prefix. Disambiguation stays scoped to
-  the colliding group rather than merging suffixed candidates into the
-  all-sessions list: a fabricated `title · suffix` can equal another session's
-  real title (titles are free-form and may contain the separator), and no
-  fixed suffix scheme is injective.
-- **First lazy send is convenient; later ones are not lazy.** A DSH-Prompt
-  buffer with no binding and no default sends without a target (the host
-  picks), then adopts the session id the response reports, so follow-up sends
-  from that buffer continue the same conversation. Pre-send naming stays
-  qualified ("last active") because only the response knows where the prompt
-  went; a send through the default target keeps following it rather than
-  pinning. Rejected while settling this: removing the recorded last-active
-  resolution (the dispatcher header and non-prompt send feedback need it),
-  eager pre-send resolution (latency, and it still races POST-time resolution),
-  and confirm-on-lazy-send / refuse-to-send-unbound (friction; the response
-  pin removes the recurrence the confirmation would address).
-- **Cold sessions are first-class.** An explicit cold id resumes on demand;
-  subagent-owned sessions are 409.
-- **Ask-user coexists with the web UI while an Emacs SSE client is
-  connected**: the bridge offers the question to Emacs and (when the web UI is
-  open) also calls `next()` so the browser panel appears; whichever answers
-  first wins and the resolved frame dismisses the other presentation. With no
-  Emacs SSE client the bridge delegates to the browser (`next()`) untouched.
-- **Approval coexists the same way**: the bridge offers an approval to Emacs
-  and (when the web UI is open) also calls `next()` so the browser panel
-  appears; whichever answers first wins, and the resolved frame dismisses the
-  other presentation — the web panel through `PendingApproval.abort()`. With
-  no answering Emacs SSE client the bridge delegates untouched.
-- **Plugin management stays user-confirmed.** Installs are validated with
-  `dsh --profile <p> --dump-config`; the bridge never auto-restarts a server.
-- **`/output` is kept but unused** — a single-shot "latest text" probe; Emacs
-  reads `/turns`.
-
 ## Candidates
 
 Ordered by recommended sequence, but out-of-sequence implementation is
@@ -120,94 +28,7 @@ DSH 0.1.6-alpha.1; the peer floor in `dsh-plugin/package.json` is
 pinned to match (node-semver prerelease rules exclude `0.1.6-alpha.1`
 from the old `^0.1.5-alpha.1` floor).
 
-**Shared prerequisites.** Two small additions unlock several candidates:
-
-- `/turns` turn records gain the closing assistant message's `messageId`
-  (ratings) and the turn's end `seq` as `endSeq` (fork targeting).
-- The plugin's optional-service list gains `sessionQuery` (stats — **wired**:
-  candidate 1 landed it), `attachments` and `llm` (image/file prompts —
-  **wired**: candidate 11 landed them), `messageFeedback` (ratings), `goals`
-  (goal mutations), `sessionController`
-  (fork — **wired**: candidate 2), `commands` (slash-command catalog,
-  `/emacs`), `permissionPresets`/`sandboxPolicy`/`approval` (permission
-  display — none of the three is a Typert Remote; the wire surface is the
-  `permissions` projection), and `serviceFor` on the `AgentPresetsService`
-  face (plan mode). All are read with `ctx.get` and must tolerate
-  `undefined`.
-
-### 1. Session stats in `describe-session` (**Implemented**)
-
-Turn the current `D`/sessions-list details buffer into a real session report,
-and make it reachable without going through the sessions list.
-
-- **Data** — one call, live *and* cold, no resume:
-  `ctx.sessionQuery.observeSession(id, {projectionMode:'all'})` returns the
-  header plus projections:
-  - `sessionStats` — turns, steps, `llmMs`, `toolMs`, `ttftMs`/`ttftSteps`,
-    `decodeMs`/`decodeTokens` (tokens/sec = `decodeTokens / (decodeMs/1000)`);
-  - `tokenUsage` — `uncachedInputTokens`, `outputTokens`, `cacheReadTokens`,
-    `cacheWriteTokens` (cache-hit % = `cacheRead / (uncachedInput +
-    cacheRead)`; cache writes are not reads);
-  - `contextPressure` / `contextBreakdown`; `modelSelection`; `agentPreset`;
-    `permissions`; `title`; `sessionListMetadata.lastPromptAt`.
-  - Start time is `header.createdAt`; lineage is `parentSession`/`isSeeded`.
-  - Observation snapshots carry **wire-visible projections only**; host-only
-    units (`sandboxMode`) are silently absent (see candidate 6).
-  - The harness has **no cost/USD** metric; do not promise one.
-- **Discoverability** — the command is currently reachable only from the
-  sessions buffer (`D` and its menu-bar menu). Generalize
-  `dsh-bridge-describe-session` to take an optional session id (default: the
-  current buffer's effective session), add it to the top-level
-  `dsh-bridge-menu` and the transient, and make the session label in the
-  DSH-View/DSH-Prompt header line clickable (`mouse-1` → describe).
-- Keep the projection fold in `logic.ts` dependency-free; fall back to the
-  existing persistence fold when `sessionQuery` is absent.
-
-### 2. Branch a turn into a new conversation
-
-**Implemented.**
-
-- **Seam** — `ctx.get('sessionController').fork(...)` (the native service; the
-  `session/fork` Remote proxy through `rpcCall` was the rejected alternative).
-  The boundary is the first `turn/end` at/after `atSeq`; omit `atSeq` for the
-  last completed turn. A fork without `atSeq` succeeds even mid-turn (cutting
-  at the last completed `turn/end`); `session/fork-unavailable` is thrown only
-  when `atSeq` pins a turn that has not completed. The host route
-  (`POST /dsh-bridge/fork`) is `logic.ts`-free wiring over the service, resolves
-  its source read-only (never resuming a cold session), 409s a subagent source,
-  and maps the seam's `RemoteError` codes by their `isDSHRemoteError` marker.
-- **Target** — the *shown* turn: fork at its `endSeq`, added to the `/turns`
-  record (the `turn/end` event's `seq`); an open turn has no `endSeq` and is
-  refused.
-- **UX** — `B` in DSH-View forks at the shown turn, then opens the child's view
-  (following) and its prompt, and reports the new id tail. The fork message
-  states that a fork **inherits the preset but not the model** (the child starts
-  on the default model) and is not auto-titled host-side (the web UI titles it
-  client-side).
-
-### 3. Transcript buffer
-
-A continuous, read-only rendering of a whole session (`/prompts` + `/turns`
-already carry the data), with turn separators and the existing follow/refresh
-machinery. This is the natural home for the turn actions below; no new host
-seam required.
-
-### 4. Ratings on the turn-closing message
-
-- **Seam** — `ctx.messageFeedback` (`list`/`put`/`delete`; also the Remotes
-  `messageFeedback/list|put|delete`). Log-only, cold-readable, optimistic
-  concurrency via `ifVersion` (`null` = require-absent); the target must be a
-  finalized assistant `messageId`. Ratings are `positive`/`negative` plus an
-  optional note.
-- **Target** — one rating per turn, addressed to the turn's closing
-  assistant `messageId`; rendered in DSH-View and the transcript.
-- **Web parity** — the web UI renders the action strip on *every* turn's
-  closing message (always visible on the latest turn, hover-revealed
-  otherwise); only *branch* is disabled for non-latest turns. Emacs has no
-  hover, so rating the shown turn is the faithful equivalent; narrowing to the
-  latest turn would make ratings unavailable while browsing.
-
-### 5. Plan mode and goal (display first)
+### 1. Plan and goal (display first)
 
 - **Plan mode** — read the `plan` projection (`{active, pending}`). There is
   no Remote, and the controller is mounted in an entry-local `isolate` realm,
@@ -229,7 +50,7 @@ seam required.
 - **UX** — show goal phase and plan state in the DSH-View/Prompt header and
   `describe-session`; add mutating commands only if demand appears.
 
-### 6. Permission mode (display only)
+### 2. Permission mode (display only)
 
 Show the effective sandbox mode (`read-only` / `workspace-write` /
 `danger-full-access`) and approval policy (`ask` / `never` — note `never`
@@ -246,105 +67,7 @@ risk acknowledgement. See [Deferred](#deferred).  Answering an on-demand
 `approval/request` (a one-shot sandbox escalation or hook-gated tool ask) is
 a separate, implemented feature.
 
-### 7. `/emacs edit` flow
-
-Open a file (and line) from DSH in Emacs. The harness `open-in-app` catalog
-ships VS Code, Zed, Sublime, Xcode… but **no Emacs target**, and the flow is
-plain HTTP routes (`GET /open-in-app/apps`, `POST /open-in-app/open {app,
-path}`), so either add an Emacs entry there/upstream or implement the
-bridge-side route (`POST /dsh-bridge/open`, spawning `emacsclient` with
-`server-name` respected).
-
-Registering `/emacs` itself goes through `ctx.get('commands')` (optional —
-tolerate `undefined`): `register({name, description, input?, recordInput?,
-handler})`, where `name` carries **no slash** and must match
-`/^[a-z][a-z0-9_-]*$/`; the handler receives `{commandId, agent, rawInput,
-attachments, signal}` and returns `{kind:'success', text?} |
-{kind:'error', text}`. Convenience, not core; keep it parked behind the
-candidates above.
-
-### 8. Slash-command catalog and execution
-
-- **Seam** — the `commands/list` and `commands/execute` Remotes, proxied
-  through the existing `rpcCall` exactly like the model Remotes.
-  `list(agent)` returns name-sorted `CommandDescriptor`s (`{name (no slash),
-  description, input?: {hint, attachments?}}`); `execute(agent, line,
-  submittedAttachments, signal)` runs a slash line without sending it to the
-  model, returning `undefined` for unknown lines and a settled `{commandId,
-  result: {kind:'success'|'error', text?}}` otherwise. Check how `signal`
-  crosses the RPC wire at implementation time.
-- **UX** — `/`-completion in the DSH-Prompt composer (annotations from
-  `description`), routing a submitted slash line to `execute` instead of
-  `/send`, with the result rendered in the view buffer; also expose the
-  catalog in the transient. Parity-plus: Emacs completion beats the web
-  command palette for keyboard users.
-
-### 9. Changed-files review (**Implemented**)
-
-- **Data** — a pure fold in `logic.ts` over the session log's file-touching
-  tool calls (the raw log, since `tool/call` is log-only and never reaches the
-  surface), producing per-turn and per-session lists of modified paths resolved
-  against the session cwd. The mutation vocabulary (`write`, `edit`, mutating
-  `str_replace_editor`) is replicated from the web client's turn-deliverables
-  fold and pinned by the version-bump checklist. `/turns` carries the per-turn
-  `files: [{path, op}]` attribution.
-- **UX** — the DSH-View buffer ends a changed turn with a `Changed files:`
-  footer: a plain inline list of one button per file that visits it. The
-  recorded-hunks viewer (DSH-Changes buffer + `GET /changes`) was removed: the
-  persisted `FileDiff` is `{path, oldText, newText}` and `computeHunkDiffs`
-  discards the `structuredPatch` line offsets, so no truthful `@@ -L,N +L,M @@`
-  header could be synthesised and the bespoke mode only half-imitated
-  `diff-mode`. A proper diff view is deferred: either persist the hunk offsets
-  (or pre/post images) upstream so the bridge can emit a genuine unified diff
-  (`diff-mode`, preferred), or ship an honest non-diff change view without
-  diff-syntax markers. A `deliverables/presented` display beyond a marker and
-  a live `files-changed` SSE nudge remain deferred.
-
-
-### 10. Cross-session search
-
-- **Route** — `GET /dsh-bridge/search?q=`: full-text over live sessions plus
-  cold logs read via `sessionPersistence.open(id, 'read')` (never resuming).
-  Cold logs are read whole, so bound the cost: a `sessionId` scope parameter
-  or a most-recent-N cap, with truncation reported.
-- **UX** — an occur/grep-style results buffer; `RET` jumps to that session's
-  transcript at the matching turn.
-
-### 11. Attachments in `/send` (**Implemented**)
-
-- **Transport** — path-based: `POST /dsh-bridge/send` takes an optional
-  `attachments: [{path, name?}]` of absolute host-local paths and the host
-  reads them, so bytes never cross the 1 MiB JSON body cap. Emacs and the DSH
-  host must share a filesystem; a raw-byte upload route for a containerized
-  host is a possible follow-up, deliberately not built.
-- **Seam** — the content-addressed `attachments` store (base bundle; one more
-  optional `ctx.get`), **not** the browser `fileUploads` receipt flow. This
-  *reverses* the original candidate's "mirror that flow rather than inventing
-  a second one": receipts guard an untrusted wire caller citing bytes it did
-  not upload, while the bridge is a trusted host plugin that can mint durable
-  refs directly (the harness's own subagent prompt does the same), and
-  `file-upload` is web-app-only whereas `attachment-local` is in the base
-  bundle. Images go through `saveImages`, files through `saveFileStream`;
-  content signatures (not extensions) decide which, since the store rejects a
-  mismatched declared type. Accepted parity deviations from `session/prompt`:
-  no `requestId` dedupe, no per-agent image-admission serialization, no
-  disposed-agent re-check, route-mapped errors instead of `session/agent-busy`.
-- **Text-only models** — the route pre-rejects an image with
-  `MODEL_DOES_NOT_SUPPORT_IMAGES` (optional `ctx.get('llm')` + the live
-  `modelSelection` projection; best-effort), mirroring the web UI.
-- **Caps** — 20 attachments and 200 MiB per file (bridge constants in
-  `logic.ts`), plus the store's own image limits.
-- **UX** — Message-mode-like in-buffer MML tags (`C-c C-a` /
-  `dsh-bridge-attach-file`, `dsh-bridge-attach-buffer-file`, dired marks), a
-  `📎N` header segment, and send-time stripping. Message mode's
-  type/description/disposition prompts have no DSH analogue. As a consequence
-  of the tag model, `dsh-bridge-send` (region/buffer send) also parses tags —
-  only those inside the sent region — rather than leaking them as literal
-  text or silently dropping them; this extends the original prompt-buffer-only
-  UX scope. The tags stay in the source buffer after such a send, so a repeat
-  region-send re-uploads the bytes.
-
-### 12. Queue visibility and queued-item management
+### 3. Queue visibility and queued-item management
 
 - **Problem** — a prompt sent from Emacs while a turn runs is queued
   host-side and invisible in Emacs; there is no way to retract, edit, or
@@ -364,10 +87,58 @@ candidates above.
   stop look ineffective; the stop confirmation now warns when that is about
   to happen.
 
-### Cut / not planned
+### 4. Compact
 
-- `dsh-bridge-minor-mode` — the transient plus region/buffer send covers it.
-- Further client-plugin (browser) features — no current demand.
+- To be scoped out: implement the functionality of the /compact
+  command in the web interface.
+
+### 5. Ratings/Feedback
+
+- **Seam** — `ctx.messageFeedback` (`list`/`put`/`delete`; also the Remotes
+  `messageFeedback/list|put|delete`). Log-only, cold-readable, optimistic
+  concurrency via `ifVersion` (`null` = require-absent); the target must be a
+  finalized assistant `messageId`. Ratings are `positive`/`negative` plus an
+  optional note.
+- **Target** — one rating per turn, addressed to the turn's closing
+  assistant `messageId`; rendered in DSH-View and the transcript.
+- **Web parity** — the web UI renders the action strip on *every* turn's
+  closing message (always visible on the latest turn, hover-revealed
+  otherwise); only *branch* is disabled for non-latest turns. Emacs has no
+  hover, so rating the shown turn is the faithful equivalent; narrowing to the
+  latest turn would make ratings unavailable while browsing.
+
+### 6. `/emacs edit` flow
+
+Open a file (and line) from DSH in Emacs. The harness `open-in-app` catalog
+ships VS Code, Zed, Sublime, Xcode… but **no Emacs target**, and the flow is
+plain HTTP routes (`GET /open-in-app/apps`, `POST /open-in-app/open {app,
+path}`), so either add an Emacs entry there/upstream or implement the
+bridge-side route (`POST /dsh-bridge/open`, spawning `emacsclient` with
+`server-name` respected).
+
+Registering `/emacs` itself goes through `ctx.get('commands')` (optional —
+tolerate `undefined`): `register({name, description, input?, recordInput?,
+handler})`, where `name` carries **no slash** and must match
+`/^[a-z][a-z0-9_-]*$/`; the handler receives `{commandId, agent, rawInput,
+attachments, signal}` and returns `{kind:'success', text?} |
+{kind:'error', text}`. Convenience, not core; keep it parked behind the
+candidates above.
+
+### 7. Cross-session search
+
+- **Route** — `GET /dsh-bridge/search?q=`: full-text over live sessions plus
+  cold logs read via `sessionPersistence.open(id, 'read')` (never resuming).
+  Cold logs are read whole, so bound the cost: a `sessionId` scope parameter
+  or a most-recent-N cap, with truncation reported.
+- **UX** — an occur/grep-style results buffer; `RET` jumps to that session's
+  transcript at the matching turn.
+
+### 8. Transcript buffer
+
+A continuous, read-only rendering of a whole session (`/prompts` + `/turns`
+already carry the data), with turn separators and the existing follow/refresh
+machinery. This is the natural home for the turn actions below; no new host
+seam required.
 
 ## Deferred
 
