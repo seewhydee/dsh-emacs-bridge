@@ -7538,19 +7538,6 @@ parent-session link describes the parent."
     (with-current-buffer dsh-bridge-describe-buffer-name
       (should (equal (dsh-bridge--effective-session) "s1")))))
 
-(ert-deftest dsh-bridge-describe-session-id-button-copies ()
-  "The Id row's button copies the raw session id."
-  (dsh-bridge-test--with-describe nil
-    (dsh-bridge-describe-session "s1")
-    (with-current-buffer dsh-bridge-describe-buffer-name
-      (goto-char (point-min))
-      (search-forward "Id")
-      (search-forward "s1")
-      (let ((button (button-at (match-beginning 0))))
-        (should button)
-        (push-button (match-beginning 0))
-        (should (equal (car kill-ring) "s1"))))))
-
 (ert-deftest dsh-bridge-describe-session-parent-xref-navigates ()
   "A parent-session xref describes the parent, and `l' returns."
   (dsh-bridge-test--with-describe '((parentSession . "parent"))
@@ -7574,20 +7561,6 @@ parent-session link describes the parent."
 	  (if help
 		  (should (equal (with-current-buffer "*Help*" (buffer-string)) before))
 		(should (not (get-buffer "*Help*")))))))
-
-(ert-deftest dsh-bridge-describe-session-action-buttons-push-no-history ()
-  "Action buttons act without entering the help xref history."
-  (dsh-bridge-test--with-describe nil
-	(dsh-bridge-describe-session "s1")
-	(with-current-buffer dsh-bridge-describe-buffer-name
-	  (let ((stack help-xref-stack)
-			(item help-xref-stack-item))
-		(goto-char (point-min))
-		(search-forward "[Copy id]")
-		(push-button (match-beginning 0))
-		(should (equal (car kill-ring) "s1"))
-		(should (eq help-xref-stack-item item))
-		(should (equal help-xref-stack stack))))))
 
 (ert-deftest dsh-bridge-describe-session-transport-failure-degrades ()
   "A transport failure names its own reason, not a duplicated label."
@@ -7644,7 +7617,9 @@ pinning the retry to that id."
         (kill-buffer dsh-bridge-describe-buffer-name)))))
 
 (ert-deftest dsh-bridge-describe-session-failure-degrades ()
-  "A failed request still opens the report with the cached facts and reason."
+  "A failed request still opens the report with the cached facts and reason.
+No section can be filled without a report, so the Stats/Tokens/Context
+headings are omitted rather than rendered empty."
   (let ((dsh-bridge--sessions-cache '(((id . "s1") (title . "cached title") (live . t)))))
     (unwind-protect
         (cl-letf (((symbol-function 'dsh-bridge--request)
@@ -7654,9 +7629,64 @@ pinning the retry to that id."
             (let ((text (buffer-string)))
               (should (string-match-p "Report unavailable: HTTP 500: boom" text))
               (should (string-match-p "DSH session cached title" text))
-              (should (string-match-p "(unavailable)" text)))))
+              (should (string-match-p "Id\\s-+s1" text))
+              (dolist (section '("Stats" "Tokens" "Context"))
+                (should-not (string-match-p
+                             (concat "\f\n" section "\n") text))))))
       (when (get-buffer dsh-bridge-describe-buffer-name)
         (kill-buffer dsh-bridge-describe-buffer-name)))))
+
+(ert-deftest dsh-bridge-describe-session-omits-unavailable-sections ()
+  "A section is omitted when the report carries no data for it.
+A report with none of stats/tokens/context renders only the identity
+rows; one with stats alone renders the Stats section and no other."
+  (dsh-bridge-test--with-describe
+      '((stats . nil) (tokens . nil) (context . nil) (breakdown . nil))
+    (dsh-bridge-describe-session "s1")
+    (with-current-buffer dsh-bridge-describe-buffer-name
+      (let ((text (buffer-string)))
+        (should (string-match-p "DSH session Title s1" text))
+        (should (string-match-p "Id\\s-+s1" text))
+        (dolist (section '("Stats" "Tokens" "Context"))
+          (should-not (string-match-p (concat "\f\n" section "\n") text))))))
+  (dsh-bridge-test--with-describe
+      '((tokens . nil) (context . nil) (breakdown . nil))
+    (dsh-bridge-describe-session "s1")
+    (with-current-buffer dsh-bridge-describe-buffer-name
+      (let ((text (buffer-string)))
+        (should (string-match-p "\f\nStats\n" text))
+        (should-not (string-match-p "\f\nTokens\n" text))
+        (should-not (string-match-p "\f\nContext\n" text))))))
+
+(ert-deftest dsh-bridge-describe-session-id-is-plain ()
+  "The Id row prints the raw id, with no copy button, and keeps its help."
+  (dsh-bridge-test--with-describe nil
+    (dsh-bridge-describe-session "s1")
+    (with-current-buffer dsh-bridge-describe-buffer-name
+      (goto-char (point-min))
+      (search-forward "Id")
+      (search-forward "s1")
+      (should (equal (get-text-property (match-beginning 0) 'help-echo)
+                     "The raw DSH session id"))
+      (should-not (button-at (match-beginning 0))))))
+
+(ert-deftest dsh-bridge-describe-session-row-buttons-push-no-history ()
+  "A row button acts without entering the help xref history.
+The report's buttons are plain actions, not help-xref links, so pressing
+one must not disturb `l'/`r' navigation."
+  (dsh-bridge-test--with-describe nil
+    (dsh-bridge-describe-session "s1")
+    (with-current-buffer dsh-bridge-describe-buffer-name
+      (let ((stack help-xref-stack)
+            (item help-xref-stack-item))
+        (goto-char (point-min))
+        (search-forward "Directory")
+        (search-forward "/tmp")
+        (should (button-at (match-beginning 0)))
+        (cl-letf (((symbol-function 'dsh-bridge--describe-open-directory) #'ignore))
+          (push-button (match-beginning 0)))
+        (should (eq help-xref-stack-item item))
+        (should (equal help-xref-stack stack))))))
 
 (ert-deftest dsh-bridge-describe-session-uses-effective-session ()
   "Called from a DSH-View buffer, the report targets that buffer's session."
