@@ -632,9 +632,12 @@ present false from an absent key test key presence separately."
   "Replace SESSION-ID's cached goal with NEW.
 A NEW section lacking `activation` inherits the cached activation only
 when it names the same goal; a new or cleared goal never inherits a
-stale one."
+stale one.  The SSE decoder's `:null' (a cleared goal) normalizes to
+nil, so the entry's representation does not depend on the decoder."
   (let* ((entry (assoc session-id dsh-bridge--session-goal))
 		 (old (cdr entry)))
+	(when (eq new :null)
+	  (setq new nil))
 	(when (and (consp new) (consp old)
 			   (null (assoc 'activation new))
 			   (equal (dsh-bridge--goal-section-id new)

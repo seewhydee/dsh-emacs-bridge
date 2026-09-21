@@ -5403,7 +5403,13 @@ not clobber the known activation for the same goal."
     (dsh-bridge--notification-handle-events
      (list (list (cons 'kind "goal") (cons 'sessionId "s1") (cons 'goal goal-section))))
     (should (equal (alist-get 'activation (cdr (assoc "s1" dsh-bridge--session-goal)))
-                   "armed"))))
+                   "armed"))
+    ;; A cleared goal arrives as the SSE decoder's :null and normalizes
+    ;; to a nil entry, matching the report path's representation.
+    (dsh-bridge--notification-handle-events
+     '(((kind . "goal") (sessionId . "s1") (goal . :null))))
+    (should (assoc "s1" dsh-bridge--session-goal))
+    (should (null (cdr (assoc "s1" dsh-bridge--session-goal))))))
 
 (ert-deftest dsh-bridge-view-header-plan-cell ()
   "The view header renders the plan cell from the cached plan section."
