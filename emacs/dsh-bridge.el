@@ -4100,51 +4100,53 @@ no-op for sessions no view shows in either state."
 ;;; Ask-user questions (the DSH `ask_user_question` tool)
 
 ;; The ask-user path registers an in-process answerer on the host's
-;; `user-questions/request` waterfall (ahead of the browser forwarder).
-;; While an Emacs SSE client is connected the bridge offers the question
-;; to Emacs and, when the web UI is also open, still hands the request
-;; to the browser forwarder so its own Q&A panel appears: the two
-;; presentations race, and whichever answers first settles the request.
-;; A browser-side rejection (no answerer, no loaded session, or the
-;; panel closed) never ends the race, so Emacs decides in that case.
-;; With no Emacs client connected the request delegates to the web UI
+;; `user-questions/request` waterfall, ahead of the browser forwarder.
+;; While an Emacs SSE client is connected the bridge offers the
+;; question to Emacs and, when the web UI is also open, also hands the
+;; request to the browser forwarder so its own Q&A panel appears.
+;; Whichever presentation answers first settles the request.  However,
+;; a browser-side rejection (no answerer, no loaded session, or the
+;; panel closed) does not end the race, leaving Emacs to decide.  With
+;; no Emacs client connected, the request delegates to the web UI
 ;; untouched.  The browser plugin's own draft-push SSE connection is
 ;; marked and never counts as Emacs — it exists whenever the web UI is
-;; open and never answers questions (it does consume the resolved frame
-;; so it can dismiss the web panel after an Emacs answer).  No loopback
-;; wire and no third-party contact is involved, and the Emacs answer
-;; arrives over the bearer-authed `POST /dsh-bridge/answer` route.  A
-;; late or duplicate answer gets a 404 `not-pending` (benign);
-;; cancelling from Emacs fails the asking tool call.
+;; open and never answers questions (it does consume the resolved
+;; frame so it can dismiss the web panel after an Emacs answer).  No
+;; loopback wire and no third-party contact is involved, and the Emacs
+;; answer arrives over the bearer-authed `POST /dsh-bridge/answer`
+;; route.  A late or duplicate answer gets a 404 `not-pending`
+;; (benign); cancelling from Emacs fails the asking tool call.
 
-;; Question buffer state and lookup -----------------------------------------
-;; (Defined before the registry maintenance below, which banners live buffers
-;; via `dsh-bridge--question-mark-resolved'.)
-
-;; The derived mode is defined later in this section; declare it here so the
-;; byte-compiler knows `dsh-bridge--question-buffer' calls a real function.
 (declare-function dsh-bridge-question-mode "dsh-bridge")
 
 (defvar-local dsh-bridge--question-id nil
   "The question id (bridge-minted) this question buffer answers.")
+
 (defvar-local dsh-bridge--question-session nil
   "The session id this question buffer asks about.")
+
 (defvar-local dsh-bridge--question-questions nil
   "The parsed question list this buffer renders.")
+
 (defvar-local dsh-bridge--question-selection nil
   "Alist of (QUESTION-ID . (SELECTED-LABEL ...)) for marked options.")
+
 (defvar-local dsh-bridge--question-custom nil
   "Alist of (QUESTION-ID . CUSTOM-TEXT) for typed custom answers.")
+
 (defvar-local dsh-bridge--question-skipped nil
   "List of QUESTION-IDs the user chose to skip (answered with no selection).")
+
 (defvar-local dsh-bridge--question-dead nil
   "Non-nil once the question this buffer asks is resolved (answered/cancelled).")
+
 (defvar-local dsh-bridge--question-sent nil
   "What this buffer itself did, as a message, once it POSTs an answer or decline.
 Set before the POST leaves.  The host broadcasts `ask-user-resolved' when the
 waterfall settles, and that frame can reach us before the POST's own response
 is handled; `dsh-bridge--ask-user-resolved' then banners this buffer with
 what it did rather than with \"answered elsewhere\".")
+
 (defvar-local dsh-bridge--question-banner nil
   "The resolution banner rendered at the top of the buffer, or nil while the
 question is open.  Set with `dsh-bridge--question-dead' by
