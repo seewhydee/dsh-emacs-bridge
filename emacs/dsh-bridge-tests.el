@@ -8029,6 +8029,33 @@ rows; one with stats alone renders the Stats section and no other."
     (cl-letf (((symbol-function 'dsh-bridge--interaction-session) (lambda () "s1")))
       (should-not (dsh-bridge--menu-goal-available)))))
 
+(ert-deftest dsh-bridge-menu-plan-goal-seed-on-open ()
+  "The menu helpers seed an uncached session through the read-through fetch.
+A DSH-Sessions buffer has no other seed path, so the items must not stay
+shaded until another buffer seeds the session."
+  (let ((dsh-bridge--sessions-cache '(((id . "s1") (live . t))))
+        (dsh-bridge--session-plan nil)
+        (dsh-bridge--session-goal nil)
+        (fetches 0))
+    (cl-letf (((symbol-function 'dsh-bridge--interaction-session) (lambda () "s1"))
+              ((symbol-function 'dsh-bridge--request)
+               (lambda (_method _path _payload)
+                 (setq fetches (1+ fetches))
+                 (cons 200 '((plan . ((active . t))) (goal . nil))))))
+      (should (dsh-bridge--menu-plan-available))
+      (should (dsh-bridge--menu-plan-selected))
+      ;; The goal seeds from the same request; a nil goal shades its item.
+      (should-not (dsh-bridge--menu-goal-available))
+      ;; Read-through: the evaluations above fetched exactly once.
+      (should (= fetches 1)))
+    ;; A failed seed leaves the items shaded without erroring.
+    (setq dsh-bridge--session-plan nil
+          dsh-bridge--session-goal nil)
+    (cl-letf (((symbol-function 'dsh-bridge--interaction-session) (lambda () "s1"))
+              ((symbol-function 'dsh-bridge--request)
+               (lambda (_method _path _payload) (cons 500 nil))))
+      (should-not (dsh-bridge--menu-plan-available)))))
+
 (ert-deftest dsh-bridge-describe-session-id-is-plain ()
   "The Id row prints the raw id, with no copy button, and keeps its help."
   (dsh-bridge-test--with-describe nil

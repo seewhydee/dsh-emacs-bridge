@@ -5672,15 +5672,22 @@ command agree."
   (ignore-errors (dsh-bridge--interaction-session)))
 
 (defun dsh-bridge--menu-plan-state ()
-  "The cached plan section for the menu's session, or nil."
+  "The cached plan section for the menu's session, or nil.
+Seeds the cache through the read-through fetch first: a DSH-Sessions
+buffer has no other seed path, so without this the menu items stay
+shaded until some other buffer seeds the session."
   (let ((session (dsh-bridge--menu-session)))
-    (and session (cdr (assoc session dsh-bridge--session-plan)))))
+    (and session
+         (progn
+           (dsh-bridge--fetch-plan-goal session)
+           (cdr (assoc session dsh-bridge--session-plan))))))
 
 (defun dsh-bridge--menu-plan-available ()
   "Whether the Plan Mode menu item can act.
-A missing section (no plan mode) or an unseeded cache shades it.  A cold
-session stays enabled: its durable projection gives the direction, and
-the mutation route resumes it on demand (501 if its preset has none)."
+A missing section (no plan mode) shades it; an unseeded session is
+seeded read-through, so only a failed seed shades it.  A cold session
+stays enabled: its durable projection gives the direction, and the
+mutation route resumes it on demand (501 if its preset has none)."
   (let* ((session (dsh-bridge--menu-session))
          (plan (dsh-bridge--menu-plan-state)))
     (and session (consp plan))))
@@ -5691,9 +5698,14 @@ the mutation route resumes it on demand (501 if its preset has none)."
     (and (consp plan) (dsh-bridge--plan-effective plan))))
 
 (defun dsh-bridge--menu-goal-state ()
-  "The cached goal section for the menu's session, or nil."
+  "The cached goal section for the menu's session, or nil.
+Seeds the cache through the read-through fetch first (the fetch fills
+both the plan and goal caches in one request)."
   (let ((session (dsh-bridge--menu-session)))
-    (and session (cdr (assoc session dsh-bridge--session-goal)))))
+    (and session
+         (progn
+           (dsh-bridge--fetch-plan-goal session)
+           (cdr (assoc session dsh-bridge--session-goal))))))
 
 (defun dsh-bridge--menu-goal-available ()
   "Whether the Goal Active menu item can act.
