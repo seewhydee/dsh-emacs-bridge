@@ -72,6 +72,20 @@
 //   GET  /dsh-bridge/models?sessionId=     -> model catalog + current selection
 //   POST /dsh-bridge/model { sessionId?, provider, model, reasoningEffort? }
 //        -> change the target session's model (proxies session/selectModel)
+//   POST /dsh-bridge/plan-mode { sessionId?, active }
+//        -> set plan mode through the preset's entry-local planMode controller
+//        (agentPresets.serviceFor; 501 when the session's preset mounts none);
+//        returns the controller outcome committed/queued/cancelled/noop
+//   POST /dsh-bridge/goal/set { sessionId?, objective, maxGoalRounds? }
+//        -> create the goal, or edit a non-complete one in place (the slash
+//        grammar's merged create-or-edit; 400 invalid input)
+//   POST /dsh-bridge/goal/pause | /goal/resume { sessionId? }
+//        -> pause an active goal, or resume a stopped one (and rearm a
+//        restored-disarmed one); 404 no current goal, 409 bad transition
+//   POST /dsh-bridge/goal/clear { sessionId? } -> clear the current goal
+//        (404 no current goal; the CAS conflict is 409). The goal body carries
+//        the GoalError code (GOAL_STALE_REVISION etc.) so Emacs can word the
+//        revision-conflict hint.
 //   GET  /dsh-bridge/context?sessionId=    -> context occupancy (204 if none)
 //   POST /dsh-bridge/sessions/resume { sessionId }        -> resume a cold session
 //   POST /dsh-bridge/sessions/rename { sessionId, title } -> rename (resumes cold)
@@ -148,6 +162,9 @@ import {
   draftMessage,
   goalActivationChangedMessage,
   goalChangedMessage,
+  goalErrorCode,
+  goalErrorStatus,
+  goalSetAction,
   imageInputUnsupported,
   isLoopbackAddress,
   isQuestionCancelRejection,
@@ -340,6 +357,7 @@ interface AgentDefaultModelService {
  */
 interface PlanModeControllerLike {
   get(agent: Agent): { active: boolean; pending?: boolean }
+  set(agent: Agent, active: boolean): 'committed' | 'queued' | 'cancelled' | 'noop'
 }
 
 /** Minimal face of the optional `agentPresets` service (composition roster). */
@@ -353,13 +371,39 @@ interface AgentPresetsService {
   serviceFor(agent: { ctx: Context }, name: string): unknown
 }
 
+/** One live goal view, as the `goals` service returns it. */
+interface GoalViewLike {
+  id: string
+  revision: number
+  objective: string
+  phase: 'active' | 'paused' | 'blocked' | 'complete'
+  blockedReason?: { code: string; message: string }
+  maxGoalRounds: number
+  roundsStarted: number
+  createdAt: number
+  updatedAt: number
+  activation: 'armed' | 'disarmed'
+}
+
+/** One compare-and-set goal reference. */
+interface GoalRefLike {
+  id: string
+  revision: number
+}
+
 /**
- * Minimal face of the optional `goals` service. Read via `ctx.get`; a
- * profile without the service (or with a session that is not live) yields no
- * activation, never a fabricated one.
+ * Minimal face of the optional `goals` service: the same host-plane service
+ * the goal Remotes wrap, called directly with the live agent so the bridge
+ * never takes the Remote's implicit agent resolution (and resume). Read via
+ * `ctx.get`; a profile without it answers 501.
  */
 interface GoalServiceLike {
-  get(agent: Agent): { activation: 'armed' | 'disarmed' } | undefined
+  get(agent: Agent): GoalViewLike | undefined
+  create(agent: Agent, request: { objective: string; maxGoalRounds?: number }): GoalViewLike
+  edit(agent: Agent, ref: GoalRefLike, request: { objective?: string; maxGoalRounds?: number }): GoalViewLike
+  pause(agent: Agent, ref: GoalRefLike): GoalViewLike
+  resume(agent: Agent, ref: GoalRefLike): GoalViewLike
+  clear(agent: Agent, ref: GoalRefLike): GoalRefLike
 }
 
 /**
@@ -2409,6 +2453,151 @@ export function apply(ctx: Context): void {
           sendJson(res, 200, { ok: true, sessionId: payload.sessionId, selected })
         } catch (error: unknown) {
           sendJson(res, bridgeErrorStatus(error), { error: error instanceof Error ? error.message : String(error) })
+        }
+        return
+      }
+
+      // Plan mode is mounted inside each preset's entry-local isolate realm, so
+      // the host `planMode` service is invisible to `ctx.get`; `serviceFor` is
+      // the only handle. That accessor is documented as read addressing, so
+      // calling `.set()` through it is a deliberate internal-coupling decision
+      // (see AGENTS.md); there is no plan Remote to prefer.
+      if (req.method === 'POST' && pathname === '/dsh-bridge/plan-mode') {
+        try {
+          const body = (await readJson(req)) as { sessionId?: unknown; active?: unknown } | undefined
+          if (typeof body?.active !== 'boolean') {
+            sendJson(res, 400, { error: 'active must be a boolean' })
+            return
+          }
+          let explicitId: string | undefined
+          if (body?.sessionId !== undefined && body.sessionId !== null) {
+            if (typeof body.sessionId !== 'string' || body.sessionId === '') {
+              sendJson(res, 400, { error: 'sessionId must be a non-empty string' })
+              return
+            }
+            explicitId = body.sessionId
+          }
+          const presets = ctx.get('agentPresets') as AgentPresetsService | undefined
+          if (presets === undefined) {
+            sendJson(res, 501, { error: 'profile lacks an agent preset roster (no plan mode)' })
+            return
+          }
+          const target = await resolveTarget(explicitId)
+          let controller: PlanModeControllerLike | undefined
+          try {
+            controller = presets.serviceFor(target.agent, 'planMode') as PlanModeControllerLike | undefined
+          } catch {
+            controller = undefined
+          }
+          if (controller === undefined) {
+            sendJson(res, 501, { error: 'this session mounts no plan mode controller' })
+            return
+          }
+          const outcome = controller.set(target.agent, body.active)
+          sendJson(res, 200, {
+            ok: true,
+            sessionId: String(target.session.id),
+            active: body.active,
+            outcome,
+          })
+        } catch (error: unknown) {
+          sendJson(res, bridgeErrorStatus(error), { error: error instanceof Error ? error.message : String(error) })
+        }
+        return
+      }
+
+      // The goal lifecycle. The service owns the compare-and-set guard; the
+      // route reads the live view at request time to build the ref, matching
+      // the web UI ("the RPC's CAS is the guard"). `set` is create-or-edit.
+      if (req.method === 'POST' && pathname.startsWith('/dsh-bridge/goal/')) {
+        try {
+          const operation = pathname.slice('/dsh-bridge/goal/'.length)
+          if (operation !== 'set' && operation !== 'pause' && operation !== 'resume' && operation !== 'clear') {
+            sendJson(res, 404, { error: `unknown goal operation: ${operation}` })
+            return
+          }
+          const body = (await readJson(req)) as
+            { sessionId?: unknown; objective?: unknown; maxGoalRounds?: unknown } | undefined
+          let explicitId: string | undefined
+          if (body?.sessionId !== undefined && body.sessionId !== null) {
+            if (typeof body.sessionId !== 'string' || body.sessionId === '') {
+              sendJson(res, 400, { error: 'sessionId must be a non-empty string' })
+              return
+            }
+            explicitId = body.sessionId
+          }
+          const goals = ctx.get('goals') as GoalServiceLike | undefined
+          if (goals === undefined) {
+            sendJson(res, 501, { error: 'profile lacks a goal service' })
+            return
+          }
+          const target = await resolveTarget(explicitId)
+          const sessionId = String(target.session.id)
+          const current = goals.get(target.agent)
+          if (operation === 'set') {
+            const objective = typeof body?.objective === 'string' ? body.objective : ''
+            if (objective.trim() === '') {
+              sendJson(res, 400, { error: 'objective must be a non-empty string' })
+              return
+            }
+            let maxGoalRounds: number | undefined
+            if (body?.maxGoalRounds !== undefined && body.maxGoalRounds !== null) {
+              const value = body.maxGoalRounds
+              if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 1) {
+                sendJson(res, 400, { error: 'maxGoalRounds must be a positive safe integer' })
+                return
+              }
+              maxGoalRounds = value
+            }
+            const request = { objective, ...(maxGoalRounds === undefined ? {} : { maxGoalRounds }) }
+            if (goalSetAction(current?.phase) === 'create') {
+              const created = goals.create(target.agent, request)
+              sendJson(res, 200, {
+                ok: true,
+                sessionId,
+                operation: 'created',
+                objective: created.objective,
+                activation: created.activation,
+              })
+            } else {
+              const edited = goals.edit(target.agent, { id: current!.id, revision: current!.revision }, request)
+              sendJson(res, 200, {
+                ok: true,
+                sessionId,
+                operation: 'updated',
+                objective: edited.objective,
+                activation: edited.activation,
+              })
+            }
+            return
+          }
+          if (current === undefined) {
+            sendJson(res, 404, { error: 'no current goal', code: 'GOAL_NOT_FOUND' })
+            return
+          }
+          const ref = { id: current.id, revision: current.revision }
+          if (operation === 'pause') {
+            const paused = goals.pause(target.agent, ref)
+            sendJson(res, 200, { ok: true, sessionId, operation: 'paused', phase: paused.phase, activation: paused.activation })
+            return
+          }
+          if (operation === 'resume') {
+            const resumed = goals.resume(target.agent, ref)
+            sendJson(res, 200, { ok: true, sessionId, operation: 'resumed', phase: resumed.phase, activation: resumed.activation })
+            return
+          }
+          const tombstone = goals.clear(target.agent, ref)
+          sendJson(res, 200, { ok: true, sessionId, operation: 'cleared', ref: tombstone })
+        } catch (error: unknown) {
+          const code = goalErrorCode(error)
+          if (code !== undefined) {
+            sendJson(res, goalErrorStatus(code), {
+              error: error instanceof Error ? error.message : String(error),
+              code,
+            })
+          } else {
+            sendJson(res, bridgeErrorStatus(error), { error: error instanceof Error ? error.message : String(error) })
+          }
         }
         return
       }

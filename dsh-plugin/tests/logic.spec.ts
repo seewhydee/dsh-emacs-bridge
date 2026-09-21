@@ -34,6 +34,9 @@ import {
   draftMessage,
   goalActivationChangedMessage,
   goalChangedMessage,
+  goalErrorCode,
+  goalErrorStatus,
+  goalSetAction,
   hostnameOf,
   isLoopbackAddress,
   isLoopbackHostname,
@@ -1011,6 +1014,48 @@ describe('goalChangedMessage', () => {
     expect(goalChangedMessage('session-1', null)).toBe(
       'data: {"kind":"goal","sessionId":"session-1","goal":null}\n\n',
     )
+  })
+})
+
+describe('goalSetAction', () => {
+  it('creates when no goal exists or the current goal is complete', () => {
+    expect(goalSetAction(undefined)).toBe('create')
+    expect(goalSetAction('complete')).toBe('create')
+  })
+
+  it('edits every other phase in place', () => {
+    expect(goalSetAction('active')).toBe('edit')
+    expect(goalSetAction('paused')).toBe('edit')
+    expect(goalSetAction('blocked')).toBe('edit')
+  })
+})
+
+describe('goalErrorCode', () => {
+  it('reads the stable code off a GoalError-like object', () => {
+    expect(goalErrorCode(Object.assign(new Error('stale'), { code: 'GOAL_STALE_REVISION' })))
+      .toBe('GOAL_STALE_REVISION')
+  })
+
+  it('ignores a non-goal code, a missing code, and non-objects', () => {
+    expect(goalErrorCode(Object.assign(new Error('x'), { code: 'session/not-found' }))).toBeUndefined()
+    expect(goalErrorCode(new Error('x'))).toBeUndefined()
+    expect(goalErrorCode(undefined)).toBeUndefined()
+    expect(goalErrorCode('GOAL_NOT_FOUND')).toBeUndefined()
+  })
+})
+
+describe('goalErrorStatus', () => {
+  it('maps the goal taxonomy to HTTP statuses', () => {
+    expect(goalErrorStatus('GOAL_NOT_FOUND')).toBe(404)
+    expect(goalErrorStatus('GOAL_STALE_REVISION')).toBe(409)
+    expect(goalErrorStatus('GOAL_INVALID_TRANSITION')).toBe(409)
+    expect(goalErrorStatus('GOAL_ALREADY_EXISTS')).toBe(409)
+    expect(goalErrorStatus('GOAL_AGENT_NOT_LIVE')).toBe(409)
+    expect(goalErrorStatus('GOAL_INVALID_OBJECTIVE')).toBe(400)
+    expect(goalErrorStatus('GOAL_INVALID_MAX_ROUNDS')).toBe(400)
+    expect(goalErrorStatus('GOAL_INVALID_BLOCK_REASON')).toBe(400)
+    expect(goalErrorStatus('GOAL_INVALID_EDIT')).toBe(400)
+    expect(goalErrorStatus('GOAL_WHAT')).toBe(500)
   })
 })
 

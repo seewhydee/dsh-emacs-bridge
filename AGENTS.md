@@ -95,7 +95,7 @@ The README.md serves as a short introduction and quickstart; it is not an exhaus
 
 - Two libraries, `lexical-binding: t`. `dsh-bridge.el` is self-contained and must never `require` the companion at load time; the sole seam is `dsh-bridge--ensure-plugin`. Both files ship in the package tar.
 - Docstrings state the function's intention, document its arguments and return value, and flag gotchas — nothing more. The code, not the docstring, is the contract: never use the docstring to narrate the implementation step by step. Tricky implementation details (why a splice is sound, why a race is safe) belong in code comments next to the code they describe.
-- A command that mutates a session resolves its target with `dsh-bridge--effective-session` and refuses when nil; the advisory last-active caches are display-only, never a mutation target.
+- A command that mutates a session resolves its target with `dsh-bridge--interaction-session` (view: shown session; prompt: effective target; sessions list: row at point; describe: shown session) and refuses with a `user-error` when nil; the advisory last-active caches are display-only, never a mutation target.
 - DSH-View bodies are filled incrementally by `dsh-bridge--view-fill` under a recorded provenance; any mismatch falls back to a full re-render. Do not add a splice path that cannot prove those checks, and keep terminal furniture (answer/approval notes, changed-files footer) out of the body.
 - Requires Emacs 29.1+. Paths given to `dsh-bridge-dsh-command` are not tilde-expanded; document full paths.
 

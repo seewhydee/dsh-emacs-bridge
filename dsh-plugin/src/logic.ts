@@ -1872,6 +1872,53 @@ export function refinePlanGoal(report: SessionReport, live: PlanGoalLive): Sessi
   return next
 }
 
+/** The operation `/goal/set` performs against the current goal state. */
+export type GoalSetAction = 'create' | 'edit'
+
+/**
+ * Whether `/goal/set` creates or edits: no current goal, or a completed one
+ * (the slash grammar replaces a complete goal rather than editing it), creates;
+ * every other phase is edited in place, keeping phase and activation.
+ */
+export function goalSetAction(currentPhase: string | undefined): GoalSetAction {
+  return currentPhase === undefined || currentPhase === 'complete' ? 'create' : 'edit'
+}
+
+/**
+ * The stable `.code` of a `GoalError`-like rejection, or undefined. Identified
+ * structurally (the goal package's error carries no Typert marker), and
+ * restricted to the `GOAL_` prefix so an unrelated `.code` is not misread.
+ */
+export function goalErrorCode(error: unknown): string | undefined {
+  if (typeof error !== 'object' || error === null) return undefined
+  const code = (error as { code?: unknown }).code
+  return typeof code === 'string' && code.startsWith('GOAL_') ? code : undefined
+}
+
+/**
+ * The HTTP status for a goal rejection code: a missing current goal is 404, a
+ * compare-and-set conflict, an invalid transition, or an agent that is no
+ * longer live is 409, invalid input is 400, and an unknown code is 500.
+ */
+export function goalErrorStatus(code: string): number {
+  switch (code) {
+    case 'GOAL_NOT_FOUND':
+      return 404
+    case 'GOAL_STALE_REVISION':
+    case 'GOAL_INVALID_TRANSITION':
+    case 'GOAL_ALREADY_EXISTS':
+    case 'GOAL_AGENT_NOT_LIVE':
+      return 409
+    case 'GOAL_INVALID_OBJECTIVE':
+    case 'GOAL_INVALID_MAX_ROUNDS':
+    case 'GOAL_INVALID_BLOCK_REASON':
+    case 'GOAL_INVALID_EDIT':
+      return 400
+    default:
+      return 500
+  }
+}
+
 /**
  * The catalog display name of PROVIDER/MODEL, or null. The pure half of the
  * host's `modelName` enrichment for the session report; mirrors the elisp

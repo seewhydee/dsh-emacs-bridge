@@ -132,6 +132,10 @@ menu:
 * `l` — open the DSH-Sessions buffer.
 * `+` — create a new session, prompting for its workspace and its title;
         the new session becomes the default target.
+* `p` — toggle plan mode for the effective session.
+* `G` — set or edit the goal objective (with `C-u`, also the round cap).
+* `A` — pause an armed goal, or resume and rearm a stopped one.
+* `X` — clear the current goal.
 
 ### DSH-Sessions buffer
 
@@ -290,6 +294,42 @@ From elsewhere in Emacs, you can also run this command (`M-x
 dsh-bridge-attach-file`) directly to open a DSH-Prompt buffer with the
 specified attachment, or `M-x dsh-bridge-attach-buffer-file` to open a
 prompt with the current buffer's file as the attachment.
+
+### Plan mode and goals
+
+Plan mode and the session goal are orthogonal pieces of DSH collaboration
+state, exposed here as ordinary Emacs commands rather than slash commands.
+They act on the session at hand: the shown session in DSH-View, the
+effective target in DSH-Prompt, the row at point in DSH-Sessions, and the
+reported session in DSH-Describe.  Outside those buffers they refuse with
+a `user-error`.
+
+* `M-x dsh-bridge-toggle-plan-mode` (`p`) — toggle plan mode.  With no
+  prefix argument it toggles the effective wanted state, so pressing it
+  twice cancels a queued change instead of re-queueing it.  A numeric
+  prefix argument sets explicitly: positive enables, otherwise disables.
+  The direction is read fresh from the host, so the header agrees with the
+  command.  The toggle takes effect at once between turns, or from the
+  next step when the session is mid-turn.
+* `M-x dsh-bridge-set-goal` (`G`) — set or edit the goal objective,
+  defaulting to the current one; RET on an unchanged objective sends
+  nothing.  With a prefix argument, also read the goal round cap.  A
+  completed goal is replaced rather than edited.
+* `M-x dsh-bridge-pause-goal` — pause an active goal.
+* `M-x dsh-bridge-resume-goal` — resume a paused or blocked goal, or
+  rearm a goal that a session resume left disarmed.
+* `M-x dsh-bridge-toggle-goal` (`A`) — pause an armed goal, or resume and
+  rearm a stopped one.
+* `M-x dsh-bridge-clear-goal` (`X`) — clear the current goal after
+  confirmation.
+
+The plan-mode and goal state appears in the DSH-View and DSH-Prompt header
+lines (`plan`, `plan (queued on)`, `plan (queued off)`, and
+`<phase>: <objective>`, with a `(disarmed)` suffix on an active but
+disarmed goal), and in the DSH-Describe report's `Plan mode` row and
+`Goal` section, which offers edit, pause/resume, and clear buttons.  The
+mode menus carry the same commands, with the plan and goal checkbox items
+shaded when the state is unknown.
 
 ### Sending text from DSH to Emacs
 
