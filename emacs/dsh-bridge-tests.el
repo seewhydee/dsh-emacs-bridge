@@ -4578,30 +4578,6 @@ nothing was sent."
   (should (eq (dsh-bridge-test--busy-send-and-exit nil nil 'queue) 'queue))
   (should (eq (dsh-bridge-test--busy-send-and-exit nil nil 'steer) 'steer)))
 
-(ert-deftest dsh-bridge-send-and-exit-steer-refused-on-incompatible-plugin ()
-  "A steer against a known-incompatible plugin is refused, not queued."
-  (dsh-bridge-test--kill-prompt-buffer)
-  (let ((sent nil)
-        (dsh-bridge-prompt-resend-confirm nil)
-        (dsh-bridge--last-sent nil)
-        (dsh-bridge--session-status '(("s1" running . 1000)))
-        (dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t))))
-        (dsh-bridge--bridge-status-cache 'incompatible))
-    (unwind-protect
-        (with-current-buffer (get-buffer-create "*dsh-bridge-prompt*")
-          (dsh-bridge-prompt-mode)
-          (setq-local dsh-bridge--prompt-session "s1")
-          (insert "hello")
-          (cl-letf (((symbol-function 'read-multiple-choice)
-                     (lambda (&rest _) (list ?s "steer")))
-                    ((symbol-function 'dsh-bridge-send-text)
-                     (lambda (&rest _) (setq sent t))))
-            (let ((err (should-error (dsh-bridge-send-and-exit) :type 'user-error)))
-              (should (string-match-p "install-plugin" (error-message-string err)))))
-          (should-not sent)
-          (should (equal (buffer-string) "hello")))
-      (dsh-bridge-test--kill-prompt-buffer))))
-
 (ert-deftest dsh-bridge-send-text-marshals-mode-and-message ()
   "A steered send carries `mode'; a queued or plain send omits it."
   (dolist (case '((steer . "steer") (queue . nil) (nil . nil)))

@@ -722,15 +722,6 @@ Callers invoke this on a transport failure or a 401/404."
   (if (memq dsh-bridge--bridge-status-cache '(running unreachable))
 	  (setq dsh-bridge--bridge-status-cache nil)))
 
-(defun dsh-bridge--plugin-incompatible-p ()
-  "Whether the installed DSH plugin's version differs from this package's.
-Consult the cached bridge status, probing only on a cold cache.  An
-incompatible plugin may predate the request fields this package sends
-and ignore them, so a caller must not assume such a field is honored."
-  (eq (or dsh-bridge--bridge-status-cache
-		  (setq dsh-bridge--bridge-status-cache (dsh-bridge--bridge-status)))
-	  'incompatible))
-
 (defvar dsh-bridge--plugin-diagnosed nil
   "Non-nil once the DSH plugin's problem has been diagnosed this session.")
 
@@ -3673,16 +3664,6 @@ STEER."
 	 ((eq dsh-bridge-send-while-running 'steer) 'steer)
 	 (t (dsh-bridge--busy-send-choice)))))
 
-(defun dsh-bridge--refuse-steer-if-incompatible ()
-  "Signal when the installed DSH plugin predates steering support.
-An old plugin ignores the unknown `mode' field and silently queues the
-prompt, which is exactly the degradation steering was chosen to avoid,
-so refuse instead of falling back."
-  (when (dsh-bridge--plugin-incompatible-p)
-	(user-error "%s"
-				(concat "dsh-bridge: the installed DSH plugin predates steering; "
-						"re-run M-x dsh-bridge-install-plugin"))))
-
 ;;;###autoload
 (defun dsh-bridge-send-and-exit (&optional steer)
   "Send a DSH-Prompt buffer as a prompt, then bury it and switch away.
@@ -3748,8 +3729,6 @@ and bury the buffer (see `dsh-bridge--prompt-exit')."
 		;; untouched, like declining the resend guard above.
 		(when (eq choice 'cancel)
 		  (user-error "dsh-bridge: send cancelled"))
-		(when (eq choice 'steer)
-		  (dsh-bridge--refuse-steer-if-incompatible))
 		(dsh-bridge-send-text
 		 text
 		 dsh-bridge--prompt-session
