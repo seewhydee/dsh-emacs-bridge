@@ -275,11 +275,10 @@ turn (1/X) to enable turn-following state."
 
 (defcustom dsh-bridge-view-changed-files t
   "Whether DSH-View turns end with a changed-files footer.
-When non-nil, a turn whose tool calls changed files shows a short list under
-its replies: a button per file that visits it, a \"[diff]\" button that opens
-the change the session log recorded, and a \"[VC diff]\" button that runs a VC
-worktree diff for the session directory.  The host supplies the attribution
-(`GET /turns' `files'); a turn that changed nothing has no footer."
+When non-nil, a turn whose tool calls changed files shows a plain list under
+its replies: one entry per changed file, each a button that visits it.  The
+host supplies the attribution (`GET /turns' `files'); a turn that changed
+nothing has no footer."
   :type 'boolean
   :group 'dsh-bridge)
 
@@ -451,12 +450,7 @@ These notes indicate the answers you gave to mid-turn queries."
 
 (defface dsh-bridge-view-changed-label-face
   '((t :inherit shadow))
-  "Face for the changed-files label and operation text in DSH-View buffers."
-  :group 'dsh-bridge)
-
-(defface dsh-bridge-view-changed-diff-face
-  '((t :inherit font-lock-keyword-face))
-  "Face for the diff buttons in the DSH-View changed-files footer."
+  "Face for the changed-files label in DSH-View buffers."
   :group 'dsh-bridge)
 
 (defface dsh-bridge-attachment-face
@@ -2223,11 +2217,9 @@ The verbs are defined in `dsh-bridge--verb-suffixes'."))
 ;;
 ;; A turn whose tool calls changed files ends with a changed-files
 ;; footer (see "Changed files" below) just above that run-status line:
-;; a button per file that visits it, a "[diff]" button that shows the
-;; before/after hunks the session log recorded, and a "[VC diff]" button
-;; that runs a VC worktree diff for the session directory.  It is part
-;; of the terminal suffix, so an incremental splice replaces it with the
-;; grown turn's fresh list.
+;; a button per file that visits it.  It is part of the terminal
+;; suffix, so an incremental splice replaces it with the grown turn's
+;; fresh list.
 ;;
 ;; Arriving segments are spliced in place, so that the user can tail
 ;; the buffer by parking the cursor on the run-status line.
@@ -2457,187 +2449,21 @@ turn-following state for the new turn."
 
 ;; The footer under a turn names the files the turn's tool calls successfully
 ;; changed.  The host's raw-log fold supplies the attribution with the turn
-;; record (`GET /turns' `files', a list of `(path . op)' alists); the recorded
-;; before/after hunks are fetched lazily from `GET /changes' only when the user
-;; asks, so the hot turn list stays small.  The footer is composed as a string
-;; in a temp buffer because `dsh-bridge--view-fill' inserts the suffix as text;
-;; text properties (including the button objects) survive `buffer-string'.
-
-(defvar dsh-bridge-changes-buffer-name "*dsh-bridge-changes*"
-  "Name of the buffer showing one changed file's recorded hunks.")
-
-(defvar-local dsh-bridge--changes-session nil
-  "Session id the current DSH-Changes buffer was fetched for.")
-
-(defvar-local dsh-bridge--changes-path nil
-  "The exact path spelling the current DSH-Changes buffer reports.")
-
-(defvar-local dsh-bridge--changes-file nil
-  "Absolute path of the file the current DSH-Changes buffer reports.")
+;; record (`GET /turns' `files', a list of `(path . op)' alists).  The footer
+;; is composed as a string in a temp buffer because `dsh-bridge--view-fill'
+;; inserts the suffix as text; text properties (including the button objects)
+;; survive `buffer-string'.
 
 (defun dsh-bridge--view-visit-changed (path)
   "Visit PATH, resolved against the current buffer's `default-directory'."
   (find-file (expand-file-name path)))
 
-(defun dsh-bridge--changes-insert-side (text face marker)
-  "Insert TEXT with each line prefixed by MARKER and propertized with FACE.
-A null TEXT (an insertion's absent before side) inserts a placeholder line."
-  (if (null text)
-      (insert (propertize "  (no previous text)\n"
-                          'face 'shadow 'font-lock-face 'shadow))
-    (let ((start (point)))
-      (dolist (line (split-string text "\n"))
-        (insert marker " " line "\n"))
-      (add-text-properties start (point) (list 'face face 'font-lock-face face)))))
-
-(defun dsh-bridge--changes-render (session-id path alist)
-  "Render ALIST (a `/changes' response) in the DSH-Changes buffer.
-SESSION-ID and PATH bind the buffer for refreshing and for visiting the file."
-  (require 'diff-mode nil t)
-  (let* ((buffer (get-buffer-create dsh-bridge-changes-buffer-name))
-         (here (eq (current-buffer) buffer))
-         (hunks (alist-get 'hunks alist))
-         (absolute (or (alist-get 'absolute alist) path))
-         (truncated (alist-get 'truncated alist)))
-    (with-current-buffer buffer
-      (unless (derived-mode-p 'dsh-bridge-changes-mode)
-        (dsh-bridge-changes-mode))
-      (let ((inhibit-read-only t))
-        (erase-buffer)
-        (setq-local dsh-bridge--changes-session session-id)
-        (setq-local dsh-bridge--changes-path path)
-        (setq-local dsh-bridge--changes-file absolute)
-        (setq-local default-directory (file-name-directory (expand-file-name absolute)))
-        (insert (propertize (format "Recorded changes for %s" path)
-                            'face 'dsh-bridge-describe-heading-face
-                            'font-lock-face 'dsh-bridge-describe-heading-face))
-        (insert "\n")
-        (insert (propertize
-                 (format "%d hunk%s recorded in the session log%s"
-                         (length hunks)
-                         (if (= (length hunks) 1) "" "s")
-                         (if truncated " (truncated)" ""))
-                 'face 'shadow 'font-lock-face 'shadow))
-        (insert "\n\n")
-        (if (null hunks)
-            (insert "(no recorded hunks)\n")
-          (let ((n 0))
-            (dolist (hunk hunks)
-              (setq n (1+ n))
-              (insert (propertize
-                       (format "--- hunk %d: %s (%s, turn %d) ---\n"
-                               n
-                               (or (alist-get 'tool hunk) "?")
-                               (or (alist-get 'op hunk) "?")
-                               (or (alist-get 'turn hunk) 0))
-                       'dsh-bridge-changes-hunk t
-                       'face 'dsh-bridge-describe-label-face
-                       'font-lock-face 'dsh-bridge-describe-label-face))
-              (dsh-bridge--changes-insert-side (alist-get 'oldText hunk) 'diff-removed "-")
-              (dsh-bridge--changes-insert-side (alist-get 'newText hunk) 'diff-added "+")
-              (insert "\n"))))
-        (goto-char (point-min))))
-    (unless here
-      (pop-to-buffer buffer))))
-
-(defun dsh-bridge--view-changed-hunks (session-id path)
-  "Show the recorded log hunks for PATH in SESSION-ID's session."
-  (let* ((result (dsh-bridge--request
-                  "GET"
-                  (concat (dsh-bridge--path "/changes" session-id)
-                          "&path=" (url-hexify-string path))
-                  nil))
-         (status (car result))
-         (alist (cdr result)))
-    (cond
-     ((eq status 200)
-      (dsh-bridge--changes-render session-id path alist))
-     ((eq status 404)
-      (message "dsh-bridge: the session log records no change to %s" path))
-     (t
-      (message "dsh-bridge: cannot load recorded changes for %s: %s"
-               path (or (alist-get 'error alist) status))))))
-
-(defun dsh-bridge--changes-hunks ()
-  "Return the positions of the DSH-Changes buffer's hunk headings."
-  (let ((positions '())
-        (pos (point-min)))
-    (while (setq pos (text-property-any pos (point-max) 'dsh-bridge-changes-hunk t))
-      (push pos positions)
-      ;; Skip the whole heading run, not just its first character.
-      (setq pos (or (next-single-property-change pos 'dsh-bridge-changes-hunk)
-                    (point-max))))
-    (nreverse positions)))
-
-(defun dsh-bridge-changes-next-hunk ()
-  "Move to the next recorded hunk heading, if any."
-  (interactive)
-  (let* ((positions (dsh-bridge--changes-hunks))
-         (target (seq-find (lambda (pos) (> pos (point))) positions)))
-    (if target
-        (goto-char target)
-      (message "dsh-bridge: no more hunks"))))
-
-(defun dsh-bridge-changes-previous-hunk ()
-  "Move back to the previous recorded hunk heading, if any."
-  (interactive)
-  (let* ((positions (dsh-bridge--changes-hunks))
-         (target (car (last (seq-filter (lambda (pos) (< pos (point))) positions)))))
-    (if target
-        (goto-char target)
-      (message "dsh-bridge: no earlier hunks"))))
-
-(defun dsh-bridge-changes-visit-file ()
-  "Visit the changed file this DSH-Changes buffer reports."
-  (interactive)
-  (unless dsh-bridge--changes-file
-    (user-error "dsh-bridge: this buffer has no changed file"))
-  (find-file dsh-bridge--changes-file))
-
-(defun dsh-bridge-changes-refresh ()
-  "Re-fetch this DSH-Changes buffer's recorded hunks."
-  (interactive)
-  (unless (and dsh-bridge--changes-session dsh-bridge--changes-path)
-    (user-error "dsh-bridge: this buffer has nothing to refresh"))
-  (dsh-bridge--view-changed-hunks dsh-bridge--changes-session
-                                  dsh-bridge--changes-path))
-
-(defvar-keymap dsh-bridge-changes-mode-map
-  :parent special-mode-map
-  :doc "Keymap for `dsh-bridge-changes-mode'."
-  "n" #'dsh-bridge-changes-next-hunk
-  "p" #'dsh-bridge-changes-previous-hunk
-  "RET" #'dsh-bridge-changes-visit-file
-  "g" #'dsh-bridge-changes-refresh
-  "q" #'quit-window)
-
-(define-derived-mode dsh-bridge-changes-mode special-mode "DSH-Changes"
-  "Major mode for the recorded hunks of one changed file.
-This is the session log's own before/after text for the file, showing each
-applied hunk as a removed block and an added block.  It is deliberately not
-`diff-mode': the log carries no line numbers, so a real `@@' header would be
-fabricated and `diff-goto-source'/`diff-apply-hunk' would lie; use the VC
-worktree diff instead.
-
-\\{dsh-bridge-changes-mode-map}")
-
-(defun dsh-bridge-view-vc-diff ()
-  "Show a VC worktree diff for the current DSH-View buffer's directory.
-This is the real, navigable `diff-mode' view of the session working tree: it
-also catches changes the log cannot trace (a `bash' command that wrote a
-file).  It signals when the directory is not inside a VC repository."
-  (interactive)
-  (require 'vc)
-  (if (vc-root-dir)
-      (vc-root-diff nil)
-    (user-error "dsh-bridge: %s is not in a VC repository" default-directory)))
-
-(defun dsh-bridge--view-changed-files (turn session-id)
+(defun dsh-bridge--view-changed-files (turn)
   "The changed-files footer string for TURN, or nil when it changed nothing.
 TURN is a turn record carrying the host fold's `files' field (a list of
-`(path . op)' alists).  SESSION-ID scopes the recorded-hunks lookup.  The
-result's file names and \"[diff]\"/\"[VC diff]\" labels are text buttons."
-  (when (and dsh-bridge-view-changed-files session-id (consp turn))
+`(path . op)' alists).  Each file name in the result is a text button that
+visits the file."
+  (when (and dsh-bridge-view-changed-files (consp turn))
     (let ((files (alist-get 'files turn)))
       (when files
         (with-temp-buffer
@@ -2646,37 +2472,16 @@ result's file names and \"[diff]\"/\"[VC diff]\" labels are text buttons."
                               'font-lock-face 'dsh-bridge-view-changed-label-face))
           (let ((first t))
             (dolist (file files)
-              (let ((path (alist-get 'path file))
-                    (op (alist-get 'op file)))
+              (let ((path (alist-get 'path file)))
                 (unless first (insert "  "))
                 (setq first nil)
                 (insert-text-button
-                 (concat "[" path "]")
+                 path
                  'action (lambda (&rest _) (dsh-bridge--view-visit-changed path))
                  'follow-link t
                  'help-echo (format "Visit %s" path)
                  'face 'dsh-bridge-view-changed-face
-                 'font-lock-face 'dsh-bridge-view-changed-face)
-                (when (and op (not (equal op "")))
-                  (insert (propertize (format " (%s)" op)
-                                      'face 'dsh-bridge-view-changed-label-face
-                                      'font-lock-face 'dsh-bridge-view-changed-label-face)))
-                (insert " ")
-                (insert-text-button
-                 "[diff]"
-                 'action (lambda (&rest _) (dsh-bridge--view-changed-hunks session-id path))
-                 'follow-link t
-                 'help-echo (format "Show the hunks the session log recorded for %s" path)
-                 'face 'dsh-bridge-view-changed-diff-face
-                 'font-lock-face 'dsh-bridge-view-changed-diff-face))))
-          (insert "  ")
-          (insert-text-button
-           "[VC diff]"
-           'action (lambda (&rest _) (dsh-bridge-view-vc-diff))
-           'follow-link t
-           'help-echo "Show the session directory's VC worktree diff"
-           'face 'dsh-bridge-view-changed-diff-face
-           'font-lock-face 'dsh-bridge-view-changed-diff-face)
+                 'font-lock-face 'dsh-bridge-view-changed-face))))
           (buffer-string))))))
 
 (defun dsh-bridge--view-turn-suffix (turn session-id)
@@ -2694,7 +2499,7 @@ last so the provenance check can still find it after the body."
 	  ""
 	(let* ((completed (and (consp turn)
 						   (not (dsh-bridge--view-turn-open-p turn))))
-		   (files (dsh-bridge--view-changed-files turn session-id))
+		   (files (dsh-bridge--view-changed-files turn))
 		   (answered (and session-id
 						  (dsh-bridge--view-answer-note session-id turn)))
 		   (furniture
@@ -3328,7 +3133,6 @@ compose a reply (prompt) for the session, etc.
   "k" #'dsh-bridge-stop-session
   "B" #'dsh-bridge-fork-turn
   "D" #'dsh-bridge-describe-session
-  "V" #'dsh-bridge-view-vc-diff
   "l" #'dsh-bridge-list-sessions)
 
 ;; The parent is a load-time choice, so set it here rather than naming it
@@ -3351,8 +3155,6 @@ compose a reply (prompt) for the session, etc.
 	 :help "Branch the shown turn into a new session"]
 	["Stop Session" dsh-bridge-stop-session
 	 :help "Stop the shown session's running turn"]
-	["VC Diff" dsh-bridge-view-vc-diff
-	 :help "Show the session directory's VC worktree diff"]
 	["Receive Message…" dsh-bridge-receive
 	 :help "Receive the latest message DSH sent to Emacs"]
 	["Describe Session" dsh-bridge-describe-session

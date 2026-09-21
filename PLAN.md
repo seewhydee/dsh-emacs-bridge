@@ -287,16 +287,18 @@ candidates above.
   against the session cwd. The mutation vocabulary (`write`, `edit`, mutating
   `str_replace_editor`) is replicated from the web client's turn-deliverables
   fold and pinned by the version-bump checklist. `/turns` carries the per-turn
-  `files: [{path, op}]` attribution; `GET /changes?sessionId=&path=` serves the
-  recorded before/after hunks lazily (read-only, never resuming).
+  `files: [{path, op}]` attribution.
 - **UX** — the DSH-View buffer ends a changed turn with a `Changed files:`
-  footer: a button per file that visits it, a `[diff]` button that opens the
-  recorded log hunks in a DSH-Changes buffer, and a `[VC diff]` button (also
-  `V`) that runs `vc-root-diff` in the session directory. The recorded hunks
-  are deliberately not `diff-mode` (the log has no line numbers); VC is the
-  real, navigable diff that also catches untraceable (`bash`) changes. A
-  dedicated DSH-Changes review buffer, `deliverables/presented` display beyond
-  a marker, and a live `files-changed` SSE nudge remain deferred.
+  footer: a plain inline list of one button per file that visits it. The
+  recorded-hunks viewer (DSH-Changes buffer + `GET /changes`) was removed: the
+  persisted `FileDiff` is `{path, oldText, newText}` and `computeHunkDiffs`
+  discards the `structuredPatch` line offsets, so no truthful `@@ -L,N +L,M @@`
+  header could be synthesised and the bespoke mode only half-imitated
+  `diff-mode`. A proper diff view is deferred: either persist the hunk offsets
+  (or pre/post images) upstream so the bridge can emit a genuine unified diff
+  (`diff-mode`, preferred), or ship an honest non-diff change view without
+  diff-syntax markers. A `deliverables/presented` display beyond a marker and
+  a live `files-changed` SSE nudge remain deferred.
 
 
 ### 10. Cross-session search

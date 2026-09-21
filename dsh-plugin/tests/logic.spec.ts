@@ -33,7 +33,6 @@ import {
   currentModelSelection,
   draftMessage,
   hostnameOf,
-  hunksForPath,
   isLoopbackAddress,
   isLoopbackHostname,
   isLoopbackOrigin,
@@ -70,9 +69,6 @@ import {
   MAX_APPROVAL_DETAIL_CHARS,
   MAX_CHANGED_FILES,
   MAX_CHANGED_FILES_PER_TURN,
-  MAX_CHANGED_HUNKS,
-  MAX_CHANGED_HUNK_CHARS,
-  MAX_CHANGED_HUNK_TOTAL_CHARS,
   parseAttachmentRequests,
   sniffImageMediaType,
   toolCallForId,
@@ -1587,107 +1583,5 @@ describe('changedFiles', () => {
     const total = changedFiles(many, '/w')
     expect(total.files).toHaveLength(MAX_CHANGED_FILES)
     expect(total.truncated).toBe(true)
-  })
-})
-
-describe('hunksForPath', () => {
-  const META = {
-    diffs: [
-      { path: 'src/a.ts', oldText: 'before', newText: 'after' },
-      { path: 'src/a.ts', oldText: null, newText: 'added' },
-    ],
-  }
-
-  it('uses the write/edit result metadata when present', () => {
-    const events = [
-      toolCall(3, 1, 'c1', 'write', { file_path: 'src/a.ts', content: 'after' }),
-      mutatingResult(3, 1, 'c1', { meta: META }),
-    ]
-    expect(hunksForPath(events, 'src/a.ts')).toEqual({
-      hunks: [
-        { turn: 3, tool: 'write', op: 'write', oldText: 'before', newText: 'after' },
-        { turn: 3, tool: 'write', op: 'write', oldText: null, newText: 'added' },
-      ],
-      truncated: false,
-    })
-  })
-
-  it('falls back to the call arguments when the result carries no usable diffs', () => {
-    const create = hunksForPath([
-      toolCall(1, 1, 'c1', 'write', { file_path: 'src/new.ts', content: 'whole file' }),
-      mutatingResult(1, 1, 'c1', { meta: { diffs: [] } }),
-    ], 'src/new.ts')
-    expect(create).toEqual({
-      hunks: [{ turn: 1, tool: 'write', op: 'write', oldText: null, newText: 'whole file' }],
-      truncated: false,
-    })
-
-    const edit = hunksForPath([
-      toolCall(1, 1, 'c2', 'edit', { file_path: 'src/a.ts', old_string: 'x', new_string: 'y' }),
-      mutatingResult(1, 1, 'c2'),
-    ], 'src/a.ts')
-    expect(edit.hunks).toEqual([
-      { turn: 1, tool: 'edit', op: 'edit', oldText: 'x', newText: 'y' },
-    ])
-  })
-
-  it('builds str_replace_editor hunks from the call arguments (no meta exists)', () => {
-    const events = [
-      toolCall(1, 1, 'e1', 'str_replace_editor', { command: 'create', path: '/w/new.ts', file_text: 'hi' }),
-      mutatingResult(1, 1, 'e1'),
-      toolCall(1, 2, 'e2', 'str_replace_editor', { command: 'str_replace', path: '/w/new.ts', old_str: 'hi', new_str: 'ho' }),
-      mutatingResult(1, 2, 'e2'),
-      toolCall(1, 3, 'e3', 'str_replace_editor', { command: 'insert', path: '/w/new.ts', insert_line: 2, new_str: 'more' }),
-      mutatingResult(1, 3, 'e3'),
-    ]
-    expect(hunksForPath(events, '/w/new.ts').hunks).toEqual([
-      { turn: 1, tool: 'str_replace_editor', op: 'str_replace_editor:create', oldText: null, newText: 'hi' },
-      { turn: 1, tool: 'str_replace_editor', op: 'str_replace_editor:str_replace', oldText: 'hi', newText: 'ho' },
-      { turn: 1, tool: 'str_replace_editor', op: 'str_replace_editor:insert', oldText: null, newText: 'more' },
-    ])
-  })
-
-  it('ignores calls for other paths, failures, and replacement results', () => {
-    const events = [
-      toolCall(1, 1, 'c1', 'write', { file_path: 'src/other.ts', content: 'x' }),
-      mutatingResult(1, 1, 'c1'),
-      toolCall(1, 2, 'c2', 'write', { file_path: 'src/a.ts', content: 'x' }),
-      mutatingResult(1, 2, 'c2', { failed: true }),
-      toolCall(1, 3, 'c3', 'write', { file_path: 'src/a.ts', content: 'x' }),
-      mutatingResult(1, 3, 'c3', { surfaceOp: { op: 'replace', startSeq: 1, endSeq: 2 } }),
-    ]
-    expect(hunksForPath(events, 'src/a.ts')).toEqual({ hunks: [], truncated: false })
-  })
-
-  it('bounds the number and size of hunks, reporting truncation', () => {
-    const many: SessionEventLike[] = []
-    for (let i = 0; i < MAX_CHANGED_HUNKS + 1; i += 1) {
-      many.push(...writeCall(1, `h${i}`, 'src/a.ts', 'x'))
-    }
-    const bounded = hunksForPath(many, 'src/a.ts')
-    expect(bounded.hunks).toHaveLength(MAX_CHANGED_HUNKS)
-    expect(bounded.truncated).toBe(true)
-
-    const huge = 'x'.repeat(MAX_CHANGED_HUNK_CHARS + 10)
-    const clipped = hunksForPath([
-      toolCall(1, 1, 'c1', 'write', { file_path: 'src/big.ts', content: huge }),
-      mutatingResult(1, 1, 'c1', { meta: { diffs: [] } }),
-    ], 'src/big.ts')
-    expect(clipped.hunks[0]!.newText).toHaveLength(MAX_CHANGED_HUNK_CHARS)
-    expect(clipped.truncated).toBe(true)
-
-    // The total payload is bounded too: many near-cap hunks stop early.
-    const bulk: SessionEventLike[] = []
-    const chunk = 'y'.repeat(MAX_CHANGED_HUNK_CHARS - 1)
-    for (let i = 0; i < 40; i += 1) {
-      bulk.push(...writeCall(1, `bulk${i}`, 'src/bulk.ts', chunk))
-    }
-    const budgeted = hunksForPath(bulk, 'src/bulk.ts')
-    expect(budgeted.truncated).toBe(true)
-    expect(budgeted.hunks.length).toBeLessThan(40)
-    const total = budgeted.hunks.reduce((sum, hunk) => sum + hunk.newText.length, 0)
-    expect(total).toBeLessThanOrEqual(
-      MAX_CHANGED_HUNK_TOTAL_CHARS + MAX_CHANGED_HUNK_CHARS,
-    )
   })
 })

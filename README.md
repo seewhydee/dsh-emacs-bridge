@@ -177,7 +177,6 @@ The following commands are available in a DSH-View buffer:
 * `k` — stop the shown session's running turn.
 * `i` — receive the latest "Send to Emacs" message (see below).
 * `D` — describe the current session.
-* `V` — run a VC worktree diff for the session directory.
 * `M-p`/`M-n` — cycle the current session's turns (older / newer).
 * `l` — open the DSH-Sessions buffer.
 * `q` — quit the window and bury the buffer.
@@ -195,24 +194,11 @@ GFM horizontal-rule syntax, so they render cleanly).
 #### Changed files
 
 A turn whose tool calls successfully changed files ends with a
-`Changed files:` footer, showing one entry per file: the operation that
-first named it (`write`, `edit`, `str_replace_editor:create`, …) and two
-buttons.  Clicking the file's `[path]` button (or typing `RET` with
-point on it) visits the file, resolved against the session directory.
-Clicking `[diff]` opens a read-only DSH-Changes buffer with the
-before/after hunks the session log recorded for that file, with `n`/`p`
-moving between hunks, `g` refetching, and `RET` visiting the file.  The
-session-level `[VC diff]` button (or `V` in the DSH-View buffer) runs
-`vc-root-diff` in the session directory instead, for a real, navigable
-`diff-mode` view of the current worktree.
-
-The two diffs answer different questions.  The recorded hunks come from
-the agent's own logged tool calls, so they work in a cold session and a
-non-VC directory, but they cannot see changes made by other means (a
-`bash` command that wrote a file) and carry no line numbers, so they
-deliberately do not support `diff-apply-hunk` or `diff-goto-source`.  The
-VC diff reflects the current worktree and catches those untraceable
-changes.
+`Changed files:` footer, a plain list of one clickable entry per file.
+Clicking a path (or typing `RET` with point on it) visits the file,
+resolved against the session directory.  There is currently no recorded
+diff or review view: the previous hunk viewer was removed pending a
+redesign (see `PLAN.md`).
 
 Customize `dsh-bridge-view-changed-files` to `nil` to omit the footer.
 A turn that produced no assistant text is absent from the turn list
