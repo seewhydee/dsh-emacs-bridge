@@ -987,6 +987,27 @@ looking like an unsent draft."
     (should (equal (buffer-string) ""))
     (should-not (buffer-modified-p))))
 
+(ert-deftest dsh-bridge-erase-prompt-resets-history-walk ()
+  "Erasing a prompt resets the history walk.
+The header stops claiming a position, and a draft stashed behind the walk
+is discarded rather than restored by M-n."
+  (let ((dsh-bridge--prompt-history (list (list "s1" "new" "mid" "old"))))
+    (with-temp-buffer
+      (dsh-bridge-prompt-mode)
+      (setq-local dsh-bridge--prompt-session "s1")
+      (setq-local dsh-bridge--prompt-draft "my draft")
+      (setq-local dsh-bridge--prompt-history-index 1)
+      (dsh-bridge--prompt-show-history (dsh-bridge--buffer-prompt-history))
+      (should (equal (dsh-bridge--prompt-history-position) " (2/3)"))
+      (dsh-bridge-erase-prompt)
+      (should (equal (buffer-string) ""))
+      (should (null dsh-bridge--prompt-history-index))
+      (should (null dsh-bridge--prompt-draft))
+      (should (equal (dsh-bridge--prompt-history-position) ""))
+      ;; M-n must not resurrect the discarded draft.
+      (dsh-bridge-prompt-next-history)
+      (should (equal (buffer-string) "")))))
+
 (ert-deftest dsh-bridge-prompt-stop-or-erase-running-stops ()
   "A running effective session takes the stop branch."
   (let ((called 'none)

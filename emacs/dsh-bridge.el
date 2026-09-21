@@ -5399,7 +5399,11 @@ session, attaching a file, selecting a model, etc.
   "Erase the contents of the prompt buffer.
 Ask for confirmation when the buffer holds modified text.  Pristine text
 \(already sent, or a history entry) is erased silently, and an empty
-buffer has nothing worth confirming."
+buffer has nothing worth confirming.
+
+The history walk is reset: the erased entry is no longer being shown, so
+the header drops its position, and a draft stashed behind the walk is
+discarded rather than restored by `dsh-bridge-prompt-next-history'."
   (interactive)
   (when (or (= (buffer-size) 0)
 			(not (buffer-modified-p))
@@ -5407,7 +5411,11 @@ buffer has nothing worth confirming."
 	(erase-buffer)
 	;; `erase-buffer' sets the modified flag; an empty buffer is pristine,
 	;; so clear it.  Otherwise a second erase would confirm about nothing.
-	(set-buffer-modified-p nil)))
+	(set-buffer-modified-p nil)
+	;; The walk describes text that no longer exists; a later M-n must not
+	;; restore the draft discarded with it.
+	(setq-local dsh-bridge--prompt-history-index nil)
+	(setq-local dsh-bridge--prompt-draft nil)))
 
 (defun dsh-bridge-prompt-stop-or-erase (&optional force)
   "Stop the prompt buffer's running session, or else erase the prompt.
