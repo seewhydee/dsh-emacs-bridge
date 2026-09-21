@@ -8015,10 +8015,12 @@ rows; one with stats alone renders the Stats section and no other."
       (should (dsh-bridge--menu-plan-selected))
       (should (dsh-bridge--menu-goal-available))
       (should (dsh-bridge--menu-goal-selected)))
-    ;; A cold session shades both items.
+    ;; A cold session keeps the Plan Mode item enabled (the durable
+    ;; projection gives the direction) but shades Goal Active (activation
+    ;; is process-local).
     (setq dsh-bridge--sessions-cache '(((id . "s1") (live . nil))))
     (cl-letf (((symbol-function 'dsh-bridge--interaction-session) (lambda () "s1")))
-      (should-not (dsh-bridge--menu-plan-available))
+      (should (dsh-bridge--menu-plan-available))
       (should-not (dsh-bridge--menu-goal-available)))
     ;; A complete goal shades the Goal Active item.
     (setq dsh-bridge--sessions-cache '(((id . "s1") (live . t)))

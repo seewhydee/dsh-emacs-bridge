@@ -5458,7 +5458,7 @@ Uses the interaction resolver, never the display-only last-active caches."
 
 (defun dsh-bridge--plan-goal-refresh (session-id)
   "Force-refresh SESSION-ID's plan/goal caches; return the report alist.
-Unlike the read-through seed, this always reads `/session», so a mutation
+Unlike the read-through seed, this always reads `/session', so a mutation
 command sees the state it is about to change.  Returns nil when the
 request fails."
   (let ((dsh-bridge-timeout dsh-bridge-describe-timeout))
@@ -5557,7 +5557,7 @@ Signals a `user-error' when there is no session or no current goal."
 Without a prefix argument, toggle the effective wanted state, so a second
 press cancels an already-queued change instead of re-queueing it.  A
 numeric prefix argument sets explicitly: positive enables, otherwise
-disables.  The direction is read fresh from `/session», never from the
+disables.  The direction is read fresh from `/session', never from the
 advisory cache.  A session whose preset mounts no plan mode is reported
 and nothing is sent."
   (interactive "P")
@@ -5637,7 +5637,7 @@ rather than edited; the host reports which happened."
 ;;;###autoload
 (defun dsh-bridge-toggle-goal ()
   "Pause the session's armed goal, or resume and rearm a stopped one.
-The decision is read fresh from `/session» so the menu checkbox and the
+The decision is read fresh from `/session' so the menu checkbox and the
 command agree."
   (interactive)
   (let* ((session (dsh-bridge--plan-goal-session))
@@ -5678,13 +5678,12 @@ command agree."
 
 (defun dsh-bridge--menu-plan-available ()
   "Whether the Plan Mode menu item can act.
-A missing section (no plan mode), an unseeded cache, and a cold session
-(a pending intent cannot exist off-process) all shade it."
+A missing section (no plan mode) or an unseeded cache shades it.  A cold
+session stays enabled: its durable projection gives the direction, and
+the mutation route resumes it on demand (501 if its preset has none)."
   (let* ((session (dsh-bridge--menu-session))
          (plan (dsh-bridge--menu-plan-state)))
-    (and session
-         (eq (alist-get 'live (dsh-bridge--session-for-id session)) t)
-         (consp plan))))
+    (and session (consp plan))))
 
 (defun dsh-bridge--menu-plan-selected ()
   "Whether the Plan Mode menu checkbox is checked for the session at hand."
