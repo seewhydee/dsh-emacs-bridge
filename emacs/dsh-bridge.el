@@ -2473,7 +2473,7 @@ visits the file."
           (let ((first t))
             (dolist (file files)
               (let ((path (alist-get 'path file)))
-                (unless first (insert "  "))
+                (unless first (insert " "))
                 (setq first nil)
                 (insert-text-button
                  path
