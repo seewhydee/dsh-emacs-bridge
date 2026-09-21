@@ -99,8 +99,12 @@ function workspace(id: string, title: string, sessionIds: readonly string[]): Wo
   return { id, title, path: `/${id}`, sessionIds }
 }
 
-function message(role: string, blocks: Array<{ type: string; text?: string }>): MessageLike {
-  return { role, content: blocks }
+function message(
+  role: string,
+  blocks: Array<{ type: string; text?: string }>,
+  source?: { kind?: string },
+): MessageLike {
+  return source === undefined ? { role, content: blocks } : { role, content: blocks, source }
 }
 
 function titleEvent(title: string): SessionEventLike {
@@ -160,6 +164,20 @@ describe('userPrompts', () => {
 
   it('returns an empty list with no messages', () => {
     expect(userPrompts([])).toEqual([])
+  })
+
+  it('excludes injected user-role context, which is not a prompt', () => {
+    const messages = [
+      message('user', [{ type: 'text', text: 'real prompt' }], { kind: 'user' }),
+      message('user', [{ type: 'text', text: '<system-reminder>' }], { kind: 'agent-instructions' }),
+      message('user', [{ type: 'text', text: 'background job bash-11 finished' }], { kind: 'plugin' }),
+      message('user', [{ type: 'text', text: 'tool output' }], { kind: 'tool' }),
+    ]
+    expect(userPrompts(messages)).toEqual(['real prompt'])
+  })
+
+  it('keeps a user-role message that carries no source', () => {
+    expect(userPrompts([message('user', [{ type: 'text', text: 'legacy' }])])).toEqual(['legacy'])
   })
 })
 

@@ -28,6 +28,8 @@ export interface MessageBlockLike {
 export interface MessageLike {
   role: string
   content: readonly MessageBlockLike[]
+  /** Producer of the message; only a `user` source is a human prompt. Absent on messages from older logs. */
+  source?: { readonly kind?: string }
 }
 
 /**
@@ -53,11 +55,18 @@ export function latestAssistantText(messages: readonly MessageLike[]): string {
  * `latestAssistantText`: reads the derived message view, keeps `user` role
  * messages, joins their text blocks with newlines, and drops whitespace-only
  * entries. Used by the prompt-buffer history.
+ *
+ * Injected context (agent instructions, plugin notices, runtime snapshots)
+ * also projects in the `user` role with text blocks, so the role alone does
+ * not make a prompt: only `source.kind === 'user'` does, the same split
+ * `queueCounts` applies to the steering inbox. A message with no source (an
+ * older log) is kept.
  */
 export function userPrompts(messages: readonly MessageLike[]): string[] {
   const prompts: string[] = []
   for (const message of messages) {
     if (message.role !== 'user') continue
+    if (message.source !== undefined && message.source.kind !== 'user') continue
     const text = message.content
       .filter(block => block.type === 'text')
       .map(block => block.text ?? '')

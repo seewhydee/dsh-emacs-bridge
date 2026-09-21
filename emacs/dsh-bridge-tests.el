@@ -8474,7 +8474,7 @@ opt-out."
                  7 7000000
                  (list (dsh-bridge-test--view-segment "done" 7001000 1))
                  7002000))
-         (expected "Changed files: src/a.ts  src/b.ts"))
+         (expected "Changed files: src/a.ts src/b.ts"))
     (with-temp-buffer
       (dsh-bridge-view-mode)
       (let ((suffix (dsh-bridge--view-changed-files changed)))
