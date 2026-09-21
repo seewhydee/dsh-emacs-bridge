@@ -6677,11 +6677,15 @@ string is a string describing how/why it ended.
 This function runs the actions prescribed by `dsh-bridge-turn-complete',
 then emits a message if `dsh-bridge-turn-boundary-echo' is non-nil and no
 visible window is showing SESSION-ID's DSH-View (the view itself shows the
-boundary; see `dsh-bridge--view-displayed-p')."
+boundary; see `dsh-bridge--view-displayed-p').
+
+The refetch runs whenever a view shows SESSION-ID, browsing or not:
+`dsh-bridge--turn-complete-refetch' leaves a browse on an untouched turn
+alone, but refreshes one parked on the turn that just ended, whose
+terminal marker is now stale.  Only a session no view shows falls back to
+the cache-only refresh."
   (if (and (eq dsh-bridge-turn-complete 'refetch)
-		   (dsh-bridge--session-view session-id)
-		   (not (seq-some #'dsh-bridge--view-browsing-p
-						  (dsh-bridge--session-views session-id))))
+		   (dsh-bridge--session-view session-id))
 	  (run-at-time 0 nil #'dsh-bridge--turn-complete-refetch session-id)
 	(run-at-time 0 nil #'dsh-bridge--view-turns-cache-refresh session-id))
   (when (and dsh-bridge-turn-boundary-echo
@@ -6693,10 +6697,12 @@ boundary; see `dsh-bridge--view-displayed-p')."
   "Refill DSH-View buffers showing SESSION-ID's completed turn, without popping.
 A non-popping fill (the user may be editing elsewhere); drops the session's
 status entry on a 404 (the session died).  Fetches `GET /dsh-bridge/turns'
-once, stores the fresh list, and re-renders each shown, non-browsing view
-from its newest turn — the `(continuing...)' marker disappears now that
-`endedAt' is known, so the completed turn ends cleanly (point is preserved
-when the content merely changed in place)."
+once, stores the fresh list, and re-renders each shown view from its newest
+turn — the `(continuing...)' marker disappears now that `endedAt' is known,
+so the completed turn ends cleanly (point is preserved when the content merely
+changed in place).  A mid-browse view is normally left alone, but one parked
+on the turn that just ended has its terminal furniture refreshed in place, so
+a stop cannot leave the view claiming a settled turn is still running."
   (pcase-let ((`(,status ,body ,http-status)
 			   (dsh-bridge--http "GET"
 								 (dsh-bridge--path "/turns" session-id) nil)))
@@ -6730,8 +6736,25 @@ when the content merely changed in place)."
 		  (dolist (buf views)
 			(with-current-buffer buf
 			  (cond
-			   ;; Don't refill mid-browse.
-			   ((dsh-bridge--view-browsing-p))
+			   ;; A browse parked on the turn that just ended still needs
+			   ;; its terminal furniture refreshed: the turn is no longer
+			   ;; running, so `(continuing...)' (or an awaiting note) is
+			   ;; stale.  Refill the *displayed* record, not `newest' — a
+			   ;; queued prompt may already have started a newer turn — and
+			   ;; restore the browse state and point, so only the suffix
+			   ;; changes.  A browse on any other turn is left alone.
+			   ((dsh-bridge--view-browsing-p)
+				(let ((record (and dsh-bridge--view-turn
+								   (seq-find (lambda (r)
+											   (equal (alist-get 'turn r)
+													  dsh-bridge--view-turn))
+											 turns))))
+				  (when (and record
+							 (not (dsh-bridge--view-turn-open-p record)))
+					(let ((pos (point)))
+					  (dsh-bridge--view-fill shown-id record nil t t)
+					  (setq-local dsh-bridge--view-browsing t)
+					  (goto-char (min pos (point-max)))))))
 			   ;; If there are already segments, continue filling.
 			   ((null dsh-bridge--view-waiting)
 				(when newest

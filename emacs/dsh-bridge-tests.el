@@ -6339,6 +6339,101 @@ resurrecting the pre-send turn: `(running...)' gives way to nothing."
     (when (buffer-live-p (get-buffer "*dsh-bridge-output*"))
       (kill-buffer "*dsh-bridge-output*"))))
 
+(ert-deftest dsh-bridge-turn-complete-refetch-browsing-ended-turn ()
+  "A browse parked on the turn that just ended drops its running marker.
+The refresh re-fills the displayed record in place, so the content, the
+browse state and point are all preserved."
+  (let ((dsh-bridge--session-status nil)
+        (dsh-bridge--turns-cache nil))
+    (with-current-buffer (get-buffer-create "*dsh-bridge-output*")
+      (dsh-bridge-view-mode)
+      (setq-local dsh-bridge--view-content-session "s1")
+      (dsh-bridge--view-fill
+       "s1"
+       '((turn . 3) (startedAt . 3000000)
+         (segments . (((text . "the reply") (time . 3001000) (step . 1)))))
+       nil t t)
+      ;; `M-p'/`M-n' leave the view browsing, not following.
+      (setq-local dsh-bridge--view-browsing t)
+      (setq-local dsh-bridge--view-follow nil)
+      (should (equal (buffer-string) "the reply\n\n(continuing...)"))
+      (goto-char 4))
+    (cl-letf (((symbol-function 'dsh-bridge--http)
+               (lambda (&rest _)
+                 (list nil
+                       (concat "{\"sessionId\":\"s1\",\"turns\":["
+                               "{\"turn\":3,\"startedAt\":3000000,"
+                               "\"endedAt\":3009000,\"reason\":\"aborted\","
+                               "\"segments\":[{\"text\":\"the reply\","
+                               "\"time\":3001000,\"step\":1}]}]}")
+                       200)))
+              ((symbol-function 'dsh-bridge--status-set) #'ignore)
+              ((symbol-function 'dsh-bridge--apply-session-directory) #'ignore))
+      (dsh-bridge--turn-complete-refetch "s1"))
+    (with-current-buffer "*dsh-bridge-output*"
+      (should (equal (buffer-string) "the reply"))
+      (should dsh-bridge--view-browsing)
+      (should (null dsh-bridge--view-follow))
+      (should (= (point) 4)))
+    (when (buffer-live-p (get-buffer "*dsh-bridge-output*"))
+      (kill-buffer "*dsh-bridge-output*"))))
+
+(ert-deftest dsh-bridge-turn-complete-refetch-browsing-other-turn ()
+  "A browse parked on a different turn is left untouched by a completion.
+Refreshing it would yank the reader to the completing turn."
+  (let ((dsh-bridge--session-status nil)
+        (dsh-bridge--turns-cache nil))
+    (with-current-buffer (get-buffer-create "*dsh-bridge-output*")
+      (dsh-bridge-view-mode)
+      (setq-local dsh-bridge--view-content-session "s1")
+      (dsh-bridge--view-fill
+       "s1"
+       '((turn . 2) (startedAt . 2000000) (endedAt . 2009000)
+         (reason . "completed")
+         (segments . (((text . "older") (time . 2001000) (step . 1)))))
+       nil t t)
+      (setq-local dsh-bridge--view-browsing t)
+      (setq-local dsh-bridge--view-follow nil))
+    (cl-letf (((symbol-function 'dsh-bridge--http)
+               (lambda (&rest _)
+                 (list nil
+                       (concat "{\"sessionId\":\"s1\",\"turns\":["
+                               "{\"turn\":3,\"startedAt\":3000000,"
+                               "\"endedAt\":3009000,\"reason\":\"aborted\","
+                               "\"segments\":[{\"text\":\"newer\","
+                               "\"time\":3001000,\"step\":1}]}]}")
+                       200)))
+              ((symbol-function 'dsh-bridge--status-set) #'ignore)
+              ((symbol-function 'dsh-bridge--apply-session-directory) #'ignore))
+      (dsh-bridge--turn-complete-refetch "s1"))
+    (with-current-buffer "*dsh-bridge-output*"
+      (should (equal (buffer-string) "older"))
+      (should dsh-bridge--view-browsing)
+      (should (equal dsh-bridge--view-turn 2)))
+    (when (buffer-live-p (get-buffer "*dsh-bridge-output*"))
+      (kill-buffer "*dsh-bridge-output*"))))
+
+(ert-deftest dsh-bridge-turn-complete-act-refetches-browsing-view ()
+  "A browsing view still routes through the completion refetch, not the
+cache-only refresh: the refetch is what drops a stale marker from the
+ended turn, and it leaves an unparked browse alone per view."
+  (let ((dsh-bridge-turn-complete 'refetch)
+        (scheduled nil))
+    (with-current-buffer (get-buffer-create "*dsh-bridge-output*")
+      (dsh-bridge-view-mode)
+      (setq-local dsh-bridge--view-content-session "s1")
+      (setq-local dsh-bridge--view-browsing t)
+      (cl-letf (((symbol-function 'run-at-time)
+                 (lambda (_secs _repeat function &rest _)
+                   (setq scheduled function)))
+                ((symbol-function 'dsh-bridge--view-displayed-p)
+                 (lambda (&rest _) t)))
+        (dsh-bridge--turn-complete-act "s1" "aborted"))
+      (should (eq scheduled #'dsh-bridge--turn-complete-refetch)))
+    (when (buffer-live-p (get-buffer "*dsh-bridge-output*"))
+      (kill-buffer "*dsh-bridge-output*"))))
+
+
 (ert-deftest dsh-bridge-view-follow-refill-waiting-gate ()
   "A waiting view is refilled by `replies-changed' only with a turn newer than
 the pre-send one: a still-running pre-send turn (or nothing newer) keeps the
