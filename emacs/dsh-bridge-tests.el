@@ -4105,10 +4105,10 @@ clears the pending flag.  A non-outbox frame never schedules a receive."
       (should-not dsh-bridge--notifications-receive-pending)
       (should (= received 1)))))
 
-(ert-deftest dsh-bridge-notifications-retry-arms-only-when-enabled ()
-  "The retry helper re-arms a reconnect only while notifications are enabled
-and no reconnect timer is already pending."
-  (let ((dsh-bridge--notifications-enabled t)
+(ert-deftest dsh-bridge-notifications-retry-arms-unless-live ()
+  "The retry helper re-arms a reconnect only when no listener is live and no
+reconnect timer is already pending."
+  (let ((dsh-bridge--notifications-process nil)
         (dsh-bridge--notifications-timer nil)
         (armed nil))
     (cl-letf (((symbol-function 'run-at-time)
@@ -4122,36 +4122,33 @@ and no reconnect timer is already pending."
       (setq armed nil)
       (dsh-bridge--notifications-retry)
       (should-not armed)))
-  (let ((dsh-bridge--notifications-enabled nil)
+  (let ((dsh-bridge--notifications-process 'live-proc)
         (dsh-bridge--notifications-timer nil)
         (armed nil))
-    (cl-letf (((symbol-function 'run-at-time)
+    (cl-letf (((symbol-function 'process-live-p) (lambda (_proc) t))
+              ((symbol-function 'run-at-time)
                (lambda (&rest _) (setq armed t) 'timer)))
       (dsh-bridge--notifications-retry)
       (should-not armed)
       (should (null dsh-bridge--notifications-timer)))))
 
-(ert-deftest dsh-bridge-notification-sentinel-reconnects-when-started ()
-  "A dropped connection re-arms the reconnect while notifications are
-started, and stays off while stopped; an `open' event is not a drop."
-  (let ((dsh-bridge--notifications-enabled t)
-        (dsh-bridge--notifications-process 'proc)
+(ert-deftest dsh-bridge-notification-sentinel-reconnects-unless-paused ()
+  "A dropped connection re-arms the reconnect unless the listener is paused;
+an `open' event is not a drop."
+  (let ((dsh-bridge--notifications-process 'proc)
         (retried nil))
     (cl-letf (((symbol-function 'dsh-bridge--notifications-retry)
                (lambda () (setq retried t))))
       (dsh-bridge--notification-sentinel 'proc "connection broken")
-      (should retried)
-      (should (null dsh-bridge--notifications-process))))
-  (let ((dsh-bridge--notifications-enabled nil)
-        (dsh-bridge--notifications-process 'proc)
+      (should retried)))
+  (let ((dsh-bridge--notifications-process 'paused)
         (retried nil))
     (cl-letf (((symbol-function 'dsh-bridge--notifications-retry)
                (lambda () (setq retried t))))
       (dsh-bridge--notification-sentinel 'proc "deleted")
       (should-not retried)
-      (should (null dsh-bridge--notifications-process))))
-  (let ((dsh-bridge--notifications-enabled t)
-        (dsh-bridge--notifications-process 'proc)
+      (should (eq dsh-bridge--notifications-process 'paused))))
+  (let ((dsh-bridge--notifications-process 'proc)
         (retried nil))
     (cl-letf (((symbol-function 'dsh-bridge--notifications-retry)
                (lambda () (setq retried t))))
@@ -4163,9 +4160,7 @@ started, and stays off while stopped; an `open' event is not a drop."
   "Start/stop are latched: a double start does not reconnect, a stop after a
 stop is a no-op, a conditional start stays off while paused, and an explicit
 start after a stop re-listens."
-  (let ((dsh-bridge--notifications-enabled nil)
-        (dsh-bridge--notifications-paused nil)
-        (dsh-bridge--notifications-process nil)
+  (let ((dsh-bridge--notifications-process nil)
         (dsh-bridge--notifications-timer nil)
         (connects 0)
         (deletes 0))
@@ -4179,8 +4174,7 @@ start after a stop re-listens."
               ((symbol-function 'delete-process)
                (lambda (_proc) (setq deletes (1+ deletes)))))
       (dsh-bridge-notifications-start)
-      (should dsh-bridge--notifications-enabled)
-      (should-not dsh-bridge--notifications-paused)
+      (should (eq dsh-bridge--notifications-process 'fake-proc))
       (should (= connects 1))
       ;; A double start sees the live process and does not reconnect.
       (dsh-bridge-notifications-start)
@@ -4189,22 +4183,45 @@ start after a stop re-listens."
       (dsh-bridge-notifications-start t)
       (should (= connects 1))
       (dsh-bridge-notifications-stop)
-      (should-not dsh-bridge--notifications-enabled)
-      (should dsh-bridge--notifications-paused)
+      (should (eq dsh-bridge--notifications-process 'paused))
       (should (= deletes 1))
-      (should (null dsh-bridge--notifications-process))
       ;; Stop after stop: nothing left to tear down.
       (dsh-bridge-notifications-stop)
       (should (= deletes 1))
       ;; A conditional start while paused stays off.
       (dsh-bridge-notifications-start t)
       (should (= connects 1))
-      (should-not dsh-bridge--notifications-enabled)
+      (should (eq dsh-bridge--notifications-process 'paused))
       ;; An explicit start after a stop re-listens.
       (dsh-bridge-notifications-start)
-      (should dsh-bridge--notifications-enabled)
-      (should-not dsh-bridge--notifications-paused)
+      (should (eq dsh-bridge--notifications-process 'fake-proc))
       (should (= connects 2)))))
+
+(ert-deftest dsh-bridge-notifications-stop-does-not-rearm-reconnect ()
+  "Stopping a live listener latches the pause before deleting the process, so
+the sentinel that `delete-process' runs synchronously cannot re-arm a
+reconnect for the listener the user just paused."
+  (let ((dsh-bridge--notifications-process 'fake-proc)
+        (dsh-bridge--notifications-timer nil)
+        (deleting nil)
+        (armed nil))
+    (cl-letf (((symbol-function 'process-live-p)
+               (lambda (proc)
+                 (and (eq proc 'fake-proc) (not deleting))))
+              ((symbol-function 'delete-process)
+               (lambda (proc)
+                 ;; `delete-process' runs the sentinel synchronously, by which
+                 ;; point the process is already dead.
+                 (setq deleting t)
+                 (unwind-protect
+                     (dsh-bridge--notification-sentinel proc "killed\n")
+                   (setq deleting nil))))
+              ((symbol-function 'run-at-time)
+               (lambda (&rest _) (setq armed t) 'timer)))
+      (dsh-bridge-notifications-stop)
+      (should (eq dsh-bridge--notifications-process 'paused))
+      (should-not armed)
+      (should (null dsh-bridge--notifications-timer)))))
 
 ;;; Turn notifications, session status, and the header line
 
@@ -9194,21 +9211,25 @@ approvals for an Emacs that will not decide them."
         (dsh-bridge--notifications-connect "tok"))
       (should (string-match-p "token=tok&answer=0" sent)))))
 
-(ert-deftest dsh-bridge-approval-answer-set-restarts-when-enabled ()
-  "Changing the answering posture reconnects an enabled listener (the host
+(ert-deftest dsh-bridge-approval-answer-set-restarts-unless-paused ()
+  "Changing the answering posture reconnects a running listener (the host
 reads the posture at subscribe time) and leaves a paused one alone."
   (let ((old (default-value 'dsh-bridge-approval-answer)))
     (unwind-protect
         (progn
-          (let ((dsh-bridge--notifications-enabled t) (restarted 0))
-            (cl-letf (((symbol-function 'dsh-bridge--notifications-restart)
-                       (lambda () (cl-incf restarted))))
+          (let ((dsh-bridge--notifications-process 'fake-proc) (restarted 0))
+            (cl-letf (((symbol-function 'dsh-bridge-notifications-stop)
+                       (lambda () (cl-incf restarted)))
+                      ((symbol-function 'dsh-bridge-notifications-start)
+                       (lambda (&optional _) (cl-incf restarted))))
               (dsh-bridge--approval-answer-set 'dsh-bridge-approval-answer 'notify-only)
               (should (eq (default-value 'dsh-bridge-approval-answer) 'notify-only))
-              (should (equal restarted 1))))
-          (let ((dsh-bridge--notifications-enabled nil) (restarted 0))
-            (cl-letf (((symbol-function 'dsh-bridge--notifications-restart)
-                       (lambda () (cl-incf restarted))))
+              (should (equal restarted 2))))
+          (let ((dsh-bridge--notifications-process 'paused) (restarted 0))
+            (cl-letf (((symbol-function 'dsh-bridge-notifications-stop)
+                       (lambda () (cl-incf restarted)))
+                      ((symbol-function 'dsh-bridge-notifications-start)
+                       (lambda (&optional _) (cl-incf restarted))))
               (dsh-bridge--approval-answer-set 'dsh-bridge-approval-answer 'all)
               (should (equal restarted 0)))))
       (set-default 'dsh-bridge-approval-answer old))))

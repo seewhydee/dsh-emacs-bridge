@@ -355,24 +355,28 @@ toggling it takes effect at the next render."
   :type 'boolean
   :group 'dsh-bridge)
 
-;; Forward declaration: the notification machinery (and its restart helper)
-;; is defined further down, but the option below must be able to consult it.
+;; Forward declaration: the setter below consults
+;; `dsh-bridge--notifications-process', which is documented further down.
 ;; It is bound (not merely declared) because `custom-declare-variable' runs
 ;; the `:set' function at definition time, before the real `defvar' below.
-(defvar dsh-bridge--notifications-enabled nil)
+(defvar dsh-bridge--notifications-process nil)
 
 (defun dsh-bridge--approval-answer-set (symbol value)
   "Set SYMBOL to VALUE, reconnecting the notification listener when it is on.
 The SSE connection declares this Emacs's approval-answering posture
 (`answer=0' when the value is `notify-only'), so the host only learns of a
-change when the stream is re-established."
+change when the stream is re-established.  A paused listener is left alone."
   (set-default symbol value)
-  (when (and dsh-bridge--notifications-enabled
-			 (fboundp 'dsh-bridge--notifications-restart))
-	(dsh-bridge--notifications-restart)))
+  ;; `dsh-bridge-notifications-start' is defined further down; on this
+  ;; function's first call, from `custom-declare-variable' at load time, it
+  ;; does not exist yet.
+  (when (fboundp 'dsh-bridge-notifications-start)
+	(unless (eq dsh-bridge--notifications-process 'paused)
+	  (dsh-bridge-notifications-stop)
+	  (dsh-bridge-notifications-start))))
 
 (defcustom dsh-bridge-approval-answer 'all
-  "How Emacs answers DSH approval requests (sandbox escalations, hook asks).
+  "How Emacs answers DSH approval requests.
 The value `all' lets `dsh-bridge-answer' submit every outcome the web UI
 offers, including a one-shot `danger-full-access' sandbox escalation: a
 token holder can already mutate sessions and run tools, so this grants no
@@ -909,16 +913,9 @@ headers (\"\" when no header terminator is present)."
 ;; helpers.  Only the notification stream is handled like this; other
 ;; parts of the bridge use `url-http'.
 
-(defvar dsh-bridge--notifications-enabled nil
-  "Whether the DSH notification listener is currently enabled.")
-
-(defvar dsh-bridge--notifications-paused nil
-  "Whether the user has explicitly paused the DSH notification listener.
-`dsh-bridge-notifications-stop' latches this so the listener stays off until
-`dsh-bridge-notifications-start' is called again.")
-
 (defvar dsh-bridge--notifications-process nil
-  "The DSH bridge's live SSE notification process, or nil.")
+  "The DSH bridge's live SSE notification process, if any.
+This is set to `paused' if the user pauses the notification listener.")
 
 (defvar dsh-bridge--notifications-timer nil
   "Reconnect timer for the DSH notification listener, or nil.")
@@ -1197,16 +1194,15 @@ burst of frames (e.g., a rename) into one refresh."
 
 (defun dsh-bridge--notifications-retry ()
   "Schedule a reconnect attempt for the notification listener."
-  (when (and dsh-bridge--notifications-enabled
-			 (not (timerp dsh-bridge--notifications-timer)))
+  (unless (or (process-live-p dsh-bridge--notifications-process)
+			  (timerp dsh-bridge--notifications-timer))
 	(setq dsh-bridge--notifications-timer
 		  (run-at-time 5 nil #'dsh-bridge-notifications-start))))
 
 (defun dsh-bridge--notification-sentinel (_proc event)
   "Sentinel for the SSE notification process: reconnect on close/error."
   (unless (string-prefix-p "open" event)
-	(setq dsh-bridge--notifications-process nil)
-	(when dsh-bridge--notifications-enabled
+	(unless (eq dsh-bridge--notifications-process 'paused)
 	  (dsh-bridge--notifications-retry))))
 
 (defun dsh-bridge--notifications-connect (token)
@@ -1237,23 +1233,17 @@ burst of frames (e.g., a rename) into one refresh."
 			 (if (eq dsh-bridge-approval-answer 'notify-only) "&answer=0" "")
 			 host port))))
 
-(defun dsh-bridge-notifications-start (&optional conditional)
-  "Enable the DSH bridge notification listener (idempotent).
-If called non-interactively with CONDITIONAL non-nil, do nothing if
-`dsh-bridge--notifications-paused' or `dsh-bridge--notifications-enabled'
-is non-nil."
+(defun dsh-bridge-notifications-start (&optional respect-pause)
+  "Enable the DSH bridge notification listener.
+If called non-interactively with RESPECT-PAUSE non-nil, do nothing if
+the listener was paused by the user (i.e., do not resume it)."
   (interactive)
-  (when (or (null conditional)
-			(and (not dsh-bridge--notifications-paused)
-				 (not dsh-bridge--notifications-enabled)))
-	(setq dsh-bridge--notifications-paused nil)
-	(setq dsh-bridge--notifications-enabled t)
-
+  (unless (and respect-pause
+			   (eq dsh-bridge--notifications-process 'paused))
 	(when (timerp dsh-bridge--notifications-timer)
 	  (cancel-timer dsh-bridge--notifications-timer)
 	  (setq dsh-bridge--notifications-timer nil))
-	(unless (and dsh-bridge--notifications-process
-				 (process-live-p dsh-bridge--notifications-process))
+	(unless (process-live-p dsh-bridge--notifications-process)
 	  (let ((token (dsh-bridge--token)))
 		(if (null token)
 			(dsh-bridge--notifications-retry)
@@ -1263,26 +1253,18 @@ is non-nil."
 
 (defun dsh-bridge-notifications-stop ()
   "Pause the DSH bridge notification listener.
-The listener stays off until `dsh-bridge-notifications-start' is called."
+To restart it, call `dsh-bridge-notifications-start'."
   (interactive)
-  (setq dsh-bridge--notifications-paused t)
-  (setq dsh-bridge--notifications-enabled nil)
-  (when (timerp dsh-bridge--notifications-timer)
-	(cancel-timer dsh-bridge--notifications-timer)
-	(setq dsh-bridge--notifications-timer nil))
-  (when (and dsh-bridge--notifications-process
-			 (process-live-p dsh-bridge--notifications-process))
-	(delete-process dsh-bridge--notifications-process))
-  (setq dsh-bridge--notifications-process nil))
-
-(defun dsh-bridge--notifications-restart ()
-  "Reconnect the notification listener when it is currently enabled.
-The SSE connection carries state the host reads at subscribe time (the
-approval-answering posture), so a change to that state needs a fresh
-connection.  A paused or never-started listener is left alone."
-  (when dsh-bridge--notifications-enabled
-	(dsh-bridge-notifications-stop)
-	(dsh-bridge-notifications-start)))
+  (let ((proc dsh-bridge--notifications-process))
+	;; Latch the pause before `delete-process': it runs the sentinel
+	;; synchronously, and the sentinel must not re-arm a reconnect for a
+	;; listener the user just paused.
+	(setq dsh-bridge--notifications-process 'paused)
+	(when (timerp dsh-bridge--notifications-timer)
+	  (cancel-timer dsh-bridge--notifications-timer)
+	  (setq dsh-bridge--notifications-timer nil))
+	(when (process-live-p proc)
+	  (delete-process proc))))
 
 ;;; Bridge requests
 
