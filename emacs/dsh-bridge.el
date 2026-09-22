@@ -803,8 +803,7 @@ response means the route (and hence the plugin) is absent."
 		'unreachable
 	  (let* ((response (dsh-bridge--parse-response buf))
 			 (status (car response))
-			 (alist (ignore-errors
-					  (json-parse-string (cdr response) :object-type 'alist))))
+			 (alist (dsh-bridge--parse-json-body (cdr response))))
 		(kill-buffer buf)
 		(cond
 		 ((eq status 403) 'forbidden)
@@ -2027,8 +2026,7 @@ that steering was requested."
 	  (push '(mode . "steer") payload))
 	(pcase-let ((`(,status ,body ,http-status)
 				 (dsh-bridge--http "POST" "/send" payload)))
-	  (let* ((alist (ignore-errors
-					  (json-parse-string body :object-type 'alist)))
+	  (let* ((alist (dsh-bridge--parse-json-body body))
 			 (err (dsh-bridge--error-message status http-status alist)))
 		(cond
 		 (err (message "dsh-bridge: %s" err))
@@ -2078,8 +2076,7 @@ was current when this function is called."
 						  (and target (list (cons 'sessionId target))))))
 	(pcase-let ((`(,status ,body ,http-status)
 				 (dsh-bridge--http "POST" "/draft" payload)))
-	  (let* ((alist (ignore-errors
-					  (json-parse-string body :object-type 'alist)))
+	  (let* ((alist (dsh-bridge--parse-json-body body))
 			 (err (dsh-bridge--error-message status http-status alist)))
 		(cond
 		 (err (message "dsh-bridge: %s" err))
@@ -4785,11 +4782,7 @@ and pop to the session's DSH-View in turn-following state."
 						 (append (list (cons 'questionId dsh-bridge--question-id)
 									   (cons 'sessionId dsh-bridge--question-session))
 								 (list (cons 'answers answers))))))
-			(let* ((alist (ignore-errors
-							(json-parse-string body
-											   :object-type 'alist
-											   :null-object nil
-											   :false-object nil)))
+			(let* ((alist (dsh-bridge--parse-json-body body))
 				   (reason (and alist (alist-get 'reason alist)))
 				   (accepted (and alist (alist-get 'accepted alist))))
 			  (cond
@@ -4833,13 +4826,10 @@ answer; an already-resolved question is bannered in place."
 					 (list (cons 'questionId dsh-bridge--question-id)
 						   (cons 'sessionId dsh-bridge--question-session)
 						   (cons 'cancelled t)))))
-		(let* ((alist (condition-case nil
-						;; JSON false must decode to nil: the
-						;; `accepted' cond branch below keys on
-						;; truthiness.
-						(json-parse-string body :object-type 'alist
-									   :null-object nil :false-object nil)
-					  (error nil)))
+		;; JSON false must decode to nil: the `accepted' cond branch
+		;; below keys on truthiness, which `dsh-bridge--parse-json-body'
+		;; guarantees.
+		(let* ((alist (dsh-bridge--parse-json-body body))
 			   (reason (and alist (alist-get 'reason alist)))
 			   (accepted (and alist (alist-get 'accepted alist))))
 		  (cond
@@ -5147,9 +5137,7 @@ selected afterwards so the continuation follows."
 								   (list (cons 'approvalId approval-id)
 										 (cons 'sessionId session-id)
 										 (cons 'decision decision)))))
-	  (let* ((alist (ignore-errors
-					  (json-parse-string body :object-type 'alist
-										 :null-object nil :false-object nil)))
+	  (let* ((alist (dsh-bridge--parse-json-body body))
 			 (reason (and alist (alist-get 'reason alist)))
 			 (accepted (and alist (alist-get 'accepted alist))))
 		(cond

@@ -123,10 +123,7 @@ profile directory; the plugin counts as installed if it appears in
 			(setq manifest (expand-file-name "package.json" dir)))
 		   (setq data (with-temp-buffer
 						(insert-file-contents manifest)
-						(ignore-errors
-						  (json-parse-string (buffer-string)
-											 :object-type 'alist
-											 :array-type 'list))))
+						(dsh-bridge--parse-json-body (buffer-string))))
 		   (or (assq 'dsh-emacs-bridge (alist-get 'dependencies data))
 			   (member "dsh-emacs-bridge"
 					   (alist-get 'bundles
