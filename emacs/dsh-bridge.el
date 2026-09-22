@@ -2742,16 +2742,13 @@ last committed segment."
 
 (defun dsh-bridge--view-turn-time-label (session-id)
   "The DSH-View header's turn-time segment for SESSION-ID, or nil.
-Describes the *displayed* turn, not the session: \"running: DURATION\"
-while that turn is open (timed from its `startedAt'), or \"done: M/D
-HH:MM\" once it has an end time.  A waiting view whose start time the
-status tracker knows is \"running: DURATION\" too; one whose start is
-unknown is \"running\".  Nil when the view shows no turn (a pushed
-message).  With `dsh-bridge-view-elapsed-ticker' off, a running turn
-degrades to \"running\" rather than showing a duration that never
-advances.
+The returned string has the format \"done END-TIME\" if the turn is
+finished, or \"running DURATION\" if the turn is open (timed from its
+`startedAt'; DURATION is omitted if `dsh-bridge-view-elapsed-ticker' is
+nil, or the start time is unavailable).
 
-Reads only the turns cache and status tracker — no I/O in a display path."
+Return nil if there is no turn (e.g., a pushed message).  This function
+only reads the turns cache and status tracker, and does no I/O."
   (let ((record (dsh-bridge--view-turn-record session-id))
 		(start (and dsh-bridge-view-elapsed-ticker
 					(dsh-bridge--status-turn-start session-id))))
@@ -2759,17 +2756,17 @@ Reads only the turns cache and status tracker — no I/O in a display path."
 	 ((and record (dsh-bridge--view-turn-open-p record))
 	  (let ((started (alist-get 'startedAt record)))
 		(if (and dsh-bridge-view-elapsed-ticker (numberp started))
-			(format "running: %s"
+			(format "running %s"
 					(dsh-bridge--format-duration
 					 (- (* 1000 (float-time)) started) 'compact))
 		  "running")))
 	 (record
 	  (let ((end (dsh-bridge--view-turn-end-time record)))
 		(when (numberp end)
-		  (format "done: %s" (dsh-bridge--format-clock end)))))
+		  (format "done %s" (dsh-bridge--format-clock end)))))
 	 (dsh-bridge--view-waiting
 	  (if (and dsh-bridge-view-elapsed-ticker (numberp start))
-		  (format "running: %s"
+		  (format "running %s"
 				  (dsh-bridge--format-duration
 				   (- (* 1000 (float-time)) start) 'compact))
 		"running"))

@@ -1534,8 +1534,8 @@ every collected id."
       (should (equal dsh-bridge--view-content-session "s2"))
       (should (string-match-p " s2" (dsh-bridge--view-header-line)))
       ;; A pushed message has no turn identity, so no time segment.
-      (should-not (string-match-p "done:" (dsh-bridge--view-header-line)))
-      (should-not (string-match-p "running:" (dsh-bridge--view-header-line))))))
+      (should-not (string-match-p "done" (dsh-bridge--view-header-line)))
+      (should-not (string-match-p "running" (dsh-bridge--view-header-line))))))
 
 (ert-deftest dsh-bridge-receive-multiple-messages-message ()
   "Several pending entries produce the honest 'received' message."
@@ -4337,17 +4337,17 @@ end clock; an open turn shows its elapsed run."
     (with-temp-buffer
       (dsh-bridge-view-mode)
       (setq-local dsh-bridge--view-content-session "s1")
-      (should-not (string-match-p "done:" (dsh-bridge--view-header-line)))
-      (should-not (string-match-p "running:" (dsh-bridge--view-header-line)))
+      (should-not (string-match-p "done" (dsh-bridge--view-header-line)))
+      (should-not (string-match-p "running" (dsh-bridge--view-header-line)))
       (setq-local dsh-bridge--view-turn 2)
       (setq-local dsh-bridge--turns-cache
                 '(("s1" 1 ((turn . 2) (startedAt . 1000)
                           (endedAt . 1600000000000)
                           (reason . "completed") (segments)))))
-      (should (string-match-p " done: " (dsh-bridge--view-header-line)))
+      (should (string-match-p " done " (dsh-bridge--view-header-line)))
       (setq-local dsh-bridge--turns-cache
                 '(("s1" 1 ((turn . 2) (startedAt . 1000) (segments)))))
-      (should (string-match-p " running: " (dsh-bridge--view-header-line))))))
+      (should (string-match-p " running " (dsh-bridge--view-header-line))))))
 
 (ert-deftest dsh-bridge-view-header-percent-escaped ()
   "A `%' in the session title is escaped for `header-line-format'."
@@ -4395,7 +4395,7 @@ end clock; an open turn shows its elapsed run."
                           (endedAt . 1600000000000) (reason . "completed")
                           (segments)))))
       (let ((narrow (dsh-bridge--view-header-line 60)))
-        (should (string-match-p "done: " narrow))
+        (should (string-match-p "done " narrow))
         (should (string-match-p "…" narrow))
         (should (<= (string-width narrow) 60)))
       ;; A nil width never truncates.
@@ -5516,7 +5516,7 @@ not clobber the known activation for the same goal."
                              (reason . "completed") (segments)))))
       (let ((header (dsh-bridge--view-header-line)))
         (should (string-match-p (regexp-quote "myproj · plan") header))
-        (should (string-match-p (regexp-quote "fix it · done:") header))))))
+        (should (string-match-p (regexp-quote "fix it · done") header))))))
 
 (ert-deftest dsh-bridge-view-header-indicator-properties ()
   "Plan and goal cells carry their faces, hover text, and click keymaps."
@@ -6338,7 +6338,7 @@ shows its end clock, and a pushed message with no turn shows nothing."
       (setq-local dsh-bridge--view-turn 2)
       (setq-local dsh-bridge--turns-cache
                 '(("s1" 1 ((turn . 2) (startedAt . 1000000) (segments)))))
-      (should (equal (dsh-bridge--view-turn-time-label "s1") "running: 1m 5s"))
+      (should (equal (dsh-bridge--view-turn-time-label "s1") "running 1m 5s"))
       (should (dsh-bridge--view-running-duration-p))
       ;; Disabling the ticker drops the duration but keeps the state.
       (let ((dsh-bridge-view-elapsed-ticker nil))
@@ -6349,7 +6349,7 @@ shows its end clock, and a pushed message with no turn shows nothing."
                 '(("s1" 1 ((turn . 2) (startedAt . 1000000)
                           (endedAt . 1600000000000) (reason . "completed")
                           (segments)))))
-      (should (string-prefix-p "done: " (dsh-bridge--view-turn-time-label "s1")))
+      (should (string-prefix-p "done " (dsh-bridge--view-turn-time-label "s1")))
       (should-not (dsh-bridge--view-running-duration-p))
       ;; Browsing an older settled turn while the session runs a newer one
       ;; still describes the older turn, and does not tick.
@@ -6359,13 +6359,13 @@ shows its end clock, and a pushed message with no turn shows nothing."
                 '(("s1" 1 ((turn . 1) (startedAt . 500) (endedAt . 900)
                           (reason . "completed") (segments))
                    ((turn . 2) (startedAt . 1000000) (segments)))))
-      (should (string-prefix-p "done: " (dsh-bridge--view-turn-time-label "s1")))
+      (should (string-prefix-p "done " (dsh-bridge--view-turn-time-label "s1")))
       (should-not (dsh-bridge--view-running-duration-p))
       ;; A waiting turn without a cached record uses the tracker's start.
       (setq-local dsh-bridge--view-turn 3)
       (setq-local dsh-bridge--view-waiting t)
       (setq-local dsh-bridge--turns-cache nil)
-      (should (equal (dsh-bridge--view-turn-time-label "s1") "running: 1m 5s"))
+      (should (equal (dsh-bridge--view-turn-time-label "s1") "running 1m 5s"))
       (should (dsh-bridge--view-running-duration-p)))))
 
 (ert-deftest dsh-bridge-turn-boundary-echo ()
