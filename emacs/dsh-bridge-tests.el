@@ -2065,7 +2065,7 @@ not the top: the flip is a provenance-mismatch rebuild under follow."
 (ert-deftest dsh-bridge-sessions-keymap ()
   "RET visits, r opens, t sets the default target, u clears it, f peeks, k
 stops a running session, v toggles archived visibility, R renames, d archives,
-+ creates, W renames the workspace, and p is previous-line again."
+U unarchives, + creates, W renames the workspace, and p is previous-line again."
   (should (eq (lookup-key dsh-bridge-sessions-mode-map (kbd "RET"))
               #'dsh-bridge-visit-session))
   (should (eq (lookup-key dsh-bridge-sessions-mode-map (kbd "r"))
@@ -2084,6 +2084,8 @@ stops a running session, v toggles archived visibility, R renames, d archives,
               #'dsh-bridge-rename-session))
   (should (eq (lookup-key dsh-bridge-sessions-mode-map (kbd "d"))
               #'dsh-bridge-archive-session))
+  (should (eq (lookup-key dsh-bridge-sessions-mode-map (kbd "U"))
+              #'dsh-bridge-unarchive-session))
   (should (eq (lookup-key dsh-bridge-sessions-mode-map (kbd "+"))
               #'dsh-bridge-create-session))
   (should (eq (lookup-key dsh-bridge-sessions-mode-map (kbd "W"))
@@ -2654,6 +2656,105 @@ raw id is not used, so an untitled row reads as untitled."
         (goto-char (point-min))
         (dsh-bridge-archive-session)))
     (should (null called))))
+
+(ert-deftest dsh-bridge-archive-session-stops-active-and-retries ()
+  "A 409 WORKSPACE_ACTIVE_SESSION offers to stop, then re-archives with
+stopActivity."
+  (let ((calls nil) (msg nil))
+    (cl-letf (((symbol-function 'y-or-n-p) (lambda (_prompt) t))
+              ((symbol-function 'dsh-bridge--request)
+               (lambda (method path payload)
+                 (push (list method path payload) calls)
+                 (if (eq t (cdr (assoc 'stopActivity payload)))
+                     (cons 200 (list (cons 'ok t)))
+                   (cons 409 (list (cons 'error "session is running")
+                                   (cons 'reason "WORKSPACE_ACTIVE_SESSION"))))))
+              ((symbol-function 'dsh-bridge--fetch-sessions)
+               (lambda () (cons 200 nil)))
+              ((symbol-function 'dsh-bridge--refresh-sessions-buffer) #'ignore)
+              ((symbol-function 'message)
+               (lambda (&rest args) (setq msg (apply #'format args)))))
+      (with-temp-buffer
+        (insert (propertize "s1 row" 'tabulated-list-id "s1"))
+        (goto-char (point-min))
+        (dsh-bridge-archive-session)))
+    ;; Oldest first: the refused plain archive, then the stop-and-archive.
+    (let ((attempts (reverse calls)))
+      (should (= (length attempts) 2))
+      (should (null (assoc 'stopActivity (caddr (car attempts)))))
+      (should (eq t (cdr (assoc 'stopActivity (caddr (cadr attempts))))))
+      (should (string-match-p "archived session" msg)))))
+
+(ert-deftest dsh-bridge-unarchive-session-marshals-args ()
+  "Unarchive POSTs the row's session id to /sessions/unarchive."
+  (let ((calls nil) (msg nil))
+    (cl-letf (((symbol-function 'dsh-bridge--request)
+               (lambda (method path payload)
+                 (push (list method path payload) calls)
+                 (cons 200 (list (cons 'ok t)))))
+              ((symbol-function 'dsh-bridge--fetch-sessions)
+               (lambda () (cons 200 nil)))
+              ((symbol-function 'dsh-bridge--refresh-sessions-buffer) #'ignore)
+              ((symbol-function 'message)
+               (lambda (&rest args) (setq msg (apply #'format args)))))
+      (with-temp-buffer
+        (insert (propertize "s1 row" 'tabulated-list-id "s1"))
+        (goto-char (point-min))
+        (dsh-bridge-unarchive-session)))
+    (let ((unarchive (cadr (assoc "/sessions/unarchive"
+                                  (mapcar (lambda (c) (list (cadr c) c)) calls)))))
+      (should unarchive)
+      (should (equal (car unarchive) "POST"))
+      (should (equal (cdr (assoc 'sessionId (caddr unarchive))) "s1"))
+      (should (string-match-p "unarchived session" msg)))))
+
+(ert-deftest dsh-bridge-session-archived-p ()
+  "Only a cached row flagged archived reads as archived."
+  (let ((dsh-bridge--sessions-cache
+         '(((id . "a1") (live . t) (archived . t))
+           ((id . "b1") (live . t)))))
+    (should (dsh-bridge--session-archived-p "a1"))
+    (should-not (dsh-bridge--session-archived-p "b1"))
+    (should-not (dsh-bridge--session-archived-p "missing"))
+    (should-not (dsh-bridge--session-archived-p nil))))
+
+(ert-deftest dsh-bridge-ensure-session-live-refuses-archived ()
+  "An archived session is refused, never resumed."
+  (let ((dsh-bridge--sessions-cache
+         '(((id . "a1") (live . nil) (archived . t) (title . "Arch"))))
+        (resumed nil))
+    (cl-letf (((symbol-function 'dsh-bridge--resume-session)
+               (lambda (&rest _) (setq resumed t) t)))
+      (let ((caught (should-error (dsh-bridge--ensure-session-live "a1")
+                                  :type 'user-error)))
+        (should (string-match-p "archived" (error-message-string caught)))))
+    (should-not resumed)))
+
+(ert-deftest dsh-bridge-session-entry-marks-archived ()
+  "An archived row's session cell carries the [archived] marker and face."
+  (let* ((session '((id . "a1") (live . nil) (archived . t) (title . "Arch")))
+         (cell (aref (cadr (dsh-bridge--session-entry session)) 2))
+         (at (string-match "\\[archived\\]" cell)))
+    (should at)
+    (should (eq (get-text-property at 'face cell) 'dsh-bridge-archived-face))))
+
+(ert-deftest dsh-bridge-visit-session-archived-refuses ()
+  "RET on an archived row says so and opens nothing."
+  (let ((dsh-bridge--sessions-cache
+         '(((id . "a1") (live . nil) (archived . t) (title . "Arch"))))
+        (opened nil) (msg nil))
+    (cl-letf (((symbol-function 'dsh-bridge--prompt-buffer)
+               (lambda (&rest _) (setq opened t)))
+              ((symbol-function 'dsh-bridge--show-session-view)
+               (lambda (&rest _) (setq opened t)))
+              ((symbol-function 'message)
+               (lambda (&rest args) (setq msg (apply #'format args)))))
+      (with-temp-buffer
+        (insert (propertize "a1 row" 'tabulated-list-id "a1"))
+        (goto-char (point-min))
+        (dsh-bridge-visit-session)))
+    (should-not opened)
+    (should (string-match-p "archived" msg))))
 
 ;;; Stopping a running session
 
@@ -5751,6 +5852,23 @@ counter tracks the live turn list during a turn, not only after it completes."
        '(((kind . "turn-start") (sessionId . "s1"))))
       (should (equal refreshed '("s1"))))))
 
+(ert-deftest dsh-bridge-notification-turn-complete-forwards-turn ()
+  "A turn-complete frame forwards its reason and turn number to the act, so
+the refetch can settle a blocked turn that `/turns' cannot name."
+  (let ((dsh-bridge--session-status nil)
+        (seen nil))
+    (cl-letf (((symbol-function 'run-at-time)
+               (lambda (_time _repeat fn &rest args) (apply fn args)))
+              ((symbol-function 'dsh-bridge--status-event-render) #'ignore)
+              ((symbol-function 'dsh-bridge--models-event-refresh) #'ignore)
+              ((symbol-function 'dsh-bridge--view-turns-cache-refresh) #'ignore)
+              ((symbol-function 'dsh-bridge--turn-complete-act)
+               (lambda (id reason turn) (setq seen (list id reason turn)))))
+      (dsh-bridge--notification-handle-events
+       '(((kind . "turn-complete") (sessionId . "s1")
+          (reason . "blocked") (turn . 7)))))
+    (should (equal seen '("s1" "blocked" 7)))))
+
 (ert-deftest dsh-bridge-notification-replies-changed-refreshes ()
   "A replies-changed frame schedules a turn-cache refresh for the session."
   (let ((refreshed nil))
@@ -6710,6 +6828,51 @@ resurrecting the pre-send turn: `(running...)' gives way to nothing."
     (with-current-buffer "*dsh-bridge-output*"
       (should (equal (buffer-string) ""))
       (should (null dsh-bridge--view-turn))
+      (should (null dsh-bridge--view-waiting)))
+    (when (buffer-live-p (get-buffer "*dsh-bridge-output*"))
+      (kill-buffer "*dsh-bridge-output*"))))
+
+(ert-deftest dsh-bridge-turn-complete-refetch-blocked-note ()
+  "A `blocked' turn, absent from `/turns', becomes an explicit terminal note.
+Without it the waiting view would keep its placeholder while the status glyph
+already reads idle."
+  (let ((dsh-bridge--session-status nil)
+        (dsh-bridge--turns-cache nil))
+    (with-current-buffer (get-buffer-create "*dsh-bridge-output*")
+      (dsh-bridge-view-mode)
+      (setq-local dsh-bridge--view-content-session "s1")
+      (dsh-bridge--view-waiting-fill "s1" 2)
+      (should (equal (buffer-string) dsh-bridge--view-running-placeholder)))
+    ;; The blocked turn is turn 3; `/turns' still names turn 2 as newest.
+    (cl-letf (((symbol-function 'dsh-bridge--http)
+               (lambda (&rest _)
+                 (list nil
+                       (concat "{\"sessionId\":\"s1\",\"turns\":["
+                               "{\"turn\":2,\"startedAt\":2000000,"
+                               "\"endedAt\":2009000,\"reason\":\"completed\","
+                               "\"segments\":[{\"text\":\"old\","
+                               "\"time\":2001000,\"step\":1}]}]}")
+                       200)))
+              ((symbol-function 'dsh-bridge--status-set) #'ignore)
+              ((symbol-function 'dsh-bridge--apply-session-directory) #'ignore))
+      (dsh-bridge--turn-complete-refetch "s1" "blocked" 3))
+    (with-current-buffer "*dsh-bridge-output*"
+      (should (string-match-p "blocked" (buffer-string)))
+      (should (null dsh-bridge--view-waiting))
+      (should (null dsh-bridge--view-turn)))
+    (when (buffer-live-p (get-buffer "*dsh-bridge-output*"))
+      (kill-buffer "*dsh-bridge-output*"))))
+
+(ert-deftest dsh-bridge-view-blocked-fill-names-archived ()
+  "The blocked note names the archived cause when the session is archived."
+  (let ((dsh-bridge--sessions-cache
+         '(((id . "s1") (live . t) (archived . t) (title . "Arch")))))
+    (with-current-buffer (get-buffer-create "*dsh-bridge-output*")
+      (dsh-bridge-view-mode)
+      (setq-local dsh-bridge--view-content-session "s1")
+      (dsh-bridge--view-waiting-fill "s1" nil)
+      (dsh-bridge--view-blocked-fill "s1")
+      (should (string-match-p "archived" (buffer-string)))
       (should (null dsh-bridge--view-waiting)))
     (when (buffer-live-p (get-buffer "*dsh-bridge-output*"))
       (kill-buffer "*dsh-bridge-output*"))))

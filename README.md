@@ -157,6 +157,7 @@ live status.  The following commands are available from here:
 * `v` — toggle whether archived sessions are shown (hidden by default).
 * `R` — rename the session at point.
 * `d` — archive the session at point.
+* `U` — unarchive the session at point.
 * `+` — create a new session, in an existing or new workspace.
 * `W` — rename the workspace of the session at point.
 * `D` — describe the session at point.

@@ -419,6 +419,11 @@ the answerer; a request that arrives with no browser open fails closed."
   "Face for an untitled session in the DSH-Sessions buffer."
   :group 'dsh-bridge)
 
+(defface dsh-bridge-archived-face
+  '((t :inherit shadow))
+  "Face for the archived marker in the DSH-Sessions buffer."
+  :group 'dsh-bridge)
+
 (defface dsh-bridge-describe-heading-face
   '((t :inherit bold))
   "Face for section headings in the DSH-Describe-Session buffer."
@@ -1065,7 +1070,8 @@ Currently supported events are:
 		  (dsh-bridge--status-event-render id)
 		  (dsh-bridge--models-event-refresh id)
 		  (dsh-bridge--describe-maybe-refresh id)
-		  (dsh-bridge--turn-complete-act id (alist-get 'reason event))))
+		  (dsh-bridge--turn-complete-act id (alist-get 'reason event)
+										 (alist-get 'turn event))))
 	   ((equal kind "replies-changed")
 		(when id
 		  ;; The first text segment after an answer retires its note; the
@@ -1392,6 +1398,13 @@ This is the `dsh-bridge--sessions-cache' entry with `id' matching ID.
 See `dsh-bridge--sessions-cache' for the session data format."
   (seq-find (lambda (s) (equal (alist-get 'id s) id))
 			dsh-bridge--sessions-cache))
+
+(defun dsh-bridge--session-archived-p (id)
+  "Whether session ID is archived, per the sessions cache.
+An archived session is readable but not runnable: the harness admits no model
+step for it, and its web UI refuses to open one.  A nil ID, or an ID with no
+cached row, is not archived."
+  (and id (eq t (alist-get 'archived (dsh-bridge--session-for-id id)))))
 
 (defun dsh-bridge--session-update-last-active (session-id time)
   "Update SESSION-ID's `lastActive' in the sessions cache to TIME (ms-epoch).
@@ -3260,7 +3273,8 @@ and workspace label are shortened to fit it.
 
 The session-pos segment is the position in the session's turn history (see
 `dsh-bridge--view-turn-position'); the time segment describes the displayed
-turn (see `dsh-bridge--view-turn-time-label'); the plan and goal segments
+turn (see `dsh-bridge--view-turn-time-label'); the archived segment appears
+while the workspace registry hides the session; the plan and goal segments
 report the cached plan-mode and goal state (see
 `dsh-bridge--header-plan-cell' and `dsh-bridge--header-goal-cell') and
 sit between the workspace and the time; the await segment appears while
@@ -3275,6 +3289,7 @@ clickable (see `dsh-bridge--header-plan-at-mouse' and
 				 (dsh-bridge--header-text (dsh-bridge--session-label id)) id))
 		 (workspace (dsh-bridge--header-text
 					 (dsh-bridge--workspace-label-for id)))
+		 (archived (and id (dsh-bridge--session-archived-p id) "archived"))
 		 (time (and id (dsh-bridge--view-turn-time-label id)))
 		 (plan (and id (dsh-bridge--header-plan-cell id)))
 		 (goal (and id (dsh-bridge--header-goal-cell id)))
@@ -3291,6 +3306,7 @@ clickable (see `dsh-bridge--header-plan-at-mouse' and
 			 (dsh-bridge--header-line-join
 			  (list (list label t)
 					(list workspace t)
+					archived
 					plan
 					goal
 					(list time)
@@ -6260,9 +6276,15 @@ Archived sessions are hidden unless `dsh-bridge--sessions-archived-p' (or
 		 (workspace-cell (if (and (stringp cwd) (not (string-empty-p cwd)))
 							 (propertize workspace 'help-echo cwd)
 						   workspace))
+		 (title (let ((label (dsh-bridge--session-label session nil t)))
+				  (if (alist-get 'archived session)
+					  (concat label
+							  (propertize "  [archived]"
+										  'face 'dsh-bridge-archived-face))
+					label)))
 		 (cols (vector (dsh-bridge--default-target-marker session)
 					   (dsh-bridge--status-glyph (alist-get 'id session))
-					   (dsh-bridge--session-label session nil t)
+					   title
 					   age
 					   workspace-cell)))
 	(when dsh-bridge-show-session-ids
@@ -6282,6 +6304,7 @@ Archived sessions are hidden unless `dsh-bridge--sessions-archived-p' (or
   "v" #'dsh-bridge-toggle-archived-sessions
   "R" #'dsh-bridge-rename-session
   "d" #'dsh-bridge-archive-session
+  "U" #'dsh-bridge-unarchive-session
   "+" #'dsh-bridge-create-session
   "W" #'dsh-bridge-rename-workspace
   "D" #'dsh-bridge-describe-session)
@@ -6316,7 +6339,9 @@ Archived sessions are hidden unless `dsh-bridge--sessions-archived-p' (or
 	["Stop Session" dsh-bridge-stop-session
 	 :help "Stop the session under point if it is running"]
 	["Archive Session" dsh-bridge-archive-session
-	 :help "Archive the session under point (one-way: no unarchive)"]
+	 :help "Archive the session under point (reversible with Unarchive)"]
+	["Unarchive Session" dsh-bridge-unarchive-session
+	 :help "Unarchive the session under point and make it runnable again"]
 	["Create Session…" dsh-bridge-create-session
 	 :help "Create a new untitled session, optionally in a new workspace"]
 	["Rename Workspace…" dsh-bridge-rename-workspace
@@ -6364,7 +6389,8 @@ Archived sessions are hidden unless `dsh-bridge--sessions-archived-p' (or
   "Resume the cold session ID via POST /sessions/resume.
 Echoes \"resuming…\" while the request is in flight, then refetches the session
 list so the row flips to live.	Returns the refreshed row alist, or nil on
-failure (the host reports 404 unknown / 409 subagent-owned / 500 composition)."
+failure (the host reports 404 unknown / 409 archived or subagent-owned / 500
+composition)."
   (message "dsh-bridge: resuming session")
   (redisplay t)
   (let* ((result (dsh-bridge--request "POST" "/sessions/resume"
@@ -6382,11 +6408,20 @@ failure (the host reports 404 unknown / 409 subagent-owned / 500 composition)."
 	  nil)))
 
 (defun dsh-bridge--ensure-session-live (id)
-  "Return non-nil when SESSION ID is live, resuming a cold session on demand.
-A saved (cold) session known to the session cache is resumed; an id
-absent from the cache returns nil without a resume attempt."
+  "Return non-nil when SESSION ID is live and runnable, resuming a cold one.
+A saved (cold) session known to the session cache is resumed; an id absent
+from the cache returns nil without a resume attempt.
+
+An archived session is refused with a `user-error' rather than resumed: the
+harness's `agent/pre-step' gate admits no model step for an archived session
+(and its web UI refuses to open one), so a prompt would be claimed by the loop
+and then silently dropped.  Use \\[dsh-bridge-unarchive-session] first;
+`dsh-bridge-fetch' still reads one for display."
   (let ((session (dsh-bridge--session-for-id id)))
 	(cond
+	 ((dsh-bridge--session-archived-p id)
+	  (user-error "dsh-bridge: session \"%s\" is archived; unarchive it first (U)"
+				  (dsh-bridge--session-label id)))
 	 ((alist-get 'live session) t)
 	 (session (and (dsh-bridge--resume-session id) t))
 	 (t nil))))
@@ -6420,12 +6455,20 @@ change the default target session."
   selecting the prompt.
 
 The session is resumed first when it is saved (cold).  The default target
-is not changed."
+is not changed.
+
+An archived session is not runnable: it is not resumed, and this command
+says so instead of opening a prompt or view.  Use
+\\[dsh-bridge-unarchive-session] to restore it, or \\[dsh-bridge-peek-session]
+to read it."
   (interactive)
   (let ((id (tabulated-list-get-id)))
 	(cond
 	 ((null id)
 	  (message "dsh-bridge: no session under point"))
+	 ((dsh-bridge--session-archived-p id)
+	  (message "dsh-bridge: session \"%s\" is archived; unarchive it with U"
+			   (dsh-bridge--session-label id)))
 	 ((or (dsh-bridge--pending-question id)
 		  (dsh-bridge--pending-approval id))
 	  ;; `dsh-bridge-answer' resolves the row's session itself.
@@ -6520,10 +6563,21 @@ makes it live (the web UI does the same)."
 			  (message "dsh-bridge: %s"
 					   (dsh-bridge--error-message nil status alist)))))))))
 
+(defun dsh-bridge--request-archive (id stop-activity)
+  "POST /sessions/archive for session ID.
+STOP-ACTIVITY non-nil asks the host to stop the session's live work instead of
+refusing the archive.  Return the usual (STATUS . ALIST) request result."
+  (dsh-bridge--request "POST" "/sessions/archive"
+					   (append (list (cons 'sessionId id))
+							   (when stop-activity
+								 (list (cons 'stopActivity t))))))
+
 (defun dsh-bridge-archive-session ()
-  "Archive the session under point (one-way).
-DSH has no unarchive at any layer, so this confirms first.	Works for live and
-cold sessions alike."
+  "Archive the session under point.
+Works for live and cold sessions.  A session whose work is live is refused by
+the host (409 `WORKSPACE_ACTIVE_SESSION'); this then offers to stop that work
+and archive, as the web UI does.  Archiving is reversible with
+\\[dsh-bridge-unarchive-session]."
   (interactive)
   (let ((id (tabulated-list-get-id)))
 	(if (null id)
@@ -6531,10 +6585,16 @@ cold sessions alike."
 	  (let ((label (dsh-bridge--session-label id)))
 		(if (not (y-or-n-p (format "Archive session %s?" label)))
 			(message "dsh-bridge: aborted")
-		  (let* ((result (dsh-bridge--request "POST" "/sessions/archive"
-											  (list (cons 'sessionId id))))
+		  (let* ((result (dsh-bridge--request-archive id nil))
 				 (status (car result))
 				 (alist (cdr result)))
+			(when (and (eq status 409)
+					   (equal (alist-get 'reason alist) "WORKSPACE_ACTIVE_SESSION")
+					   (y-or-n-p
+						(format "Session %s is running.  Stop it and archive? " label)))
+			  (setq result (dsh-bridge--request-archive id t)
+					status (car result)
+					alist (cdr result)))
 			(if (eq status 200)
 				(progn
 				  (dsh-bridge--fetch-sessions)
@@ -6542,6 +6602,28 @@ cold sessions alike."
 				  (message "dsh-bridge: archived session %s" label))
 			  (message "dsh-bridge: %s"
 					   (dsh-bridge--error-message nil status alist)))))))))
+
+(defun dsh-bridge-unarchive-session ()
+  "Unarchive the session under point, making it runnable again.
+The registry drops the id without re-checking that the session exists, so
+this never reports 404; 501 means the installed plugin predates unarchive
+support."
+  (interactive)
+  (let ((id (tabulated-list-get-id)))
+	(if (null id)
+		(message "dsh-bridge: no session under point")
+	  (let* ((result (dsh-bridge--request "POST" "/sessions/unarchive"
+										  (list (cons 'sessionId id))))
+			 (status (car result))
+			 (alist (cdr result)))
+		(if (eq status 200)
+			(progn
+			  (dsh-bridge--fetch-sessions)
+			  (dsh-bridge--refresh-sessions-buffer)
+			  (message "dsh-bridge: unarchived session %s" (dsh-bridge--session-label id)))
+		  (message "dsh-bridge: %s"
+				   (or (dsh-bridge--error-message nil status alist)
+					   (format "failed to unarchive session %s" id))))))))
 
 (defun dsh-bridge--read-new-session-title ()
   "Read a non-empty session title, re-prompting until one is entered."
@@ -7262,10 +7344,11 @@ turn browsing."
 			(dsh-bridge--session-label session-id)
 			verb)))
 
-(defun dsh-bridge--turn-complete-act (session-id reason)
+(defun dsh-bridge--turn-complete-act (session-id reason &optional turn)
   "Update cache and inform the user after a turn ends.
-SESSION-ID is the session id for the ended session, and REASON is a
-string is a string describing how/why it ended.
+SESSION-ID is the session id for the ended session, REASON is a string
+describing how/why it ended, and TURN, when non-nil, is the ended turn's
+number from the frame.
 
 This function runs the actions prescribed by `dsh-bridge-turn-complete',
 then emits a message if `dsh-bridge-turn-boundary-echo' is non-nil and no
@@ -7279,14 +7362,37 @@ terminal marker is now stale.  Only a session no view shows falls back to
 the cache-only refresh."
   (if (and (eq dsh-bridge-turn-complete 'refetch)
 		   (dsh-bridge--session-view session-id))
-	  (run-at-time 0 nil #'dsh-bridge--turn-complete-refetch session-id)
+	  (run-at-time 0 nil #'dsh-bridge--turn-complete-refetch session-id reason turn)
 	(run-at-time 0 nil #'dsh-bridge--view-turns-cache-refresh session-id))
   (when (and dsh-bridge-turn-boundary-echo
 			 (not (dsh-bridge--view-displayed-p session-id)))
 	(message "dsh-bridge: %s"
 			 (dsh-bridge--turn-reason-phrase session-id reason))))
 
-(defun dsh-bridge--turn-complete-refetch (session-id)
+(defun dsh-bridge--view-blocked-fill (session-id)
+  "Render SESSION-ID's rejected (`blocked') turn as a terminal note.
+A `blocked' turn produced no reply and never will, so the view would otherwise
+sit on its `(running...)' placeholder while the status glyph reads idle.  The
+note is archive-aware because the harness's archived-session gate is the usual
+cause."
+  (dsh-bridge--view-fill session-id nil nil t)
+  (setq-local dsh-bridge--view-turn nil)
+  (setq-local dsh-bridge--view-waiting nil)
+  (let ((note (if (dsh-bridge--session-archived-p session-id)
+				  "(blocked \u2014 this session is archived; unarchive it with U)"
+				"(blocked \u2014 the host rejected the step and produced no reply)")))
+	(let ((inhibit-read-only t))
+	  (erase-buffer)
+	  (insert (propertize note
+						  'face 'dsh-bridge-view-marker-face
+						  'font-lock-face 'dsh-bridge-view-marker-face
+						  'dsh-bridge-turn-marker t))
+	  (goto-char (point-min))))
+  (setq-local dsh-bridge--view-provenance nil)
+  (setq header-line-format dsh-bridge--view-header-line-format)
+  (dsh-bridge--view-ticker-ensure))
+
+(defun dsh-bridge--turn-complete-refetch (session-id &optional reason ended-turn)
   "Refill DSH-View buffers showing SESSION-ID's completed turn, without popping.
 A non-popping fill (the user may be editing elsewhere); drops the session's
 status entry on a 404 (the session died).  Fetches `GET /dsh-bridge/turns'
@@ -7295,7 +7401,12 @@ turn — the `(continuing...)' marker disappears now that `endedAt' is known,
 so the completed turn ends cleanly (point is preserved when the content merely
 changed in place).  A mid-browse view is normally left alone, but one parked
 on the turn that just ended has its terminal furniture refreshed in place, so
-a stop cannot leave the view claiming a settled turn is still running."
+a stop cannot leave the view claiming a settled turn is still running.
+
+REASON and ENDED-TURN are the completed turn's facts from the frame.  A
+`blocked' turn never appears in `/turns' (it carries no text-bearing message),
+so a view still waiting for it is given an explicit terminal note instead of
+a blank."
   (pcase-let ((`(,status ,body ,http-status)
 			   (dsh-bridge--http "GET"
 								 (dsh-bridge--path "/turns" session-id) nil)))
@@ -7360,6 +7471,18 @@ a stop cannot leave the view claiming a settled turn is still running."
 					 (numberp dsh-bridge--view-turn)
 					 (>= turn dsh-bridge--view-turn))
 				(dsh-bridge--view-fill shown-id newest nil t t))
+			   ;; A `blocked' turn produced no reply and never will: the
+			   ;; fold drops textless turns, so `/turns' cannot name it.
+			   ;; Explain the wait instead of leaving the placeholder (the
+			   ;; status glyph already reads idle).
+			   ((and dsh-bridge--view-waiting
+					 (equal reason "blocked")
+					 (or (and (numberp ended-turn)
+							  (numberp dsh-bridge--view-turn)
+							  (= ended-turn dsh-bridge--view-turn))
+						 (null (dsh-bridge--view-turn-index-of
+								turns dsh-bridge--view-turn))))
+				(dsh-bridge--view-blocked-fill shown-id))
 			   ;; Otherwise the content is not the new turn's (or
 			   ;; there is none): blank the view to idle.
 			   (t
@@ -7371,9 +7494,11 @@ a stop cannot leave the view claiming a settled turn is still running."
 In the session list: `RET' opens the session under point (resuming a saved
 session on demand; the default target is untouched), `t' sets the default
 target, `u' clears it, `f' peeks the session's latest turn, `v' toggles
-archived-session visibility, `R' renames the session, `d' archives it, `+'
-creates a session, `W' renames the row's workspace, `D' shows session
-details, `g' re-fetches, `S' sorts by column.	 Legend: `*' =
+archived-session visibility, `R' renames the session, `d' archives it, `U'
+unarchives it, `+' creates a session, `W' renames the row's workspace, `D'
+shows session details, `g' re-fetches, `S' sorts by column.  An archived
+session is marked `[archived]' and is read-only: `RET', `r', and `t' refuse
+it until `U' restores it, while `f' still displays its turns.  Legend: `*' =
 default target, `…' = running."
   (interactive)
   (if (dsh-bridge--list-sessions-in-buffer)

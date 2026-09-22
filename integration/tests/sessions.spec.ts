@@ -249,4 +249,43 @@ describe('session management', () => {
     })
     expect(unknown.status).toBe(404)
   }, 60000)
+
+  it('refuses run-oriented routes for an archived session, then unarchives it', async () => {
+    const fixture = inject('fixture')
+    const dir = tempWorkspace()
+
+    const created = await post(fixture, '/dsh-bridge/sessions/create', {
+      path: dir,
+      workspaceTitle: uniqueTitle('archived-run'),
+    })
+    expect(created.status).toBe(201)
+    const id = created.body.sessionId
+
+    const archived = await post(fixture, '/dsh-bridge/sessions/archive', { sessionId: id })
+    expect(archived.status).toBe(200)
+
+    // The harness admits no model step for an archived session, so the bridge
+    // refuses before resuming rather than letting a prompt be silently dropped.
+    const sent = await post(fixture, '/dsh-bridge/send', { sessionId: id, text: 'hello' })
+    expect(sent.status).toBe(409)
+    expect(sent.body.error).toMatch(/archived/i)
+
+    const resumed = await post(fixture, '/dsh-bridge/sessions/resume', { sessionId: id })
+    expect(resumed.status).toBe(409)
+
+    // Read-only surfaces still serve, and mark the turn list archived.
+    const turns = await get(fixture, `/dsh-bridge/turns?sessionId=${id}`)
+    expect(turns.status).toBe(200)
+    expect(turns.body.archived).toBe(true)
+
+    // Unarchive restores the run target.
+    const unarchived = await post(fixture, '/dsh-bridge/sessions/unarchive', { sessionId: id })
+    expect(unarchived.status).toBe(200)
+    expect(unarchived.body.ok).toBe(true)
+    const rows = sessionRows((await get(fixture, '/dsh-bridge/sessions')).body)
+    expect(rows.find((s) => s.id === id).archived).toBe(false)
+
+    const resumedAfter = await post(fixture, '/dsh-bridge/sessions/resume', { sessionId: id })
+    expect(resumedAfter.status).toBe(200)
+  }, 60000)
 })

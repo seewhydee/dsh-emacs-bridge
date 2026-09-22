@@ -35,7 +35,7 @@
 //        then Agent.followup() (or Agent.steer() when `mode` is `"steer"`;
 //        images sniffed from content and rejected for text-only models; 400
 //        for any other `mode`; 501 without an attachment store; 413 over the
-//        caps)
+//        caps; 409 when the target is archived)
 //   GET  /dsh-bridge/output?sessionId=           -> latest assistant text
 //        (kept deliberately: a single-shot "latest text" probe; the Emacs
 //        package no longer calls it)
@@ -53,7 +53,7 @@
 //        [{ path, op }] }; endSeq is the turn/end event's seq — the
 //        session/fork anchor — and is absent while the turn is open; files is
 //        the changed-files fold's per-turn attribution, absent when the turn
-//        changed nothing) plus running, epoch, title and cwd.  Optional
+//        changed nothing) plus running, archived, epoch, title and cwd.  Optional
 //        since=<turn>&epoch=<n> request the incremental suffix: turns with
 //        turn >= since when the epoch matches the surface's replaceGeneration,
 //        else the full list (incremental: true|false)
@@ -88,8 +88,15 @@
 //        revision-conflict hint.
 //   GET  /dsh-bridge/context?sessionId=    -> context occupancy (204 if none)
 //   POST /dsh-bridge/sessions/resume { sessionId }        -> resume a cold session
+//        (409 when the session is archived: the harness admits no model step
+//        for an archived session, so it is never a run target)
 //   POST /dsh-bridge/sessions/rename { sessionId, title } -> rename (resumes cold)
-//   POST /dsh-bridge/sessions/archive { sessionId }       -> archive (one-way)
+//   POST /dsh-bridge/sessions/archive { sessionId, stopActivity? }
+//        -> archive; 409 + reason WORKSPACE_ACTIVE_SESSION when the session's
+//        work is live and stopActivity was not requested
+//   POST /dsh-bridge/sessions/unarchive { sessionId }     -> unarchive
+//        (idempotent; unknown ids still resolve, so no 404; 501 without a
+//        registry exposing unarchiveSession)
 //   POST /dsh-bridge/sessions/stop { sessionId }
 //        -> stop the session's active turn (the web UI's stop button; proxies
 //        sessionController.cancel with keepInbox semantics, so queued input
@@ -336,7 +343,14 @@ interface WorkspaceRegistryService {
   get(id: string): WorkspaceEntityService | undefined
   create(path: string, title?: string): Promise<WorkspaceEntityService>
   resolveByPath(path: string): Promise<WorkspaceEntityService | undefined>
-  archiveSession(id: string): Promise<void>
+  archiveSession(id: string, options?: { stopActivity?: boolean }): Promise<void>
+  /**
+   * Drop the id from the archive set. Declared optional because a profile may
+   * carry a registry predating unarchive (`0.1.7-alpha.1` is the first pinned
+   * version to expose it); the `/sessions/unarchive` route answers 501 rather
+   * than calling an absent method.
+   */
+  unarchiveSession?(id: string): Promise<void>
 }
 
 /** Minimal face of one workspace entity, enough for display and rename. */
@@ -501,6 +515,11 @@ function isSessionTitleInvalidError(error: unknown): error is Error {
 /** Whether an error is the workspace registry's unknown-session rejection. */
 function isWorkspaceUnknownSessionError(error: unknown): error is Error {
   return error instanceof Error && error.name === 'WorkspaceUnknownSessionError'
+}
+
+/** Whether an error is the workspace registry's active-session archive refusal. */
+function isWorkspaceActiveSessionError(error: unknown): error is Error {
+  return error instanceof Error && error.name === 'WorkspaceActiveSessionError'
 }
 
 /** The HTTP status for a propagated bridge/transport error: BridgeError → its status, an oversize body → 413, else 500. */
@@ -1332,6 +1351,27 @@ export function apply(ctx: Context): void {
     return header?.origin === 'subagent'
   }
 
+  /** Whether the workspace registry currently hides the session from grouping surfaces. */
+  function isArchivedSession(id: string): boolean {
+    const registry = ctx.get('workspaceRegistry') as WorkspaceRegistryService | undefined
+    return (registry?.archivedSessionIds ?? []).some(value => String(value) === id)
+  }
+
+  /**
+   * Reject a run-oriented request that names an archived session. The harness
+   * admits no model step for an archived session (the session controller's
+   * `agent/pre-step` gate rejects it) and its web UI refuses to open one, so a
+   * prompt would be claimed by the loop and then silently dropped. The bridge
+   * mirrors that policy: an archived session stays readable through the
+   * read-only routes, but is never a run target until it is unarchived.
+   * @throws {BridgeError} 409 archived.
+   */
+  function assertNotArchived(id: string): void {
+    if (isArchivedSession(id)) {
+      throw new BridgeError(409, `session ${id} is archived; unarchive it first`)
+    }
+  }
+
   /**
    * Ensure target id is live: adopt an already-live agent, else resume the
    * persisted session. Subagent-owned ids are rejected (409). The agent handle
@@ -2130,7 +2170,9 @@ export function apply(ctx: Context): void {
             sendJson(res, 409, { error: 'no browser client connected' })
             return
           }
+          if (explicitId !== undefined) assertNotArchived(explicitId)
           const target = await resolveTarget(explicitId)
+          assertNotArchived(String(target.session.id))
           broadcast(draftMessage(String(target.session.id), text))
           sendJson(res, 200, {
             ok: true,
@@ -2274,7 +2316,12 @@ export function apply(ctx: Context): void {
               ...(mediaType === undefined ? {} : { mediaType }),
             })
           }
+          // Refuse before resolving, so a doomed prompt does not resume an
+          // archived session as a side effect; the post-resolution check also
+          // covers the target-less fallback, which may itself be archived.
+          if (explicitId !== undefined) assertNotArchived(explicitId)
           const target = await resolveTarget(explicitId)
+          assertNotArchived(String(target.session.id))
           if (prepared.some(item => item.mediaType !== undefined)
             && await imageModelUnsupported(target)) {
             sendJson(res, 400, {
@@ -2399,6 +2446,7 @@ export function apply(ctx: Context): void {
             turns,
             incremental,
             running: ctx.agents.get(String(session.id))?.status === 'running',
+            archived: isArchivedSession(String(session.id)),
             epoch,
           })
         } catch (error: unknown) {
@@ -2507,7 +2555,9 @@ export function apply(ctx: Context): void {
             sendJson(res, 501, { error: 'profile lacks an agent preset roster (no plan mode)' })
             return
           }
+          if (explicitId !== undefined) assertNotArchived(explicitId)
           const target = await resolveTarget(explicitId)
+          assertNotArchived(String(target.session.id))
           let controller: PlanModeControllerLike | undefined
           try {
             controller = presets.serviceFor(target.agent, 'planMode') as PlanModeControllerLike | undefined
@@ -2556,7 +2606,9 @@ export function apply(ctx: Context): void {
             sendJson(res, 501, { error: 'profile lacks a goal service' })
             return
           }
+          if (explicitId !== undefined) assertNotArchived(explicitId)
           const target = await resolveTarget(explicitId)
+          assertNotArchived(String(target.session.id))
           const sessionId = String(target.session.id)
           const current = goals.get(target.agent)
           if (operation === 'set') {
@@ -2652,6 +2704,7 @@ export function apply(ctx: Context): void {
             sendJson(res, 400, { error: 'sessionId is required' })
             return
           }
+          assertNotArchived(id)
           const target = await ensureLive(id)
           sendJson(res, 200, {
             ok: true,
@@ -2693,10 +2746,14 @@ export function apply(ctx: Context): void {
 
       if (req.method === 'POST' && pathname === '/dsh-bridge/sessions/archive') {
         try {
-          const body = (await readJson(req)) as { sessionId?: unknown } | undefined
+          const body = (await readJson(req)) as { sessionId?: unknown; stopActivity?: unknown } | undefined
           const id = typeof body?.sessionId === 'string' && body.sessionId !== '' ? body.sessionId : null
           if (id === null) {
             sendJson(res, 400, { error: 'sessionId is required' })
+            return
+          }
+          if (body?.stopActivity !== undefined && typeof body.stopActivity !== 'boolean') {
+            sendJson(res, 400, { error: 'stopActivity must be a boolean' })
             return
           }
           const workspaceRegistry = ctx.get('workspaceRegistry') as WorkspaceRegistryService | undefined
@@ -2704,12 +2761,49 @@ export function apply(ctx: Context): void {
             sendJson(res, 501, { error: 'profile lacks a workspace registry (no archive support)' })
             return
           }
-          await workspaceRegistry.archiveSession(id)
+          // Without `stopActivity` the registry refuses a session whose work is
+          // live; the web UI turns that refusal into a stop-and-archive
+          // confirmation, and the route surfaces it as 409 + `reason` so Emacs
+          // can offer the same.
+          await workspaceRegistry.archiveSession(id, body?.stopActivity === true ? { stopActivity: true } : undefined)
           sendJson(res, 200, { ok: true, sessionId: id })
           broadcastSessionsChanged(id)
         } catch (error: unknown) {
+          if (isWorkspaceActiveSessionError(error)) {
+            sendJson(res, 409, {
+              error: error instanceof Error ? error.message : String(error),
+              reason: 'WORKSPACE_ACTIVE_SESSION',
+            })
+            return
+          }
           const status = isWorkspaceUnknownSessionError(error) ? 404 : bridgeErrorStatus(error)
           sendJson(res, status, { error: error instanceof Error ? error.message : String(error) })
+        }
+        return
+      }
+
+      // The inverse of `/sessions/archive`, mirroring the web UI's unarchive
+      // row action. Unknown ids still resolve (dropping an absent id cannot
+      // introduce one), so there is no 404 here — only the 501 for a registry
+      // that predates unarchive.
+      if (req.method === 'POST' && pathname === '/dsh-bridge/sessions/unarchive') {
+        try {
+          const body = (await readJson(req)) as { sessionId?: unknown } | undefined
+          const id = typeof body?.sessionId === 'string' && body.sessionId !== '' ? body.sessionId : null
+          if (id === null) {
+            sendJson(res, 400, { error: 'sessionId is required' })
+            return
+          }
+          const workspaceRegistry = ctx.get('workspaceRegistry') as WorkspaceRegistryService | undefined
+          if (workspaceRegistry === undefined || typeof workspaceRegistry.unarchiveSession !== 'function') {
+            sendJson(res, 501, { error: 'profile lacks a workspace registry (no unarchive support)' })
+            return
+          }
+          await workspaceRegistry.unarchiveSession(id)
+          sendJson(res, 200, { ok: true, sessionId: id })
+          broadcastSessionsChanged(id)
+        } catch (error: unknown) {
+          sendJson(res, bridgeErrorStatus(error), { error: error instanceof Error ? error.message : String(error) })
         }
         return
       }
