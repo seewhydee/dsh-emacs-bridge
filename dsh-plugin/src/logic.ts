@@ -353,6 +353,25 @@ export function sessionPreset(
   return header.agentPreset
 }
 
+/**
+ * Whether SEQ is the seq of a `turn/end` event in EVENTS — the completed-turn
+ * boundary `POST /fork` accepts as an explicit anchor.
+ *
+ * DSH 0.1.7 widened the fork seam: an explicit `atSeq` is now an exact
+ * inclusive event cut, and a cut inside an open turn is closed with synthetic
+ * "forked" results instead of being refused. The bridge keeps its own
+ * completed-turn-only contract (Emacs branches a shown, completed turn and
+ * quotes the anchor in its docs), so the route validates the anchor against the
+ * source log rather than inheriting a mid-turn cut.
+ *
+ * @param events - the source session's raw event log.
+ * @param seq - the requested fork anchor.
+ * @returns whether the anchor names a completed turn's `turn/end` seq.
+ */
+export function isCompletedTurnAnchor(events: readonly SessionEventLike[], seq: number): boolean {
+  return events.some(event => event.seq === seq && event.type === 'turn/end')
+}
+
 // -- Changed files (the DSH-View footer's attribution) -----------------------
 //
 // The fold walks the *raw log*, not the session surface: `tool/call` is
@@ -447,7 +466,13 @@ function toolCallFact(event: SessionEventLike): ToolCallFact | null {
  * The pairing facts of one `tool/result` event, or null. Only an append-origin
  * result counts: a compaction replacement copy must not settle a mutation call
  * a second time (the harness's `isAppendSurfaceEvent`). The call id is read from
- * `message.source.callId`, falling back to the block's own `toolCallId`.
+ * `message.source.callId`, falling back to the message's own `toolCallId`.
+ *
+ * The failure flag is read from the tool-role message itself. DSH 0.1.7
+ * flattened tool results into first-class `role: 'tool'` messages, moving
+ * `isError` off the first content block onto the message (the same read the web
+ * client's turn-deliverables fold makes); reading the block would mark every
+ * failed mutation as a change.
  */
 function toolResultFact(event: SessionEventLike): ToolResultFact | null {
   if (event.type !== 'tool/result' || event.surfaceOp !== 'append') return null
@@ -455,13 +480,11 @@ function toolResultFact(event: SessionEventLike): ToolResultFact | null {
   if (!isRecord(data)) return null
   const message = data.message
   if (!isRecord(message)) return null
-  const content = message.content
-  const block = Array.isArray(content) ? content[0] : undefined
-  const failed = isRecord(block) && block.isError === true
+  const failed = message.isError === true
   const source = message.source
   const callId = isRecord(source) && typeof source.callId === 'string'
     ? source.callId
-    : isRecord(block) && typeof block.toolCallId === 'string' ? block.toolCallId : null
+    : typeof message.toolCallId === 'string' ? message.toolCallId : null
   return callId === null ? null : { callId, failed }
 }
 

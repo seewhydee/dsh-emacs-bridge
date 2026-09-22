@@ -38,6 +38,7 @@ import {
   goalErrorStatus,
   goalSetAction,
   hostnameOf,
+  isCompletedTurnAnchor,
   isLoopbackAddress,
   isLoopbackHostname,
   isLoopbackOrigin,
@@ -1232,6 +1233,34 @@ describe('sessionPreset', () => {
   })
 })
 
+describe('isCompletedTurnAnchor', () => {
+  it('accepts a completed turn end seq', () => {
+    const events: SessionEventLike[] = [
+      { time: 1, seq: 0, type: 'turn/start' },
+      { time: 2, seq: 1, type: 'turn/end' },
+    ]
+    expect(isCompletedTurnAnchor(events, 1)).toBe(true)
+  })
+
+  it('rejects every seq inside a still-open turn', () => {
+    // DSH 0.1.7 would cut at any of these and close the turn synthetically;
+    // the bridge's contract only accepts a turn/end boundary.
+    const events: SessionEventLike[] = [
+      { time: 1, seq: 0, type: 'turn/start' },
+      { time: 2, seq: 1, type: 'step/start' },
+      { time: 3, seq: 2, type: 'assistant/message' },
+    ]
+    expect(isCompletedTurnAnchor(events, 0)).toBe(false)
+    expect(isCompletedTurnAnchor(events, 1)).toBe(false)
+    expect(isCompletedTurnAnchor(events, 2)).toBe(false)
+  })
+
+  it('rejects a seq the log does not contain', () => {
+    expect(isCompletedTurnAnchor([{ time: 1, seq: 0, type: 'turn/start' }], 99)).toBe(false)
+    expect(isCompletedTurnAnchor([], 0)).toBe(false)
+  })
+})
+
 describe('assistantTextForMessage', () => {
   const events: SessionEventLike[] = [
     {
@@ -1543,9 +1572,11 @@ function mutatingResult(
       turn,
       step,
       message: {
-        role: 'user',
-        content: [{ type: 'tool-result', toolCallId: callId, ...(opts.failed ? { isError: true } : {}) }],
+        role: 'tool',
+        content: [{ type: 'text', text: 'ok' }],
         source: { kind: 'tool', callId },
+        toolCallId: callId,
+        ...(opts.failed ? { isError: true } : {}),
       },
       ...(opts.meta === undefined ? {} : { meta: opts.meta }),
     },
@@ -1618,6 +1649,23 @@ describe('changedFiles', () => {
     ], '/w')
     expect(result.files).toEqual([])
     expect(result.byTurn.size).toBe(0)
+  })
+
+  it('pairs a result through the message toolCallId when the source carries none', () => {
+    const result = changedFiles([
+      toolCall(1, 1, 'c1', 'write', { file_path: 'src/a.ts', content: 'one' }),
+      {
+        time: 1000,
+        type: 'tool/result',
+        surfaceOp: 'append',
+        data: {
+          turn: 1,
+          step: 1,
+          message: { role: 'tool', content: [], source: { kind: 'tool' }, toolCallId: 'c1' },
+        },
+      },
+    ], '/w')
+    expect(result.files.map(file => file.path)).toEqual(['src/a.ts'])
   })
 
   it('accepts exactly the mutating str_replace_editor commands', () => {

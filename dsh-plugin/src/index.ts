@@ -111,8 +111,10 @@
 //        name-uniqueness rule `/workspaces/rename` also keeps)
 //   POST /dsh-bridge/fork { sessionId?, atSeq? } -> branch a completed-turn
 //        prefix into a new session (returns the child id; the source may be
-//        cold — it is never resumed; 409 session/fork-unavailable or
-//        subagent-owned, 501 without a session controller)
+//        cold — it is never resumed; an explicit atSeq must name a completed
+//        turn's `turn/end` seq, which the route enforces host-side; 409 for
+//        that or session/fork-unavailable or subagent-owned, 501 without a
+//        session controller)
 //   GET  /dsh-bridge/workspaces                   -> workspace roster
 //   POST /dsh-bridge/workspaces/rename { workspaceId, title } -> rename a workspace
 
@@ -166,6 +168,7 @@ import {
   goalErrorStatus,
   goalSetAction,
   imageInputUnsupported,
+  isCompletedTurnAnchor,
   isLoopbackAddress,
   isQuestionCancelRejection,
   isSubagentChild,
@@ -1632,6 +1635,28 @@ export function apply(ctx: Context): void {
   }
 
   /**
+   * The source session's raw event log for the `/fork` anchor check: the live
+   * snapshot when the session is live, else one cold read through a read
+   * handle. Returns undefined when the log cannot be read — a degraded backend
+   * the caller tolerates (the fork seam observes the source itself and
+   * surfaces its own error) rather than a verdict.
+   */
+  async function forkSourceEvents(id: string): Promise<readonly SessionEventLike[] | undefined> {
+    const live = sessions.list().find(session => String(session.id) === id)
+    if (live !== undefined) return live.snapshotEvents() as readonly SessionEventLike[]
+    try {
+      const handle = await sessionPersistence.open(id, 'read')
+      try {
+        return (await handle.read()).events
+      } finally {
+        await handle.close()
+      }
+    } catch {
+      return undefined
+    }
+  }
+
+  /**
    * Fold a cold session's title. The persisted projection cache serves the
    * title with zero log reads (mirroring the harness's own session list) when
    * it holds a non-empty one; otherwise read the log through a read handle and
@@ -2954,6 +2979,21 @@ export function apply(ctx: Context): void {
               }
             } catch {
               // degraded: no cold header to check
+            }
+          }
+          // DSH 0.1.7's fork seam cuts at any existing event and closes an open
+          // tail with synthetic "forked" results, so it no longer refuses an
+          // anchor inside an unfinished turn. The bridge's contract is a
+          // completed-turn prefix, so enforce the anchor here. A source log the
+          // backend cannot read degrades to the seam's own verdict, matching
+          // the subagent fence above.
+          if (atSeq !== undefined) {
+            const events = await forkSourceEvents(id)
+            if (events !== undefined && !isCompletedTurnAnchor(events, atSeq)) {
+              sendJson(res, 409, {
+                error: `session ${id} has no completed turn ending at event ${String(atSeq)}`,
+              })
+              return
             }
           }
           const child = await sessionController.fork({

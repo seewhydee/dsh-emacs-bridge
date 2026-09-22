@@ -24,9 +24,13 @@ re-verification checklist.
 
 Ordered by recommended sequence, but out-of-sequence implementation is
 acceptable based on user needs. Harness seams were verified against
-DSH 0.1.6-alpha.1; the peer floor in `dsh-plugin/package.json` is
-pinned to match (node-semver prerelease rules exclude `0.1.6-alpha.1`
-from the old `^0.1.5-alpha.1` floor).
+DSH 0.1.7-alpha.1; the peer floor in `dsh-plugin/package.json` is
+pinned to match (node-semver prerelease rules exclude `0.1.7-alpha.1`
+from the old `^0.1.6-alpha.1` floor). Two seams moved in that release:
+tool results are now first-class `role: 'tool'` messages carrying the
+failure flag themselves, and `session/fork` cuts at an exact event, so
+the bridge reads the new `isError` location and enforces its own
+completed-turn anchor before calling the seam.
 
 ### 1. Plan and goal
 

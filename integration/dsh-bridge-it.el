@@ -222,6 +222,18 @@ temp home are reliably released; escalate to SIGKILL after 10s."
        (and (listp turns) turns)))
    timeout-ms))
 
+(defun dsh-bridge-it--wait-for-completed-turn (session-id timeout-ms)
+  "Wait until SESSION-ID's newest folded turn carries an `endSeq', up to TIMEOUT-MS.
+An assistant message folds into `/turns' before its `turn/end' is logged, so
+waiting for a turn is not the same as waiting for a forkable anchor."
+  (dsh-bridge-it--wait
+   (lambda ()
+     (let* ((result (dsh-bridge--request "GET" (dsh-bridge--path "/turns" session-id) nil))
+            (turns (alist-get 'turns (cdr result)))
+            (newest (car turns)))
+       (and newest (alist-get 'endSeq newest))))
+   timeout-ms))
+
 (defun dsh-bridge-it--session-ids ()
   "The fixture roster's session ids (live and persisted)."
   (let* ((result (dsh-bridge--request "GET" "/sessions" nil))
@@ -295,7 +307,10 @@ source as `parentSession' with `isSeeded' set."
                         (expand-file-name "../" dsh-bridge-it--directory)))
            (before (dsh-bridge-it--session-ids)))
       (dsh-bridge-send-text "Please branch." session-id)
-      (should (dsh-bridge-it--wait-for-turns session-id 30000))
+      ;; Wait for the anchor, not merely for a turn: the reply folds into
+      ;; `/turns' a moment before the turn closes, and an open turn is not
+      ;; branchable.
+      (should (dsh-bridge-it--wait-for-completed-turn session-id 30000))
       ;; Open the session's DSH-View, which selects the buffer, then branch
       ;; the shown (completed) turn; the command opens the child and its
       ;; prompt.
@@ -405,10 +420,11 @@ registry."
                                (process-live-p dsh-bridge--notifications-process)))
                15000))
       ;; Kill the host; the SSE connection drops, and the sentinel arms the
-      ;; reconnect retry.
+      ;; reconnect retry.  The listener keeps the dead process object (only its
+      ;; liveness marks the drop), so the wait is for not-live, not for nil.
       (dsh-bridge-it--kill-fixture)
       (should (dsh-bridge-it--wait
-               (lambda () (null dsh-bridge--notifications-process))
+               (lambda () (not (process-live-p dsh-bridge--notifications-process)))
                15000))
       (should (dsh-bridge-it--wait
                (lambda () (timerp dsh-bridge--notifications-timer))

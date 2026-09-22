@@ -83,14 +83,28 @@ describe('branching a turn (POST /dsh-bridge/fork)', () => {
     const fixture = inject('fixture')
     await post(fixture, '/mock-llm/reset', {})
     const sessionId = await createSession(fixture)
+    // One completed turn first, so the refusal below cannot be explained by
+    // "the session has no completed turn at all": the host enforces that an
+    // explicit anchor names a `turn/end` seq (DSH 0.1.7's seam would otherwise
+    // accept an exact mid-turn cut and close it synthetically).
+    await runTextTurn(fixture, sessionId, 'Done.')
 
-    // A hanging turn leaves the session's only turn open: no turn/end to cut at.
+    // A hanging turn leaves the session's newest turn open: no turn/end to cut at.
     await scriptMock(fixture, [{ kind: 'hang' }])
     const sse = openSse(fixture, { timeoutMs: 10000 })
     await post(fixture, '/dsh-bridge/send', { text: 'Never finish.', sessionId })
     await sse.waitFor('turn-start')
 
-    const refused = await post(fixture, '/dsh-bridge/fork', { sessionId, atSeq: 1 })
+    const turns = await get(fixture, `/dsh-bridge/turns?sessionId=${sessionId}`)
+    const completed = turns.body.turns.find((record) => record.endSeq !== undefined)
+    expect(completed).toBeTruthy()
+
+    // The completed turn's own endSeq still forks...
+    const forked = await post(fixture, '/dsh-bridge/fork', { sessionId, atSeq: completed.endSeq })
+    expect(forked.status).toBe(201)
+
+    // ...but an event seq inside the open turn does not.
+    const refused = await post(fixture, '/dsh-bridge/fork', { sessionId, atSeq: completed.endSeq + 1 })
     expect(refused.status).toBe(409)
     expect(refused.body.error).toMatch(/fork|completed|turn/i)
     sse.close()

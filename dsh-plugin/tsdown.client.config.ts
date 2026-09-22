@@ -4,10 +4,12 @@
 // artifact contract for this package alone. Keep the banner/footer/intro
 // wrapper, the externals, the purity gate, and the define substitutions in sync
 // with that preset (the contract is pre-release and the most likely thing to
-// drift on a dsh version bump). Two preset pieces are deliberately not
-// replicated: the CSS virtual-module plugins (this package has no stylesheets)
-// and the tsc-sourcemap chaining/browserSourcePath (this build consumes src/
-// directly, not the harness's lib/types layout).
+// drift on a dsh version bump). Three preset pieces are deliberately not
+// replicated: the CSS virtual-module plugins (this package has no stylesheets),
+// the tsc-sourcemap chaining/browserSourcePath (this build consumes src/
+// directly, not the harness's lib/types layout), and the chunk-aware banner and
+// `chunkFileNames` (this package emits a single entry chunk with no dynamic
+// imports, so the entry-only banner is the whole wrapper).
 import { readFileSync } from 'node:fs'
 import type { UserConfig } from 'tsdown'
 
@@ -49,7 +51,7 @@ function isExternal(specifier: string): boolean {
 
 /** Inline-safe wire layers and vendored libraries a client bundle may carry privately. */
 const INLINE_SAFE =
-  /^(?:@deepseek-ai\/dsh-(?:file-reference|session|llm|tools|brand|deque|output-retention|typert-protocol|util-crypto|util-values|util-workspace-path)(?:\/|$)|@deepseek-ai\/dsh-token-meter\/client$|@deepseek-ai\/dsh-host-open-in-app\/shared$|@deepseek-ai\/dsh-agent-presets\/display$|@deepseek-ai\/dsh-spill-policy\/notice$)/
+  /^(?:@deepseek-ai\/dsh-(?:file-reference|session|llm|tools|brand|deque|output-retention|typert-protocol|util-crypto|util-values|util-workspace-path)(?:\/|$)|@deepseek-ai\/dsh-token-meter\/client$|@deepseek-ai\/dsh-native-command\/types$|@deepseek-ai\/dsh-host-open-in-app\/shared$|@deepseek-ai\/dsh-plugin-manager\/registry$|@deepseek-ai\/dsh-agent-preset-registry\/display$|@deepseek-ai\/dsh-spill-policy\/notice$)/
 const VENDORED_LIBRARY = /^@deepseek-ai\/(cosmokit|schemastery)(\/|$)/
 const GENERATED_REMOTE = /^@deepseek-ai\/dsh-[a-z0-9]+(?:-[a-z0-9]+)*\/remote$/
 
