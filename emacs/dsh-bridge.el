@@ -630,10 +630,6 @@ Each entry is (SESSION-ID . GOAL), where GOAL is the `/session` report's
 `goal` alist (a null goal clears the entry); an absent entry means the
 session has not been seeded.")
 
-(defun dsh-bridge--alist-set (alist key value)
-  "Return ALIST with KEY set to VALUE, replacing any existing entry."
-  (cons (cons key value) (assoc-delete-all key alist)))
-
 (defun dsh-bridge--json-false-p (value)
   "Whether VALUE is JSON false as either decoder represents it.
 `dsh-bridge--parse-json-body` maps JSON false to nil, while the SSE
@@ -653,15 +649,16 @@ when it names the same goal; a new or cleared goal never inherits a
 stale one.  The SSE decoder's `:null' (a cleared goal) normalizes to
 nil, so the entry's representation does not depend on the decoder."
   (let* ((entry (assoc session-id dsh-bridge--session-goal))
-		 (old (cdr entry)))
+		 (old (cdr entry))
+		 activation-pair)
 	(when (eq new :null)
 	  (setq new nil))
 	(when (and (consp new) (consp old)
-			   (null (assoc 'activation new))
+			   (null (assq 'activation new))
 			   (equal (dsh-bridge--goal-section-id new)
 					  (dsh-bridge--goal-section-id old))
-			   (assoc 'activation old))
-	  (setq new (dsh-bridge--alist-set new 'activation (alist-get 'activation old))))
+			   (setq activation-pair (assq 'activation old)))
+	  (push `(activation . ,(cdr activation-pair)) new))
 	(setq dsh-bridge--session-goal
 		  (assoc-delete-all session-id dsh-bridge--session-goal))
 	(push (cons session-id new) dsh-bridge--session-goal)))
@@ -678,7 +675,9 @@ ignored; a session with no cached goal is left alone."
 			 (cached-rev (alist-get 'revision snapshot)))
 		(when (and (or (null goal-id) (equal goal-id cached-id))
 				   (or (null revision) (equal revision cached-rev)))
-		  (setcdr entry (dsh-bridge--alist-set section 'activation activation)))))))
+		  (setcdr entry
+				  (cons (cons 'activation activation)
+						(assq-delete-all 'activation section))))))))
 
 (defun dsh-bridge--plan-goal-store (session-id report)
   "Seed SESSION-ID's plan and goal caches from REPORT, a `/session` body."
@@ -1291,7 +1290,7 @@ code or nil, and ALIST is the decoded JSON body or nil."
 	 ((and http-status (>= http-status 400))
 	  (format "HTTP %s: %s" http-status
 			  (or (alist-get 'error alist) "error")))
-	 ((and alist (assoc 'error alist)) (alist-get 'error alist))
+	 ((and alist (assq 'error alist)) (alist-get 'error alist))
 	 (t nil))))
 
 (defun dsh-bridge--parse-json-body (body)
@@ -1364,7 +1363,7 @@ checking STATUS for a failed request."
   (let* ((result (dsh-bridge--request "GET" "/sessions" nil))
 		 (status (car result))
 		 (sessions (and (eq status 200)
-						(cdr (assoc 'sessions (cdr result))))))
+						(cdr (assq 'sessions (cdr result))))))
 	(when (eq status 200)
 	  (setq dsh-bridge--sessions-cache sessions)
 	  ;; Update session status trackers.  Each session's `running'
@@ -2851,9 +2850,9 @@ to pop to the buffer using the same window.  Return the buffer."
   (let ((id (alist-get 'sessionId session-alist)))
 	(unless id
 	  (error "dsh-bridge: /turns response has no sessionId"))
-	(let* ((running-pair (assoc 'running session-alist))
+	(let* ((running-pair (assq 'running session-alist))
 		   (running (eq (cdr-safe running-pair) t))
-		   (turns-pair (assoc 'turns session-alist))
+		   (turns-pair (assq 'turns session-alist))
 		   (turns (cdr-safe turns-pair))
 		   (follow (or (and turns
 							(dsh-bridge--view-turn-open-p (car-safe turns)))
@@ -2947,7 +2946,7 @@ session with no committed turn yet shows the running placeholder.  Used
 when an explicit action resumes a session and the continuation must be
 collected in the view."
   (let* ((alist (or alist (dsh-bridge--session-turns session-id)))
-		 (turns-pair (assoc 'turns alist))
+		 (turns-pair (assq 'turns alist))
 		 (turns (cdr-safe turns-pair))
 		 (running (eq (alist-get 'running alist) t))
 		 (buf (or (dsh-bridge--session-view session-id)
@@ -3207,7 +3206,7 @@ clickable `dsh-bridge-plan-face' indicator: mouse-1 turns plan mode
 off (see `dsh-bridge--header-plan-at-mouse')."
   (let ((plan (cdr (assoc session-id dsh-bridge--session-plan))))
     (when (consp plan)
-      (let* ((pending-pair (assoc 'pending plan))
+      (let* ((pending-pair (assq 'pending plan))
              (queued (eq (alist-get 'queued plan) t))
              (active (eq (alist-get 'active plan) t))
              (text (cond
@@ -3538,7 +3537,7 @@ multi-view refills call this once and skip the per-view refresh in
 											   since cached-epoch))
            (result (dsh-bridge--request "GET" path nil))
            (alist (cdr result))
-           (turns-pair (assoc 'turns alist)))
+           (turns-pair (assq 'turns alist)))
       (when turns-pair
         (let ((turns (cdr turns-pair))
               ;; An epoch-less response must not downgrade a numeric epoch.
@@ -3803,7 +3802,7 @@ non-nil, is the ms-epoch at which the prompt was sent."
   (let* ((path (dsh-bridge--path "/turns" session-id))
 		 (result (dsh-bridge--request "GET" path nil))
 		 (alist (cdr-safe result))
-		 (turns-pair (assoc 'turns alist))
+		 (turns-pair (assq 'turns alist))
 		 (turns (cdr-safe turns-pair)))
 	(when turns-pair
 	  (dsh-bridge--turns-cache-store session-id turns
@@ -5523,7 +5522,7 @@ request fails."
 
 (defun dsh-bridge--plan-effective (plan)
   "The wanted plan-mode state in PLAN: its pending direction, else active."
-  (let ((pending (assoc 'pending plan)))
+  (let ((pending (assq 'pending plan)))
     (if pending
         (not (dsh-bridge--json-false-p (cdr pending)))
       (eq (alist-get 'active plan) t))))
@@ -6450,7 +6449,7 @@ is not changed."
 	  (error "dsh-bridge: could not open session \"%s\"" id))
 	 (t
 	  (let* ((alist (dsh-bridge--session-turns id))
-			 (turns-pair (and alist (assoc 'turns alist)))
+			 (turns-pair (and alist (assq 'turns alist)))
 			 (turns (cdr-safe turns-pair))
 			 (running (eq (alist-get 'running alist) t)))
 		(cond
@@ -6827,7 +6826,7 @@ The state is `on'/`off', with a `(queued off)'/`(queued on)'/
 	 ((member "plan" missing) "—")
 	 ((consp plan)
 	  (let ((active (eq (alist-get 'active plan) t))
-			(pending-pair (assoc 'pending plan))
+			(pending-pair (assq 'pending plan))
 			(queued (eq (alist-get 'queued plan) t)))
 		(propertize (concat (if active "on" "off")
 				(cond
@@ -7323,12 +7322,12 @@ a stop cannot leave the view claiming a settled turn is still running."
 			(setq dsh-bridge--session-status
 				  (assoc-delete-all session-id dsh-bridge--session-status)))
 		(let* ((shown-id (or (alist-get 'sessionId alist) session-id))
-			   (turns-pair (assoc 'turns alist))
+			   (turns-pair (assq 'turns alist))
 			   (turns (cdr turns-pair))
 			   (views (dsh-bridge--session-views shown-id))
 			   (newest (car-safe turns))
 			   (turn (alist-get 'turn newest))
-			   (running-pair (assoc 'running alist)))
+			   (running-pair (assq 'running alist)))
 		  ;; An empty `turns' list (no turns, e.g. after compaction)
 		  ;; replaces the stale cache entry, and the response's
 		  ;; `epoch' is recorded for later incremental fetches.

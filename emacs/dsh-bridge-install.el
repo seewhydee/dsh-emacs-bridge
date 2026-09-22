@@ -127,7 +127,7 @@ profile directory; the plugin counts as installed if it appears in
 						  (json-parse-string (buffer-string)
 											 :object-type 'alist
 											 :array-type 'list))))
-		   (or (assoc 'dsh-emacs-bridge (alist-get 'dependencies data))
+		   (or (assq 'dsh-emacs-bridge (alist-get 'dependencies data))
 			   (member "dsh-emacs-bridge"
 					   (alist-get 'bundles
 								  (alist-get 'profile
