@@ -5478,6 +5478,225 @@ not clobber the known activation for the same goal."
         (should (string-match-p (regexp-quote "plan") header))
         (should (string-match-p (regexp-quote "active: ship it") header))))))
 
+(ert-deftest dsh-bridge-view-header-indicator-order ()
+  "Plan and goal cells sit between the workspace and the turn time."
+  (let ((dsh-bridge--session-status nil)
+        (dsh-bridge--sessions-cache
+         '(((id . "s1") (title . "T") (workspace . "myproj") (live . t))))
+        (dsh-bridge--session-plan '(("s1" . ((active . t)))))
+        (dsh-bridge--session-goal
+         (list (cons "s1"
+                     (dsh-bridge-test--goal-section
+                      "active" "armed" "fix it"))))
+        (dsh-bridge-status-indicator 'geometric))
+    (with-temp-buffer
+      (dsh-bridge-view-mode)
+      (setq-local dsh-bridge--view-content-session "s1")
+      (setq-local dsh-bridge--view-turn 2)
+      (setq-local dsh-bridge--turns-cache
+                  '(("s1" 1 ((turn . 2) (startedAt . 1000)
+                             (endedAt . 1600000000000)
+                             (reason . "completed") (segments)))))
+      (let ((header (dsh-bridge--view-header-line)))
+        (should (string-match-p (regexp-quote "myproj · plan") header))
+        (should (string-match-p (regexp-quote "fix it · done:") header))))))
+
+(ert-deftest dsh-bridge-view-header-indicator-properties ()
+  "Plan and goal cells carry their faces, hover text, and click keymaps."
+  (let ((dsh-bridge--session-status nil)
+        (dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t))))
+        (dsh-bridge--session-plan '(("s1" . ((active . t)))))
+        (dsh-bridge--session-goal
+         (list (cons "s1"
+                     (dsh-bridge-test--goal-section
+                      "active" "armed" "fix it"))))
+        (dsh-bridge-status-indicator 'geometric))
+    (with-temp-buffer
+      (dsh-bridge-view-mode)
+      (setq-local dsh-bridge--view-content-session "s1")
+      (let* ((header (dsh-bridge--view-header-line))
+             (plan (string-match (regexp-quote "plan") header))
+             (goal (string-match (regexp-quote "fix it") header)))
+        (should plan)
+        (should goal)
+        (should (eq (get-text-property plan 'face header)
+                    'dsh-bridge-plan-face))
+        (should (eq (get-text-property plan 'mouse-face header) 'highlight))
+        (should (equal (get-text-property plan 'help-echo header)
+                       "mouse-1: turn plan mode off"))
+        (should (eq (lookup-key (get-text-property plan 'keymap header)
+                                [header-line mouse-1])
+                    #'dsh-bridge--header-plan-at-mouse))
+        (should (equal (get-text-property plan 'dsh-bridge-session-id header)
+                       "s1"))
+        (should (eq (get-text-property goal 'face header)
+                    'dsh-bridge-goal-face))
+        (should (equal (get-text-property goal 'help-echo header)
+                       "mouse-1: pause the goal"))
+        (should (eq (lookup-key (get-text-property goal 'keymap header)
+                                [header-line mouse-1])
+                    #'dsh-bridge--header-goal-at-mouse)))))
+  ;; A stopped goal advertises the resuming direction, and its
+  ;; untruncatable suffix is part of the clickable cell.
+  (let ((dsh-bridge--session-status nil)
+        (dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t))))
+        (dsh-bridge--session-plan nil)
+        (dsh-bridge--session-goal
+         (list (cons "s1"
+                     (dsh-bridge-test--goal-section
+                      "active" "disarmed" "fix it"))))
+        (dsh-bridge-status-indicator 'geometric))
+    (with-temp-buffer
+      (dsh-bridge-view-mode)
+      (setq-local dsh-bridge--view-content-session "s1")
+      (let* ((header (dsh-bridge--view-header-line))
+             (goal (string-match (regexp-quote "fix it") header))
+             (suffix (string-match (regexp-quote "(disarmed)") header)))
+        (should goal)
+        (should (equal (get-text-property goal 'help-echo header)
+                       "mouse-1: resume and rearm the goal"))
+        (should suffix)
+        (should (eq (get-text-property suffix 'face header)
+                    'dsh-bridge-goal-face))
+        (should (eq (lookup-key (get-text-property suffix 'keymap header)
+                                [header-line mouse-1])
+                    #'dsh-bridge--header-goal-at-mouse))))))
+
+(ert-deftest dsh-bridge-prompt-header-indicator-order ()
+  "Plan and goal cells sit between the workspace and the model segment."
+  (let ((dsh-bridge--session-status nil)
+        (dsh-bridge--sessions-cache
+         '(((id . "s1") (title . "T") (workspace . "myproj") (live . t))))
+        (dsh-bridge--session-models
+         '(("s1" (current . ((provider . "p") (model . "m")))
+            (groups . (((id . "p") (name . "P")
+                        (models . (((id . "m") (name . "Model M"))))))))))
+        (dsh-bridge--session-context '(("s1" . (45000 . 100000))))
+        (dsh-bridge--last-sent nil)
+        (dsh-bridge--session-plan '(("s1" . ((active . t)))))
+        (dsh-bridge--session-goal
+         (list (cons "s1"
+                     (dsh-bridge-test--goal-section
+                      "active" "armed" "ship it"))))
+        (dsh-bridge-status-indicator 'geometric))
+    (with-temp-buffer
+      (dsh-bridge-prompt-mode)
+      (setq-local dsh-bridge--prompt-session "s1")
+      (let ((header (dsh-bridge--prompt-header-line)))
+        (should (string-match-p (regexp-quote "myproj · plan") header))
+        (should (string-match-p (regexp-quote "ship it · Model M")
+                                header))))))
+
+(ert-deftest dsh-bridge-header-indicator-click-commands ()
+  "A plan cell click sets plan mode off; a goal cell click toggles the goal.
+Both commands run in the clicked window's buffer."
+  (let ((buffer (generate-new-buffer " *dsh-bridge-header*"))
+        (outside (current-buffer))
+        plan-arg plan-buffer goal-buffer)
+    (unwind-protect
+        (progn
+          (set-window-buffer (selected-window) buffer)
+          (cl-letf (((symbol-function 'dsh-bridge--interaction-session)
+                     (lambda () "s1"))
+                    ((symbol-function 'dsh-bridge-toggle-plan-mode)
+                     (lambda (arg)
+                       (setq plan-arg arg plan-buffer (current-buffer))))
+                    ((symbol-function 'dsh-bridge-toggle-goal)
+                     (lambda () (setq goal-buffer (current-buffer)))))
+            ;; A real header-line click carries the cell string as
+            ;; (STRING . STR-POS) and names no buffer point.
+            (dsh-bridge--header-plan-at-mouse
+             (list 'mouse-1
+                   (list (selected-window) 'header-line '(0 . 0) 0
+                         (cons (propertize "plan"
+                                           'dsh-bridge-session-id "s1")
+                               0))))
+            (should (equal plan-arg -1))
+            (should (eq plan-buffer buffer))
+            (dsh-bridge--header-goal-at-mouse
+             (list 'mouse-1
+                   (list (selected-window) 'header-line '(0 . 0) 0
+                         (cons (propertize "active: ship it"
+                                           'dsh-bridge-session-id "s1")
+                               0))))
+            (should (eq goal-buffer buffer))))
+      (set-window-buffer (selected-window) outside)
+      (kill-buffer buffer))))
+
+(ert-deftest dsh-bridge-header-indicator-click-refusals ()
+  "A cell click refuses a foreign cell, an unbound buffer, or no window."
+  (let ((buffer (generate-new-buffer " *dsh-bridge-header*"))
+        (outside (current-buffer))
+        (ran nil))
+    (unwind-protect
+        (progn
+          (set-window-buffer (selected-window) buffer)
+          (cl-letf (((symbol-function 'dsh-bridge-toggle-plan-mode)
+                     (lambda (&rest _) (setq ran t)))
+                    ((symbol-function 'dsh-bridge-toggle-goal)
+                     (lambda (&rest _) (setq ran t))))
+            ;; The cell names a session the buffer is not bound to.
+            (cl-letf (((symbol-function 'dsh-bridge--interaction-session)
+                       (lambda () "s1")))
+              (should-error
+               (dsh-bridge--header-plan-at-mouse
+                (list 'mouse-1
+                      (list (selected-window) 'header-line '(0 . 0) 0
+                            (cons (propertize "plan"
+                                              'dsh-bridge-session-id "s2")
+                                  0))))
+               :type 'user-error))
+            ;; No session at all: a buffer following last-active only.
+            (cl-letf (((symbol-function 'dsh-bridge--interaction-session)
+                       (lambda () nil)))
+              (should-error
+               (dsh-bridge--header-goal-at-mouse
+                (list 'mouse-1
+                      (list (selected-window) 'header-line '(0 . 0) 0
+                            (cons (propertize "active: ship it"
+                                              'dsh-bridge-session-id "s1")
+                                  0))))
+               :type 'user-error))
+            ;; No live window behind the header.
+            (should-error
+             (dsh-bridge--header-plan-at-mouse
+              (list 'mouse-1
+                    (list nil 'header-line '(0 . 0) 0
+                          (cons (propertize "plan"
+                                            'dsh-bridge-session-id "s1")
+                                0))))
+             :type 'user-error)
+            (should-not ran)))
+      (set-window-buffer (selected-window) outside)
+      (kill-buffer buffer))))
+
+(ert-deftest dsh-bridge-describe-indicator-faces ()
+  "The Plan mode row and the Goal objective carry their indicator faces."
+  (dsh-bridge-test--with-describe '((plan . ((active . t))))
+				  (dsh-bridge-describe-session "s1")
+				  (with-current-buffer dsh-bridge-describe-buffer-name
+				    (goto-char (point-min))
+				    (re-search-forward "Plan mode +")
+				    (should (eq (get-text-property (point) 'face)
+						'dsh-bridge-plan-face))))
+  ;; The missing marker is plain text, not an indicator.
+  (dsh-bridge-test--with-describe '((plan . nil) (missing . ("plan")))
+				  (dsh-bridge-describe-session "s1")
+				  (with-current-buffer dsh-bridge-describe-buffer-name
+				    (goto-char (point-min))
+				    (re-search-forward "Plan mode +")
+				    (should-not (get-text-property (point) 'face))))
+  (dsh-bridge-test--with-describe
+   (list (cons 'goal
+               (dsh-bridge-test--goal-section
+                "active" "armed" "fix it")))
+   (dsh-bridge-describe-session "s1")
+   (with-current-buffer dsh-bridge-describe-buffer-name
+     (goto-char (point-min))
+     (re-search-forward "Objective +")
+     (should (eq (get-text-property (point) 'face)
+                 'dsh-bridge-goal-face)))))
+
 (ert-deftest dsh-bridge-notification-turn-frames-refresh-models ()
   "Turn frames force-refresh a cached session's model entry, and leave
 uncached sessions alone.  `run-at-time' is stubbed to run immediately."

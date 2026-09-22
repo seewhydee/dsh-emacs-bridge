@@ -458,6 +458,20 @@ These notes indicate the answers you gave to mid-turn queries."
   "Face for file/image attachment tags in the DSH-Prompt buffer."
   :group 'dsh-bridge)
 
+(defface dsh-bridge-plan-face
+  '((t :inherit font-lock-keyword-face))
+  "Face for plan-mode indicators.
+Used by the plan cell in DSH-View and DSH-Prompt header lines and by
+the `Plan mode' row of the DSH-Describe report."
+  :group 'dsh-bridge)
+
+(defface dsh-bridge-goal-face
+  '((t :inherit font-lock-constant-face))
+  "Face for goal indicators.
+Used by the goal cell in DSH-View and DSH-Prompt header lines and by
+the Objective row of the DSH-Describe report's Goal section."
+  :group 'dsh-bridge)
+
 (defface dsh-bridge-question-heading-face
   '((t :inherit bold))
   "Face for the headings in the DSH-Question buffer.
@@ -3175,47 +3189,96 @@ space for subsequent flexible cells."
 		  (setq rest (cdr rest))))
 	  (mapconcat #'identity (nreverse pieces) sep))))
 
+(defvar dsh-bridge--header-plan-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map [header-line mouse-1]
+		#'dsh-bridge--header-plan-at-mouse)
+    map)
+  "Local keymap for the clickable plan cell in header lines.")
+
+(defvar dsh-bridge--header-goal-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map [header-line mouse-1]
+		#'dsh-bridge--header-goal-at-mouse)
+    map)
+  "Local keymap for the clickable goal cell in header lines.")
+
+(defun dsh-bridge--header-indicator-string (string face keymap help session-id)
+  "Return STRING as a clickable header-line indicator for SESSION-ID.
+Applies FACE for color, HELP as the hover `help-echo', and KEYMAP so
+mouse-1 runs the indicator's command.  The session id travels on the
+string: a header-line click names no buffer point, and the click
+handler checks the id against the clicked window's session."
+  (propertize string
+              'face face
+              'mouse-face 'highlight
+              'help-echo help
+              'keymap keymap
+              'dsh-bridge-session-id session-id))
+
 (defun dsh-bridge--header-plan-cell (session-id)
   "The header plan-mode cell for SESSION-ID, or nil.
 Renders `plan' when active; `plan (queued on)'/`plan (queued off)'
 when the live read names the wanted direction; `plan (change queued)'
-when only a direction-less pending change is known."
+when only a direction-less pending change is known.  The cell is a
+clickable `dsh-bridge-plan-face' indicator: mouse-1 turns plan mode
+off (see `dsh-bridge--header-plan-at-mouse')."
   (let ((plan (cdr (assoc session-id dsh-bridge--session-plan))))
-	(when (consp plan)
-	  (let ((pending-pair (assoc 'pending plan))
-			(queued (eq (alist-get 'queued plan) t))
-			(active (eq (alist-get 'active plan) t)))
-		(cond
-		 ((and pending-pair (not (dsh-bridge--json-false-p (cdr pending-pair))))
-		  (list "plan (queued on)"))
-		 (pending-pair (list "plan (queued off)"))
-		 (queued (list "plan (change queued)"))
-		 (active (list "plan")))))))
+    (when (consp plan)
+      (let* ((pending-pair (assoc 'pending plan))
+             (queued (eq (alist-get 'queued plan) t))
+             (active (eq (alist-get 'active plan) t))
+             (text (cond
+		    ((and pending-pair
+			  (not (dsh-bridge--json-false-p (cdr pending-pair))))
+		     "plan (queued on)")
+		    (pending-pair "plan (queued off)")
+		    (queued "plan (change queued)")
+		    (active "plan"))))
+	(when text
+	  (list (dsh-bridge--header-indicator-string
+		 text 'dsh-bridge-plan-face dsh-bridge--header-plan-map
+		 "mouse-1: turn plan mode off" session-id)))))))
 
 (defun dsh-bridge--header-goal-cell (session-id)
   "The header goal cell for SESSION-ID, or nil.
 `<phase>: <objective>' for an active/paused/blocked goal, with a
 ` (disarmed)' untruncatable suffix on an active disarmed goal; hidden
-when there is no goal or the goal is complete."
+when there is no goal or the goal is complete.  The cell is a
+clickable `dsh-bridge-goal-face' indicator: mouse-1 pauses an armed
+goal, or resumes and rearms a stopped one (see
+`dsh-bridge--header-goal-at-mouse')."
   (let ((goal (cdr (assoc session-id dsh-bridge--session-goal))))
-	(when (consp goal)
-	  (let* ((snapshot (alist-get 'goal goal))
-			 (phase (alist-get 'phase snapshot))
-			 (objective (alist-get 'objective snapshot)))
-		(when (and (member phase '("active" "paused" "blocked"))
-				   (stringp objective))
-		  (let ((text (concat phase ": " (dsh-bridge--header-text objective)))
-				(disarmed (equal (alist-get 'activation goal) "disarmed")))
-			(if (and disarmed (equal phase "active"))
-				(list text t " (disarmed)")
-			  (list text t))))))))
+    (when (consp goal)
+      (let* ((snapshot (alist-get 'goal goal))
+             (phase (alist-get 'phase snapshot))
+             (objective (alist-get 'objective snapshot)))
+	(when (and (member phase '("active" "paused" "blocked"))
+		   (stringp objective))
+	  (let* ((activation (alist-get 'activation goal))
+		 (disarmed (equal activation "disarmed"))
+		 ;; The hover text names the direction toggle-goal will
+		 ;; take, so a click never acts opposite to its label.
+		 (help (if (and (equal phase "active") (equal activation "armed"))
+			   "mouse-1: pause the goal"
+			 "mouse-1: resume and rearm the goal"))
+		 (text (dsh-bridge--header-indicator-string
+			(concat phase ": " (dsh-bridge--header-text objective))
+			'dsh-bridge-goal-face dsh-bridge--header-goal-map
+			help session-id)))
+            (if (and disarmed (equal phase "active"))
+		(list text t
+		      (dsh-bridge--header-indicator-string
+		       " (disarmed)" 'dsh-bridge-goal-face
+		       dsh-bridge--header-goal-map help session-id))
+              (list text t))))))))
 
 (defun dsh-bridge--view-header-line (&optional width)
   "Return the header line for a DSH-View buffer.
 Header line format:
 
- <status> <session-pos> <label> · <workspace> · <time>
-                 [ · plan][ · goal][ · <await>]
+ <status> <session-pos> <label> · <workspace>
+         [ · plan][ · goal][ · <time>][ · <await>]
 
 WIDTH, if non-nil, is the display columns available; the session label
 and workspace label are shortened to fit it.
@@ -3224,9 +3287,12 @@ The session-pos segment is the position in the session's turn history (see
 `dsh-bridge--view-turn-position'); the time segment describes the displayed
 turn (see `dsh-bridge--view-turn-time-label'); the plan and goal segments
 report the cached plan-mode and goal state (see
-`dsh-bridge--header-plan-cell' and `dsh-bridge--header-goal-cell'); the
-await segment appears while a question or approval is pending.  The line is
-%-escaped for `header-line-format'."
+`dsh-bridge--header-plan-cell' and `dsh-bridge--header-goal-cell') and
+sit between the workspace and the time; the await segment appears while
+a question or approval is pending.  The plan and goal cells are
+clickable (see `dsh-bridge--header-plan-at-mouse' and
+`dsh-bridge--header-goal-at-mouse').  The line is %-escaped for
+`header-line-format'."
   (let* ((id dsh-bridge--view-content-session)
 		 (status (dsh-bridge--status-glyph id))
 		 (pos (string-trim (or (dsh-bridge--view-turn-position) "")))
@@ -3250,9 +3316,9 @@ await segment appears while a question or approval is pending.  The line is
 			 (dsh-bridge--header-line-join
 			  (list (list label t)
 					(list workspace t)
-					(list time)
 					plan
 					goal
+					(list time)
 					(list await))
 			  (and width (max 1 (- width (string-width prefix)))))))))
 
@@ -5671,6 +5737,46 @@ command agree."
                             (alist-get 'objective snapshot)))
       (dsh-bridge--goal-command "clear" "goal cleared"))))
 
+(defun dsh-bridge--header-indicator-act (event command)
+  "Run COMMAND for the session whose header indicator was clicked in EVENT.
+The clicked window's interaction session must be the id carried on the
+clicked cell, so a display-only prediction (a last-active fallback the
+buffer is not bound to) is never mutated."
+  (let* ((position (event-start event))
+	 (window (and position (posn-window position)))
+	 (string-pos (and position (posn-string position)))
+	 (cell-id (and string-pos
+		       (get-text-property (cdr string-pos)
+					  'dsh-bridge-session-id
+					  (car string-pos)))))
+    (unless (window-live-p window)
+      (user-error "dsh-bridge: the clicked header belongs to no live window"))
+    ;; A header-line click does not select its window: the cell's keymap
+    ;; overrides the global [header-line mouse-1] binding that would.
+    (with-selected-window window
+      (let ((session (dsh-bridge--plan-goal-session)))
+	(unless (equal cell-id session)
+	  (user-error
+	   "dsh-bridge: the clicked indicator belongs to another session"))
+	(funcall command)))))
+
+(defun dsh-bridge--header-plan-at-mouse (event)
+  "Turn plan mode off for the session whose header plan cell EVENT clicked.
+Signals a `user-error' when the clicked window's buffer names no session
+or names one other than the cell's.  The negative prefix makes
+`dsh-bridge-toggle-plan-mode' set the direction explicitly: always off,
+so a click cancels a queued-on change instead of re-queueing it."
+  (interactive "e")
+  (dsh-bridge--header-indicator-act
+   event (lambda () (dsh-bridge-toggle-plan-mode -1))))
+
+(defun dsh-bridge--header-goal-at-mouse (event)
+  "Pause or resume the goal whose header goal cell EVENT clicked.
+Runs `dsh-bridge-toggle-goal' in the clicked window, so the direction
+and refusal rules match the command, its `A' binding, and its menu item."
+  (interactive "e")
+  (dsh-bridge--header-indicator-act event #'dsh-bridge-toggle-goal))
+
 ;;; Menu state helpers (evaluated when a mode menu is built)
 
 (defun dsh-bridge--menu-session ()
@@ -5747,7 +5853,7 @@ recomputes on the next redisplay)."
 Header line format:
 
  <status> <label>[ (last active)][ (k/n)] · <workspace>
-        [ · <model>][ · <ctx%>][ · plan][ · goal][ ✓ sent HH:MM]
+        [ · plan][ · goal][ · <model>][ · <ctx%>][ ✓ sent HH:MM]
 
 WIDTH, if non-nil, is the display columns available; the session label
 and workspace label are shortened to fit it.
@@ -5759,7 +5865,11 @@ bound session, and one reached through `dsh-bridge-default-session' (the
 send does carry that target), are unqualified.
 
 The model and context segments stay empty until their first successful
-fetch.  Editing the text clears the sent marker.  The `(k/n)' segment
+fetch.  The plan and goal cells sit directly after the workspace and are
+clickable: mouse-1 turns plan mode off, or pauses and resumes the goal
+(see `dsh-bridge--header-plan-at-mouse' and
+`dsh-bridge--header-goal-at-mouse').  Editing the text clears the sent
+marker.  The `(k/n)' segment
 appears when walking the prompt history.  Attachments are not shown here:
 their tag lines are visible in the buffer itself."
   (let* ((session dsh-bridge--prompt-session)
@@ -5806,10 +5916,10 @@ their tag lines are visible in the buffer itself."
 					  (list (dsh-bridge--header-text
 							 (dsh-bridge--workspace-label-for session))
 							t)
-					  (list model)
-					  (list context)
 					  plan
-					  goal)
+					  goal
+					  (list model)
+					  (list context))
 				(and width
 					 (max 1 (- width (string-width prefix) (string-width sent)))))
 			   sent)))))
@@ -6737,14 +6847,14 @@ The state is `on'/`off', with a `(queued off)'/`(queued on)'/
 	  (let ((active (eq (alist-get 'active plan) t))
 			(pending-pair (assoc 'pending plan))
 			(queued (eq (alist-get 'queued plan) t)))
-		(concat (if active "on" "off")
+		(propertize (concat (if active "on" "off")
 				(cond
 				 ((and pending-pair
 					   (dsh-bridge--json-false-p (cdr pending-pair)))
 				  " (queued off)")
 				 (pending-pair " (queued on)")
 				 (queued " (change queued)")
-				 (t "")))))
+				 (t ""))) 'face 'dsh-bridge-plan-face)))
 	 (t "—"))))
 
 (defun dsh-bridge--describe-stats (stats)
@@ -6833,7 +6943,10 @@ alist, or nil when the host reported none."
 		 (phase (dsh-bridge--normalized-string (alist-get 'phase snapshot)))
 		 (blocked (alist-get 'blockedReason snapshot))
 		 (activation (dsh-bridge--normalized-string (alist-get 'activation goal))))
-	(dsh-bridge--describe-row "Objective" (or objective "—"))
+	(dsh-bridge--describe-row "Objective"
+				  (if objective
+				      (propertize objective 'face 'dsh-bridge-goal-face)
+				    "—"))
 	(dsh-bridge--describe-row
 	 "Actions"
 	 (lambda ()
