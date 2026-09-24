@@ -4192,8 +4192,6 @@ no-op for sessions no view shows in either state."
 ;; or multiply selectable answers, and custom replies may be either
 ;; mutually exclusive with selectable answers, or co-exist with them.
 
-(declare-function dsh-bridge-question-mode "dsh-bridge")
-
 (defvar-local dsh-bridge--question-id nil
   "The question id (bridge-minted) this question buffer answers.")
 
@@ -4357,7 +4355,7 @@ with `q' and returning with `a' keeps any in-progress marks.  A name collision
 			 (buffer (get-buffer-create name)))
 		(with-current-buffer buffer
 		  (unless (eq major-mode 'dsh-bridge-question-mode)
-			(dsh-bridge-question-mode))
+			(funcall #'dsh-bridge-question-mode))
 		  (setq-local dsh-bridge--question-id question-id)
 		  (setq-local dsh-bridge--question-session session-id)
 		  (setq-local dsh-bridge--question-questions questions)
