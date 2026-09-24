@@ -24,13 +24,15 @@ re-verification checklist.
 
 Ordered by recommended sequence, but out-of-sequence implementation is
 acceptable based on user needs. Harness seams were verified against
-DSH 0.1.7-alpha.1; the peer floor in `dsh-plugin/package.json` is
-pinned to match (node-semver prerelease rules exclude `0.1.7-alpha.1`
-from the old `^0.1.6-alpha.1` floor). Two seams moved in that release:
-tool results are now first-class `role: 'tool'` messages carrying the
-failure flag themselves, and `session/fork` cuts at an exact event, so
-the bridge reads the new `isError` location and enforces its own
-completed-turn anchor before calling the seam.
+DSH 0.1.7-rc.1; the peer floor in `dsh-plugin/package.json` is pinned
+to match. rc.1 moved no host seam the bridge folds, but its faster
+first-reply timing exposed two DSH-View races that the Emacs client now
+closes: a `replies-changed` frame that arrives while the blocking send
+is still on the wire — before the view and its turns-cache entry exist —
+is replayed instead of dropped, and a slower `/turns` reply that lands
+after a fresher one can no longer downgrade that turn's cached record.
+The client bundle also names the size-neutral `IconCheckOutlineRegular`,
+the rename that replaced the numeric icon export.
 
 ### 1. Plan and goal
 

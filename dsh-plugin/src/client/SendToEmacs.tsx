@@ -18,7 +18,7 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 import { useCallback, useState } from 'react'
-import { IconCheckOutline16, Tooltip } from '@deepseek-ai/dsh-client-ui-primitives'
+import { IconCheckOutlineRegular, Tooltip } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 // Type-only: pulls the ui-chat SlotMap merge (the assistant-actions entry).
 import type {} from '@deepseek-ai/dsh-client-ui-chat/client'
@@ -76,7 +76,7 @@ export function SendToEmacs({ messageId, deposit, t }: SendToEmacsProps) {
           cursor: pending ? 'default' : 'pointer', color: 'inherit',
         }}
       >
-        {sent ? <IconCheckOutline16 /> : <EmacsMiniIcon />}
+        {sent ? <IconCheckOutlineRegular /> : <EmacsMiniIcon />}
       </button>
     </Tooltip>
   )

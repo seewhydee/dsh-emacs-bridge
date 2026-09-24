@@ -3470,6 +3470,17 @@ distinguish via `dsh-bridge--turns-cache-entry'."
   (let ((entry (dsh-bridge--turns-cache-entry session-id)))
     (and entry (cdr entry))))
 
+(defun dsh-bridge--turns-record-stale-p (candidate reference)
+  "Whether CANDIDATE is a stale view of the same turn as REFERENCE.
+Within one history epoch a turn only ever grows: segments append and
+`turn/end' adds the terminal facts once, so CANDIDATE is stale when it
+carries fewer segments than REFERENCE or drops the `endedAt' that
+REFERENCE already records."
+  (or (< (length (alist-get 'segments candidate))
+         (length (alist-get 'segments reference)))
+      (and (alist-get 'endedAt reference)
+           (null (alist-get 'endedAt candidate)))))
+
 (defun dsh-bridge--turns-cache-store (session-id turns epoch)
   "Replace SESSION-ID's turns cache entry with TURNS at EPOCH.
 
@@ -3479,16 +3490,24 @@ TURNS with EPOCH as the history epoch (or nil for a response with no
 
 If EPOCH matches what is already recorded in `dsh-bridge--turns-cache',
 and the newest turn in TURNS is older than the cached one, do
-nothing (this is probably an out-of-order reply)."
+nothing.  Do nothing as well when it names that same newest turn with a
+stale record (fewer segments, or missing end facts the cache already
+carries): a fetch that started before the turn grew can land after a
+fresher one, and must not downgrade it (an out-of-order reply)."
   (when session-id
     (let* ((existing (cdr-safe (assoc session-id dsh-bridge--turns-cache)))
-           (existing-newest (alist-get 'turn (car-safe (cdr-safe existing))))
-           (newest (alist-get 'turn (car-safe turns))))
+           (existing-newest-record (car-safe (cdr-safe existing)))
+           (existing-newest (alist-get 'turn existing-newest-record))
+           (newest-record (car-safe turns))
+           (newest (alist-get 'turn newest-record)))
       (unless (and (numberp epoch)
                    (equal epoch (car-safe existing))
                    (numberp existing-newest)
                    (numberp newest)
-                   (< newest existing-newest))
+                   (or (< newest existing-newest)
+                       (and (= newest existing-newest)
+                            (dsh-bridge--turns-record-stale-p
+                             newest-record existing-newest-record))))
         (setq dsh-bridge--turns-cache
               (assoc-delete-all session-id dsh-bridge--turns-cache))
         (push (cons session-id (cons epoch turns)) dsh-bridge--turns-cache)))))
@@ -3846,6 +3865,16 @@ non-nil, is the ms-epoch at which the prompt was sent."
 		(setq-local dsh-bridge--view-follow t)
 		(setq header-line-format dsh-bridge--view-header-line-format)
 		(dsh-bridge--view-ticker-ensure))
+	  ;; A `replies-changed' frame for this send's turn can arrive while the
+	  ;; blocking POST is still on the wire — before this view and its cache
+	  ;; entry exist — and the deferred refresh then finds neither and drops
+	  ;; the frame (see `dsh-bridge--view-turns-cache-refresh').  A turn
+	  ;; parked on a question produces no later frame, so the placeholder
+	  ;; above would strand the committed reply.  Both now exist, so replay
+	  ;; one refresh; it is idempotent, and a frame arriving after this fetch
+	  ;; still refills normally.
+	  (when (with-current-buffer buf dsh-bridge--view-waiting)
+		(run-at-time 0 nil #'dsh-bridge--turns-changed session-id))
 	  buf)))
 
 (defun dsh-bridge--prompt-exit (sent-session-id &optional window sent-at)

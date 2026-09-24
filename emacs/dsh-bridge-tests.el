@@ -4949,6 +4949,61 @@ replace it (the regression guard for the fix above)."
   (when (buffer-live-p (get-buffer "*dsh-bridge-output*"))
     (kill-buffer "*dsh-bridge-output*")))
 
+(ert-deftest dsh-bridge-send-exit-replays-a-replies-changed-race ()
+  "A `replies-changed' frame can arrive while the blocking send is on the wire,
+before the view and its turns-cache entry exist; the deferred refresh then
+drops the frame.  `--after-prompt-view' leaves the waiting placeholder and
+replays one refresh, so a turn parked on a question does not strand the reply
+it announced.  A view that already holds content needs no replay."
+  (when (buffer-live-p (get-buffer "*dsh-bridge-output*"))
+    (kill-buffer "*dsh-bridge-output*"))
+  (with-temp-buffer
+    (dsh-bridge-prompt-mode)
+    (setq-local dsh-bridge--prompt-session "s1")
+    (let* ((sent-at 5000)
+           (dsh-bridge--turns-cache nil)
+           (dsh-bridge--session-status nil)
+           (replayed nil))
+      (cl-letf (((symbol-function 'pop-to-buffer) #'ignore)
+                ((symbol-function 'dsh-bridge--request)
+                 (lambda (_m _p _pl)
+                   (cons 200 (list (cons 'sessionId "s1")
+                                   (cons 'turns nil)
+                                   (cons 'running t)
+                                   (cons 'epoch 0)))))
+                ((symbol-function 'run-at-time)
+                 (lambda (_time _repeat fn &rest args) (apply fn args)))
+                ((symbol-function 'dsh-bridge--turns-changed)
+                 (lambda (id) (push id replayed))))
+        (dsh-bridge--prompt-exit "s1" nil sent-at))
+      (with-current-buffer (get-buffer "*dsh-bridge-output*")
+        (should (eq dsh-bridge--view-waiting t)))
+      (should (equal replayed '("s1"))))
+    ;; A response that already carries the turn fills it; no replay is due.
+    (let* ((sent-at 5000)
+           (finished (dsh-bridge-test--view-turn
+                      1 5001 (list (dsh-bridge-test--view-segment "done")) 5002))
+           (dsh-bridge--turns-cache nil)
+           (dsh-bridge--session-status nil)
+           (replayed nil))
+      (cl-letf (((symbol-function 'pop-to-buffer) #'ignore)
+                ((symbol-function 'dsh-bridge--request)
+                 (lambda (_m _p _pl)
+                   (cons 200 (list (cons 'sessionId "s1")
+                                   (cons 'turns (list finished))
+                                   (cons 'running nil)
+                                   (cons 'epoch 0)))))
+                ((symbol-function 'run-at-time)
+                 (lambda (_time _repeat fn &rest args) (apply fn args)))
+                ((symbol-function 'dsh-bridge--turns-changed)
+                 (lambda (id) (push id replayed))))
+        (dsh-bridge--prompt-exit "s1" nil sent-at))
+      (with-current-buffer (get-buffer "*dsh-bridge-output*")
+        (should-not dsh-bridge--view-waiting))
+      (should-not replayed)))
+  (when (buffer-live-p (get-buffer "*dsh-bridge-output*"))
+    (kill-buffer "*dsh-bridge-output*")))
+
 (ert-deftest dsh-bridge-send-and-exit-passes-send-instant ()
   "The success callback carries the send instant to `--prompt-exit', so
 `--after-prompt-view' can tell this send's turn from the pre-send one."
@@ -6035,6 +6090,36 @@ A changed epoch, an unknown epoch, and an explicit empty list still replace."
     (dsh-bridge--turns-cache-store "s1" nil 6)
     (should (assoc "s1" dsh-bridge--turns-cache))
     (should (null (funcall turns)))))
+
+(ert-deftest dsh-bridge-turns-cache-store-ignores-stale-same-turn-record ()
+  "A refetch sent before the newest turn grew can land after a fresher one.
+Within an equal epoch that turn only ever grows, so the stale reply must not
+downgrade its cached record: fewer segments, or same segments without the end
+facts the cache already stored, is ignored.  A record that adds the end facts
+still applies."
+  (let* ((open (dsh-bridge-test--view-turn
+                1 1000 (list (dsh-bridge-test--view-segment "a" 1001 1))))
+         (grown (dsh-bridge-test--view-turn
+                 1 1000 (list (dsh-bridge-test--view-segment "a" 1001 1)
+                             (dsh-bridge-test--view-segment "b" 1002 2))))
+         (ended (dsh-bridge-test--view-turn
+                 1 1000 (list (dsh-bridge-test--view-segment "a" 1001 1)
+                             (dsh-bridge-test--view-segment "b" 1002 2))
+                 1003))
+         (turns (lambda () (dsh-bridge--turns-cache-turns "s1")))
+         (dsh-bridge--turns-cache nil))
+    (dsh-bridge--turns-cache-store "s1" (list ended) 5)
+    ;; Fewer segments than the cached record: an out-of-order reply.
+    (dsh-bridge--turns-cache-store "s1" (list open) 5)
+    (should (equal (funcall turns) (list ended)))
+    ;; Same segments but missing the end facts the cache already carries.
+    (dsh-bridge--turns-cache-store "s1" (list grown) 5)
+    (should (equal (funcall turns) (list ended)))
+    ;; A record that gains the end facts is newer and applies.
+    (setq dsh-bridge--turns-cache nil)
+    (dsh-bridge--turns-cache-store "s1" (list grown) 5)
+    (dsh-bridge--turns-cache-store "s1" (list ended) 5)
+    (should (equal (funcall turns) (list ended)))))
 
 ;;; Phase 2: incremental `/turns' fetch and cache merge (epoch + since)
 
