@@ -5211,8 +5211,8 @@ per-buffer decision, not a helper: it is covered at the caller level by
       (should (eq dsh-bridge--view-follow t))
       ;; The awaited turn has no record yet: a lookup by its number misses,
       ;; which is what keeps fork/copy/M-p/M-n inert during the placeholder.
-      (should-not (dsh-bridge--view-turn-index-of
-                   (dsh-bridge--turns-cache-turns "s1") dsh-bridge--view-turn))
+      (should-not (dsh-bridge--view-turn-index
+                   (dsh-bridge--turns-cache-turns "s1")))
       ;; Not a turn, so no position segment.
       (should (equal (dsh-bridge--view-turn-position) nil))
       (should-not (string-match-p "(latest/" (dsh-bridge--view-header-line))))

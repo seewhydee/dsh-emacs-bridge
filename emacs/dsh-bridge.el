@@ -2389,7 +2389,7 @@ message pushed from DSH.")
   "Non-nil while this DSH-View buffer is mid M-p/M-n turn browsing.
 A nil value means the view is \"at rest\", showing the content it was
 last filled with (a fetch, \"Send to Emacs\" push, or follow refill).
-The index can be obtained via `dsh-bridge--view-turn-index-of'.")
+The index can be obtained via `dsh-bridge--view-turn-index'.")
 
 (defvar-local dsh-bridge--view-follow nil
   "Whether the DSH-View buffer is in turn-following state.
@@ -2703,9 +2703,10 @@ recorded body."
              (text-property-any (1+ body) (point-max)
                                 'dsh-bridge-turn-marker t)))))
 
-(defun dsh-bridge--view-turn-index-of (turns turn)
-  "Index of TURN (a number) in TURNS (newest first), or nil when absent."
-  (seq-position turns turn
+(defun dsh-bridge--view-turn-index (turns &optional turn)
+  "Index of TURN (a number) in TURNS (newest first), or nil when absent.
+If TURN is omitted or nil, default to `dsh-bridge--view-turn'."
+  (seq-position turns (or turn dsh-bridge--view-turn)
 				(lambda (record number)
 				  (equal (alist-get 'turn record) number))))
 
@@ -2730,8 +2731,7 @@ This function uses the turns cache only, and does no synchronous I/O."
 		(setq total (length turns))
 		(cond (dsh-bridge--view-follow (format " (latest/%d)" total))
 			  (dsh-bridge--view-turn
-			   (let ((k (dsh-bridge--view-turn-index-of
-						 turns dsh-bridge--view-turn)))
+			   (let ((k (dsh-bridge--view-turn-index turns)))
 				 (if k (format " (%d/%d)" (1+ k) total)))))))))
 
 (defun dsh-bridge--view-turn-record (&optional session-id)
@@ -3615,15 +3615,12 @@ neither shown nor cached, it is left alone."
 			;; For a mid-browse view, the turn may vanish from the
 			;; refreshed list (replaced by compaction, or the list
 			;; coming back empty for some reason).  In that case,
-			;; leave browsing state, returning to \"at rest\".  Note
-			;; that the turn index is derived from the turn number
-			;; (see `dsh-bridge--view-turn-index-of').
+			;; leave browsing state, returning to \"at rest\".
 			(with-current-buffer buf
               (when dsh-bridge--view-browsing
                 (setq dsh-bridge--view-browsing
                       (and dsh-bridge--view-turn
-                           (dsh-bridge--view-turn-index-of
-                            turns dsh-bridge--view-turn)
+                           (dsh-bridge--view-turn-index turns)
                            t)))
               (setq header-line-format dsh-bridge--view-header-line-format)))
           (dsh-bridge--view-ticker-ensure)
@@ -3653,8 +3650,7 @@ turn-following state."
 				(not dsh-bridge--view-browsing))))
 	(if (null turns)
 		(message "dsh-bridge: no turns in this session")
-	  (let* ((index (dsh-bridge--view-turn-index-of
-					 turns dsh-bridge--view-turn))
+	  (let* ((index (dsh-bridge--view-turn-index turns))
 			 ;; Content with no turn identity (a pushed message) counts as
 			 ;; newest position: the first M-p steps one older.
 			 (next (1+ (or index 0))))
@@ -3674,7 +3670,7 @@ turn-following state."
 		   (turns (and turn
 					   (dsh-bridge--view-turns-refresh
 						(not dsh-bridge--view-browsing))))
-		   (k (and turns (dsh-bridge--view-turn-index-of turns turn))))
+		   (k (and turns (dsh-bridge--view-turn-index turns turn))))
 	  (cond
 	   ((null k)
 		(message "dsh-bridge: no newer turns"))
@@ -7507,8 +7503,7 @@ a blank."
 					 (or (and (numberp ended-turn)
 							  (numberp dsh-bridge--view-turn)
 							  (= ended-turn dsh-bridge--view-turn))
-						 (null (dsh-bridge--view-turn-index-of
-								turns dsh-bridge--view-turn))))
+						 (null (dsh-bridge--view-turn-index turns))))
 				(dsh-bridge--view-blocked-fill shown-id))
 			   ;; Otherwise the content is not the new turn's (or
 			   ;; there is none): blank the view to idle.
