@@ -5844,16 +5844,8 @@ Both commands run in the clicked window's buffer."
       (kill-buffer buffer))))
 
 (ert-deftest dsh-bridge-describe-indicator-faces ()
-  "The Plan mode row and the Goal objective carry their indicator faces."
+  "The Plan-mode row is plain text and the Goal objective carries its face."
   (dsh-bridge-test--with-describe '((plan . ((active . t))))
-				  (dsh-bridge-describe-session "s1")
-				  (with-current-buffer dsh-bridge-describe-buffer-name
-				    (goto-char (point-min))
-				    (re-search-forward "Plan mode +")
-				    (should (eq (get-text-property (point) 'face)
-						'dsh-bridge-plan-face))))
-  ;; The missing marker is plain text, not an indicator.
-  (dsh-bridge-test--with-describe '((plan . nil) (missing . ("plan")))
 				  (dsh-bridge-describe-session "s1")
 				  (with-current-buffer dsh-bridge-describe-buffer-name
 				    (goto-char (point-min))
@@ -8134,7 +8126,7 @@ parent-session link describes the parent."
       (should (equal dsh-bridge--describe-session "s1"))
       (let ((text (buffer-string)))
         (should (string-match-p "DSH session Title s1" text))
-        (should (string-match-p "Turns / steps\\s-+12 / 48" text))
+        (should (string-match-p "Turns / steps\\s-+12/48" text))
         (should (string-match-p "2m 13\\.4s" text))
         (should (string-match-p "Tool time\\s-+1h 35m" text))
         (should (string-match-p "Cache hit\\s-+96\\.4%" text))
@@ -8489,17 +8481,22 @@ rows; one with stats alone renders the Stats section and no other."
     (setq-local dsh-bridge--describe-session "s1")
     (should (equal (dsh-bridge--interaction-session) "s1"))))
 
-(ert-deftest dsh-bridge-describe-goal-buttons ()
-  "The Goal section's Actions row offers edit, pause, and clear buttons."
+(ert-deftest dsh-bridge-describe-goal-no-action-buttons ()
+  "The Goal section renders its facts without in-buffer action buttons.
+Goal mutations live on the transient menu and the header cells, so the
+report no longer offers an Actions row."
   (dsh-bridge-test--with-describe
-      (list (cons 'goal (dsh-bridge-test--goal-section "active" "armed")))
+      (list (cons 'goal (dsh-bridge-test--goal-section "active" "armed" "fix it")))
     (dsh-bridge-describe-session "s1")
     (with-current-buffer dsh-bridge-describe-buffer-name
       (goto-char (point-min))
-      (should (search-forward "Actions" nil t))
+      (should (search-forward "Goal" nil t))
+      (should (search-forward "Objective" nil t))
+      (should (search-forward "fix it" nil t))
+      (should-not (search-forward "Actions" nil t))
       (dolist (label '("edit" "pause" "clear"))
-        (should (search-forward label nil t))
-        (should (button-at (match-beginning 0)))))))
+        (goto-char (point-min))
+        (should-not (re-search-forward (concat "\\_<" label "\\_>") nil t))))))
 
 (ert-deftest dsh-bridge-menu-plan-goal-state ()
   "The menu checkboxes and shading read the live caches."
@@ -8554,15 +8551,14 @@ shaded until another buffer seeds the session."
       (should-not (dsh-bridge--menu-plan-available)))))
 
 (ert-deftest dsh-bridge-describe-session-id-is-plain ()
-  "The Id row prints the raw id, with no copy button, and keeps its help."
+  "The Id row prints the raw id, with no copy button and no help echo."
   (dsh-bridge-test--with-describe nil
     (dsh-bridge-describe-session "s1")
     (with-current-buffer dsh-bridge-describe-buffer-name
       (goto-char (point-min))
       (search-forward "Id")
       (search-forward "s1")
-      (should (equal (get-text-property (match-beginning 0) 'help-echo)
-                     "The raw DSH session id"))
+      (should-not (get-text-property (match-beginning 0) 'help-echo))
       (should-not (button-at (match-beginning 0))))))
 
 (ert-deftest dsh-bridge-describe-session-row-buttons-push-no-history ()
@@ -8578,7 +8574,7 @@ one must not disturb `l'/`r' navigation."
         (search-forward "Directory")
         (search-forward "/tmp")
         (should (button-at (match-beginning 0)))
-        (cl-letf (((symbol-function 'dsh-bridge--describe-open-directory) #'ignore))
+        (cl-letf (((symbol-function 'find-file) #'ignore))
           (push-button (match-beginning 0)))
         (should (eq help-xref-stack-item item))
         (should (equal help-xref-stack stack))))))
@@ -8628,7 +8624,7 @@ one must not disturb `l'/`r' navigation."
 	  (should (equal got "s1")))))
 
 (ert-deftest dsh-bridge-format-helpers ()
-  "The report's number, duration, percent, and time formatters."
+  "The report's number, duration, and time formatters."
   (should (equal (dsh-bridge--format-number 1234567) "1,234,567"))
   (should (equal (dsh-bridge--format-number 0) "0"))
   (should (equal (dsh-bridge--format-number -1234) "-1,234"))
@@ -8649,8 +8645,6 @@ one must not disturb `l'/`r' navigation."
   (should (equal (dsh-bridge--format-duration 5701550) "1h 35m"))
   (should (equal (dsh-bridge--format-duration nil) "—"))
   (should (equal (dsh-bridge--format-duration -5) "0ms"))
-  (should (equal (dsh-bridge--format-percent 1 4) "25.0%"))
-  (should-not (dsh-bridge--format-percent 1 0))
   (should (equal (dsh-bridge--format-time nil) "—")))
 
 (ert-deftest dsh-bridge-describe-entry-points ()
@@ -9498,18 +9492,21 @@ opt-out."
                  7 7000000
                  (list (dsh-bridge-test--view-segment "done" 7001000 1))
                  7002000))
-         (expected "Changed files: src/a.ts src/b.ts"))
+         (expected "Changed files: a.ts b.ts"))
     (with-temp-buffer
       (dsh-bridge-view-mode)
       (let ((suffix (dsh-bridge--view-changed-files changed)))
         (should (equal (substring-no-properties suffix) expected))
-        ;; A live text button sits at each path's start.
+        ;; A live text button sits at each basename; the button's `path'
+        ;; property keeps the full path for the visit action.
         (with-temp-buffer
           (insert suffix)
           (goto-char (point-min))
-          (dolist (path '("src/a.ts" "src/b.ts"))
-            (should (search-forward path nil t))
-            (should (button-at (match-beginning 0))))))
+          (dolist (file '(("a.ts" . "src/a.ts") ("b.ts" . "src/b.ts")))
+            (should (search-forward (car file) nil t))
+            (let ((button (button-at (match-beginning 0))))
+              (should button)
+              (should (equal (button-get button 'path) (cdr file)))))))
       ;; A completed turn composes body + blank line + footer, and no marker.
       (let ((render (dsh-bridge-test--view-turn-render changed "s1")))
         (should (equal render (concat "done\n\n" expected)))
@@ -9559,22 +9556,22 @@ pending (the note belongs to a later, open turn)."
                        (concat "\n\n" footer)))))))
 
 (ert-deftest dsh-bridge-view-changed-files-buttons ()
-  "The footer's button carries the expected action: visit the file."
+  "The footer's button visits the file named by its `path' property."
   (let* ((files (list (dsh-bridge-test--view-file "src/a.ts" "write")))
          (turn (dsh-bridge-test--view-turn
                 7 7000000
                 (list (dsh-bridge-test--view-segment "done" 7001000 1))
                 7002000 nil files))
-         (visited nil)
+         (opened nil)
          (suffix (dsh-bridge--view-changed-files turn)))
     (with-temp-buffer
+      (setq default-directory "/tmp/")
       (insert suffix)
       (goto-char (point-min))
-      (cl-letf (((symbol-function 'dsh-bridge--view-visit-changed)
-                 (lambda (path) (setq visited path))))
-        (search-forward "src/a.ts")
+      (cl-letf (((symbol-function 'find-file) (lambda (file) (setq opened file))))
+        (search-forward "a.ts")
         (button-activate (button-at (match-beginning 0)))))
-    (should (equal visited "src/a.ts"))))
+    (should (equal opened "/tmp/src/a.ts"))))
 
 (ert-deftest dsh-bridge-view-changed-files-default-directory ()
   "Rendering sets the view's `default-directory' to the session cwd, so the
@@ -9591,7 +9588,7 @@ footer's visit button resolves a relative path against it at click time."
       (should (equal default-directory "/tmp/dsh-session/"))
       (cl-letf (((symbol-function 'find-file) (lambda (file) (setq opened file))))
         (goto-char (point-min))
-        (search-forward "src/a.ts")
+        (search-forward "a.ts")
         (button-activate (button-at (match-beginning 0))))
       (should (equal opened "/tmp/dsh-session/src/a.ts")))))
 

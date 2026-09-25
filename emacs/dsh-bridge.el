@@ -452,11 +452,6 @@ to its queries before proceeding."
 These notes indicate the answers you gave to mid-turn queries."
   :group 'dsh-bridge)
 
-(defface dsh-bridge-view-changed-face
-  '((t :inherit link))
-  "Face for the changed-file buttons in DSH-View buffers."
-  :group 'dsh-bridge)
-
 (defface dsh-bridge-view-changed-label-face
   '((t :inherit shadow))
   "Face for the changed-files label in DSH-View buffers."
@@ -2586,9 +2581,10 @@ turn-following state for the new turn."
 ;; inserts the suffix as text; text properties (including the button objects)
 ;; survive `buffer-string'.
 
-(defun dsh-bridge--view-visit-changed (path)
-  "Visit PATH, resolved against the current buffer's `default-directory'."
-  (find-file (expand-file-name path)))
+(defun dsh-bridge--button-visit (button)
+  "Visit the filename specified by BUTTON's `path' property."
+  (let ((path (button-get button 'path)))
+	(when path (find-file (expand-file-name path)))))
 
 (defun dsh-bridge--view-changed-files (turn)
   "The changed-files footer string for TURN, or nil when it changed nothing.
@@ -2599,21 +2595,16 @@ visits the file."
     (let ((files (alist-get 'files turn)))
       (when files
         (with-temp-buffer
-          (insert (propertize "Changed files: "
+          (insert (propertize "Changed files:"
                               'face 'dsh-bridge-view-changed-label-face
                               'font-lock-face 'dsh-bridge-view-changed-label-face))
-          (let ((first t))
-            (dolist (file files)
-              (let ((path (alist-get 'path file)))
-                (unless first (insert " "))
-                (setq first nil)
-                (insert-text-button
-                 path
-                 'action (lambda (&rest _) (dsh-bridge--view-visit-changed path))
-                 'follow-link t
-                 'help-echo (format "Visit %s" path)
-                 'face 'dsh-bridge-view-changed-face
-                 'font-lock-face 'dsh-bridge-view-changed-face))))
+          (dolist (file files)
+            (let ((path (alist-get 'path file)))
+			  (insert " ")
+              (insert-text-button (file-name-nondirectory path)
+								  'path path
+								  'action #'dsh-bridge--button-visit
+								  'follow-link t)))
           (buffer-string))))))
 
 (defun dsh-bridge--view-turn-suffix (turn session-id)
@@ -6843,12 +6834,6 @@ non-number renders as \"—\"; a negative duration counts as zero."
 			  (format "%dh %dm" hours
 					  (floor (/ (- rounded (* hours 3600)) 60))))))))))
 
-(defun dsh-bridge--format-percent (num den)
-  "Format NUM/DEN as a percentage, or nil when DEN is not positive."
-  (if (and (numberp num) (numberp den) (> den 0))
-	  (format "%.1f%%" (* 100.0 (/ num (float den))))
-	nil))
-
 (defun dsh-bridge--format-time (ms)
   "Format ms-epoch MS as an absolute time plus its relative age; nil -> \"—\"."
   (if (numberp ms)
@@ -6865,22 +6850,10 @@ its line is the single blank line between sections; the zero-width
 	(insert (propertize "\f" 'display "") "\n"))
   (insert (propertize title 'face 'dsh-bridge-describe-heading-face) "\n"))
 
-(defun dsh-bridge--describe-row (label value &optional help)
-  "Insert an aligned LABEL/VALUE row.
-VALUE is a string or a function that inserts the value itself; HELP is
-an optional `help-echo' string covering the value."
-  (insert (propertize (format "  %-16s " label) 'face 'dsh-bridge-describe-label-face))
-  (let ((beg (point)))
-	(if (functionp value) (funcall value) (insert (format "%s" value)))
-	(when help (put-text-property beg (point) 'help-echo help)))
-  (insert "\n"))
-
-(defun dsh-bridge--describe-button (label function &optional help)
-  "Insert an action button LABEL that calls FUNCTION with no arguments."
-  (insert-text-button label
-					  'action (lambda (&rest _) (funcall function))
-					  'follow-link t
-					  'help-echo (or help (format "mouse-1/RET: %s" label))))
+(defun dsh-bridge--describe-label (label)
+  "Insert an aligned row header LABEL for a DSH-Describe-Session buffer."
+  (insert (propertize (format "  %-16s " label)
+					  'face 'dsh-bridge-describe-label-face)))
 
 (defun dsh-bridge--describe-model-label (report)
   "The model display line for REPORT, or nil when no selection is known."
@@ -6894,89 +6867,83 @@ an optional `help-echo' string covering the value."
 						 (or provider id)))
 			  (and effort (format " (%s)" effort))))))
 
-(defun dsh-bridge--describe-permission-label (report)
-  "Return (NAME . DESCRIPTION) for REPORT's current permission, or nil."
-  (let* ((permissions (alist-get 'permissions report))
-		 (current (dsh-bridge--normalized-string (alist-get 'currentValue permissions)))
-		 (options (alist-get 'options permissions)))
-	(when current
-	  (let ((match (seq-find (lambda (option)
-							   (equal (alist-get 'value option) current))
-							 options)))
-		(cons (or (dsh-bridge--normalized-string (alist-get 'name match)) current)
-			  (dsh-bridge--normalized-string (alist-get 'description match)))))))
-
 (defun dsh-bridge--describe-plan-label (report)
   "Return REPORT's Plan mode row value, or an em dash when it is missing.
 The state is `on'/`off', with a `(queued off)'/`(queued on)'/
 `(change queued)' suffix when a change is pending."
   (let ((plan (alist-get 'plan report))
 		(missing (alist-get 'missing report)))
-	(cond
-	 ((member "plan" missing) "—")
-	 ((consp plan)
+	(if (or (member "plan" missing) (not (consp plan)))
+		"—"
 	  (let ((active (eq (alist-get 'active plan) t))
 			(pending-pair (assq 'pending plan))
 			(queued (eq (alist-get 'queued plan) t)))
-		(propertize (concat (if active "on" "off")
+		(concat (if active "on" "off")
 				(cond
 				 ((and pending-pair
 					   (dsh-bridge--json-false-p (cdr pending-pair)))
 				  " (queued off)")
 				 (pending-pair " (queued on)")
 				 (queued " (change queued)")
-				 (t ""))) 'face 'dsh-bridge-plan-face)))
-	 (t "—"))))
+				 (t "")))))))
 
 (defun dsh-bridge--describe-stats (stats)
   "Insert the Stats section from STATS, the report's `stats' alist."
   (dsh-bridge--describe-section "Stats")
+  ;; Turns/steps
+  (dsh-bridge--describe-label "Turns / steps")
+  (insert (dsh-bridge--format-number (alist-get 'turns stats)) "/"
+		  (dsh-bridge--format-number (alist-get 'steps stats)) "\n")
+  ;; LLM time amd tool time
+  (dsh-bridge--describe-label "LLM time")
+  (insert (dsh-bridge--format-duration (alist-get 'llmMs stats)) "\n")
+  (dsh-bridge--describe-label "Tool time")
+  (insert (dsh-bridge--format-duration (alist-get 'toolMs stats)) "\n")
+  ;; Time to first token (or its average)
+  (dsh-bridge--describe-label "First token")
   (let* ((ttft (alist-get 'ttftMs stats))
-		 (ttft-steps (alist-get 'ttftSteps stats))
-		 (decode-ms (alist-get 'decodeMs stats))
-		 (decode-tokens (alist-get 'decodeTokens stats)))
-	(dsh-bridge--describe-row
-	 "Turns / steps"
-	 (format "%s / %s" (dsh-bridge--format-number (alist-get 'turns stats))
-			 (dsh-bridge--format-number (alist-get 'steps stats))))
-	(dsh-bridge--describe-row "LLM time"
-							  (dsh-bridge--format-duration (alist-get 'llmMs stats)))
-	(dsh-bridge--describe-row "Tool time"
-							  (dsh-bridge--format-duration (alist-get 'toolMs stats)))
-	(dsh-bridge--describe-row
-	 "First token"
-	 (if (and (numberp ttft) (numberp ttft-steps) (> ttft-steps 0))
-		 (format "%s avg over %s steps"
-				 (dsh-bridge--format-duration (/ ttft (float ttft-steps)))
-				 (dsh-bridge--format-number ttft-steps))
-	   (dsh-bridge--format-duration ttft)))
-	(dsh-bridge--describe-row
-	 "Decode"
-	 (concat (dsh-bridge--format-duration decode-ms)
-			 (if (numberp decode-tokens)
-				 (format " · %s tokens" (dsh-bridge--format-number decode-tokens))
-			   "")
-			 (if (and (numberp decode-tokens) (numberp decode-ms) (> decode-ms 0))
-				 (format " · %.1f tok/s" (/ decode-tokens (/ decode-ms 1000.0)))
-			   "")))))
+		 (ttft-steps (alist-get 'ttftSteps stats)))
+	(if (and (numberp ttft) (numberp ttft-steps) (> ttft-steps 0))
+		(insert (dsh-bridge--format-duration (/ ttft (float ttft-steps)))
+				" avg over "
+				(dsh-bridge--format-number ttft-steps)
+				" steps\n")
+	  (insert (dsh-bridge--format-duration ttft) "\n")))
+  ;; Token decode stats
+  (dsh-bridge--describe-label "Decode")
+  (let ((decode-ms (alist-get 'decodeMs stats))
+		(decode-tokens (alist-get 'decodeTokens stats)))
+	(insert (dsh-bridge--format-duration decode-ms))
+	(when (numberp decode-tokens)
+	  (insert " · " (dsh-bridge--format-number decode-tokens) " tokens"))
+	(when (and (numberp decode-tokens) (numberp decode-ms) (> decode-ms 0))
+	  (insert (format " · %.1f tok/s"
+					  (/ decode-tokens (/ decode-ms 1000.0))))))
+  (insert "\n"))
 
 (defun dsh-bridge--describe-tokens (tokens)
   "Insert the Tokens section from TOKENS, the report's `tokens' alist."
   (dsh-bridge--describe-section "Tokens")
   (let ((uncached (alist-get 'uncachedInputTokens tokens))
-		(cache-read (alist-get 'cacheReadTokens tokens)))
-	(dsh-bridge--describe-row "Input (uncached)" (dsh-bridge--format-number uncached))
-	(dsh-bridge--describe-row "Output"
-							  (dsh-bridge--format-number (alist-get 'outputTokens tokens)))
-	(dsh-bridge--describe-row "Cache read" (dsh-bridge--format-number cache-read))
-	(dsh-bridge--describe-row "Cache write"
-							  (dsh-bridge--format-number (alist-get 'cacheWriteTokens tokens)))
-	(dsh-bridge--describe-row
-	 "Cache hit"
-	 (or (dsh-bridge--format-percent
-		  cache-read
-		  (and (numberp uncached) (numberp cache-read) (+ uncached cache-read)))
-		 "—"))))
+		(nout (alist-get 'outputTokens tokens))
+		(cache-read (alist-get 'cacheReadTokens tokens))
+		(cache-write (alist-get 'cacheWriteTokens tokens)))
+	(dsh-bridge--describe-label "Input (uncached)")
+	(insert (dsh-bridge--format-number uncached) "\n")
+	(dsh-bridge--describe-label "Output")
+	(insert (dsh-bridge--format-number nout) "\n")
+	(dsh-bridge--describe-label "Cache read")
+	(insert (dsh-bridge--format-number cache-read) "\n")
+	(dsh-bridge--describe-label "Cache write")
+	(insert (dsh-bridge--format-number cache-write) "\n")
+	(dsh-bridge--describe-label "Cache hit")
+	;; Guard the denominator: `(/ x 0)' yields inf/nan rather than an
+	;; error, so a zero total must fall back to the em dash.
+	(let ((total (and (numberp cache-read) (numberp uncached)
+					  (+ uncached cache-read))))
+	  (insert (if (and total (> total 0))
+				  (format "%.1f%%\n" (/ (* 100.0 cache-read) total))
+				"—\n")))))
 
 (defun dsh-bridge--describe-context (context breakdown)
   "Insert the Context section.
@@ -6986,158 +6953,167 @@ alist, or nil when the host reported none."
   (let ((next (or (alist-get 'projectedTokens context)
 				  (alist-get 'pressureTokens context)))
 		(window (alist-get 'contextWindow context)))
-	(dsh-bridge--describe-row
-	 "Next request"
-	 (if (numberp next)
-		 (concat (dsh-bridge--format-number next)
-				 (if (numberp window)
-					 (format " / %s" (dsh-bridge--format-number window))
-				   "")
-				 (let ((percent (dsh-bridge--format-percent next window)))
-				   (if percent (format " (%s)" percent) "")))
-	   "—"))
-	(dsh-bridge--describe-row "Last request"
-							  (dsh-bridge--format-number (alist-get 'pressureTokens context)))
-	(when breakdown
-	  (dsh-bridge--describe-row
-	   "Breakdown"
-	   (format "system %s · tools %s · messages %s"
-			   (dsh-bridge--format-number (alist-get 'systemTokens breakdown))
-			   (dsh-bridge--format-number (alist-get 'toolsTokens breakdown))
-			   (dsh-bridge--format-number (alist-get 'messageTokens breakdown)))))))
+	(dsh-bridge--describe-label "Next request")
+	(if (not (numberp next))
+		(insert "—")
+	  (insert (dsh-bridge--format-number next))
+	  (if (numberp window)
+		  (insert " / " (dsh-bridge--format-number window)))
+	  (when (and (numberp window) (> window 0))
+		(insert (format " (%.1f%%)" (/ (* 100.0 next) window)))))
+	(insert "\n"))
+  (dsh-bridge--describe-label "Last request")
+  (insert (dsh-bridge--format-number (alist-get 'pressureTokens context))
+		  "\n")
+  (when breakdown
+	(dsh-bridge--describe-label "Breakdown")
+	(let ((system (alist-get 'systemTokens breakdown))
+		  (tools  (alist-get 'toolsTokens breakdown))
+		  (messages (alist-get 'messageTokens breakdown)))
+	  (insert "system " (dsh-bridge--format-number system)
+			  " · tools " (dsh-bridge--format-number tools)
+			  " · messages " (dsh-bridge--format-number messages)))))
 
 (defun dsh-bridge--describe-goal (goal)
   "Insert the Goal section for GOAL, the report's `goal' alist."
   (dsh-bridge--describe-section "Goal")
   (let* ((snapshot (alist-get 'goal goal))
-		 (objective (dsh-bridge--normalized-string (alist-get 'objective snapshot)))
 		 (phase (dsh-bridge--normalized-string (alist-get 'phase snapshot)))
 		 (blocked (alist-get 'blockedReason snapshot))
 		 (activation (dsh-bridge--normalized-string (alist-get 'activation goal))))
-	(dsh-bridge--describe-row "Objective"
-				  (if objective
-				      (propertize objective 'face 'dsh-bridge-goal-face)
-				    "—"))
-	(dsh-bridge--describe-row
-	 "Actions"
-	 (lambda ()
-	   (dsh-bridge--describe-button
-		"edit" #'dsh-bridge-set-goal "mouse-1/RET: set or edit the goal")
-	   (insert " ")
-	   (dsh-bridge--describe-button
-		(if (and (equal phase "active") (equal activation "armed")) "pause" "resume")
-		(if (and (equal phase "active") (equal activation "armed"))
-			#'dsh-bridge-pause-goal
-		  #'dsh-bridge-resume-goal)
-		"mouse-1/RET: pause, or resume and rearm, the goal")
-	   (insert " ")
-	   (dsh-bridge--describe-button
-		"clear" #'dsh-bridge-clear-goal "mouse-1/RET: clear the goal")))
-	(dsh-bridge--describe-row "Phase" (or phase "—"))
-	(dsh-bridge--describe-row
-	 "Rounds"
-	 (format "%s/%s"
-			 (dsh-bridge--format-number (alist-get 'roundsStarted goal))
-			 (dsh-bridge--format-number (alist-get 'maxGoalRounds snapshot))))
+	(dsh-bridge--describe-label "Objective")
+	(let ((objective (dsh-bridge--normalized-string
+					  (alist-get 'objective snapshot))))
+	  (if objective
+		  (insert (propertize objective 'face 'dsh-bridge-goal-face) "\n")
+		(insert "—\n")))
+	(dsh-bridge--describe-label "Phase")
+	(insert (or phase "—") "\n")
+	(dsh-bridge--describe-label "Rounds")
+	(let ((started (alist-get 'roundsStarted goal))
+		  (max-rounds (alist-get 'maxGoalRounds snapshot)))
+	  (insert (dsh-bridge--format-number started) "/"
+			  (dsh-bridge--format-number max-rounds) "\n"))
 	(when (consp blocked)
-	  (dsh-bridge--describe-row
-	   "Blocked"
-	   (format "%s: %s"
-			   (or (dsh-bridge--normalized-string (alist-get 'code blocked)) "?")
-			   (or (dsh-bridge--normalized-string (alist-get 'message blocked)) "?"))))
+	  (dsh-bridge--describe-label "Blocked")
+	  (let ((code (alist-get 'code blocked))
+			(msg (alist-get 'message blocked)))
+		(insert (or (dsh-bridge--normalized-string code) "?")
+				": "
+				(or (dsh-bridge--normalized-string msg) "?")
+				"\n")))
 	(when (member activation '("armed" "disarmed"))
-	  (dsh-bridge--describe-row "Armed" activation))
-	(dsh-bridge--describe-row "Created" (dsh-bridge--format-time (alist-get 'createdAt goal)))
-	(dsh-bridge--describe-row "Updated" (dsh-bridge--format-time (alist-get 'updatedAt goal)))))
+	  (dsh-bridge--describe-label "Armed")
+	  (insert activation "\n"))
+	(dsh-bridge--describe-label "Created")
+	(insert (dsh-bridge--format-time (alist-get 'createdAt goal)) "\n")
+	(dsh-bridge--describe-label "Updated")
+	(insert (dsh-bridge--format-time (alist-get 'updatedAt goal)) "\n")))
 
 (defun dsh-bridge--describe-insert (id session status alist)
   "Insert the report body for session ID (nil when unknown).
 SESSION is the cached session row or nil; STATUS and ALIST are the
 `/session' response.  A non-200 STATUS renders the cached facts plus the
 failure reason, never a fake zero."
-  (let* ((report (and (eq status 200) (listp alist) alist))
-		 (failure (unless report
-					(or (dsh-bridge--error-message nil status alist)
-						"request failed or timed out")))
-		 (title (or (dsh-bridge--normalized-string (alist-get 'title report))
-					(dsh-bridge--normalized-string (alist-get 'title session))
-					"[Untitled Session]"))
-		 (live (if report (eq (alist-get 'live report) t)
-				 (and session (alist-get 'live session))))
-		 (running (and report (eq (alist-get 'running report) t)))
-		 (cwd (or (dsh-bridge--normalized-string (alist-get 'cwd report))
-				  (dsh-bridge--normalized-string (alist-get 'cwd session))))
-		 (workspace (dsh-bridge--normalized-string (alist-get 'workspace report)))
-		 (created (or (alist-get 'createdAt report) (alist-get 'createdAt session)))
-		 (last-active (or (alist-get 'lastActive report)
-						  (alist-get 'lastActive session)))
-		 (parent (dsh-bridge--normalized-string (alist-get 'parentSession report)))
-		 (preset (dsh-bridge--normalized-string (alist-get 'agentPreset report)))
-		 (model (dsh-bridge--describe-model-label report))
-		 (permissions (dsh-bridge--describe-permission-label report))
-		 (plan (dsh-bridge--describe-plan-label report)))
-	(insert (propertize (format "DSH session %s" title)
-						'face 'dsh-bridge-describe-heading-face)
-			"\n\n")
-	(when failure
-	  (insert (propertize (format "  Report unavailable: %s\n" failure) 'face 'error)))
-	(dsh-bridge--describe-row "Id" (or id "(unknown)") "The raw DSH session id")
-	(dsh-bridge--describe-row "State" (format "%s%s" (if live "live" "saved")
-											  (if running " · running" "")))
-	(dsh-bridge--describe-row "Created" (dsh-bridge--format-time created))
-	(dsh-bridge--describe-row "Last prompt"
-							  (dsh-bridge--format-time (alist-get 'lastPromptAt report)))
-	(dsh-bridge--describe-row "Last active" (dsh-bridge--format-time last-active))
-	(dsh-bridge--describe-row
-	 "Directory"
-	 (if cwd
-		 (lambda ()
-		   (dsh-bridge--describe-button cwd
-										(lambda () (dsh-bridge--describe-open-directory cwd))))
-	   "—")
-	 cwd)
-	(when workspace
-	  (dsh-bridge--describe-row
-	   "Workspace"
-	   (lambda ()
-		 (dsh-bridge--describe-button workspace
-									  (lambda () (dsh-bridge--describe-open-directory cwd))))))
-	(dsh-bridge--describe-row "Preset" (or preset "—"))
-	(dsh-bridge--describe-row
-	 "Model"
-	 (if model
-		 (lambda ()
-		   (dsh-bridge--describe-button
-			model (lambda () (dsh-bridge--describe-open-prompt id))
-			"mouse-1/RET: open the prompt buffer (C-c C-m changes the model)"))
-	   "default"))
-	(dsh-bridge--describe-row "Permissions"
-							  (if permissions (car permissions) "—")
-							  (cdr permissions))
-	(dsh-bridge--describe-row "Plan mode" plan)
-	(when parent
-	  (dsh-bridge--describe-row
-	   "Forked from"
-	   (lambda ()
-		 (help-insert-xref-button parent 'dsh-bridge-describe-session-xref parent))))
+  (let ((report (and (eq status 200) (listp alist) alist)))
+	;; Header
+	(insert
+	 (propertize
+	  (format "DSH session %s"
+			  (or (dsh-bridge--normalized-string (alist-get 'title report))
+				  (dsh-bridge--normalized-string (alist-get 'title session))
+				  "[Untitled Session]"))
+	  'face 'dsh-bridge-describe-heading-face)
+	 "\n\n")
+	(unless report
+	  (let ((failure (or (dsh-bridge--error-message nil status alist)
+						 "request failed or timed out")))
+		(insert (propertize (format "  Report unavailable: %s\n" failure)
+							'face 'error))))
+	;; Session ID and state
+	(dsh-bridge--describe-label "Id")
+	(insert (or id "(unknown)") "\n")
+	(dsh-bridge--describe-label "State")
+	(let ((live (if report
+					(eq (alist-get 'live report) t)
+				  (and session (alist-get 'live session))))
+		  (running (and report (eq (alist-get 'running report) t))))
+	  (insert (if live "live" "saved")
+			  (if running " · running\n" "\n")))
+	;; Creation, prompt, and last-active time
+	(dsh-bridge--describe-label "Created")
+	(let ((created (or (alist-get 'createdAt report)
+					   (alist-get 'createdAt session))))
+	  (insert (dsh-bridge--format-time created) "\n"))
+	(dsh-bridge--describe-label "Last prompt")
+	(insert (dsh-bridge--format-time (alist-get 'lastPromptAt report))
+			"\n")
+	(dsh-bridge--describe-label "Last active")
+	(insert (dsh-bridge--format-time (or (alist-get 'lastActive report)
+										 (alist-get 'lastActive session)))
+			"\n")
+	;; Working directory and workspace
+	(let ((cwd (or (alist-get 'cwd report)
+				   (alist-get 'cwd session)))
+		  (workspace (alist-get 'workspace report)))
+	  (dsh-bridge--describe-label "Directory")
+	  (setq cwd (dsh-bridge--normalized-string cwd))
+	  (if cwd
+          (insert-text-button cwd
+							  'path cwd
+							  'action #'dsh-bridge--button-visit
+							  'follow-link t)
+		(insert "—"))
+	  (insert "\n")
+	  (dsh-bridge--describe-label "Workspace")
+	  (insert (or (dsh-bridge--normalized-string workspace) "—") "\n"))
+	;; Preset, model, permissions
+	(dsh-bridge--describe-label "Preset")
+	(insert (or (dsh-bridge--normalized-string (alist-get 'agentPreset report))
+				"—")
+			"\n")
+	(dsh-bridge--describe-label "Model")
+	(insert (or (dsh-bridge--describe-model-label report) "(default)"))
+	(insert "\n")
+	(dsh-bridge--describe-label "Permissions")
+	(let* ((permissions (alist-get 'permissions report))
+		   (current     (dsh-bridge--normalized-string
+						 (alist-get 'currentValue permissions)))
+		   (options     (alist-get 'options permissions))
+		   match)
+	  (if (null current)
+		  (insert "—")
+		(setq match (seq-find (lambda (opt)
+								(equal (alist-get 'value opt) current))
+							  options))
+		(insert (or (dsh-bridge--normalized-string (alist-get 'name match))
+					current "—"))))
+	(insert "\n")
+	;; Parent session
+	(let ((parent (dsh-bridge--normalized-string
+				   (alist-get 'parentSession report))))
+	  (when parent
+		(dsh-bridge--describe-label "Forked from")
+		(help-insert-xref-button parent 'dsh-bridge-describe-session-xref
+								 parent)))
 	(when (eq (alist-get 'isSeeded report) t)
-	  (dsh-bridge--describe-row "Seeded" "yes"))
+	  (dsh-bridge--describe-label "Seeded")
+	  (insert "yes\n"))
+	;; Plan and goal mode indicators
+	(let ((goal (alist-get 'goal report)))
+	  (dsh-bridge--describe-label "Plan mode")
+	  (insert (dsh-bridge--describe-plan-label report))
+	  (insert "\n")
+	  (when goal
+		(dsh-bridge--describe-goal goal)))
+	;; Other sections
 	(let ((stats   (alist-get 'stats report))
 		  (tokens  (alist-get 'tokens report))
 		  (context (alist-get 'context report))
-		  (breakdown (alist-get 'breakdown report))
-		  (goal    (alist-get 'goal report)))
+		  (breakdown (alist-get 'breakdown report)))
 	  (when stats   (dsh-bridge--describe-stats stats))
 	  (when tokens  (dsh-bridge--describe-tokens tokens))
-	  (when context (dsh-bridge--describe-context context breakdown))
-	  (when goal    (dsh-bridge--describe-goal goal)))))
-
-(defun dsh-bridge--describe-open-directory (directory)
-  "Open DIRECTORY in Dired, or as a file when it is not a directory."
-  (interactive "DDirectory: ")
-  (if (and (stringp directory) (not (string-empty-p directory)))
-	  (if (file-directory-p directory) (dired directory) (find-file directory))
-	(message "dsh-bridge: no directory recorded")))
+	  (when context (dsh-bridge--describe-context context breakdown)))))
 
 (defun dsh-bridge--describe-open-prompt (&optional id)
   "Open the DSH-Prompt buffer for the described session."
