@@ -7250,7 +7250,7 @@ session is waiting for an answer, and nothing jumps: the user did not act."
     (with-current-buffer (get-buffer "*dsh-bridge-question: T*")
       (should dsh-bridge--question-resolution)
       (should (string-match-p
-               "\\`This question was answered elsewhere (not in this buffer)\\.\n"
+               "\\`Query answered elsewhere (not in this buffer)\\.\n"
                (buffer-string)))
       (should-not (string-match-p "is waiting for your answer" (buffer-string))))
     (when (buffer-live-p (get-buffer "*dsh-bridge-question: T*"))
@@ -7313,7 +7313,7 @@ without jumping."
     (with-current-buffer (get-buffer "*dsh-bridge-question: T*")
       (should dsh-bridge--question-resolution)
       (should (string-match-p
-               "\\`This question was cancelled\\.\n"
+               "\\`Query cancelled\\.\n"
                (buffer-string)))
       (should-not (string-match-p "answered elsewhere" (buffer-string)))
       (should-not (string-match-p "is waiting for your answer" (buffer-string))))
@@ -7761,7 +7761,7 @@ user's action did not settle the question, so no jump happens."
                  (lambda (&rest _) (setq exited t))))
         (dsh-bridge--question-submit))
       (should dsh-bridge--question-resolution)
-      (should (string-match-p "already answered or cancelled" (buffer-string)))
+      (should (string-match-p "Query already resolved" (buffer-string)))
       (should-not exited))
     (when (dsh-bridge--question-find-buffer "q1")
       (kill-buffer (dsh-bridge--question-find-buffer "q1")))))
@@ -7846,7 +7846,7 @@ answered note."
                  (lambda (&rest _) (setq exited t))))
         (dsh-bridge--question-decline))
       (should dsh-bridge--question-resolution)
-      (should (string-match-p "already answered or cancelled" (buffer-string)))
+      (should (string-match-p "Query already resolved" (buffer-string)))
       (should-not (assoc "s1" dsh-bridge--view-answer-notes))
       (should-not exited))
     (when (dsh-bridge--question-find-buffer "q1")
@@ -7979,6 +7979,12 @@ the `face' property, which is the whole contract here: these buffers carry no
         ;; if someone turned Font Lock on, which is not this buffer's contract.
         (should-not (text-property-any (point-min) (point-max)
                                        'font-lock-face face)))
+      ;; The help prose takes the furniture face as a block, but
+      ;; `substitute-command-keys' has already faced its key specs; the
+      ;; block pass must leave those alone (see
+      ;; `dsh-bridge--question-add-face').
+      (should (text-property-any (point-min) (point-max)
+                                 'face 'help-key-binding))
       ;; Marking an option faces the mark inside its box, and the label, as
       ;; selected; the bracket around the mark stays furniture.
       (goto-char (point-min))

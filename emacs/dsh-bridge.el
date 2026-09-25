@@ -4184,16 +4184,15 @@ no-op for sessions no view shows in either state."
 ;; mutually exclusive with selectable answers, or co-exist with them.
 
 (defvar-local dsh-bridge--question-request-id nil
-  "The bridge-minted request id this question buffer answers.
-The host names it `questionId' on the wire.  Each question in
-`dsh-bridge--question-questions' carries the asker's own `id' as well;
-that per-question id is what keys the selection state below.")
+  "The bridge-minted request id for this DSH-Question buffer.
+This is the id listed under `questionId' on the bridge, which is
+distinct from the per-question ids in `dsh-bridge--question-questions'.")
 
 (defvar-local dsh-bridge--question-session nil
-  "The session id this question buffer asks about.")
+  "The session id this DSH-Question buffer asks about.")
 
 (defvar-local dsh-bridge--question-questions nil
-  "The parsed question list this buffer renders.")
+  "The parsed question list this DSH-Question buffer renders.")
 
 (defvar-local dsh-bridge--question-selection nil
   "Alist of (QID . (SELECTED-LABEL ...)) for marked options.")
@@ -4205,20 +4204,12 @@ that per-question id is what keys the selection state below.")
   "List of QIDs the user chose to skip (answered with no selection).")
 
 (defvar-local dsh-bridge--question-resolution nil
-  "The resolution banner once the question is resolved, or nil while open.
-Non-nil also means the question this buffer asks is no longer pending, so
-this doubles as the buffer's resolved flag.  Set by
-`dsh-bridge--question-mark-resolved' and re-emitted by
-`dsh-bridge--question-render', which also drops the now-false \"waiting
-for your answer\" header.")
+  "The DSH-Question buffer's resolution banner, or nil if unresolved.")
 
 (defvar-local dsh-bridge--question-sent nil
-  "The outcome symbol (`sent' or `declined') this buffer itself POSTed, or nil.
-Set before the POST leaves.  The host broadcasts `ask-user-resolved' when the
-waterfall settles, and that frame can reach us before the POST's own response
-is handled; `dsh-bridge--question-mark-resolved' then prefers this record over
-the incoming outcome, so the banner repeats what this buffer did rather than
-\"answered elsewhere\".")
+  "The outcome (`sent' or `declined') posted from this DSH-Question buffer.
+The value is nil if no outcome has been posted (including if the
+question is resolved from the DSH web interface).")
 
 (defun dsh-bridge--question-find-buffer (request-id)
   "The live question buffer answering REQUEST-ID, or nil."
@@ -4228,20 +4219,10 @@ the incoming outcome, so the banner repeats what this buffer did rather than
 		     (equal dsh-bridge--question-request-id request-id))))
 	    (buffer-list)))
 
-(defconst dsh-bridge--question-outcome-messages
-  '((sent . "Your answer was sent.")
-    (declined . "You declined to answer; the question was cancelled.")
-    (cancelled . "This question was cancelled.")
-    (elsewhere . "This question was answered elsewhere (not in this buffer).")
-    (not-pending . "This question was already answered or cancelled.")
-    (stale . "This question is no longer pending."))
-  "Resolution banner text for each ask-user resolution OUTCOME.
-Used by `dsh-bridge--question-mark-resolved'.")
-
 (defun dsh-bridge--question-mark-resolved (request-id outcome)
   "Mark the DSH-Question buffer for REQUEST-ID as resolved.
 OUTCOME says how the question was settled and selects the resolution
-banner, through `dsh-bridge--question-outcome-messages':
+banner:
 
 - `sent' (this buffer submitted an answer)
 - `declined' (this buffer declined the question)
@@ -4252,28 +4233,34 @@ banner, through `dsh-bridge--question-outcome-messages':
 
 For the first four, the banner prefers `dsh-bridge--question-sent' if
 that is non-nil.  If the host's resolved frame outruns the answer POST's
-response, this buffer's own record is the actual banner.  The last two do
-not consult it: a rejected POST leaves the record set although this
+response, this buffer's own record is the actual banner.  The last two
+do not consult it: a rejected POST leaves the record set although this
 buffer did not settle the question.
 
-This function does nothing if the buffer was already resolved.	It also
+This function does nothing if the buffer was already resolved. It also
 performs no window management; the caller is responsible for displaying
 the result on-screen."
   (let ((buffer (dsh-bridge--question-find-buffer request-id)))
     (when buffer
       (with-current-buffer buffer
 	(unless dsh-bridge--question-resolution
-	  ;; Only a settling outcome consults this buffer's own record: a
-	  ;; rejected POST leaves it set although this buffer did not
-	  ;; settle the question.
-	  (let* ((settled (memq outcome '(sent declined cancelled elsewhere)))
-		 (record (and settled
-			      (alist-get dsh-bridge--question-sent
-					 dsh-bridge--question-outcome-messages))))
-	    (setq-local dsh-bridge--question-resolution
-			(or record
-			    (alist-get outcome dsh-bridge--question-outcome-messages)
-			    (error "dsh-bridge: unknown resolution outcome %S" outcome))))
+	  ;; Only a settling outcome consults this buffer's own
+	  ;; record: a rejected POST leaves it set although this
+	  ;; buffer did not settle the question.
+	  (let* ((msgs '((sent . "Your answer was sent.")
+			 (declined . "You declined to answer.")
+			 (cancelled . "Query cancelled.")
+			 (elsewhere . "Query answered elsewhere \
+(not in this buffer).")
+			 (not-pending . "Query already resolved.")
+			 (stale . "Query no longer pending.")))
+		 (settled (memq outcome '(sent declined cancelled elsewhere)))
+		 (record (or (and settled
+				  (alist-get dsh-bridge--question-sent msgs))
+			     (alist-get outcome msgs))))
+	    (if record
+		(setq-local dsh-bridge--question-resolution record)
+	      (error "dsh-bridge: unknown query resolution %S" outcome)))
 	  (dsh-bridge--question-render))))))
 
 (defun dsh-bridge--ask-user-session-clear (session-id)
@@ -4281,21 +4268,20 @@ the result on-screen."
 Defensive cleanup on `turn-complete': a turn that ended without a resolved
 frame cannot still be waiting on the user."
   (dolist (pending (cdr (assoc session-id dsh-bridge--pending-questions)))
-    (dsh-bridge--question-mark-resolved
-     (car pending) 'stale))
+    (dsh-bridge--question-mark-resolved (car pending) 'stale))
   (setq dsh-bridge--pending-questions
 	(assoc-delete-all session-id dsh-bridge--pending-questions)))
 
 (defun dsh-bridge--ask-user-arrive (session-id request-id questions)
-  "Record a newly arrived ask-user question and announce it.
-Only the registry entry is materialized here; the question buffer is created
-on demand when the user runs `\\[dsh-bridge-answer]', so an ask that arrives
-while the user is elsewhere leaves no buffer to go stale, and one that is
-resolved before it is ever opened leaves no trace at all.  The announcement is
-the echo-area message and the DSH-View body.
-A request id already in the registry is a replay — the plugin re-announces
-pending asks to every reconnecting SSE client — so it just refreshes the
-stored copy, silently, without re-messaging or re-rendering."
+  "Process a newly-arrived query from the DSH bridge.
+The announcement is made in the echo area and the session's DSH-View
+buffer (if any); the query is stored in `dsh-bridge--pending-questions'.
+In case the request id is already in the registry, refresh the stored
+copy silently (this may happen if another SSE client reconnects, which
+triggers the DSH plugin to re-announce pending asks).
+
+This function does not create the DSH-Question buffer; that is done on
+demand by `\\[dsh-bridge-answer]'."
   (let* ((entry (assoc session-id dsh-bridge--pending-questions))
 	 (slot (and entry (assoc request-id (cdr entry)))))
     (if slot
@@ -4311,17 +4297,16 @@ stored copy, silently, without re-messaging or re-rendering."
 		 (or (and (stringp q) (substring q 0 (min 60 (length q)))) "")
 		 (substitute-command-keys "\\[dsh-bridge-answer]")))
       (dsh-bridge--status-event-render session-id)
-      ;; The DSH-View body must say the session is parked, not "(continuing...)".
+      ;; DSH-View must say session is parked, not "(continuing...)".
       (dsh-bridge--view-await-refresh session-id))))
 
 (defun dsh-bridge--ask-user-resolved (session-id request-id outcome)
-  "Retire a pending ask for SESSION-ID when it was ANSWERED or CANCELLED.
-The banner repeats what this buffer did when this Emacs was the one answering:
-the host's resolved frame races the answer POST's response, so \"answered
-elsewhere\" is only right when the buffer has no local submit on record."
+  "Retire a pending ask for SESSION-ID if it was answered or cancelled.
+Update the DSH-Question buffer's banner accordingly."
   (let ((entry (assoc session-id dsh-bridge--pending-questions)))
     (when entry
-      (setcdr entry (cl-delete request-id (cdr entry) :key #'car :test #'equal))
+      (setcdr entry (cl-delete request-id (cdr entry)
+			       :key #'car :test #'equal))
       (when (null (cdr entry))
 	(setq dsh-bridge--pending-questions
 	      (assoc-delete-all session-id dsh-bridge--pending-questions)))))
@@ -4334,13 +4319,14 @@ elsewhere\" is only right when the buffer has no local submit on record."
 ;; The DSH-Question buffer
 
 (defun dsh-bridge--question-buffer (session-id request-id questions)
-  "Find or create the question buffer for REQUEST-ID and return it.
-A live buffer already answering REQUEST-ID is returned untouched, so burying
-with `q' and returning with `a' keeps any in-progress marks.  A name collision
-(two sessions sharing a label, each with a pending ask) gets a fresh name."
+  "Return a DSH-Question buffer for REQUEST-ID.
+A live buffer already answering REQUEST-ID is returned, keeping any
+in-progress marks untouched.  A name collision (two sessions sharing a
+label, each with a pending ask) gets a fresh name."
   (let ((existing (dsh-bridge--question-find-buffer request-id)))
     (if (and existing
-	     (with-current-buffer existing (not dsh-bridge--question-resolution)))
+	     (with-current-buffer existing
+	       (not dsh-bridge--question-resolution)))
 	existing
       (let* ((base (format "*dsh-bridge-question: %s*"
 			   (dsh-bridge--session-label session-id)))
@@ -5076,17 +5062,14 @@ decision prompt."
 	  (insert "\n")
 	  (dsh-bridge--insert "Tool call arguments"
 			      'dsh-bridge-question-heading-face t)
-	  (let ((start (point)))
-	    (insert (dsh-bridge--approval-format-arguments arguments) "\n")
-	    (dsh-bridge--question-add-face
-	     start (point) 'dsh-bridge-question-detail-face)))))
+	  (dsh-bridge--insert (dsh-bridge--approval-format-arguments arguments)
+			      'dsh-bridge-question-detail-face t))))
     (when (eq dsh-bridge-approval-answer 'notify-only)
       (insert "\n")
-      (let ((start (point)))
-	(insert "Approval answering is disabled (dsh-bridge-approval-answer \
-is notify-only); resolve this request in the web UI.\n")
-	(dsh-bridge--question-add-face
-	 start (point) 'dsh-bridge-question-furniture-face)))
+      (dsh-bridge--insert "Approval answering is disabled \
+(dsh-bridge-approval-answer is notify-only); \
+resolve this request in the web UI."
+			  'dsh-bridge-question-furniture-face t))
     (buffer-string)))
 
 ;; Showing and deciding ------------------------------------------------------
