@@ -1813,6 +1813,52 @@ after its last segment."
         (should (null dsh-bridge--view-browsing))
         (should (string-match-p " (latest/3)" (dsh-bridge--view-header-line)))))))
 
+(ert-deftest dsh-bridge-view-turn-navigation-waiting ()
+  "M-p from a post-send `(running...)' placeholder reaches the prior turn.
+The placeholder is anchored to the awaited turn, which has no record yet, so a
+miss on that lookup must step from *before* the list start; treating it as
+\"already showing the newest cached turn\" stepped past it."
+  (let ((dsh-bridge--turns-cache
+         (dsh-bridge-test--view-cache dsh-bridge-test--view-turns)))
+    (with-temp-buffer
+      (dsh-bridge-view-mode)
+      (setq-local dsh-bridge--view-content-session "s1")
+      (dsh-bridge--view-waiting-fill "s1" 30)
+      (should (eq dsh-bridge--view-waiting t))
+      (cl-letf (((symbol-function 'dsh-bridge--request)
+                 (lambda (&rest _) dsh-bridge-test--turns-response)))
+        (dsh-bridge-view-previous-reply))
+      (should (equal (buffer-string) dsh-bridge-test--view-newest-rendered))
+      (should (equal dsh-bridge--view-turn 30))
+      (should (eq dsh-bridge--view-browsing t))
+      (should (null dsh-bridge--view-waiting))
+      (should (string-match-p " (1/3)" (dsh-bridge--view-header-line)))
+      ;; The walk then continues to the next older turn as usual.
+      (dsh-bridge-view-previous-reply)
+      (should (equal (buffer-string) dsh-bridge-test--view-middle-rendered)))))
+
+(ert-deftest dsh-bridge-view-turn-navigation-waiting-single-turn ()
+  "With one cached turn, M-p from the placeholder shows it instead of refusing.
+The old step arithmetic saw the awaited turn's miss as position 0 and stepped
+to position 1, which is past the single cached turn: it reported \"at the
+oldest turn\" and left the placeholder on screen."
+  (let* ((only (list (nth 0 dsh-bridge-test--view-turns)))
+         (dsh-bridge--turns-cache (dsh-bridge-test--view-cache only))
+         (response (cons 200 (list (cons 'sessionId "s1")
+                                   (cons 'turns only)
+                                   (cons 'epoch 0)
+                                   (cons 'incremental nil)))))
+    (with-temp-buffer
+      (dsh-bridge-view-mode)
+      (setq-local dsh-bridge--view-content-session "s1")
+      (dsh-bridge--view-waiting-fill "s1" 30)
+      (cl-letf (((symbol-function 'dsh-bridge--request)
+                 (lambda (&rest _) response)))
+        (dsh-bridge-view-previous-reply))
+      (should (equal (buffer-string) dsh-bridge-test--view-newest-rendered))
+      (should (equal dsh-bridge--view-turn 30))
+      (should (eq dsh-bridge--view-browsing t)))))
+
 (ert-deftest dsh-bridge-view-turn-navigation-no-turns ()
   "With no turns, M-p reports it and leaves the buffer alone."
   (let ((dsh-bridge--turns-cache nil)
@@ -5210,7 +5256,9 @@ per-buffer decision, not a helper: it is covered at the caller level by
       (should (equal dsh-bridge--view-turn 3))
       (should (eq dsh-bridge--view-follow t))
       ;; The awaited turn has no record yet: a lookup by its number misses,
-      ;; which is what keeps fork/copy/M-p/M-n inert during the placeholder.
+      ;; which is what keeps fork/copy/M-n inert during the placeholder (M-p
+      ;; still walks back to the newest cached turn; see
+      ;; `dsh-bridge-view-turn-navigation-waiting').
       (should-not (dsh-bridge--view-turn-index
                    (dsh-bridge--turns-cache-turns "s1")))
       ;; Not a turn, so no position segment.

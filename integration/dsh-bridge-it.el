@@ -872,6 +872,57 @@ collapses, and the view lands at the new turn's tail."
           (should (equal (marker-position probe) (point-min)))))
       (set-marker probe nil))))
 
+(ert-deftest dsh-bridge-it-view-previous-after-send ()
+  "M-p in the post-send `(running...)' view reaches the session's prior turn.
+The reported sequence: a session with completed history, a prompt sent from
+the DSH-Prompt buffer (the mock hangs, so the popped DSH-View keeps its
+placeholder), then M-p.  The placeholder is anchored to the awaited turn,
+which `/turns' does not hold yet, and the walk used to step past the
+newest cached turn — with one prior turn it refused outright (\"at the
+oldest turn\"), with more it skipped one."
+  (dsh-bridge-it--with-fixture
+    ;; Two completed turns of history, with distinct reply texts.
+    (dsh-bridge-it--script-mock
+     (vector (list :kind "text" :text "Reply one.")
+             (list :kind "text" :text "Reply two.")))
+    (let ((session-id (dsh-bridge-it--create-session
+                       (expand-file-name "../" dsh-bridge-it--directory))))
+      (dsh-bridge-it--notifications-start)
+      (dsh-bridge-send-text "Prompt one." session-id)
+      (should (dsh-bridge-it--wait-for-completed-turn session-id 30000))
+      (dsh-bridge-send-text "Prompt two." session-id)
+      ;; Wait for the *second* turn specifically; the first is already a
+      ;; completed newest turn and would satisfy a looser predicate.
+      (should (dsh-bridge-it--wait
+               (lambda ()
+                 (let* ((path (dsh-bridge--path "/turns" session-id))
+                        (result (dsh-bridge--request "GET" path nil))
+                        (newest (car (alist-get 'turns (cdr result)))))
+                   (and newest (equal (alist-get 'turn newest) 2)
+                        (alist-get 'endSeq newest))))
+               30000))
+      ;; The reported send: the mock hangs, so the view shows the placeholder.
+      (dsh-bridge-it--script-mock (vector (list :kind "hang")))
+      (dsh-bridge-it--prompt-send session-id "Prompt three.")
+      (with-current-buffer (dsh-bridge-it--view session-id)
+        (should (eq dsh-bridge--view-waiting t))
+        (should (equal dsh-bridge--view-turn 3))
+        (should (string-match-p "(running\\.\\.\\.)" (buffer-string)))
+        ;; M-p shows the immediately previous turn (turn 2), not turn 1 and
+        ;; not a refusal; browsing ends the waiting state.
+        (dsh-bridge-view-previous-reply)
+        (should (equal dsh-bridge--view-turn 2))
+        (should (eq dsh-bridge--view-browsing t))
+        (should (null dsh-bridge--view-waiting))
+        (should (string-match-p "Reply two\\." (buffer-string)))
+        (should-not (string-match-p "Reply one\\." (buffer-string)))
+        (should (string-match-p " (1/2)" (dsh-bridge--view-header-line)))
+        ;; The walk continues to the oldest turn.
+        (dsh-bridge-view-previous-reply)
+        (should (equal dsh-bridge--view-turn 1))
+        (should (string-match-p "Reply one\\." (buffer-string)))
+        (should (string-match-p " (2/2)" (dsh-bridge--view-header-line)))))))
+
 (ert-deftest dsh-bridge-it-stop-session ()
   "Stopping a hung turn works end to end and a second stop is a no-op.
 The mock hangs the turn, so the only way it can end is the stop route; the

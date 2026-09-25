@@ -3638,7 +3638,11 @@ state, and ends any waiting state (`dsh-bridge--view-waiting')."
 an idle reply, shown with every segment it committed.  Entering navigation
 from rest force-refreshes the session's turn list, so the step and the
 `(k/n)' count are current; subsequent steps reuse the cache.  Also leaves
-turn-following state."
+turn-following state.
+
+A view still waiting for its just-sent turn (the `(running...)' placeholder)
+is anchored to a turn the list cannot hold yet, so its first `M-p' shows the
+newest cached turn."
   (interactive)
   (setq-local dsh-bridge--view-follow nil)
   (let ((turns (dsh-bridge--view-turns-refresh
@@ -3646,9 +3650,19 @@ turn-following state."
     (if (null turns)
 	(message "dsh-bridge: no turns in this session")
       (let* ((index (dsh-bridge--view-turn-index turns))
-	     ;; Content with no turn identity (a pushed message) counts as
-	     ;; newest position: the first M-p steps one older.
-	     (next (1+ (or index 0))))
+	     ;; POS is the position the walk steps back from.  The buffer's
+	     ;; anchor (`dsh-bridge--view-turn') is normally the displayed
+	     ;; turn; when it is a number the list does not hold — the
+	     ;; awaited turn of a waiting view, or a turn a refresh dropped —
+	     ;; the buffer shows content newer than every cached turn, so the
+	     ;; step lands on the newest cached one (position -1).  Only
+	     ;; content with no turn identity at all (a pushed message)
+	     ;; counts as the newest position itself, whose first M-p steps
+	     ;; one older.
+	     (pos (cond (index index)
+			((numberp dsh-bridge--view-turn) -1)
+			(t 0)))
+	     (next (1+ pos)))
 	(if (>= next (length turns))
 	    (message "dsh-bridge: at the oldest turn")
 	  (dsh-bridge--view-show-turn next turns))))))
