@@ -288,16 +288,17 @@ interface ProjectionSnapshotLike {
  * `ctx.get` — a profile without the cache simply yields undefined and the
  * bridge falls back to a read-handle log fold for cold titles.
  *
- * `inheritedEventCount` completes the checkpoint identity and is required by
- * the service (it validates the value as a `SessionLogOffset` and refuses an
- * unseeded header with a nonzero cut). The bridge only knows an exact cut for
- * an unseeded header, so `coldSessionTitle` passes 0 there and skips the cache
- * for seeded (forked) headers, mirroring the harness's own list projection.
+ * The zero-I/O listing face takes the header alone as the identity witness
+ * (format version, creation time, cwd, and the seeded flag — not the exact
+ * inherited prefix length, which is Session state) and serves seeded (forked)
+ * lifecycles as well as unseeded ones. The optional second argument narrows
+ * the viewed projection keys; `coldSessionTitle` asks for `title` only. The
+ * bridge's call is guarded: a harness API drift here degrades to the log fold
+ * rather than failing the listing.
  */
 interface ProjectionCacheService {
   cachedSnapshot(
     meta: SessionHeader,
-    inheritedEventCount: number,
     keys?: readonly string[],
   ): ProjectionSnapshotLike | undefined
 }
@@ -1708,10 +1709,6 @@ export function apply(ctx: Context): void {
    * recoverable from the log. Only an untitled session — usually blank, hence
    * a cheap log — pays for that read.
    *
-   * A seeded (forked) header's checkpoint identity needs the exact inherited
-   * prefix length, which is Session state rather than header metadata; the
-   * cache is trusted only for unseeded headers (the harness's list projection
-   * takes the same shortcut), and a seeded one falls through to the log read.
    * The cache read is itself guarded: an API drift there must degrade to the
    * log fold, not reject the caller's whole cold listing. Fail-soft: a title
    * is a display nicety and must never hide the session row.
@@ -1722,7 +1719,7 @@ export function apply(ctx: Context): void {
     header: SessionHeader,
   ): Promise<string | null> {
     try {
-      const snapshot = header.isSeeded ? undefined : cache?.cachedSnapshot(header, 0)
+      const snapshot = cache?.cachedSnapshot(header, ['title'])
       if (snapshot !== undefined) {
         const title = snapshot.values.title
         if (typeof title === 'string' && title !== '') return title
