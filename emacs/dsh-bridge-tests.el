@@ -7961,8 +7961,8 @@ how to edit or clear it."
 (ert-deftest dsh-bridge-question-fontification ()
   "The ask-user buffer faces its structure: heading, question text, furniture,
 option labels, the selected mark, and the skip suffix.  Each face is set as
-both `face' and `font-lock-face' so it shows with font-lock off and survives a
-font-lock pass."
+the `face' property, which is the whole contract here: these buffers carry no
+`font-lock-defaults', so `font-lock-face' is never consulted."
   (let ((dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t)))))
     (with-current-buffer
         (dsh-bridge--question-buffer "s1" "q1"
@@ -7974,8 +7974,13 @@ font-lock pass."
                       dsh-bridge-question-furniture-face
                       dsh-bridge-question-option-face))
         (should (text-property-any (point-min) (point-max) 'face face))
-        (should (text-property-any (point-min) (point-max) 'font-lock-face face)))
-      ;; Marking an option faces its box and label as selected.
+        ;; The buffer's own structural faces are `face'-only: with no
+        ;; `font-lock-defaults' a `font-lock-face' copy would only take effect
+        ;; if someone turned Font Lock on, which is not this buffer's contract.
+        (should-not (text-property-any (point-min) (point-max)
+                                       'font-lock-face face)))
+      ;; Marking an option faces the mark inside its box, and the label, as
+      ;; selected; the bracket around the mark stays furniture.
       (goto-char (point-min))
       (re-search-forward "1\\. Yes")
       (goto-char (line-beginning-position))
@@ -7984,6 +7989,11 @@ font-lock pass."
       (goto-char (point-min))
       (should (re-search-forward "\\[x\\]" nil t))
       (should (eq (get-text-property (match-beginning 0) 'face)
+                  'dsh-bridge-question-furniture-face))
+      (should (eq (get-text-property (1+ (match-beginning 0)) 'face)
+                  'dsh-bridge-question-selected-face))
+      ;; The label right after the box is selected too.
+      (should (eq (get-text-property (+ 4 (match-end 0)) 'face)
                   'dsh-bridge-question-selected-face))
       ;; Skipping faces the suffix.
       (dsh-bridge--question-skip)

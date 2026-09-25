@@ -85,6 +85,12 @@ This should match the version reported by the running DSH plugin.")
   "Return STR if it is a non-empty string, else nil."
   (and (stringp str) (not (string-empty-p str)) str))
 
+(defun dsh-bridge--insert (string face &optional append-newline)
+  "Insert STRING carrying FACE as the `face' property.
+If APPEND-NEWLINE is non-nil, append an unpropertized newline."
+  (insert (propertize string 'face face))
+  (if append-newline (insert "\n")))
+
 (defun dsh-bridge--dsh-home ()
   "Return the DeepSeek Harness (DSH) home directory.
 This is the directory where DSH stores all user data, and is specified
@@ -506,7 +512,7 @@ option descriptions, and the custom-row hint."
 
 (defface dsh-bridge-question-selected-face
   '((t :inherit font-lock-constant-face))
-  "Face for a marked option (its `[x]' box and label) in the DSH-Question buffer."
+  "Face for a selected option in the DSH-Questions buffer."
   :group 'dsh-bridge)
 
 (defface dsh-bridge-question-custom-value-face
@@ -4355,24 +4361,17 @@ with `q' and returning with `a' keeps any in-progress marks.  A name collision
 		  (dsh-bridge--question-render))
 		buffer))))
 
-(defun dsh-bridge--question-propertize (string face)
-  "Return STRING carrying FACE as both `face' and `font-lock-face'.
-The buffer carries no `font-lock-defaults' of its own, so `face' is what
-shows; the `font-lock-face' copy survives if a user turns font-lock on."
-  (propertize string 'face face 'font-lock-face face))
-
 (defun dsh-bridge--question-add-face (start end face)
   "Add FACE from START to END, leaving already-faced characters alone.
-Both `face' and `font-lock-face' are filled, so FACE shows with font-lock
-off and survives a font-lock pass.  Existing per-character faces win: the
-key specs `substitute-command-keys' produces, and markdown fontification."
+FACE is set as the `face' property, the only one this buffer reads: it has no
+`font-lock-defaults'.  Existing per-character faces win: the key specs
+`substitute-command-keys' produces, and markdown fontification."
   (save-excursion
 	(goto-char start)
 	(while (< (point) end)
 	  (let ((next (next-single-property-change (point) 'face nil end)))
 		(unless (get-text-property (point) 'face)
-		  (put-text-property (point) next 'face face)
-		  (put-text-property (point) next 'font-lock-face face))
+		  (put-text-property (point) next 'face face))
 		(goto-char next)))))
 
 (defvar dsh-bridge--question-detail-cache nil
@@ -4397,21 +4396,14 @@ otherwise return DETAIL unchanged.  The result is cached because
 
 (defun dsh-bridge--question-fontify-detail-1 (detail)
   "Fontify DETAIL with `gfm-view-mode' in a temporary buffer and return it."
+  ;; Font Lock leaves each character with both `face' and
+  ;; `font-lock-face', and the copied string keeps both as-is.  The
+  ;; question buffer uses only `face'; the latter is inert.
   (with-temp-buffer
 	(insert detail)
 	(let ((inhibit-read-only t))
 	  (delay-mode-hooks (gfm-view-mode))
-	  (font-lock-ensure)
-	  ;; Font lock writes `face'; mirror it onto `font-lock-face' so the
-	  ;; copied string keeps its faces in a buffer whose font-lock state may
-	  ;; differ from this temporary one's.
-	  (let ((position (point-min)))
-		(while (< position (point-max))
-		  (let ((next (next-single-property-change position 'face nil (point-max))))
-			(let ((face (get-text-property position 'face)))
-			  (when face
-				(put-text-property position next 'font-lock-face face)))
-			(setq position next)))))
+	  (font-lock-ensure))
 	(buffer-substring (point-min) (point-max))))
 
 ;; Declared here and populated with its keys below, once the command it binds
@@ -4428,27 +4420,23 @@ RET and the number keys keep using the row's `dsh-bridge-option' /
 
 (defun dsh-bridge--question-render ()
   "Populate the current question buffer from its state variables.
-The whole buffer is re-rendered from `dsh-bridge--question-questions' plus the
-selection/custom/skipped state on every change, so markers can never drift.
-Every line of a question's block carries its question id as a text property,
-so point anywhere in the block identifies the question.  A resolved buffer
-renders its resolution banner in place of the \"waiting for your answer\"
-header.  Faces are attached here, as both `face' and `font-lock-face', because
-the buffer is rebuilt rather than font-locked in place."
+The buffer is re-rendered from `dsh-bridge--question-questions' plus the
+selection/custom/skipped state on every change, so markers can never
+drift.  Each line of a question's block carries its question id as a
+text property.  A resolved buffer renders its resolution banner in place
+of the \"waiting for your answer\" header."
   (let ((inhibit-read-only t))
 	(erase-buffer)
 	(if dsh-bridge--question-dead
 		;; The session is no longer waiting; the resolution banner, if any,
 		;; takes the header's place.
 		(when dsh-bridge--question-banner
-		  (insert (dsh-bridge--question-propertize
-				   dsh-bridge--question-banner
-				   'dsh-bridge-question-banner-face)
-				  "\n"))
-	  (insert (dsh-bridge--question-propertize
-			   (format "Session \"%s\" is waiting for your answer\n"
-					   (dsh-bridge--session-label dsh-bridge--question-session))
-			   'dsh-bridge-question-heading-face)))
+		  (dsh-bridge--insert dsh-bridge--question-banner
+							  'dsh-bridge-question-banner-face t))
+	  (dsh-bridge--insert (format "Session \"%s\" is waiting for your answer\n"
+								  (dsh-bridge--session-label
+								   dsh-bridge--question-session))
+						  'dsh-bridge-question-heading-face))
 	;; The buffer itself must say how to work it: the mode docstring is not
 	;; visible, and the keys (RET selects, C-c C-c submits) are not guessable.
 	;; `substitute-command-keys' faces the key specs it substitutes; the prose
@@ -4483,18 +4471,16 @@ the buffer is rebuilt rather than font-locked in place."
 			   (block-start (point)))
 		  (when (> n 0) (insert "\n"))
 		  (cl-incf n)
-		  (insert (dsh-bridge--question-propertize
-				   (format "Question %d of %d" n total)
-				   'dsh-bridge-question-furniture-face))
+		  (dsh-bridge--insert (format "Question %d of %d" n total)
+							  'dsh-bridge-question-furniture-face)
 		  (when skipped
-			(insert (dsh-bridge--question-propertize
-					 " — skipped" 'dsh-bridge-question-skip-face)))
+			(dsh-bridge--insert " — skipped" 'dsh-bridge-question-skip-face))
 		  (insert "\n\n")
 		  (when (and (stringp header) (not (string-empty-p header)))
-			(insert (dsh-bridge--question-propertize
-					 (concat header "\n") 'dsh-bridge-question-heading-face)))
-		  (insert (dsh-bridge--question-propertize
-				   (concat (or qtext "") "\n") 'dsh-bridge-question-text-face))
+			(dsh-bridge--insert (concat header "\n")
+								'dsh-bridge-question-heading-face))
+		  (dsh-bridge--insert (concat (or qtext "") "\n")
+							  'dsh-bridge-question-text-face)
 		  ;; The reviewed artifact (a plan-review's plan markdown) must be
 		  ;; visible: deciding on it blind is worse than not surfacing it.
 		  (when (and (stringp detail) (not (string-empty-p detail)))
@@ -4510,56 +4496,51 @@ the buffer is rebuilt rather than font-locked in place."
 					 (desc (alist-get 'description opt))
 					 (marked (member label selected))
 					 (start (point)))
-				(insert "  "
-						(dsh-bridge--question-propertize
-						 (if marked "[x]" "[ ]")
-						 (if marked 'dsh-bridge-question-selected-face
-						   'dsh-bridge-question-furniture-face))
-						" "
-						(dsh-bridge--question-propertize
-						 (format "%d." i) 'dsh-bridge-question-furniture-face)
-						" "
-						(dsh-bridge--question-propertize
-						 label
-						 (if marked 'dsh-bridge-question-selected-face
-						   'dsh-bridge-question-option-face))
-						(if (and (stringp desc) (not (string-empty-p desc)))
-							(concat " "
-									(dsh-bridge--question-propertize
-									 (concat "— " desc)
-									 'dsh-bridge-question-furniture-face))
-						  "")
-						"\n")
+				(insert "  ")
+				(dsh-bridge--insert "[" 'dsh-bridge-question-furniture-face)
+				(dsh-bridge--insert (if marked "x" " ")
+									(if marked
+										'dsh-bridge-question-selected-face
+									  'dsh-bridge-question-furniture-face))
+				(dsh-bridge--insert "]" 'dsh-bridge-question-furniture-face)
+				(insert " ")
+				(dsh-bridge--insert (format "%d." i)
+									'dsh-bridge-question-furniture-face)
+				(insert " ")
+				(dsh-bridge--insert label
+									(if marked
+										'dsh-bridge-question-selected-face
+									  'dsh-bridge-question-option-face))
+				(if (and (stringp desc) (not (string-empty-p desc)))
+					(progn
+					  (insert " ")
+					  (dsh-bridge--insert (concat "— " desc)
+										  'dsh-bridge-question-furniture-face)))
+				(insert "\n")
 				(put-text-property start (1- (point)) 'dsh-bridge-option label)
 				(dsh-bridge--question-add-row-affordance
 				 start (1- (point)) "mouse-1: toggle this option"))))
-		  ;; The custom-answer row is always present (the web UI offers one per
-		  ;; question).  It is drawn as an action, not a checkbox: a `[ ]'
-		  ;; bracket here would read as "mark this to enable typing" even
-		  ;; though RET/`c' simply opens a minibuffer prompt.  The trailing
-		  ;; hint says where the text goes and how to change or clear it.
+		  ;; The custom-answer row is always present (the web UI
+		  ;; offers one per question).  Note that we don't draw this
+		  ;; as a checkbox.
 		  (let* ((has-custom (and custom (not (string-empty-p custom))))
 				 (start (point)))
-			(insert "      "
-					(dsh-bridge--question-propertize
-					 "c." 'dsh-bridge-question-furniture-face)
-					" "
-					(if has-custom
-						(concat
-						 (dsh-bridge--question-propertize
-						  (concat "Custom answer: " custom)
-						  'dsh-bridge-question-custom-value-face)
-						 " "
-						 (dsh-bridge--question-propertize
-						  "(RET to edit; empty clears)"
-						  'dsh-bridge-question-furniture-face))
-					  (concat
-					   (dsh-bridge--question-propertize
-						"Type a custom answer..." 'dsh-bridge-question-furniture-face)
-					   " "
-					   (dsh-bridge--question-propertize
-						"(RET here or `c')" 'dsh-bridge-question-furniture-face)))
-					"\n")
+			(insert "      ")
+			(dsh-bridge--insert "c." 'dsh-bridge-question-furniture-face)
+			(insert " ")
+			(if has-custom
+				(progn
+				  (dsh-bridge--insert (concat "Custom answer: " custom)
+									  'dsh-bridge-question-custom-value-face)
+				  (insert " ")
+				  (dsh-bridge--insert "(RET to edit; empty clears)"
+									  'dsh-bridge-question-furniture-face))
+			  (dsh-bridge--insert "Type a custom answer..."
+								  'dsh-bridge-question-furniture-face)
+			  (insert " ")
+			  (dsh-bridge--insert "(RET here or `c')"
+								  'dsh-bridge-question-furniture-face))
+			(insert "\n")
 			(put-text-property start (1- (point)) 'dsh-bridge-option-custom t)
 			(dsh-bridge--question-add-row-affordance
 			 start (1- (point)) "mouse-1: type a custom answer"))
@@ -5076,27 +5057,23 @@ with the `notify-only' explanation when answering is disabled; it is the
 text shown by `dsh-bridge--approval-show' and used as the help text of the
 decision prompt."
   (with-temp-buffer
-	(insert (dsh-bridge--question-propertize
-			 (format "Session \"%s\" requests approval\n"
-					 (dsh-bridge--session-label session-id))
-			 'dsh-bridge-question-heading-face))
+	(dsh-bridge--insert (format "Session \"%s\" requests approval\n"
+								(dsh-bridge--session-label session-id))
+						'dsh-bridge-question-heading-face)
 	(let ((tool (or (plist-get plist :tool-name) "a tool"))
 		  (reason (plist-get plist :reason))
 		  (detail (plist-get plist :detail)))
-	  (insert "\n"
-			  (dsh-bridge--question-propertize "Tool: " 'dsh-bridge-question-furniture-face)
-			  (dsh-bridge--question-propertize tool 'dsh-bridge-question-text-face)
-			  "\n")
+	  (insert "\n")
+	  (dsh-bridge--insert "Tool: " 'dsh-bridge-question-furniture-face)
+	  (dsh-bridge--insert tool 'dsh-bridge-question-text-face t)
 	  (when (and (stringp reason) (not (string-empty-p reason)))
-		(insert (dsh-bridge--question-propertize "Reason: " 'dsh-bridge-question-furniture-face)
-				(dsh-bridge--question-propertize reason 'dsh-bridge-question-text-face)
-				"\n"))
+		(dsh-bridge--insert "Reason: " 'dsh-bridge-question-furniture-face)
+		(dsh-bridge--insert reason 'dsh-bridge-question-text-face t))
 	  (let ((arguments (and (listp detail) (alist-get 'arguments detail))))
 		(when (and (stringp arguments) (not (string-empty-p arguments)))
-		  (insert "\n"
-				  (dsh-bridge--question-propertize "Tool call arguments"
-												   'dsh-bridge-question-heading-face)
-				  "\n")
+		  (insert "\n")
+		  (dsh-bridge--insert "Tool call arguments"
+							  'dsh-bridge-question-heading-face t)
 		  (let ((start (point)))
 			(insert (dsh-bridge--approval-format-arguments arguments) "\n")
 			(dsh-bridge--question-add-face
@@ -6848,12 +6825,12 @@ its line is the single blank line between sections; the zero-width
 `display' property keeps the `^L' glyph from showing."
   (unless (= (point) (point-min))
 	(insert (propertize "\f" 'display "") "\n"))
-  (insert (propertize title 'face 'dsh-bridge-describe-heading-face) "\n"))
+  (dsh-bridge--insert title 'dsh-bridge-describe-heading-face t))
 
 (defun dsh-bridge--describe-label (label)
   "Insert an aligned row header LABEL for a DSH-Describe-Session buffer."
-  (insert (propertize (format "  %-16s " label)
-					  'face 'dsh-bridge-describe-label-face)))
+  (dsh-bridge--insert (format "  %-16s " label)
+					  'dsh-bridge-describe-label-face))
 
 (defun dsh-bridge--describe-model-label (report)
   "The model display line for REPORT, or nil when no selection is known."
@@ -6985,7 +6962,7 @@ alist, or nil when the host reported none."
 	(let ((objective (dsh-bridge--normalized-string
 					  (alist-get 'objective snapshot))))
 	  (if objective
-		  (insert (propertize objective 'face 'dsh-bridge-goal-face) "\n")
+		  (dsh-bridge--insert objective 'dsh-bridge-goal-face t)
 		(insert "—\n")))
 	(dsh-bridge--describe-label "Phase")
 	(insert (or phase "—") "\n")
@@ -7017,19 +6994,18 @@ SESSION is the cached session row or nil; STATUS and ALIST are the
 failure reason, never a fake zero."
   (let ((report (and (eq status 200) (listp alist) alist)))
 	;; Header
-	(insert
-	 (propertize
-	  (format "DSH session %s"
+	(dsh-bridge--insert
+	 (format "DSH session %s"
 			  (or (dsh-bridge--normalized-string (alist-get 'title report))
 				  (dsh-bridge--normalized-string (alist-get 'title session))
 				  "[Untitled Session]"))
-	  'face 'dsh-bridge-describe-heading-face)
-	 "\n\n")
+	 'dsh-bridge-describe-heading-face)
+	(insert "\n\n")
 	(unless report
 	  (let ((failure (or (dsh-bridge--error-message nil status alist)
 						 "request failed or timed out")))
-		(insert (propertize (format "  Report unavailable: %s\n" failure)
-							'face 'error))))
+		(dsh-bridge--insert (format "  Report unavailable: %s\n" failure)
+							'error)))
 	;; Session ID and state
 	(dsh-bridge--describe-label "Id")
 	(insert (or id "(unknown)") "\n")
