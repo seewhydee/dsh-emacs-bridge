@@ -24,15 +24,22 @@ re-verification checklist.
 
 Ordered by recommended sequence, but out-of-sequence implementation is
 acceptable based on user needs. Harness seams were verified against
-DSH 0.1.7-rc.1; the peer floor in `dsh-plugin/package.json` is pinned
-to match. rc.1 moved no host seam the bridge folds, but its faster
-first-reply timing exposed two DSH-View races that the Emacs client now
-closes: a `replies-changed` frame that arrives while the blocking send
-is still on the wire — before the view and its turns-cache entry exist —
-is replayed instead of dropped, and a slower `/turns` reply that lands
-after a fresher one can no longer downgrade that turn's cached record.
-The client bundle also names the size-neutral `IconCheckOutlineRegular`,
-the rename that replaced the numeric icon export.
+DSH 0.1.7-rc.2; the peer floor in `dsh-plugin/package.json` is pinned
+to match. rc.2 moved no host seam the bridge folds: every imported
+package changed only its version field, and the reachable source
+changes are additive — the LLM request projection gained an optional
+tool-update fold that the bridge's text-only block readers ignore,
+`sessionQuery` wraps a projection failure in a new
+`SESSION_QUERY_CORRUPT_SESSION` code that still surfaces as 500, and
+`WorkspaceRegistry.initializeDefault` changed shape where the bridge
+never calls it. The one client-artifact change (an inline-safe
+`default-workspace` wire layer) is mirrored in `tsdown.client.config.ts`.
+Two host behaviours did drift, neither needing code: `session/selectModel`
+now rejects a model its provider does not advertise (already mapped to
+400) and saves the deployment default in the background, and the Auto
+permission preset now routes reviewer denials into the approval
+waterfall instead of pinning `approval: never`, so Emacs answers
+auto-review denials the host used to reject itself.
 
 ### 1. Plan and goal
 
