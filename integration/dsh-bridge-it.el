@@ -290,7 +290,7 @@ fixture-booting tests can share one Emacs process."
           ;; The real turn count, not just the label: exactly one turn
           ;; completed (steps are left loose — an async auto-title may
           ;; fold in extra ones).
-          (should (string-match-p "Turns / steps\\s-+1 / " text))
+          (should (string-match-p "Turns / steps\\s-+1/[0-9]" text))
           (should (string-match-p "Tokens" text))
           (should (string-match-p "Cache hit" text))))
       (kill-buffer dsh-bridge-describe-buffer-name))))
@@ -388,12 +388,14 @@ follow-up."
           (should (eq major-mode 'dsh-bridge-question-mode))
           (dsh-bridge--question-decline))
         ;; The host accepted the decline: the registry clears via SSE and the
-        ;; question buffer is bannered resolved.
+        ;; question buffer is bannered resolved (the resolution variable holds
+        ;; the banner text; a rejected decline would leave it nil).
         (should (dsh-bridge-it--wait
                  (lambda () (null (assoc session-id dsh-bridge--pending-questions)))
                  15000))
-        (should (buffer-local-value 'dsh-bridge--question-dead
-                                    (dsh-bridge--question-find-buffer question-id)))
+        (should (equal (buffer-local-value 'dsh-bridge--question-resolution
+                                           (dsh-bridge--question-find-buffer question-id))
+                       "You declined to answer."))
         ;; The cancelled tool call fails; the turn resumes on the mock's
         ;; follow-up entry and completes.
         (should (dsh-bridge-it--wait
