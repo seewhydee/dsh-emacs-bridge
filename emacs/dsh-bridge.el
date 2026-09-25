@@ -2713,21 +2713,20 @@ mid-browse, k is the index of the shown turn in the session's turn
 list (a fetched turn is normally 1).  In turn-following state, the
 segment is \"(latest/n)\" instead.
 
+The post-send waiting state follows the session's live tail, so it too
+reads \"(latest/n)\"; n counts the turns that have a record, so a turn
+whose first reply has not arrived yet is not counted until it does.
+
 This function uses the turns cache only, and does no synchronous I/O."
-  ;; Omit the turn indicator if (i) the first reply hasn't arrived yet
-  ;; (the turn only exists after the first reply, even though we have
-  ;; prepped the DSH-View buffer for it); or (ii) there's no session
-  ;; or cache data available.
-  (unless dsh-bridge--view-waiting
-    (let* ((session dsh-bridge--view-content-session)
-	   (turns (dsh-bridge--turns-cache-turns session))
-	   total)
-      (when turns
-	(setq total (length turns))
-	(cond (dsh-bridge--view-follow (format " (latest/%d)" total))
-	      (dsh-bridge--view-turn
-	       (let ((k (dsh-bridge--view-turn-index turns)))
-		 (if k (format " (%d/%d)" (1+ k) total)))))))))
+  (let* ((session dsh-bridge--view-content-session)
+	 (turns (dsh-bridge--turns-cache-turns session))
+	 total)
+    (when turns
+      (setq total (length turns))
+      (cond (dsh-bridge--view-follow (format " (latest/%d)" total))
+	    (dsh-bridge--view-turn
+	     (let ((k (dsh-bridge--view-turn-index turns)))
+	       (if k (format " (%d/%d)" (1+ k) total))))))))
 
 (defun dsh-bridge--view-turn-record (&optional session-id)
   "The turn record the current DSH-View buffer displays, or nil.
@@ -2812,21 +2811,34 @@ A hidden view does not count as \"the user is looking\"."
   "Put the current DSH-View buffer into turn-following state.
 The buffer then tracks the session's newest turn, refilling as the turn's
 segments are committed and flipping to a newer turn when one starts producing.
-Also ensures the header's elapsed ticker runs if the session is live.
-Announces the state change, since the only other feedback is the header's `⤓'
-marker."
-  (let ((turns (dsh-bridge--view-turns-refresh t)))
-    ;; Entering follow by hand ends any waiting state.	Kept explicit even
-    ;; though `dsh-bridge--view-fill' also clears it, because the refill below
-    ;; is skipped when the turn cache is empty — and in that case the awaited
-    ;; turn number must be dropped too, since no fill will replace it.
-    (setq-local dsh-bridge--view-waiting nil)
-    (setq-local dsh-bridge--view-turn nil)
-    (setq-local dsh-bridge--view-follow t)
-    (setq-local dsh-bridge--view-browsing nil)
-    (when turns
-      (dsh-bridge--view-fill dsh-bridge--view-content-session
-			     (car turns) nil t))
+A session already running a turn that has no record yet — the turn a send
+started, with no committed reply — is shown as its running placeholder
+instead of as the newest turn that does have one.  Also ensures the header's
+elapsed ticker runs if the session is live.  Announces the state change,
+since the only other feedback is the header's `⤓' marker."
+  (let* ((session dsh-bridge--view-content-session)
+	 (turns (dsh-bridge--view-turns-refresh t))
+	 (newest (car-safe turns))
+	 ;; The awaited turn has no `/turns' record: the session is running and
+	 ;; its newest cached turn is already closed, so a later turn is in
+	 ;; flight that the fold cannot name yet.  The placeholder is the
+	 ;; rendering that follows.
+	 (awaited (and newest
+		       (numberp (alist-get 'turn newest))
+		       (not (dsh-bridge--view-turn-open-p newest))
+		       (eq (dsh-bridge--status-state session) 'running))))
+    (if awaited
+	(dsh-bridge--view-waiting-fill session (alist-get 'turn newest))
+      ;; Entering follow by hand ends any waiting state.	 Kept explicit even
+      ;; though `dsh-bridge--view-fill' also clears it, because the refill below
+      ;; is skipped when the turn cache is empty — and in that case the awaited
+      ;; turn number must be dropped too, since no fill will replace it.
+      (setq-local dsh-bridge--view-waiting nil)
+      (setq-local dsh-bridge--view-turn nil)
+      (setq-local dsh-bridge--view-follow t)
+      (setq-local dsh-bridge--view-browsing nil)
+      (when turns
+	(dsh-bridge--view-fill session (car turns) nil t)))
     (setq header-line-format dsh-bridge--view-header-line-format)
     (dsh-bridge--view-ticker-ensure)
     (message "dsh-bridge: following the newest turn")))

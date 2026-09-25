@@ -875,13 +875,15 @@ collapses, and the view lands at the new turn's tail."
       (set-marker probe nil))))
 
 (ert-deftest dsh-bridge-it-view-previous-after-send ()
-  "M-p in the post-send `(running...)' view reaches the session's prior turn.
+  "The post-send `(running...)' view: header, M-p walk, and M-n return.
 The reported sequence: a session with completed history, a prompt sent from
 the DSH-Prompt buffer (the mock hangs, so the popped DSH-View keeps its
 placeholder), then M-p.  The placeholder is anchored to the awaited turn,
-which `/turns' does not hold yet, and the walk used to step past the
-newest cached turn — with one prior turn it refused outright (\"at the
-oldest turn\"), with more it skipped one."
+which `/turns' does not hold yet: it must still show the `(latest/n)'
+position of the cached list, M-p must step to the newest cached turn (it
+used to step past it, refusing with \"at the oldest turn\" when there was
+one prior turn), and M-n from there must return to the placeholder rather
+than stop on the last populated turn."
   (dsh-bridge-it--with-fixture
     ;; Two completed turns of history, with distinct reply texts.
     (dsh-bridge-it--script-mock
@@ -910,6 +912,11 @@ oldest turn\"), with more it skipped one."
         (should (eq dsh-bridge--view-waiting t))
         (should (equal dsh-bridge--view-turn 3))
         (should (string-match-p "(running\\.\\.\\.)" (buffer-string)))
+        ;; The placeholder is in turn-following state, so it carries the
+        ;; `(latest/n)' position of the turns that exist so far — not a
+        ;; missing indicator.  The awaited turn has no record yet, so it is
+        ;; not counted until its first reply folds in.
+        (should (string-match-p " (latest/2)" (dsh-bridge--view-header-line)))
         ;; M-p shows the immediately previous turn (turn 2), not turn 1 and
         ;; not a refusal; browsing ends the waiting state.
         (dsh-bridge-view-previous-reply)
@@ -919,11 +926,29 @@ oldest turn\"), with more it skipped one."
         (should (string-match-p "Reply two\\." (buffer-string)))
         (should-not (string-match-p "Reply one\\." (buffer-string)))
         (should (string-match-p " (1/2)" (dsh-bridge--view-header-line)))
-        ;; The walk continues to the oldest turn.
+        ;; M-n from the newest cached turn returns to the running
+        ;; placeholder for the awaited turn, restoring the post-send state.
+        (dsh-bridge-view-next-reply)
+        (should (eq dsh-bridge--view-waiting t))
+        (should (equal dsh-bridge--view-turn 3))
+        (should (eq dsh-bridge--view-follow t))
+        (should (null dsh-bridge--view-browsing))
+        (should (string-match-p "(running\\.\\.\\.)" (buffer-string)))
+        (should (string-match-p " (latest/2)" (dsh-bridge--view-header-line)))
+        ;; The walk continues to the oldest turn from the placeholder.
+        (dsh-bridge-view-previous-reply)
+        (should (equal dsh-bridge--view-turn 2))
         (dsh-bridge-view-previous-reply)
         (should (equal dsh-bridge--view-turn 1))
         (should (string-match-p "Reply one\\." (buffer-string)))
-        (should (string-match-p " (2/2)" (dsh-bridge--view-header-line)))))))
+        (should (string-match-p " (2/2)" (dsh-bridge--view-header-line)))
+        ;; M-n walks back toward the placeholder one turn at a time; the
+        ;; placeholder is the newest position, not a wall.
+        (dsh-bridge-view-next-reply)
+        (dsh-bridge-view-next-reply)
+        (should (eq dsh-bridge--view-waiting t))
+        (should (equal dsh-bridge--view-turn 3))
+        (should (string-match-p "(running\\.\\.\\.)" (buffer-string)))))))
 
 (ert-deftest dsh-bridge-it-stop-session ()
   "Stopping a hung turn works end to end and a second stop is a no-op.
