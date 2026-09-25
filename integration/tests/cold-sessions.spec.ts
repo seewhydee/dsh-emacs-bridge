@@ -18,19 +18,22 @@
 // so this spec boots its own pair of hosts against one caller-supplied home:
 // the first creates and persists a session, the second starts with no live
 // agent for it and must still enumerate it through `sessionPersistence.list()`
-// with its durable title folded back. Two regression modes are guarded:
+// with its durable title folded back. Three regression modes are guarded:
 //   - a title-fold fault that rejected the whole persisted batch, silently
 //     reducing `/sessions` to the live rows only;
 //   - trusting a projection-cache null title, when the write-behind checkpoint
 //     lagged the log past a rename (the cache row is written before shutdown),
-//     which made the title vanish whenever the checkpoint happened to be stale.
+//     which made the title vanish whenever the checkpoint happened to be stale;
+//   - ignoring the predecessor-generation title face after a harness Session
+//     format bump, which rejected every pre-bump cache record and made a
+//     listing fold each cold log for a title the zero-I/O cache already held.
 // The rename-then-kill sequence below is what makes the second case likely.
 // The second half drives the documented cold WRITE paths: naming a persisted-
 // only id in POST /dsh-bridge/send resumes the session on demand and lands the
 // prompt, and POST /dsh-bridge/sessions/resume brings a cold id live directly.
 
 import { describe, it, expect } from 'vitest'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { launch } from '../host/launch.mjs'
@@ -143,6 +146,57 @@ describe('cold (persisted-only) session listing', () => {
         const resumeRow = rows.find((s) => s.id === resumeId)
         return sendRow?.live === true && resumeRow?.live === true
       })
+    } finally {
+      if (first !== undefined) await first.kill()
+      if (second !== undefined) await second.kill()
+      rmSync(dshHome, { recursive: true, force: true })
+    }
+  }, 240000)
+
+  it('serves a predecessor-generation cache title without folding the log', async () => {
+    const dshHome = mkdtempSync(join(tmpdir(), 'dsh-bridge-cold-cache-'))
+    let first
+    let second
+    try {
+      first = await launch({ dshHome, timeoutMs: 120000 })
+      const id = await createSession(first)
+      const durable = `Durable title ${process.pid}-${Date.now()}`
+      const renamed = await post(first, '/dsh-bridge/sessions/rename', { sessionId: id, title: durable })
+      expect(renamed.status, JSON.stringify(renamed.body)).toBe(200)
+
+      // The write-behind checkpoint is asynchronous (an interval/count trigger,
+      // or the creation flush racing the rename). Wait for the renamed title to
+      // land while the session is still live; the shutdown disposer drops
+      // pending timers, so a record still in flight at kill time never lands.
+      const recordPath = join(dshHome, 'storages', 'session_projcache', 'sessions', `${id}.json`)
+      await poll(() => {
+        if (!existsSync(recordPath)) return false
+        const stored = JSON.parse(readFileSync(recordPath, 'utf8'))
+        return stored.record?.rows?.title?.val === durable
+      }, 30000)
+      await first.kill()
+      first = undefined
+
+      // Age the stored checkpoint by one Session format generation and plant a
+      // title only that face can serve. The log still carries `durable`, so a
+      // bridge that folds the log instead of consulting the predecessor cache
+      // is caught: it would report `durable`, not the sentinel. Writing after
+      // the kill keeps any detach flush from clobbering the override.
+      const stored = JSON.parse(readFileSync(recordPath, 'utf8'))
+      const generation = stored.record.identity.formatVersion
+      expect(typeof generation, 'the stored checkpoint must carry a numeric format generation').toBe('number')
+      const sentinel = `Predecessor title ${process.pid}-${Date.now()}`
+      stored.record.identity.formatVersion = generation - 1
+      stored.record.rows.title.val = sentinel
+      writeFileSync(recordPath, JSON.stringify(stored))
+
+      second = await launch({ dshHome, timeoutMs: 120000 })
+      const sessions = await get(second, '/dsh-bridge/sessions')
+      expect(sessions.status).toBe(200)
+      const row = sessions.body.sessions.find((session) => session.id === id)
+      expect(row).toBeDefined()
+      expect(row.live).toBe(false)
+      expect(row.title).toBe(sentinel)
     } finally {
       if (first !== undefined) await first.kill()
       if (second !== undefined) await second.kill()

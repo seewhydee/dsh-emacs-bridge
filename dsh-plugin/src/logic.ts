@@ -715,6 +715,26 @@ export function sessionTitle(events: readonly SessionEventLike[]): string | null
   return typeof title === 'string' && title !== '' ? title : null
 }
 
+/** The viewed values of one persisted projection-cache block (a listing hint). */
+export interface ProjectionBlockLike {
+  readonly values?: Readonly<Record<string, unknown>>
+}
+
+/**
+ * The title a persisted projection-cache block serves, or undefined when the
+ * caller must fold the log instead.
+ *
+ * A cache block is a zero-I/O listing hint, never an authority: only a
+ * non-empty string counts. An absent block, or a missing/non-string/empty
+ * value — including the deliberate null a lagging write-behind checkpoint
+ * leaves after an uncheckpointed rename — reads as "no cached title", which is
+ * what makes `coldSessionTitle` fall through to the authoritative log fold.
+ */
+export function cachedTitleValue(block: ProjectionBlockLike | undefined): string | undefined {
+  const title = block?.values?.title
+  return typeof title === 'string' && title !== '' ? title : undefined
+}
+
 /**
  * Merge live sessions with persisted (cold) headers into one inventory.
  * `live` is already filtered to targetable sessions by the caller; persisted

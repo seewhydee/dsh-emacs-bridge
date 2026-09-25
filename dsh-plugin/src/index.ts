@@ -162,6 +162,7 @@ import {
   assistantTextForMessage,
   assistantTurns,
   attachmentErrorHttpStatus,
+  cachedTitleValue,
   catalogModelName,
   changedFiles,
   classifySessionId,
@@ -292,15 +293,22 @@ interface ProjectionSnapshotLike {
  * (format version, creation time, cwd, and the seeded flag — not the exact
  * inherited prefix length, which is Session state) and serves seeded (forked)
  * lifecycles as well as unseeded ones. The optional second argument narrows
- * the viewed projection keys; `coldSessionTitle` asks for `title` only. The
- * bridge's call is guarded: a harness API drift here degrades to the log fold
- * rather than failing the listing.
+ * the viewed projection keys; `coldSessionTitle` asks for `title` only.
+ *
+ * `cachedPredecessorTitle` is the transitional face for a stored checkpoint
+ * written under an older Session format generation (the harness bumps the
+ * format and retains old replay inputs): `cachedSnapshot` demands an exact
+ * generation match, so it rejects those records, while this face serves the
+ * stale-but-genuine title the harness's own list also shows. It is optional —
+ * a harness face without it (or an API drift) degrades to the log fold rather
+ * than failing the listing.
  */
 interface ProjectionCacheService {
   cachedSnapshot(
     meta: SessionHeader,
     keys?: readonly string[],
   ): ProjectionSnapshotLike | undefined
+  cachedPredecessorTitle?(meta: SessionHeader): ProjectionSnapshotLike | undefined
 }
 
 /**
@@ -1703,11 +1711,17 @@ export function apply(ctx: Context): void {
    * it holds a non-empty one; otherwise read the log through a read handle and
    * fold `session/title` events directly.
    *
-   * A cached null title is deliberately not authoritative: the checkpoint is
-   * write-behind and can lag the log, so a `session/title` event appended
-   * after the last checkpoint (e.g. a rename just before a restart) is still
-   * recoverable from the log. Only an untitled session — usually blank, hence
-   * a cheap log — pays for that read.
+   * The cache is consulted in the harness's own order: the exact-generation
+   * block first, then the predecessor-generation title for a checkpoint that
+   * predates the current Session format. Without that second face a harness
+   * format bump rejects every pre-bump record and silently turns a zero-I/O
+   * listing into a whole-log fold per session.
+   *
+   * A cached null title, or a missing block, is deliberately not authoritative:
+   * the checkpoint is write-behind and can lag the log, so a `session/title`
+   * event appended after the last checkpoint (e.g. a rename just before a
+   * restart) is still recoverable from the log. Only an untitled session —
+   * usually blank, hence a cheap log — pays for that read.
    *
    * The cache read is itself guarded: an API drift there must degrade to the
    * log fold, not reject the caller's whole cold listing. Fail-soft: a title
@@ -1719,11 +1733,10 @@ export function apply(ctx: Context): void {
     header: SessionHeader,
   ): Promise<string | null> {
     try {
-      const snapshot = cache?.cachedSnapshot(header, ['title'])
-      if (snapshot !== undefined) {
-        const title = snapshot.values.title
-        if (typeof title === 'string' && title !== '') return title
-      }
+      const block = cache?.cachedSnapshot(header, ['title'])
+        ?? cache?.cachedPredecessorTitle?.(header)
+      const title = cachedTitleValue(block)
+      if (title !== undefined) return title
     } catch {
       // Fall through to the log read: a cache fault is not a listing fault.
     }

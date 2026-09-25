@@ -26,6 +26,7 @@ import {
   assistantMessageText,
   assistantTextForMessage,
   assistantTurns,
+  cachedTitleValue,
   changedFiles,
   classifySessionId,
   contextMessage,
@@ -617,6 +618,27 @@ describe('sessionTitle', () => {
     expect(sessionTitle([{ time: 1, type: 'session/title', data: null }])).toBeNull()
     expect(sessionTitle([{ time: 1, type: 'session/title', data: { title: '' } }])).toBeNull()
     expect(sessionTitle([{ time: 1, type: 'session/title', data: { title: 42 } }])).toBeNull()
+  })
+})
+
+describe('cachedTitleValue', () => {
+  it('serves a non-empty cached title', () => {
+    expect(cachedTitleValue({ values: { title: 'Cached title' } })).toBe('Cached title')
+  })
+
+  it('does not serve a missing block (the caller folds the log)', () => {
+    expect(cachedTitleValue(undefined)).toBeUndefined()
+  })
+
+  it('does not serve a null or empty title, so a lagging checkpoint folds', () => {
+    expect(cachedTitleValue({ values: { title: null } })).toBeUndefined()
+    expect(cachedTitleValue({ values: { title: '' } })).toBeUndefined()
+  })
+
+  it('does not serve a non-string or absent title value', () => {
+    expect(cachedTitleValue({ values: { title: 42 } })).toBeUndefined()
+    expect(cachedTitleValue({ values: {} })).toBeUndefined()
+    expect(cachedTitleValue({})).toBeUndefined()
   })
 })
 
