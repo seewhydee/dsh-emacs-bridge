@@ -81,7 +81,8 @@ integration/
 | `tests/queue.spec.ts` | the `/send` `mode` field (400 for an unknown value, so a typo never degrades a steer into a queued send; `steer` accepted) and `GET /sessions/queue` counts off a live agent (a follow-up parked in `next-turn`, a steer in `next-step`), zeros for an unknown or absent id |
 | `tests/models.spec.ts` | mock-LLM fidelity: advertised modalities behind the image-support precheck (text-only model → 400 `MODEL_DOES_NOT_SUPPORT_IMAGES`; the default stays image-capable), fragmented `tool-call-delta` argument assembly, and a model error ending the turn with reason `error` |
 | `tests/turns-incremental.spec.ts` | the `/turns` epoch contract incremental DSH-View filling relies on: a running turn grows segment by segment under a stable epoch, the inclusive `since` fetch re-sends the boundary turn in full, and a stale epoch forces the full-list fallback |
-| `dsh-bridge-it.el` | the live-Emacs seats of the ask-user path (submit and decline), `C-c C-a` attachment staging plus send-time tag stripping, DSH-Describe rendering live host statistics, turn branching, incremental DSH-View filling (in-place segment append with a surviving marker, first-reply tailing, and the newer-turn rebuild), stopping a hung turn through `/sessions/stop` (the turn closes `aborted` and a second stop is a no-op), SSE reconnect resilience across a same-port fixture restart, the DSH-Sessions list over live data, outbox receive + ack draining, and cold-session resume driven from Emacs |
+| `tests/turn-activity.spec.ts` | the turn-activity fold behind DSH-View process lines: `tool/call` → `tool/result` pairing plus a one-line summary per reasoning block (summary-only — the later reasoning paragraphs stay host-side), the debounced `activity-changed` frame, and the live activity-only record (`segments: []`) for a first step with no text, with or without reasoning |
+| `dsh-bridge-it.el` | the live-Emacs seats of the ask-user path (submit and decline), `C-c C-a` attachment staging plus send-time tag stripping, DSH-Describe rendering live host statistics, turn branching, incremental DSH-View filling (in-place segment append with a surviving marker, first-reply tailing, and the newer-turn rebuild), live turn-activity streaming plus the buffer-local toggle, stopping a hung turn through `/sessions/stop` (the turn closes `aborted` and a second stop is a no-op), SSE reconnect resilience across a same-port fixture restart, the DSH-Sessions list over live data, outbox receive + ack draining, and cold-session resume driven from Emacs |
 
 `tests/cold-sessions.spec.ts` boots a second host against a persisted
 `dshHome` (the launcher's `dshHome` option) to cover the cold roster; the
@@ -108,8 +109,10 @@ lazily per request from `$DSH_HOME/dsh-bridge-token`):
 Entry kinds: `{kind:'text', text, delayMs?}`, `{kind:'tool-call', name,
 arguments, text?, fragmentArgs?}` (`fragmentArgs: true` splits the arguments
 JSON across several `tool-call-delta` chunks, the way real providers fragment
-them), `{kind:'hang'}`, `{kind:'error', message}` (the adapter throws; the
-turn ends with reason `error`).
+them), `{kind:'reasoning', text, toolCall?:{name, arguments}}` (a reasoning
+block, optionally followed by one tool call; this is what the bridge folds into
+a one-line thinking summary), `{kind:'hang'}`, `{kind:'error', message}` (the
+adapter throws; the turn ends with reason `error`).
 
 ## Failure bounds
 

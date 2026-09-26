@@ -21,6 +21,18 @@
 // objects.  `CallId` is a runtime no-op branded string in the harness, so a
 // plain string id is accepted by the assembler.
 
+/**
+ * Next mock call id. A block index alone cannot be the id: two queued script
+ * entries place their call at the same block index, and the host pairs tool
+ * results with calls by id, so a collision would mis-name the first result.
+ * A module counter keeps every emitted call id distinct.
+ */
+let mockCallCounter = 0
+function mockCallId() {
+  mockCallCounter += 1
+  return `mock-call-${mockCallCounter}`
+}
+
 /** Chunks that stream one plain text reply and finish with `stop`. */
 export function textChunks(text) {
   const deltas = Array.from(text, (char) => ({ type: 'text-delta', index: 0, text: char }))
@@ -53,6 +65,7 @@ export function toolCallChunks(name, argumentsJson, text, { fragmentArgs = false
     index += 1
   }
   chunks.push({ type: 'block-start', index, blockType: 'tool-call' })
+  const callId = mockCallId()
   if (fragmentArgs && argumentsJson.length > 1) {
     // Three pieces: the middle boundary is deliberately off the half so a
     // boundary-aligned assembler bug cannot hide behind equal splits.
@@ -67,24 +80,58 @@ export function toolCallChunks(name, argumentsJson, text, { fragmentArgs = false
       chunks.push({
         type: 'tool-call-delta',
         index,
-        id: `mock-call-${index}`,
+        id: callId,
         ...(position === 0 ? { name } : {}),
         argumentsDelta: piece,
       })
     })
   } else {
     chunks.push(
-      { type: 'tool-call-delta', index, id: `mock-call-${index}`, name, argumentsDelta: argumentsJson },
+      { type: 'tool-call-delta', index, id: callId, name, argumentsDelta: argumentsJson },
     )
   }
   chunks.push(
     {
       type: 'block-end',
       index,
-      block: { type: 'tool-call', id: `mock-call-${index}`, name, arguments: argumentsJson },
+      block: { type: 'tool-call', id: callId, name, arguments: argumentsJson },
     },
     { type: 'usage', usage: { inputTokens: 10, outputTokens: 5 } },
     { type: 'finish', reason: { kind: 'tool-calls' } },
+  )
+  return chunks
+}
+
+/**
+ * Chunks that emit one reasoning block, optionally followed by one tool-call
+ * block, and finish with `tool-calls` (or `stop` without a call).  The
+ * reasoning text is what the bridge folds into a one-line thinking summary;
+ * its full text must never reach Emacs.
+ */
+export function reasoningChunks(text, { toolCall } = {}) {
+  const chunks = [
+    { type: 'block-start', index: 0, blockType: 'reasoning' },
+    ...Array.from(text, (char) => ({ type: 'reasoning-delta', index: 0, text: char })),
+    { type: 'block-end', index: 0, block: { type: 'reasoning', text } },
+  ]
+  let outputTokens = text.length
+  if (toolCall !== undefined) {
+    const argumentsJson = JSON.stringify(toolCall.arguments ?? {})
+    const callId = mockCallId()
+    chunks.push(
+      { type: 'block-start', index: 1, blockType: 'tool-call' },
+      { type: 'tool-call-delta', index: 1, id: callId, name: toolCall.name, argumentsDelta: argumentsJson },
+      {
+        type: 'block-end',
+        index: 1,
+        block: { type: 'tool-call', id: callId, name: toolCall.name, arguments: argumentsJson },
+      },
+    )
+    outputTokens += 5
+  }
+  chunks.push(
+    { type: 'usage', usage: { inputTokens: 10, outputTokens } },
+    { type: 'finish', reason: { kind: toolCall === undefined ? 'stop' : 'tool-calls' } },
   )
   return chunks
 }

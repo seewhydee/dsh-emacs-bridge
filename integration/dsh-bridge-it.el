@@ -659,14 +659,11 @@ the tag line."
 
 (defun dsh-bridge-it--turn-render (turn session-id)
   "Buffer text for the whole TURN record, or \"\" for nil.
-A local composition of the turn body, as `dsh-bridge--view-fill' builds it,
-and the suffix helper (the package renders those separately for the
-incremental fill, so it has no whole-turn renderer)."
+The production body renderer (which honors the buffer's activity toggle)
+composed with the suffix helper the incremental fill keeps separate."
   (if (null turn)
       ""
-    (concat (mapconcat (lambda (seg) (or (alist-get 'text seg) ""))
-                       (alist-get 'segments turn)
-                       dsh-bridge--view-segment-divider)
+    (concat (dsh-bridge--view-turn-body turn)
             (dsh-bridge--view-turn-suffix turn session-id))))
 
 (defun dsh-bridge-it--prompt-send (session-id text)
@@ -991,6 +988,126 @@ status must return to idle."
                                         (list (cons 'sessionId session-id))))))
         (should (eq (alist-get 'accepted body) t))
         (should-not (alist-get 'running body))))))
+
+(ert-deftest dsh-bridge-it-activity-live-and-toggle ()
+  "Turn activity streams live into a followed DSH-View and toggles in place.
+The mock answers with a reasoning block plus an ask-user tool call and no
+text, so the turn carries activity before it carries any reply.  With
+`dsh-bridge-view-activity' bound non-nil, the debounced `activity-changed'
+frame refills the waiting view with the synthesized activity-only record; the
+line is the folded one-line summary (the block's first line), never a later
+reasoning paragraph.
+Answering completes the turn, and toggling the buffer rebuilds without (and
+then with) the activity lines."
+  (dsh-bridge-it--with-fixture
+    (dsh-bridge-it--script-mock
+     (vector
+      (list :kind "reasoning"
+            :text "Ask the user before touching anything.\n\nINTERNAL-REASONING-MARKER: never rendered."
+            :toolCall (list :name "ask_user_question"
+                            :arguments (list :questions
+                                             (vector (list :id "q1"
+                                                           :question "Proceed?"
+                                                           :options (vector (list :label "Go")))))))
+      (list :kind "text" :text "Finished after the answer.")))
+    (let ((session-id (dsh-bridge-it--create-session
+                       (expand-file-name "../" dsh-bridge-it--directory)))
+          (dsh-bridge-view-activity t))
+      (dsh-bridge-it--notifications-start)
+      (dsh-bridge-it--prompt-send session-id "Go.")
+      ;; The activity frame refills the waiting view before any reply segment
+      ;; exists (the tool call parks the turn, so the state is deterministic).
+      (should (dsh-bridge-it--wait
+               (lambda ()
+                 (let ((text (dsh-bridge-it--view-text session-id)))
+                   (and (assoc session-id dsh-bridge--pending-questions)
+                        text
+                        (string-match-p "thinking: " text))))
+               30000))
+      (with-current-buffer (dsh-bridge-it--view session-id)
+        (let ((text (buffer-string)))
+          (should (string-match-p "Ask the user before" text))
+          (should (string-match-p "ask_user_question" text))
+          ;; Summary-only: the reasoning's later paragraph stays host-side.
+          (should-not (string-match-p "INTERNAL-REASONING-MARKER" text))
+          (let ((record (car (dsh-bridge--turns-cache-turns session-id))))
+            (should (null (alist-get 'segments record)))
+            (should (alist-get 'activity record)))
+          ;; The recorded provenance keys lead with the activity item, so a
+          ;; later splice of the answer text extends that prefix.
+          (should (eq (car-safe (car (plist-get dsh-bridge--view-provenance :keys)))
+                      'activity))))
+      (dsh-bridge-it--answer-pending session-id "Go")
+      (should (dsh-bridge-it--wait
+               (lambda ()
+                 (let ((text (dsh-bridge-it--view-text session-id))
+                       (prov (dsh-bridge-it--view-provenance session-id)))
+                   (and text
+                        (string-match-p "Finished after the answer\\." text)
+                        (null (plist-get prov :open)))))
+               30000))
+      (with-current-buffer (dsh-bridge-it--view session-id)
+        (let ((record (car (dsh-bridge--turns-cache-turns session-id))))
+          ;; The live view equals the reference render of the live record.
+          (should (equal (buffer-string)
+                         (dsh-bridge-it--turn-render record session-id)))
+          ;; Toggling off rebuilds without the activity lines...
+          (dsh-bridge-view-toggle-activity)
+          (should-not dsh-bridge--view-activity)
+          (should-not (string-match-p "thinking: " (buffer-string)))
+          (should (string-match-p "Finished after the answer\\." (buffer-string)))
+          ;; ...and toggling back on restores them.
+          (dsh-bridge-view-toggle-activity)
+          (should dsh-bridge--view-activity)
+          (should (string-match-p "thinking: " (buffer-string)))
+          (should (equal (buffer-string)
+                         (dsh-bridge-it--turn-render record session-id))))))))
+
+(ert-deftest dsh-bridge-it-activity-toggle-while-waiting ()
+  "Toggling activity on while the post-send placeholder is up shows activity.
+The view waits on a just-started turn whose first step is reasoning plus a
+tool call and no text.  With activity off its frames are ignored, so the
+placeholder stays up; the toggle must work from that state and fold in the
+activity the host already serves, without waiting for the first reply."
+  (dsh-bridge-it--with-fixture
+    (dsh-bridge-it--script-mock
+     (vector
+      (list :kind "reasoning"
+            :text "Think before asking."
+            :toolCall (list :name "ask_user_question"
+                            :arguments (list :questions
+                                             (vector (list :id "q1"
+                                                           :question "Proceed?"
+                                                           :options (vector (list :label "Go")))))))
+      (list :kind "text" :text "Done after the answer.")))
+    (let ((session-id (dsh-bridge-it--create-session
+                       (expand-file-name "../" dsh-bridge-it--directory)))
+          (dsh-bridge-view-activity nil))
+      (dsh-bridge-it--notifications-start)
+      ;; Park the view in the post-send waiting state for the turn the direct
+      ;; send below starts.  `--prompt-send' is racy here: its blocking POST
+      ;; can already see the turn's synthetic activity record, which makes the
+      ;; send path fill the view instead of waiting.
+      (with-current-buffer (get-buffer-create "*dsh-bridge-output*")
+        (dsh-bridge-view-mode)
+        (setq-local dsh-bridge--view-content-session session-id)
+        (dsh-bridge--view-waiting-fill session-id nil))
+      (dsh-bridge-it--post "/dsh-bridge/send"
+                           (list (cons 'text "Go.") (cons 'sessionId session-id)))
+      (should (dsh-bridge-it--wait
+               (lambda () (assoc session-id dsh-bridge--pending-questions))
+               30000))
+      (with-current-buffer (dsh-bridge-it--view session-id)
+        (should dsh-bridge--view-waiting)
+        (should-not dsh-bridge--view-activity)
+        (should-not (string-match-p "Think before asking" (buffer-string)))
+        ;; Toggling on from the placeholder folds the activity in.
+        (dsh-bridge-view-toggle-activity)
+        (should dsh-bridge--view-activity)
+        (should-not dsh-bridge--view-waiting)
+        (should (string-match-p "Think before asking" (buffer-string)))
+        (should (string-match-p "ask_user_question" (buffer-string))))
+      (dsh-bridge-it--answer-pending session-id "Go"))))
 
 (provide 'dsh-bridge-it)
 ;;; dsh-bridge-it.el ends here

@@ -1290,7 +1290,7 @@ draft when the entry shown is pristine."
 ;;; The view buffers
 
 (ert-deftest dsh-bridge-view-mode-basics ()
-  "The view mode is read-only and binds g/q/r/k/B/i/l plus M-p/M-n — and no
+  "The view mode is read-only and binds g/q/r/k/B/i/l/v plus M-p/M-n — and no
 compose/fetch/targeting verbs."
   (with-temp-buffer
     (dsh-bridge-view-mode)
@@ -1305,6 +1305,8 @@ compose/fetch/targeting verbs."
               #'dsh-bridge-fork-turn))
   (should (eq (lookup-key dsh-bridge-view-mode-map (kbd "i"))
               #'dsh-bridge-receive))
+  (should (eq (lookup-key dsh-bridge-view-mode-map (kbd "v"))
+              #'dsh-bridge-view-toggle-activity))
   (should (eq (lookup-key dsh-bridge-view-mode-map (kbd "l"))
               #'dsh-bridge-list-sessions))
   (should (eq (lookup-key dsh-bridge-view-mode-map (kbd "D"))
@@ -1687,11 +1689,13 @@ buffer and reports the missing id."
         (cons 'time (or time 1000))
         (cons 'step (or step 1))))
 
-(defun dsh-bridge-test--view-turn (turn started-at segments &optional ended-at reason files)
+(defun dsh-bridge-test--view-turn (turn started-at segments &optional ended-at reason files activity)
   "A turn-record alist: TURN number, STARTED-AT ms-epoch, SEGMENTS oldest first.
 The turn is open (running) unless ENDED-AT is given; REASON defaults to
 \"completed\".  FILES, when non-nil, is the changed-files list `GET /turns'
-attaches to a turn that mutated files, as `((path . P) (op . O))' alists."
+attaches to a turn that mutated files, as `((path . P) (op . O))' alists.
+ACTIVITY, when non-nil, is the turn's host activity list (see
+`dsh-bridge-test--view-thinking' et al.)."
   (let ((record (list (cons 'turn turn)
                       (cons 'startedAt started-at)
                       (cons 'segments segments))))
@@ -1700,7 +1704,40 @@ attaches to a turn that mutated files, as `((path . P) (op . O))' alists."
                                         (cons 'reason (or reason "completed"))))))
     (when files
       (setq record (append record (list (cons 'files files)))))
+    (when activity
+      (setq record (append record (list (cons 'activity activity)))))
     record))
+
+(defun dsh-bridge-test--view-thinking (summary &optional seq ord step time)
+  "A host `thinking' activity entry for SUMMARY."
+  (list (cons 'kind "thinking")
+        (cons 'summary summary)
+        (cons 'seq (or seq 40))
+        (cons 'ord (or ord 0))
+        (cons 'step (or step 1))
+        (cons 'time (or time 1000))))
+
+(defun dsh-bridge-test--view-tool-call (name summary &optional call-id seq step time)
+  "A host `tool-call' activity entry for NAME with SUMMARY."
+  (list (cons 'kind "tool-call")
+        (cons 'name name)
+        (cons 'summary summary)
+        (cons 'callId (or call-id "call-1"))
+        (cons 'seq (or seq 41))
+        (cons 'ord 0)
+        (cons 'step (or step 1))
+        (cons 'time (or time 1000))))
+
+(defun dsh-bridge-test--view-tool-result (name &optional call-id is-error seq step time)
+  "A host `tool-result' activity entry for NAME, failed when IS-ERROR."
+  (list (cons 'kind "tool-result")
+        (cons 'name name)
+        (cons 'callId (or call-id "call-1"))
+        (cons 'isError (and is-error t))
+        (cons 'seq (or seq 42))
+        (cons 'ord 0)
+        (cons 'step (or step 1))
+        (cons 'time (or time 1000))))
 
 (defun dsh-bridge-test--view-file (path &optional op)
   "A changed-file row for the DSH-View footer: PATH with OP (default \"write\")."
@@ -1731,15 +1768,14 @@ attaches to a turn that mutated files, as `((path . P) (op . O))' alists."
               (cons 'incremental nil))))
 
 ;; The package renders a turn's body and terminal suffix separately (the
-;; incremental fill needs them apart), building the body inline, so the
-;; whole-turn render the tests assert against is composed here.
+;; incremental fill needs them apart), so the whole-turn render the tests
+;; assert against is composed here from the production renderer.
 
 (defun dsh-bridge-test--view-turn-body (turn)
-  "The segment-joined body of TURN, without any suffix.
-Mirrors the body `dsh-bridge--view-fill' builds."
-  (mapconcat (lambda (seg) (or (alist-get 'text seg) ""))
-             (alist-get 'segments turn)
-             dsh-bridge--view-segment-divider))
+  "The body of TURN, as the package renders it.
+Delegates to `dsh-bridge--view-turn-body' so the mirror cannot drift; callers
+exercising activity bind `dsh-bridge--view-activity' first."
+  (dsh-bridge--view-turn-body turn))
 
 (defun dsh-bridge-test--view-turn-render (turn &optional session-id)
   "Buffer text for the whole TURN record, or \"\" for nil.
@@ -2098,7 +2134,369 @@ A text marker planted in the body survives a splice and collapses to
         (let ((probe (copy-marker 3)))
           (should (refill other))
           (should (equal (marker-position probe) (point-min)))
+          (set-marker probe nil))
+        ;; Recorded activity-toggle state differs from the current -> rebuild.
+        (refill one)
+        (let ((probe (copy-marker 3)))
+          (setq-local dsh-bridge--view-activity (not dsh-bridge--view-activity))
+          (should (refill two))
+          (should (equal (marker-position probe) (point-min)))
           (set-marker probe nil))))))
+
+;;; Turn activity
+
+(ert-deftest dsh-bridge-view-activity-render-order ()
+  "Activity weaves between segments per step: thinking, text, then tools.
+A step boundary is a blank line; the `---' divider survives only between
+adjacent segments, so activity-off rendering is byte-identical to the old
+segment join."
+  (let ((turn (dsh-bridge-test--view-turn
+                7 7000000
+                (list (dsh-bridge-test--view-segment "answer one" 7001000 1)
+                      (dsh-bridge-test--view-segment "answer two" 7002000 2))
+                7003000 "completed" nil
+                (list (dsh-bridge-test--view-thinking "think one" 10 0 1 7001000)
+                      (dsh-bridge-test--view-tool-call "read" "src/a.ts" "c1" 11 1 7001100)
+                      (dsh-bridge-test--view-tool-result "read" "c1" nil 12 1 7001200)
+                      (dsh-bridge-test--view-thinking "think two" 20 0 2 7002000)
+                      (dsh-bridge-test--view-tool-call "edit" "src/a.ts" "c2" 21 2 7002100)
+                      (dsh-bridge-test--view-tool-result "edit" "c2" t 22 2 7002200)))))
+    (with-temp-buffer
+      (dsh-bridge-view-mode)
+      (setq-local dsh-bridge--view-activity t)
+      ;; Summaries go through the production wrapper so the expectation
+      ;; holds whether the view derives from `gfm-view-mode' or not (a
+      ;; load-time choice depending on markdown-mode's presence).
+      (should (equal (dsh-bridge-test--view-turn-body turn)
+                     (concat "\u22ef thinking: " (dsh-bridge--view-literal "think one") "\n"
+                             "answer one\n"
+                             "\u2192 read " (dsh-bridge--view-literal "src/a.ts") "\n"
+                             "\u2713 read\n\n"
+                             "\u22ef thinking: " (dsh-bridge--view-literal "think two") "\n"
+                             "answer two\n"
+                             "\u2192 edit " (dsh-bridge--view-literal "src/a.ts") "\n"
+                             "\u2717 edit (error)"))))
+    (with-temp-buffer
+      (dsh-bridge-view-mode)
+      (should (equal (dsh-bridge-test--view-turn-body turn)
+                     "answer one\n\n---\nanswer two")))))
+
+(ert-deftest dsh-bridge-view-turn-items-keeps-step-segments ()
+  "Every segment a step carries renders, in host order, joined by the divider.
+The host fold does not dedupe segments by step, so the item pipeline must not
+either: dropping one would vanish reply text."
+  (let ((turn (dsh-bridge-test--view-turn
+               7 7000000
+               (list (dsh-bridge-test--view-segment "part one" 7001000 1)
+                     (dsh-bridge-test--view-segment "part two" 7002000 1)
+                     (dsh-bridge-test--view-segment "next step" 7003000 2))
+               7004000)))
+    (with-temp-buffer
+      (dsh-bridge-view-mode)
+      (should (equal (dsh-bridge-test--view-turn-body turn)
+                     "part one\n\n---\npart two\n\n---\nnext step")))
+    (with-temp-buffer
+      (dsh-bridge-view-mode)
+      (setq-local dsh-bridge--view-activity t)
+      (should (equal (length (dsh-bridge--view-turn-items turn)) 3))
+      (should (equal (dsh-bridge-test--view-turn-body turn)
+                     "part one\n\n---\npart two\n\n---\nnext step")))))
+
+(ert-deftest dsh-bridge-view-item-separator-rules ()
+  "Segments keep the divider; a step boundary takes a blank line."
+  (let ((seg-a (dsh-bridge--view-segment-item (dsh-bridge-test--view-segment "a" 1000 1)))
+        (seg-b (dsh-bridge--view-segment-item (dsh-bridge-test--view-segment "b" 2000 2)))
+        (act-a (dsh-bridge--view-activity-item (dsh-bridge-test--view-thinking "t" 5 0 1 1000)))
+        (act-b (dsh-bridge--view-activity-item
+                (dsh-bridge-test--view-tool-call "x" "y" "c" 6 2 1000))))
+    (should (equal (dsh-bridge--view-item-separator seg-a seg-b)
+                   dsh-bridge--view-segment-divider))
+    (should (equal (dsh-bridge--view-item-separator seg-a act-a) "\n"))
+    (should (equal (dsh-bridge--view-item-separator act-a seg-a) "\n"))
+    (should (equal (dsh-bridge--view-item-separator act-a act-b) "\n\n"))
+    (should (equal (dsh-bridge--view-item-separator nil seg-a) ""))))
+
+(ert-deftest dsh-bridge-view-activity-line-grammar ()
+  "Activity lines carry their kind's prefix, face, and identity property."
+  (let ((thinking (dsh-bridge--view-activity-line
+                   (dsh-bridge-test--view-thinking "one two" 10 1 2 1000)))
+        (call (dsh-bridge--view-activity-line
+               (dsh-bridge-test--view-tool-call "read" "src/a.ts" "call-9" 11 1 1000)))
+        (same (dsh-bridge--view-activity-line
+               (dsh-bridge-test--view-tool-call "read" "read" "call-9" 11 1 1000)))
+        (empty (dsh-bridge--view-activity-line
+                (dsh-bridge-test--view-tool-call "read" "" "call-9" 11 1 1000)))
+        (ok (dsh-bridge--view-activity-line
+             (dsh-bridge-test--view-tool-result "read" "call-9" nil 12 1 1000)))
+        (bad (dsh-bridge--view-activity-line
+              (dsh-bridge-test--view-tool-result "read" "call-9" t 12 1 1000))))
+    (should (equal thinking "\u22ef thinking: one two"))
+    (should (eq (get-text-property 0 'face thinking)
+                'dsh-bridge-view-activity-thinking-face))
+    (should (eq (get-text-property 0 'font-lock-face thinking)
+                'dsh-bridge-view-activity-thinking-face))
+    (should (equal call "\u2192 read src/a.ts"))
+    (should (eq (get-text-property 0 'face call) 'dsh-bridge-view-activity-face))
+    (should (equal same "\u2192 read"))
+    (should (equal empty "\u2192 read"))
+    (should (equal ok "\u2713 read"))
+    (should (equal bad "\u2717 read (error)"))
+    (should (eq (get-text-property 0 'face bad) 'dsh-bridge-view-activity-error-face))
+    (should (eq (plist-get (get-text-property 0 'dsh-bridge-activity thinking) :kind)
+                'thinking))
+    (should (equal (plist-get (get-text-property 0 'dsh-bridge-activity thinking) :seq) 10))
+    (should (equal (plist-get (get-text-property 0 'dsh-bridge-activity call) :call-id)
+                   "call-9"))
+    (should-not (text-property-any 0 (length call) 'dsh-bridge-turn-marker t call))))
+
+(ert-deftest dsh-bridge-view-activity-only-turn ()
+  "A turn with no text segment renders its activity and its footer.
+With activity off, the same turn renders as just its footer, with no leading
+blank line (the empty body sits flush)."
+  (let ((turn (dsh-bridge-test--view-turn
+               7 7000000 nil 7003000 "completed"
+               (list (dsh-bridge-test--view-file "logic.ts"))
+               (list (dsh-bridge-test--view-thinking "guard both sites" 10 0 1 7001000)
+                     (dsh-bridge-test--view-tool-call "edit" "src/logic.ts" "c1" 11 1 7001100)
+                     (dsh-bridge-test--view-tool-result "edit" "c1" nil 12 1 7001200)))))
+    (with-temp-buffer
+      (dsh-bridge-view-mode)
+      (setq-local dsh-bridge--view-activity t)
+      ;; Summaries go through the production wrapper so the expectation
+      ;; holds whether the view derives from `gfm-view-mode' or not.
+      (should (equal (substring-no-properties (dsh-bridge-test--view-turn-render turn "s1"))
+                     (concat "\u22ef thinking: " (dsh-bridge--view-literal "guard both sites") "\n"
+                             "\u2192 edit " (dsh-bridge--view-literal "src/logic.ts") "\n"
+                             "\u2713 edit\n\n"
+                             "Changed files: logic.ts"))))
+    (with-temp-buffer
+      (dsh-bridge-view-mode)
+      (should (equal (substring-no-properties (dsh-bridge-test--view-turn-render turn "s1"))
+                     "Changed files: logic.ts")))))
+
+(ert-deftest dsh-bridge-view-activity-splice ()
+  "Activity appends splice in place; a toggle flip forces a rebuild."
+  (let* ((seg1 (dsh-bridge-test--view-segment "first" 7001000 1))
+         (think1 (dsh-bridge-test--view-thinking "one" 10 0 1 7001000))
+         (call1 (dsh-bridge-test--view-tool-call "read" "src/a.ts" "c1" 11 1 7001100))
+         (result1 (dsh-bridge-test--view-tool-result "read" "c1" nil 12 1 7001200))
+         (one (dsh-bridge-test--view-turn 7 7000000 (list seg1) nil nil nil (list think1)))
+         (two (dsh-bridge-test--view-turn 7 7000000 (list seg1) nil nil nil
+                                          (list think1 call1 result1)))
+         (dsh-bridge--turns-cache (dsh-bridge-test--view-cache (list two one)))
+         ;; The first fill counts as a session change and reseeds the toggle
+         ;; from this option, so bind it for the whole test.
+         (dsh-bridge-view-activity t))
+    (with-temp-buffer
+      (dsh-bridge-view-mode)
+      (dsh-bridge--view-fill "s1" one nil t)
+      (should dsh-bridge--view-activity)
+      (setq-local dsh-bridge--view-follow t)
+      (let ((probe (copy-marker 3)))
+        (dsh-bridge--view-fill "s1" two nil t t)
+        (should (equal (substring-no-properties (buffer-string))
+                       (substring-no-properties
+                        (dsh-bridge-test--view-turn-render two "s1"))))
+        ;; Spliced, not rebuilt: a marker inside the first segment survived.
+        (should (equal (marker-position probe) 3))
+        (set-marker probe nil))
+      ;; A toggle flip mismatches the recorded :activity and rebuilds.
+      (dsh-bridge--view-fill "s1" one nil t t)
+      (let ((probe (copy-marker 3)))
+        (setq-local dsh-bridge--view-activity nil)
+        (dsh-bridge--view-fill "s1" one nil t t)
+        (should (equal (marker-position probe) (point-min)))
+        (set-marker probe nil)))))
+
+(ert-deftest dsh-bridge-view-activity-toggle-command ()
+  "The toggle flips the buffer-local state, rebuilds, echoes, keeps point."
+  (let* ((turn (dsh-bridge-test--view-turn
+                7 7000000 (list (dsh-bridge-test--view-segment "reply" 7001000 1))
+                nil nil nil (list (dsh-bridge-test--view-thinking "one" 10 0 1 7001000))))
+         (dsh-bridge--turns-cache (dsh-bridge-test--view-cache (list turn)))
+         (messages nil))
+    (with-temp-buffer
+      (dsh-bridge-view-mode)
+      (dsh-bridge--view-fill "s1" turn nil t)
+      (should-not dsh-bridge--view-activity)
+      (cl-letf (((symbol-function 'dsh-bridge--view-turns-cache-refresh) #'ignore)
+                ((symbol-function 'message)
+                 (lambda (format-string &rest args)
+                   (push (apply #'format format-string args) messages))))
+        (goto-char 5)
+        (dsh-bridge-view-toggle-activity)
+        (should dsh-bridge--view-activity)
+        (should (equal (substring-no-properties (buffer-string))
+                       (substring-no-properties
+                        (dsh-bridge-test--view-turn-render turn "s1"))))
+        ;; A mid-body point keeps its approximate place across the rebuild.
+        (should (= (point) 5))
+        (should (string-match-p "shown" (car messages)))
+        (dsh-bridge-view-toggle-activity)
+        (should-not dsh-bridge--view-activity)
+        (should (string-match-p "hidden" (car messages)))))
+    (with-temp-buffer
+      (dsh-bridge-view-mode)
+      (should-error (dsh-bridge-view-toggle-activity) :type 'user-error))))
+
+(ert-deftest dsh-bridge-view-toggle-activity-waiting ()
+  "The toggle works from the post-send placeholder, so early activity shows.
+A waiting view has no record for its awaited turn until the host folds one;
+the toggle must still flip, and the refresh it forces folds the synthetic
+activity-only record in."
+  (let ((dsh-bridge--turns-cache nil)
+        (messages nil))
+    (with-temp-buffer
+      (dsh-bridge-view-mode)
+      (dsh-bridge--view-waiting-fill "s1" 2)
+      (should (equal (buffer-string) dsh-bridge--view-running-placeholder))
+      (cl-letf (((symbol-function 'dsh-bridge--view-turns-cache-refresh)
+                 (lambda (_session-id)
+                   (setq dsh-bridge--turns-cache
+                         (dsh-bridge-test--view-cache
+                          (list (dsh-bridge-test--view-turn
+                                 3 3000000 nil nil nil nil
+                                 (list (dsh-bridge-test--view-thinking
+                                        "early" 10 0 1 3000100))))))))
+                ((symbol-function 'message)
+                 (lambda (format-string &rest args)
+                   (push (apply #'format format-string args) messages))))
+        (should-not dsh-bridge--view-activity)
+        (dsh-bridge-view-toggle-activity)
+        (should dsh-bridge--view-activity)
+        (should (null dsh-bridge--view-waiting))
+        (should (equal dsh-bridge--view-turn 3))
+        (should (string-match-p "early" (buffer-string)))
+        (should (string-match-p "shown" (car messages)))))))
+
+(ert-deftest dsh-bridge-view-toggle-activity-waiting-without-activity ()
+  "Toggling from the placeholder before any activity flips but stays waiting."
+  (let ((dsh-bridge--turns-cache nil)
+        (messages nil))
+    (with-temp-buffer
+      (dsh-bridge-view-mode)
+      (dsh-bridge--view-waiting-fill "s1" 2)
+      (cl-letf (((symbol-function 'dsh-bridge--view-turns-cache-refresh) #'ignore)
+                ((symbol-function 'message)
+                 (lambda (format-string &rest args)
+                   (push (apply #'format format-string args) messages))))
+        (dsh-bridge-view-toggle-activity)
+        (should dsh-bridge--view-activity)
+        (should dsh-bridge--view-waiting)
+        (should (equal dsh-bridge--view-turn 3))
+        (should (equal (buffer-string) dsh-bridge--view-running-placeholder))
+        (should (string-match-p "shown" (car messages)))))))
+
+(ert-deftest dsh-bridge-turns-record-stale-by-activity ()
+  "A candidate whose newest activity entry predates the reference is stale.
+The per-turn window slides, so the entry count alone cannot separate an older
+response from a newer one (both sit at the cap); the newest `seq' can."
+  (let* ((think (dsh-bridge-test--view-thinking "one" 10 0 1 1000))
+         (call (dsh-bridge-test--view-tool-call "read" "a" "c1" 11 1 1100))
+         (base (dsh-bridge-test--view-turn 7 1000 nil nil nil nil (list think)))
+         (more (dsh-bridge-test--view-turn 7 1000 nil nil nil nil (list think call)))
+         (old-window (dsh-bridge-test--view-turn
+                      7 1000 nil nil nil nil
+                      (list (dsh-bridge-test--view-thinking "a" 5 0 1 1000)
+                            (dsh-bridge-test--view-tool-call "read" "a" "c1" 60 1 1060))))
+         (new-window (dsh-bridge-test--view-turn
+                      7 1000 nil nil nil nil
+                      (list (dsh-bridge-test--view-thinking "b" 6 0 1 1000)
+                            (dsh-bridge-test--view-tool-call "read" "a" "c2" 61 1 1061))))
+         (none (dsh-bridge-test--view-turn 7 1000 nil nil nil nil nil)))
+    (should (dsh-bridge--turns-record-stale-p base more))
+    (should-not (dsh-bridge--turns-record-stale-p more base))
+    (should-not (dsh-bridge--turns-record-stale-p more more))
+    ;; Equal entry counts, different windows: the newest seq decides.
+    (should (dsh-bridge--turns-record-stale-p old-window new-window))
+    (should-not (dsh-bridge--turns-record-stale-p new-window old-window))
+    ;; Losing activity the reference already has is stale; gaining it is not.
+    (should (dsh-bridge--turns-record-stale-p none more))
+    (should-not (dsh-bridge--turns-record-stale-p more none))))
+
+(ert-deftest dsh-bridge-view-activity-window-slide-rebuilds ()
+  "A slid activity window is no longer a prefix, so the fill rebuilds whole.
+The host's per-turn cap drops the oldest entries, so a re-sent record's keys
+do not extend the recorded ones; the provenance check must re-render rather
+than splice a tail under a body that is no longer there."
+  (let* ((think (dsh-bridge-test--view-thinking "one" 5 0 1 7000000))
+         (call (dsh-bridge-test--view-tool-call "read" "a" "c1" 6 1 7000100))
+         (result (dsh-bridge-test--view-tool-result "read" "c1" nil 7 1 7000200))
+         (one (dsh-bridge-test--view-turn 7 7000000 nil nil nil nil (list think call)))
+         (two (dsh-bridge-test--view-turn 7 7000000 nil nil nil nil (list call result)))
+         (dsh-bridge--turns-cache (dsh-bridge-test--view-cache (list two one)))
+         (dsh-bridge-view-activity t))
+    (with-temp-buffer
+      (dsh-bridge-view-mode)
+      (dsh-bridge--view-fill "s1" one nil t)
+      (let ((probe (copy-marker 3)))
+        (dsh-bridge--view-fill "s1" two nil t t)
+        ;; Rebuilt, not spliced: the old body, and the marker in it, is gone.
+        (should (equal (marker-position probe) (point-min)))
+        (set-marker probe nil))
+      (should (equal (substring-no-properties (buffer-string))
+                     (substring-no-properties
+                      (dsh-bridge-test--view-turn-render two "s1")))))))
+
+(ert-deftest dsh-bridge-activity-changed-refetch-gate ()
+  "`activity-changed' schedules a refetch only while a view renders activity."
+  (let ((calls nil))
+    (with-temp-buffer
+      (dsh-bridge-view-mode)
+      (setq-local dsh-bridge--view-content-session "s1")
+      (cl-letf (((symbol-function 'run-at-time)
+                 (lambda (_secs _repeat function &rest args)
+                   (push (cons function args) calls))))
+        (dsh-bridge--notification-handle-events
+         (list (list (cons 'kind "activity-changed") (cons 'sessionId "s1"))))
+        (should-not calls)
+        (setq-local dsh-bridge--view-activity t)
+        (dsh-bridge--notification-handle-events
+         (list (list (cons 'kind "activity-changed") (cons 'sessionId "s1"))))
+        (should (equal (cdr (car calls)) '("s1")))
+        (should (eq (car (car calls)) #'dsh-bridge--turns-changed))
+        ;; A frame for another session does not touch this view's session.
+        (setq calls nil)
+        (dsh-bridge--notification-handle-events
+         (list (list (cons 'kind "activity-changed") (cons 'sessionId "s2"))))
+        (should-not calls)))))
+
+(ert-deftest dsh-bridge-view-literal-markdown ()
+  "Summaries are code-spanned under gfm-view-mode and raw otherwise."
+  (should (equal (dsh-bridge--longest-backtick-run "a``b`c") 2))
+  (should (equal (dsh-bridge--longest-backtick-run "plain") 0))
+  ;; Outside a gfm-view-mode buffer the text is inserted verbatim.
+  (should (equal (dsh-bridge--view-literal "a*b*") "a*b*"))
+  (cl-letf (((symbol-function 'derived-mode-p)
+             (lambda (mode) (eq mode 'gfm-view-mode))))
+    (should (equal (dsh-bridge--view-literal "**/*.spec.ts") "`**/*.spec.ts`"))
+    (should (equal (dsh-bridge--view-literal "a``b") "```a``b```"))
+    (should (equal (dsh-bridge--view-literal "`pwd`") "`` `pwd` ``"))
+    (should (equal (dsh-bridge--view-literal "") ""))))
+
+(ert-deftest dsh-bridge-view-turn-renders-empty-p ()
+  "Only a textless, settled turn with activity off and no files is empty.
+The running marker and the changed-files footer both count as content, so a
+refill must still take a record that carries either."
+  (let ((blank (dsh-bridge-test--view-turn
+                2 2000000 nil 2000900 "completed" nil
+                (list (dsh-bridge-test--view-tool-call "read" "a.ts" "c1" 11 1 2000200))))
+        (with-files (dsh-bridge-test--view-turn
+                     2 2000000 nil 2000900 "completed"
+                     (list (dsh-bridge-test--view-file "a.ts"))))
+        (open (dsh-bridge-test--view-turn 2 2000000 nil nil nil nil nil))
+        (textual (dsh-bridge-test--view-turn
+                  2 2000000 (list (dsh-bridge-test--view-segment "reply" 2000100 1)) 2000900)))
+    (with-temp-buffer
+      (dsh-bridge-view-mode)
+      (setq-local dsh-bridge--view-activity nil)
+      (should (dsh-bridge--view-turn-renders-empty-p blank "s1"))
+      (should-not (dsh-bridge--view-turn-renders-empty-p with-files "s1"))
+      (should-not (dsh-bridge--view-turn-renders-empty-p open "s1"))
+      (should-not (dsh-bridge--view-turn-renders-empty-p textual "s1"))
+      (should-not (dsh-bridge--view-turn-renders-empty-p nil "s1"))
+      (setq-local dsh-bridge--view-activity t)
+      (should-not (dsh-bridge--view-turn-renders-empty-p blank "s1")))))
 
 (ert-deftest dsh-bridge-view-fill-provenance ()
   "A record fill records the render provenance, a splice extends it, and the
@@ -4828,6 +5226,31 @@ nothing was sent."
                                 (_ "prompt sent"))
                               msg)))))
 
+(ert-deftest dsh-bridge-send-text-yields-to-a-racing-turn-boundary ()
+  "A send whose request races the notifier does not clobber the truth.
+A fast turn can start and finish before `POST /send' answers; the optimistic
+\"running\" mark must then be skipped, or an idle session keeps a stale
+running status and the next send prompts."
+  (let ((dsh-bridge--prompt-history nil)
+        (dsh-bridge--session-status nil)
+        (dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t)))))
+    ;; Control: with no tracker movement during the request, the send marks
+    ;; the session running.
+    (cl-letf (((symbol-function 'dsh-bridge--http)
+               (lambda (&rest _) (list nil "{\"ok\":true,\"sessionId\":\"s1\"}" 200)))
+              ((symbol-function 'message) #'ignore))
+      (dsh-bridge-send-text "one" "s1"))
+    (should (eq (dsh-bridge--status-state "s1") 'running))
+    ;; The racing case: the notifier settles the turn while the request is in
+    ;; flight, so its idle is the truth and the stale running mark is skipped.
+    (cl-letf (((symbol-function 'dsh-bridge--http)
+               (lambda (&rest _)
+                 (dsh-bridge--status-set "s1" 'idle)
+                 (list nil "{\"ok\":true,\"sessionId\":\"s1\"}" 200)))
+              ((symbol-function 'message) #'ignore))
+      (dsh-bridge-send-text "two" "s1"))
+    (should (eq (dsh-bridge--status-state "s1") 'idle))))
+
 (ert-deftest dsh-bridge-send-text-steer-records-history ()
   "A steered send is recorded in the prompt history like a plain send."
   (let ((dsh-bridge--prompt-history nil)
@@ -7030,6 +7453,130 @@ already reads idle."
       (should (null dsh-bridge--view-turn)))
     (when (buffer-live-p (get-buffer "*dsh-bridge-output*"))
       (kill-buffer "*dsh-bridge-output*"))))
+
+(ert-deftest dsh-bridge-turn-complete-refetch-blocked-activity-note ()
+  "A `blocked' turn synthesized into `/turns' still yields the terminal note.
+The host names an activity-bearing blocked turn through a synthetic record
+with empty `segments'; with activity rendering off that record renders
+nothing, so the waiting view must fall through to the blocked note rather
+than go blank.  With the toggle on the same record fills normally, showing
+its activity lines."
+  (let ((dsh-bridge--session-status nil)
+        (dsh-bridge--turns-cache nil)
+        (response
+         (concat "{\"sessionId\":\"s1\",\"turns\":["
+                 "{\"turn\":3,\"startedAt\":3000000,"
+                 "\"endedAt\":3009000,\"reason\":\"blocked\","
+                 "\"segments\":[],"
+                 "\"activity\":[{\"kind\":\"thinking\","
+                 "\"summary\":\"checking the gate\",\"seq\":10,"
+                 "\"ord\":0,\"step\":1,\"time\":3000100}]}]}")))
+    (with-current-buffer (get-buffer-create "*dsh-bridge-output*")
+      (dsh-bridge-view-mode)
+      (setq-local dsh-bridge--view-content-session "s1")
+      (dsh-bridge--view-waiting-fill "s1" 2)
+      (should (equal (buffer-string) dsh-bridge--view-running-placeholder)))
+    (cl-letf (((symbol-function 'dsh-bridge--http)
+               (lambda (&rest _) (list nil response 200)))
+              ((symbol-function 'dsh-bridge--status-set) #'ignore)
+              ((symbol-function 'dsh-bridge--apply-session-directory) #'ignore))
+      ;; Toggle off: the synthetic record renders nothing, so the waiting
+      ;; view falls through to the explicit blocked note.
+      (with-current-buffer "*dsh-bridge-output*"
+        (setq-local dsh-bridge--view-activity nil))
+      (dsh-bridge--turn-complete-refetch "s1" "blocked" 3)
+      (with-current-buffer "*dsh-bridge-output*"
+        (should (string-match-p "blocked" (buffer-string)))
+        (should-not (string-match-p "checking the gate" (buffer-string)))
+        (should (null dsh-bridge--view-waiting))
+        (should (null dsh-bridge--view-turn)))
+      ;; Toggle on: the same record fills and shows its activity lines.
+      (with-current-buffer "*dsh-bridge-output*"
+        (dsh-bridge--view-waiting-fill "s1" 2)
+        (setq-local dsh-bridge--view-activity t))
+      (dsh-bridge--turn-complete-refetch "s1" "blocked" 3)
+      (with-current-buffer "*dsh-bridge-output*"
+        (should (string-match-p "checking the gate" (buffer-string)))
+        (should-not (string-match-p "(blocked" (buffer-string)))
+        (should (equal dsh-bridge--view-turn 3))
+        (should (null dsh-bridge--view-waiting))))
+    (when (buffer-live-p (get-buffer "*dsh-bridge-output*"))
+      (kill-buffer "*dsh-bridge-output*"))))
+
+(ert-deftest dsh-bridge-turn-complete-keeps-following-view-content ()
+  "A settled record that renders nothing does not blank a following view.
+The host serves a synthetic activity-only record for a turn that produced no
+text; with activity rendering off that record has no body and no suffix, so
+the refill must leave the previously displayed turn alone (filling it would
+erase the view).  With the toggle on the same record fills and shows its
+activity."
+  (let ((dsh-bridge--session-status nil)
+        (dsh-bridge--turns-cache nil)
+        (response
+         (concat "{\"sessionId\":\"s1\",\"turns\":["
+                 "{\"turn\":2,\"startedAt\":2000000,"
+                 "\"endedAt\":2009000,\"reason\":\"completed\","
+                 "\"segments\":[],"
+                 "\"activity\":[{\"kind\":\"tool-call\",\"name\":\"read\","
+                 "\"summary\":\"a.ts\",\"callId\":\"c1\",\"seq\":10,"
+                 "\"ord\":0,\"step\":1,\"time\":2000100}]},"
+                 "{\"turn\":1,\"startedAt\":1000000,"
+                 "\"endedAt\":1000900,\"reason\":\"completed\","
+                 "\"segments\":[{\"text\":\"first reply\","
+                 "\"time\":1000100,\"step\":1}]}]}")))
+    (with-current-buffer (get-buffer-create "*dsh-bridge-output*")
+      (dsh-bridge-view-mode)
+      (setq-local dsh-bridge--view-content-session "s1")
+      (setq-local dsh-bridge--view-activity nil)
+      (dsh-bridge--view-fill "s1" (dsh-bridge-test--view-turn
+                                   1 1000000
+                                   (list (dsh-bridge-test--view-segment
+                                          "first reply" 1000100 1))
+                                   1000900)
+                             nil t)
+      (setq-local dsh-bridge--view-follow t))
+    (cl-letf (((symbol-function 'dsh-bridge--http)
+               (lambda (&rest _) (list nil response 200)))
+              ((symbol-function 'dsh-bridge--status-set) #'ignore)
+              ((symbol-function 'dsh-bridge--apply-session-directory) #'ignore))
+      ;; Toggle off: the empty record must not replace the shown turn.
+      (dsh-bridge--turn-complete-refetch "s1" "completed" 2)
+      (with-current-buffer "*dsh-bridge-output*"
+        (should (equal dsh-bridge--view-turn 1))
+        (should (string-match-p "first reply" (buffer-string))))
+      ;; Toggle on: the same record renders its activity and fills.
+      (with-current-buffer "*dsh-bridge-output*"
+        (setq-local dsh-bridge--view-activity t))
+      (dsh-bridge--turn-complete-refetch "s1" "completed" 2)
+      (with-current-buffer "*dsh-bridge-output*"
+        (should (equal dsh-bridge--view-turn 2))
+        (should (string-match-p "read" (buffer-string)))))
+    (when (buffer-live-p (get-buffer "*dsh-bridge-output*"))
+      (kill-buffer "*dsh-bridge-output*"))))
+
+(ert-deftest dsh-bridge-view-follow-refill-keeps-content-on-empty-record ()
+  "A following view is not blanked by a newest record that renders nothing."
+  (let* ((one (dsh-bridge-test--view-turn
+               1 1000000
+               (list (dsh-bridge-test--view-segment "first reply" 1000100 1)) 1000900))
+         (empty (dsh-bridge-test--view-turn
+                 2 2000000 nil 2000900 "completed" nil
+                 (list (dsh-bridge-test--view-tool-call "read" "a.ts" "c1" 11 1 2000200))))
+         (dsh-bridge--turns-cache (dsh-bridge-test--view-cache (list empty one))))
+    (with-temp-buffer
+      (dsh-bridge-view-mode)
+      (setq-local dsh-bridge--view-content-session "s1")
+      (setq-local dsh-bridge--view-activity nil)
+      (dsh-bridge--view-fill "s1" one nil t)
+      (setq-local dsh-bridge--view-follow t)
+      (dsh-bridge--view-follow-refill "s1")
+      (should (equal dsh-bridge--view-turn 1))
+      (should (string-match-p "first reply" (buffer-string)))
+      ;; With activity on, the same record renders and fills.
+      (setq-local dsh-bridge--view-activity t)
+      (dsh-bridge--view-follow-refill "s1")
+      (should (equal dsh-bridge--view-turn 2))
+      (should (string-match-p "read" (buffer-string))))))
 
 (ert-deftest dsh-bridge-view-blocked-fill-names-archived ()
   "The blocked note names the archived cause when the session is archived."

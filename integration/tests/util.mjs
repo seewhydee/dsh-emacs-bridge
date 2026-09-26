@@ -112,8 +112,10 @@ export async function createSession(fixture, path = REPO_ROOT, timeoutMs = 60000
 
 /**
  * Open an SSE stream to `/dsh-bridge/events` and collect parsed frames.
- * `waitFor(kind)` resolves with the first frame of that kind seen after the
- * call, or rejects on timeout. `opened` resolves once the host has accepted
+ * `waitFor(kind, timeout?, match?)` resolves with the first frame of that kind
+ * seen after the call (optionally one satisfying `match`, e.g. a session-id
+ * filter on the shared host), or rejects on timeout. `opened` resolves once
+ * the host has accepted
  * the connection (await it before driving a route that gates on client
  * presence, e.g. POST /draft). `close()` aborts the stream. `purpose`
  * ('draft') marks the connection as the browser's draft stream, the way the
@@ -138,11 +140,16 @@ export function openSse(fixture, { timeoutMs = 15000, purpose, answer } = {}) {
   function settle(kind, frame) {
     const list = waiters.get(kind)
     if (!list) return
-    waiters.delete(kind)
+    // Resolve only the waiters this frame satisfies; one parked with a `match`
+    // predicate (a session-scoped wait on the shared host) stays waiting.
+    const remaining = []
     for (const w of list) {
+      if (w.match !== undefined && !w.match(frame)) { remaining.push(w); continue }
       clearTimeout(w.timer)
       w.resolve(frame ?? null)
     }
+    if (remaining.length === 0) waiters.delete(kind)
+    else waiters.set(kind, remaining)
   }
 
   function failAll(reason) {
@@ -201,8 +208,9 @@ export function openSse(fixture, { timeoutMs = 15000, purpose, answer } = {}) {
   return {
     frames,
     opened,
-    waitFor(kind, timeout = timeoutMs) {
-      const existing = frames.find((f) => f.kind === kind)
+    waitFor(kind, timeout = timeoutMs, match) {
+      const existing = frames.find((f) => f.kind === kind
+        && (match === undefined || match(f)))
       if (existing !== undefined) return Promise.resolve(existing)
       return new Promise((resolvePromise, reject) => {
         const timer = setTimeout(() => {
@@ -214,7 +222,7 @@ export function openSse(fixture, { timeoutMs = 15000, purpose, answer } = {}) {
           reject(new Error(`timed out waiting for SSE frame kind ${kind}`))
         }, timeout)
         const list = waiters.get(kind) ?? []
-        list.push({ resolve: resolvePromise, reject, timer })
+        list.push({ resolve: resolvePromise, reject, timer, match })
         waiters.set(kind, list)
       })
     },

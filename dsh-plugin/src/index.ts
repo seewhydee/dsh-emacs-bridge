@@ -22,8 +22,9 @@
 //   GET  /dsh-bridge/status                         -> { name, version } (loopback-fenced)
 //   GET  /dsh-bridge/events?token=                  -> EventSource (composer-draft push)
 //        (also carries turn lifecycle, context, plan, goal, goal-activation,
-//        outbox, and sessions-changed frames; the payloads are documented on
-//        their constructors in logic.ts)
+//        outbox, sessions-changed, replies-changed, and activity-changed
+//        frames; the payloads are documented on their constructors in
+//        logic.ts)
 //        (?purpose=draft marks the browser's own draft stream; an unmarked
 //        connection is Emacs and is eligible to answer ask-user questions and
 //        approvals, both of which coexist with the web UI's own panels.  &answer=0
@@ -50,10 +51,17 @@
 //   GET  /dsh-bridge/turns?sessionId=             -> turn-aggregated assistant
 //        replies, newest first (each turn: { turn, startedAt, endedAt?,
 //        reason?, endSeq?, segments: [{ text, time, step }], files?:
-//        [{ path, op }] }; endSeq is the turn/end event's seq — the
-//        session/fork anchor — and is absent while the turn is open; files is
-//        the changed-files fold's per-turn attribution, absent when the turn
-//        changed nothing) plus running, archived, epoch, title and cwd.  Optional
+//        [{ path, op }], activity?: [{ kind, seq, ord, time, turn, step,
+//        callId?, name?, summary?, isError? }] };
+//        endSeq is the turn/end event's seq — the session/fork anchor — and is
+//        absent while the turn is open; files is the changed-files fold's
+//        per-turn attribution, absent when the turn changed nothing; activity
+//        is the tool-call/result + thinking-summary fold (summary-only: full
+//        reasoning never leaves the host; the newest 60 entries per turn),
+//        absent when the turn has none.  A turn that has activity but no text
+//        yet is also served, with segments: [] and its turn/start (and
+//        turn/end, once closed) boundary facts.) plus running, archived,
+//        epoch, title and cwd.  Optional
 //        since=<turn>&epoch=<n> request the incremental suffix: turns with
 //        turn >= since when the epoch matches the surface's replaceGeneration,
 //        else the full list (incremental: true|false)
@@ -153,6 +161,8 @@ import type { ApprovalRequestEvent } from '@deepseek-ai/dsh-user-approval/types'
 import { Outbox } from './outbox.ts'
 import {
   answerMatchesQuestions,
+  activityChangedMessage,
+  activityRelevantEvent,
   approvalDecisionValid,
   approvalMessage,
   approvalResolvedMessage,
@@ -209,10 +219,13 @@ import {
   tokenRequestsSameOrigin,
   tokensEqual,
   toolCallForId,
+  turnActivity,
+  turnBoundaries,
   turnCompleteMessage,
   turnStartMessage,
   turnsSince,
   userPrompts,
+  withActivityTurns,
   workspaceRefsBySession,
   workspaceTitleConflict,
   KeyedSerial,
@@ -1507,6 +1520,39 @@ export function apply(ctx: Context): void {
     }
   }
 
+  // Turn activity (tool calls, results, reasoning summaries) arrives in bursts
+  // — a step's calls and their results land together — so its SSE frame is
+  // trailing-debounced per session. The frame is only a nudge: Emacs re-pulls
+  // `/turns`, which carries the bounded activity the fold computed.
+  const ACTIVITY_DEBOUNCE_MS = 500
+  const activityTimers = new Map<string, ReturnType<typeof setTimeout>>()
+
+  /** Schedule (or re-schedule) SESSION-ID's trailing activity frame. */
+  function scheduleActivityFrame(sessionId: string, turn: number | undefined): void {
+    const pending = activityTimers.get(sessionId)
+    if (pending !== undefined) clearTimeout(pending)
+    const timer = setTimeout(() => {
+      activityTimers.delete(sessionId)
+      broadcast(activityChangedMessage(sessionId, turn))
+    }, ACTIVITY_DEBOUNCE_MS)
+    activityTimers.set(sessionId, timer)
+  }
+
+  /** Drop SESSION-ID's pending activity frame (the session is gone). */
+  function clearActivityFrame(sessionId: string): void {
+    const pending = activityTimers.get(sessionId)
+    if (pending === undefined) return
+    clearTimeout(pending)
+    activityTimers.delete(sessionId)
+  }
+
+  // The timer map is process state, so it must not outlive the plugin (a
+  // hot-reload disposes the effect while a frame may still be pending).
+  ctx.effect(() => () => {
+    for (const timer of activityTimers.values()) clearTimeout(timer)
+    activityTimers.clear()
+  }, 'dsh-bridge: activity debounce')
+
   // Push turn lifecycle and title changes onto the SSE stream for the Emacs
   // status tracker and sessions-list auto-refresh. Emitted only for targetable
   // (non-subagent) sessions; the browser ignores any kind it does not
@@ -1516,6 +1562,12 @@ export function apply(ctx: Context): void {
   ctx.on('session/event', (session, event) => {
     if (isSubagentChild(session.header.origin, ownedByLiveParent(session))) return
     const id = String(session.id)
+    // The activity nudge is independent of the lifecycle branches below: a
+    // tool-only step emits no turn boundary and no replies-changed, yet it is
+    // exactly the mid-turn activity the view streams.
+    if (activityRelevantEvent(event as SessionEventLike)) {
+      scheduleActivityFrame(id, turnNumberOf(event.data))
+    }
     if (event.type === 'turn/start') {
       broadcast(turnStartMessage(id, event.time, turnNumberOf(event.data)))
       return
@@ -1650,6 +1702,7 @@ export function apply(ctx: Context): void {
     }
   })
   ctx.on('session/disposed', (session) => {
+    clearActivityFrame(String(session.id))
     if (!isSubagentChild(session.header.origin, ownedByLiveParent(session))) {
       broadcastSessionsChanged(String(session.id))
     }
@@ -2434,15 +2487,30 @@ export function apply(ctx: Context): void {
           const epoch = session.surface.replaceGeneration
           const events = session.snapshotEvents() as readonly SessionEventLike[]
           // The changed-files fold walks the raw log (`tool/call` is log-only),
-          // unlike the surface-walking turn fold it is merged into.
+          // unlike the surface-walking turn fold it is merged into.  The
+          // activity fold rides the same raw log; it also supplies synthetic
+          // records for activity-bearing turns that have no text yet, so the
+          // view can stream activity before the turn's first reply.  The
+          // surface set keeps compaction-shadowed turns vanished.
           const fold = changedFiles(events, session.header.cwd)
-          const records = assistantTurns({ nodes: session.surface.nodes, events })
+          const activity = turnActivity(events)
+          const records = withActivityTurns(
+            assistantTurns({ nodes: session.surface.nodes, events }),
+            activity,
+            turnBoundaries(events),
+            new Set(session.surface.nodes),
+          )
             .reverse()
             .map((turn) => {
               const files = fold.byTurn.get(turn.turn)
-              return files === undefined
-                ? turn
-                : { ...turn, files: files.map(file => ({ path: file.path, op: file.op })) }
+              const stream = activity.get(turn.turn)
+              const extra = {
+                ...(files === undefined
+                  ? {}
+                  : { files: files.map(file => ({ path: file.path, op: file.op })) }),
+                ...(stream === undefined ? {} : { activity: stream.entries }),
+              }
+              return Object.keys(extra).length === 0 ? turn : { ...turn, ...extra }
             })
           const { incremental, turns } = turnsSince(
             records,

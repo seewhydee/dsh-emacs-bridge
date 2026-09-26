@@ -30,7 +30,7 @@
 import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
-import { textChunks, toolCallChunks, auxChunks } from './chunks.js'
+import { textChunks, toolCallChunks, reasoningChunks, auxChunks } from './chunks.js'
 
 export const name = 'dsh-bridge-mock-llm'
 
@@ -182,6 +182,17 @@ class MockAdapter {
           toolCallChunks(entry.name, argumentsJson, entry.text, {
             fragmentArgs: entry.fragmentArgs === true,
           }),
+          0,
+          options.signal,
+        )
+        return
+      }
+      case 'reasoning': {
+        yield* this.paced(
+          reasoningChunks(
+            typeof entry.text === 'string' ? entry.text : '',
+            entry.toolCall === undefined ? {} : { toolCall: entry.toolCall },
+          ),
           0,
           options.signal,
         )

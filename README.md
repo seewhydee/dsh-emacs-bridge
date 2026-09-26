@@ -181,6 +181,7 @@ The following commands are available in a DSH-View buffer:
 * `B` — branch the shown turn into a new session.
 * `k` — stop the shown session's running turn.
 * `i` — receive the latest "Send to Emacs" message (see below).
+* `v` — show or hide the turn's tool calls and thinking summaries.
 * `D` — describe the current session.
 * `M-p`/`M-n` — cycle the current session's turns (older / newer).
 * `l` — open the DSH-Sessions buffer.
@@ -206,9 +207,26 @@ diff or review view: the previous hunk viewer was removed pending a
 redesign (see `PLAN.md`).
 
 Customize `dsh-bridge-view-changed-files` to `nil` to omit the footer.
-A turn that produced no assistant text is absent from the turn list
-altogether, so a purely file-changing turn has no footer; refresh (`g`)
-after a turn completes to pick up its files.
+A turn that produced no assistant text but did run a tool is still
+served, so a purely file-changing turn shows its footer (and no reply);
+refresh (`g`) after a turn completes to pick up its files.
+
+#### Turn activity
+
+By default a DSH-View buffer shows only the assistant's replies.  Type
+`v` (`dsh-bridge-view-toggle-activity`) to interleave the shown turn's
+*activity*: one line per tool call, one line per tool result, and a
+one-line summary of each reasoning (thinking) block.  The toggle is
+buffer-local and starts from `dsh-bridge-view-activity` (default
+`nil`); it is also in the buffer's menu.
+
+The thinking lines are summaries that the host derives from the model's
+reasoning blocks; the full chain of thought never reaches Emacs.
+Activity streams in live, mid-turn, so a turn whose opening step is
+tool-only or reasoning-only shows its lines before it has any reply
+text.  Long sessions keep activity only for recent turns; within a turn
+the host keeps the newest entries, so a busy live turn keeps streaming
+and its oldest lines slide out.
 
 #### Agent queries and approval requests
 
@@ -337,6 +355,13 @@ directly, and the browser plugin fetches it from a route fenced to
 loopback peers and same-origin pages.  Request bodies are capped at 1
 MiB, and messages waiting for Emacs sit in a bounded outbox that
 evicts the oldest entries (with a warning).
+
+Turn activity is bounded too: `/turns` carries at most 60 activity
+entries per turn — the oldest slide out first, so a live turn's newest
+activity is always sent — and activity for at most the newest 40 turns,
+so the payload cannot grow without limit over a long session.
+Reasoning crosses the wire only as a one-line summary; the full text
+stays on the host.
 
 Note that any third party with access to the token can do everything
 this Emacs package can: send prompts, read session logs (including

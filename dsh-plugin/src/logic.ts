@@ -135,6 +135,47 @@ export interface SessionTurnLogLike {
   events: readonly SessionEventLike[]
 }
 
+/** The turn-boundary facts of one session log, keyed by turn number. */
+export interface TurnBoundaries {
+  /** Ms-epoch `turn/start` time; first wins. */
+  starts: Map<number, number>
+  /** `turn/end` facts; last wins. `seq` is the fork anchor. */
+  ends: Map<number, { time: number; reason?: string; seq: number }>
+}
+
+/**
+ * Fold the log-only turn boundary events (`turn/start` / `turn/end`) of one
+ * session log, keyed by turn number. A turn has one `turn/start` (first wins
+ * for the start time) and at most one `turn/end` (last wins). The walk is
+ * indexed rather than `for...of` so a sparse log can fall back to the array
+ * position for `endSeq`.
+ */
+export function turnBoundaries(events: readonly SessionEventLike[]): TurnBoundaries {
+  const starts = new Map<number, number>()
+  const ends = new Map<number, { time: number; reason?: string; seq: number }>()
+  for (let index = 0; index < events.length; index += 1) {
+    const event = events[index]
+    if (event === undefined) continue
+    if (event.type === 'turn/start') {
+      const data = event.data as { turn?: unknown } | undefined
+      const turn = data?.turn
+      if (typeof turn === 'number' && !starts.has(turn)) starts.set(turn, event.time)
+    } else if (event.type === 'turn/end') {
+      const data = event.data as { turn?: unknown; reason?: { kind?: unknown } } | undefined
+      const turn = data?.turn
+      if (typeof turn === 'number') {
+        const kind = data?.reason?.kind
+        ends.set(turn, {
+          time: event.time,
+          ...(typeof kind === 'string' ? { reason: kind } : {}),
+          seq: typeof event.seq === 'number' ? event.seq : index,
+        })
+      }
+    }
+  }
+  return { starts, ends }
+}
+
 /**
  * Fold a session log into its text-bearing agent turns, oldest first.
  *
@@ -171,33 +212,9 @@ export function assistantTurns(log: SessionTurnLogLike): AssistantTurn[] {
     segments.push({ text, time: event.time, step })
   }
 
-  // Turn boundaries are log-only, so fold start/end facts for the turns that
-  // produced text from the events themselves. A turn has one `turn/start`
-  // (first wins for the start time) and at most one `turn/end` (last wins).
-  // The boundary fold is indexed rather than `for...of` so a sparse log can
-  // fall back to the array position for `endSeq`.
-  const starts = new Map<number, number>()
-  const ends = new Map<number, { time: number; reason?: string; seq: number }>()
-  for (let index = 0; index < log.events.length; index += 1) {
-    const event = log.events[index]
-    if (event === undefined) continue
-    if (event.type === 'turn/start') {
-      const data = event.data as { turn?: unknown } | undefined
-      const turn = data?.turn
-      if (typeof turn === 'number' && !starts.has(turn)) starts.set(turn, event.time)
-    } else if (event.type === 'turn/end') {
-      const data = event.data as { turn?: unknown; reason?: { kind?: unknown } } | undefined
-      const turn = data?.turn
-      if (typeof turn === 'number') {
-        const kind = data?.reason?.kind
-        ends.set(turn, {
-          time: event.time,
-          ...(typeof kind === 'string' ? { reason: kind } : {}),
-          seq: typeof event.seq === 'number' ? event.seq : index,
-        })
-      }
-    }
-  }
+  // Turn boundaries are log-only, so fold start/end facts from the events
+  // themselves; the fold is shared with the activity-only turn synthesis.
+  const { starts, ends } = turnBoundaries(log.events)
 
   const turns: AssistantTurn[] = []
   for (const turn of order) {
@@ -259,6 +276,13 @@ function nonNegativeIntParam(value: string | undefined): number | undefined {
  * the client's turns below `since` is sound.  `since` is inclusive because
  * the boundary turn is exactly the one that changes mid-turn: segments
  * append to it, and a `turn/end` sets its `endedAt`/`reason`.
+ *
+ * The record list keeps that property, but a turn's *activity* entries do
+ * not: `MAX_ACTIVITY_TURNS` can drop an older turn's entries between fetches,
+ * and turns below `since` are never re-sent, so an Emacs client can hold
+ * phantom activity for them until a full (non-incremental) refetch.  That is
+ * a bounded display lag, not a correctness hole — `/turns` remains the
+ * authority whenever it is refetched in full.
  */
 export function turnsSince(
   turns: readonly AssistantTurn[],
@@ -306,7 +330,9 @@ export interface SessionEventLike {
   /**
    * How a message-producing event entered the surface: `'append'` or a
    * replacement descriptor. The changed-files fold reads it to ignore
-   * compaction replacement copies (see `isAppendSurfaceEvent` in the harness).
+   * compaction replacement copies (the harness check is `isAppendSurfaceEvent`
+   * in `@deepseek-ai/dsh-session/surface`; this module carries its own
+   * structural guard of the same name).
    */
   surfaceOp?: unknown
 }
@@ -645,6 +671,389 @@ export function changedFiles(
     }
   }
   return { files, byTurn, truncated }
+}
+
+// -- Turn activity (the DSH-View process stream) -----------------------------
+//
+// The fold walks the *raw log* like the changed-files fold above (`tool/call`
+// is log-only), so it sees call arguments and reasoning blocks that never
+// become surface nodes. Two log facts drive the guards:
+//
+// - `tool/result` and `assistant/message` are surface events; a compaction
+//   replacement copy must be skipped (`isAppendSurfaceEvent`), or reasoning
+//   would be reported twice. `tool/call` is never a surface event.
+// - A fully compaction-shadowed turn still has raw-log activity (its
+//   `tool/call` events survive, and so do the original 'append' message
+//   events, which the surface replace shadows by seq), so `withActivityTurns`
+//   synthesizes a record only for a turn that still owns a surface node.
+//
+// The summary folds mirror web-client previews: the tool-call detail mirrors
+// the process-detail fold
+// (`packages/client/ui-chat/src/client/conversation-nodes/process-activity.ts`)
+// and the thinking summary mirrors `ReasoningRow`'s settled firstLine. Both
+// are client-side, not a host contract, so they are mirrored here rather than
+// imported. Re-verify them on every DSH version bump; see AGENTS.md.
+
+/** Maximum activity entries retained for one turn. Once the cap is reached the
+ * oldest entries are dropped, so the newest activity — the part a view
+ * following a live turn is watching — always remains. */
+export const MAX_ACTIVITY_ENTRIES_PER_TURN = 60
+
+/** Maximum activity-bearing turns retained, newest first. Older turns get no
+ * activity (a retention window, deliberately silent rather than reported). */
+export const MAX_ACTIVITY_TURNS = 40
+
+/** Cap on a tool-call summary, in graphemes. */
+export const MAX_ACTIVITY_DETAIL_CHARS = 160
+
+/** Cap on a thinking summary, in graphemes. */
+export const MAX_ACTIVITY_THINKING_CHARS = 160
+
+/** Argument keys, in priority order, whose value names a tool call's one-line
+ * task detail. Mirrors the web client's `LIVE_TOOL_DETAIL_KEYS`. */
+const ACTIVITY_DETAIL_KEYS = [
+  'title', 'description', 'objective', 'task', 'task_name', 'name', 'question',
+  'questions', 'prompt', 'message', 'command', 'cmd', 'queries', 'query',
+  'pattern', 'url', 'uri', 'file_path', 'path', 'target', 'action', 'status',
+] as const
+
+/** Grapheme segmenter for the summary caps: the harness caps graphemes, not
+ * code units, so a cap never splits an emoji or a combining sequence. */
+const ACTIVITY_SEGMENTER = new Intl.Segmenter(undefined, { granularity: 'grapheme' })
+
+/** The fields every activity entry carries. */
+export interface ActivityEntryBase {
+  /** The source event's log seq (the array position when the log is sparse). */
+  seq: number
+  /** Disambiguates entries derived from one event: the 0-based reasoning-block
+   * index for `thinking`, 0 for tool entries. */
+  ord: number
+  /** The source event's ms-epoch time. */
+  time: number
+  /** The harness turn and step the entry belongs to. */
+  turn: number
+  step: number
+}
+
+/** One tool call the agent dispatched. */
+export interface ActivityToolCall extends ActivityEntryBase {
+  kind: 'tool-call'
+  callId: string
+  name: string
+  /** One-line task detail folded from the call's arguments. */
+  summary: string
+}
+
+/** One tool call's result, as a status line. */
+export interface ActivityToolResult extends ActivityEntryBase {
+  kind: 'tool-result'
+  callId: string
+  name: string
+  isError: boolean
+}
+
+/** One reasoning block, reduced to a one-line summary. The full reasoning text
+ * is deliberately never part of the fold's output. */
+export interface ActivityThinking extends ActivityEntryBase {
+  kind: 'thinking'
+  summary: string
+}
+
+export type ActivityEntry = ActivityToolCall | ActivityToolResult | ActivityThinking
+
+/** One turn's bounded activity stream. */
+export interface TurnActivity {
+  /** Entries in log order, which is also the render order: a step's reasoning
+   * precedes its tool entries, because the step's assistant message is
+   * appended before the calls dispatch. */
+  entries: ActivityEntry[]
+  /** Seqs of this turn's append `assistant/message` events: the surface
+   * visibility evidence `withActivityTurns` tests. Never serialized. */
+  messageSeqs: number[]
+}
+
+/** Whether EVENT entered the surface at its own log position. A compaction
+ * replacement copy (a `replace` surfaceOp) must not be folded a second time;
+ * this is the same guard `toolResultFact` applies to tool results. */
+function isAppendSurfaceEvent(event: SessionEventLike): boolean {
+  return event.surfaceOp === 'append'
+}
+
+/** The graphemes of TEXT, for the summary caps. */
+function graphemes(text: string): string[] {
+  return Array.from(ACTIVITY_SEGMENTER.segment(text), part => part.segment)
+}
+
+/**
+ * One summary line from an arbitrary argument value: a string passes through,
+ * an array all of whose items are strings joins with `", "`, anything else is
+ * empty. Whitespace collapses to single spaces and the result is capped at CAP
+ * graphemes with an ellipsis — the web client's `normalizeLiveToolDetail`,
+ * including its array arm (a bare string-typed helper would drop
+ * `queries`-style values and fall through to the tool name).
+ */
+function normalizeActivityDetail(value: unknown, cap: number): string {
+  const text = typeof value === 'string'
+    ? value
+    : Array.isArray(value) && value.every(item => typeof item === 'string')
+      ? (value as readonly string[]).join(', ')
+      : ''
+  const normalized = text.replace(/\s+/g, ' ').trim()
+  if (normalized === '') return ''
+  const chars = graphemes(normalized)
+  return chars.length <= cap ? normalized : `${chars.slice(0, cap - 1).join('').trimEnd()}\u2026`
+}
+
+/** The first question text of an `ask_user_question`-style `questions` value. */
+function activityQuestionDetail(value: unknown): string {
+  if (!Array.isArray(value)) return ''
+  for (const item of value) {
+    if (!isRecord(item)) continue
+    const detail = normalizeActivityDetail(item.question, MAX_ACTIVITY_DETAIL_CHARS)
+    if (detail !== '') return detail
+  }
+  return ''
+}
+
+/**
+ * One tool call's one-line detail, folded from its serialized arguments: the
+ * first present key of the activity detail vocabulary whose normalized value
+ * is non-empty, else the normalized NAME. Mirrors the web client's
+ * `liveToolDetail`, which wraps even the bare-name fallback in
+ * `normalizeLiveToolDetail`.
+ */
+export function activityToolDetail(name: string, argumentsRaw: string): string {
+  let args: unknown
+  try {
+    args = JSON.parse(argumentsRaw) as unknown
+  } catch {
+    return normalizeActivityDetail(name, MAX_ACTIVITY_DETAIL_CHARS)
+  }
+  if (!isRecord(args)) return normalizeActivityDetail(name, MAX_ACTIVITY_DETAIL_CHARS)
+  for (const key of ACTIVITY_DETAIL_KEYS) {
+    if (!(key in args)) continue
+    const detail = key === 'questions'
+      ? activityQuestionDetail(args[key])
+      : normalizeActivityDetail(args[key], MAX_ACTIVITY_DETAIL_CHARS)
+    if (detail !== '') return detail
+  }
+  return normalizeActivityDetail(name, MAX_ACTIVITY_DETAIL_CHARS)
+}
+
+/**
+ * One reasoning block's one-line summary: the block's first line, `**`
+ * markers stripped, whitespace collapsed, capped at
+ * {@link MAX_ACTIVITY_THINKING_CHARS} graphemes. This is parity with the web
+ * client's settled `ReasoningRow` preview (`firstLine`): the fold only ever
+ * sees committed blocks, so the streaming "latest completed paragraph"
+ * preview does not apply. Returns '' when the first line normalizes to
+ * nothing, which the fold drops.
+ */
+export function activityThinkingSummary(text: string): string {
+  const newline = text.indexOf('\n')
+  const line = newline === -1 ? text : text.slice(0, newline)
+  return normalizeActivityDetail(line.replaceAll('**', ''), MAX_ACTIVITY_THINKING_CHARS)
+}
+
+/**
+ * Fold a session log into its turn activity: the tool calls dispatched, their
+ * results, and one-line reasoning summaries, grouped by turn and in log order.
+ *
+ * Each entry is attributed from its own `data.turn`/`data.step` (never a
+ * tracked "current turn", which would misfile a compaction replay under the
+ * turn that re-logged it), and non-append surface copies are skipped. Bounded
+ * by {@link MAX_ACTIVITY_ENTRIES_PER_TURN} per turn — a sliding window that
+ * drops the oldest entries, so a live turn's newest activity always streams —
+ * and by {@link MAX_ACTIVITY_TURNS} turns (the oldest dropped silently, so the
+ * newest turn is always kept). The full reasoning text never enters the
+ * result.
+ */
+export function turnActivity(events: readonly SessionEventLike[]): Map<number, TurnActivity> {
+  const byTurn = new Map<number, TurnActivity>()
+  const messageSeqsByTurn = new Map<number, number[]>()
+  const callNames = new Map<string, string>()
+
+  const activityFor = (turn: number): TurnActivity => {
+    let activity = byTurn.get(turn)
+    if (activity === undefined) {
+      activity = { entries: [], messageSeqs: [] }
+      byTurn.set(turn, activity)
+    }
+    return activity
+  }
+
+  /** Append ENTRY, sliding the window: once the turn is at its cap the oldest
+   * entry is dropped so the newest activity always survives. */
+  const push = (entry: ActivityEntry): void => {
+    const activity = activityFor(entry.turn)
+    if (activity.entries.length >= MAX_ACTIVITY_ENTRIES_PER_TURN) {
+      activity.entries.shift()
+    }
+    activity.entries.push(entry)
+  }
+
+  for (let index = 0; index < events.length; index += 1) {
+    const event = events[index]
+    if (event === undefined) continue
+    const seq = typeof event.seq === 'number' ? event.seq : index
+    if (event.type === 'tool/call') {
+      const call = toolCallFact(event)
+      const step = isRecord(event.data) ? event.data.step : undefined
+      if (call === null || typeof step !== 'number') continue
+      callNames.set(call.callId, call.name)
+      push({
+        kind: 'tool-call',
+        seq,
+        ord: 0,
+        time: event.time,
+        turn: call.turn,
+        step,
+        callId: call.callId,
+        name: call.name,
+        summary: activityToolDetail(call.name, call.arguments),
+      })
+      continue
+    }
+    if (event.type === 'tool/result') {
+      if (!isAppendSurfaceEvent(event)) continue
+      const result = toolResultFact(event)
+      const data = isRecord(event.data) ? event.data : undefined
+      const turn = data?.turn
+      const step = data?.step
+      if (result === null || typeof turn !== 'number' || typeof step !== 'number') continue
+      push({
+        kind: 'tool-result',
+        seq,
+        ord: 0,
+        time: event.time,
+        turn,
+        step,
+        callId: result.callId,
+        name: callNames.get(result.callId) ?? 'tool',
+        isError: result.failed,
+      })
+      continue
+    }
+    if (event.type !== 'assistant/message') continue
+    if (!isAppendSurfaceEvent(event)) continue
+    const data = isRecord(event.data) ? event.data : undefined
+    const turn = data?.turn
+    const step = data?.step
+    if (typeof turn !== 'number' || typeof step !== 'number') continue
+    // Recorded even when the message carries no reasoning: the seq is the
+    // surface-visibility evidence for a turn whose only activity is a pending
+    // tool call (no text segment, no thinking block).
+    const seqs = messageSeqsByTurn.get(turn)
+    if (seqs === undefined) messageSeqsByTurn.set(turn, [seq])
+    else seqs.push(seq)
+    const message = data?.message
+    const content = isRecord(message) && Array.isArray(message.content) ? message.content : undefined
+    if (content === undefined) continue
+    let ord = 0
+    for (const block of content) {
+      if (!isRecord(block) || block.type !== 'reasoning') continue
+      const summary = typeof block.text === 'string' ? activityThinkingSummary(block.text) : ''
+      if (summary !== '') {
+        push({ kind: 'thinking', seq, ord, time: event.time, turn, step, summary })
+      }
+      ord += 1
+    }
+  }
+
+  for (const [turn, activity] of byTurn) {
+    const seqs = messageSeqsByTurn.get(turn)
+    if (seqs !== undefined) activity.messageSeqs = seqs
+  }
+
+  // The retention window is applied last, newest turn first, so the live turn
+  // is never the one dropped. Turns dropped here simply have no activity, like
+  // a turn whose per-turn window has slid past its start.
+  if (byTurn.size > MAX_ACTIVITY_TURNS) {
+    const keep = new Set([...byTurn.keys()].sort((a, b) => a - b).slice(-MAX_ACTIVITY_TURNS))
+    for (const turn of [...byTurn.keys()]) {
+      if (!keep.has(turn)) byTurn.delete(turn)
+    }
+  }
+  return byTurn
+}
+
+/**
+ * Insert a synthetic record for every activity-bearing turn that has no
+ * text-bearing record, so activity is visible from a turn's first tool call or
+ * reasoning block rather than only from its first reply.
+ *
+ * SURFACE-SEQS is the set of seqs currently on the model-visible surface
+ * (`Session.surface.nodes`). A turn whose append assistant messages are all
+ * shadowed by a compaction replacement is deliberately not resurrected from
+ * its surviving raw-log events, matching the surface walk's "shadowed turns
+ * simply vanish" rule (`assistantTurns`). Records come back in ascending turn
+ * order, as `assistantTurns` produces them; `/turns` reverses once.
+ */
+export function withActivityTurns(
+  turns: readonly AssistantTurn[],
+  activity: ReadonlyMap<number, TurnActivity>,
+  boundaries: TurnBoundaries,
+  surfaceSeqs: ReadonlySet<number>,
+): AssistantTurn[] {
+  const records = [...turns].sort((a, b) => a.turn - b.turn)
+  const present = new Set(records.map(record => record.turn))
+  const synthetic: AssistantTurn[] = []
+  for (const [turn, act] of activity) {
+    if (present.has(turn) || act.entries.length === 0) continue
+    const visible = act.messageSeqs.some(seq => surfaceSeqs.has(seq))
+      || act.entries.some(entry => (entry.kind === 'tool-result' || entry.kind === 'thinking')
+        && surfaceSeqs.has(entry.seq))
+    if (!visible) continue
+    const start = boundaries.starts.get(turn) ?? act.entries[0]?.time
+    if (start === undefined) continue
+    const record: AssistantTurn = { turn, startedAt: start, segments: [] }
+    const end = boundaries.ends.get(turn)
+    if (end !== undefined) {
+      record.endedAt = end.time
+      if (end.reason !== undefined) record.reason = end.reason
+      record.endSeq = end.seq
+    }
+    synthetic.push(record)
+  }
+  if (synthetic.length === 0) return records
+  synthetic.sort((a, b) => a.turn - b.turn)
+  const merged: AssistantTurn[] = []
+  let next = 0
+  for (const record of records) {
+    while (next < synthetic.length && synthetic[next]!.turn < record.turn) {
+      merged.push(synthetic[next]!)
+      next += 1
+    }
+    merged.push(record)
+  }
+  while (next < synthetic.length) {
+    merged.push(synthetic[next]!)
+    next += 1
+  }
+  return merged
+}
+
+/**
+ * Whether EVENT may add turn activity, i.e. whether the host should nudge
+ * Emacs to refetch `/turns`. Pure so the SSE side carries no fold decisions
+ * of its own. This is a conservative over-approximation of `turnActivity`,
+ * not an exact mirror: a `tool/call` passes unconditionally (the fold may
+ * still drop it as malformed), and a reasoning block of `"**"`-only text
+ * nudges although its summary normalizes to nothing. Over-nudging is
+ * harmless — Emacs refetches and folds the same activity.
+ */
+export function activityRelevantEvent(event: SessionEventLike): boolean {
+  if (event.type === 'tool/call') return true
+  if (event.type === 'tool/result') return isAppendSurfaceEvent(event)
+  if (event.type !== 'assistant/message' || !isAppendSurfaceEvent(event)) return false
+  const data = event.data
+  if (!isRecord(data)) return false
+  const message = data.message
+  if (!isRecord(message) || !Array.isArray(message.content)) return false
+  return message.content.some(block => isRecord(block)
+    && block.type === 'reasoning'
+    && typeof block.text === 'string'
+    && block.text.trim() !== '')
 }
 
 /** One entry in the merged session inventory handed to Emacs. */
@@ -1074,6 +1483,23 @@ export function turnCompleteMessage(sessionId: string, reason: string, time: num
 export function repliesChangedMessage(sessionId: string, turn?: number): string {
   return `data: ${JSON.stringify({
     kind: 'replies-changed',
+    sessionId,
+    ...(turn === undefined ? {} : { turn }),
+  })}\n\n`
+}
+
+/**
+ * One SSE `data:` frame announcing that a session's turn activity grew (a
+ * `tool/call`, an append `tool/result`, or an `assistant/message` carrying
+ * reasoning was committed mid-turn). Emitted at most once per debounce window
+ * per session: activity arrives in bursts, and the frame is only a nudge to
+ * re-pull `GET /turns`. TURN names the turn that grew; it is informational
+ * (Emacs refreshes the session's turn cache, not a turn-specific entry), and
+ * the browser ignores the non-`draft` kind.
+ */
+export function activityChangedMessage(sessionId: string, turn?: number): string {
+  return `data: ${JSON.stringify({
+    kind: 'activity-changed',
     sessionId,
     ...(turn === undefined ? {} : { turn }),
   })}\n\n`
