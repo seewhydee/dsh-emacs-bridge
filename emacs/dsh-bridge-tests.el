@@ -7376,7 +7376,7 @@ and the late response settling afterwards does not banner a second time."
         (should (string-match-p "\\`Your answer was sent\\.\n" (buffer-string)))
         (should-not (string-match-p "is waiting for your answer" (buffer-string)))
         ;; A re-render of the resolved buffer keeps the banner and the header out.
-        (dsh-bridge--question-rerender-at-point)
+        (dsh-bridge--question-render)
         (should (string-match-p "\\`Your answer was sent\\.\n" (buffer-string)))
         (should-not (string-match-p "is waiting for your answer" (buffer-string)))
         ;; The response settling afterwards must not banner again, and now
@@ -8146,6 +8146,288 @@ keymap whose mouse-1 binding toggles the row under the click."
       (should (equal (cdr (assoc "q1" dsh-bridge--question-selection)) '("Yes"))))
     (when (dsh-bridge--question-find-buffer "q1")
       (kill-buffer (dsh-bridge--question-find-buffer "q1")))))
+
+(defmacro dsh-bridge-test--with-question (questions &rest body)
+  "Run BODY in a fresh DSH-Question buffer rendering QUESTIONS.
+The buffer answers request id \"q1\" for session \"s1\" (title \"T\") and is
+killed afterwards."
+  (declare (indent 1))
+  `(let ((dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t)))))
+     (unwind-protect
+	 (with-current-buffer (dsh-bridge--question-buffer "s1" "q1" ,questions)
+	   ,@body)
+       (when (dsh-bridge--question-find-buffer "q1")
+	 (kill-buffer (dsh-bridge--question-find-buffer "q1"))))))
+
+(defun dsh-bridge-test--goto-question (qid)
+  "Move point to the first line of question QID's block."
+  (goto-char (car (dsh-bridge--question-block-bounds qid)))
+  (when (eq (char-after) ?\n) (forward-char 1)))
+
+(defun dsh-bridge-test--property-spans (prop start end)
+  "Return the (START END VALUE) spans carrying PROP between START and END."
+  (let ((pos start)
+	spans)
+    (while (< pos end)
+      (let ((value (get-text-property pos prop))
+	    (next (or (next-single-property-change pos prop nil end) end)))
+	(when value (push (list pos next value) spans))
+	(setq pos next)))
+    (nreverse spans)))
+
+(defun dsh-bridge-test--assert-question-properties (qid labels custom skipped)
+  "Assert the text-property shape of question QID's block.
+LABELS is the expected option labels in order, CUSTOM non-nil when the custom
+row carries a typed answer, and SKIPPED non-nil when the title line shows the
+skip suffix.  Every character of the block must carry the question id: that
+run is what the patch functions locate a block by, and plain `insert' inherits
+no text properties."
+  (let* ((block (dsh-bridge--question-block-bounds qid))
+	 (start (car block))
+	 (end (cdr block))
+	 (options (dsh-bridge-test--property-spans 'dsh-bridge-option start end))
+	 (customs (dsh-bridge-test--property-spans
+		   'dsh-bridge-option-custom start end))
+	 (controls (dsh-bridge-test--property-spans
+		    'dsh-bridge-question-controls start end))
+	 (skips (dsh-bridge-test--property-spans
+		 'dsh-bridge-question-skip start end)))
+    (should block)
+    (when block
+      (let ((ids (dsh-bridge-test--property-spans
+		  'dsh-bridge-question-id start end)))
+	(should (equal (length ids) 1))
+	(should (equal (nth 0 (car ids)) start))
+	(should (equal (nth 1 (car ids)) end)))
+      (should (equal (mapcar (lambda (span) (nth 2 span)) options) labels))
+      (should (equal (length customs) 1))
+      (should (eq (nth 2 (car customs)) t))
+      (should (equal (length controls) 1))
+      ;; The controls span is exactly the option rows plus the custom row; the
+      ;; separating newlines carry the block id but none of the row properties.
+      (should (equal (nth 0 (car controls))
+		     (if options (nth 0 (car options)) (nth 0 (car customs)))))
+      ;; The controls region runs one past the custom row's end: its trailing
+      ;; newline is part of it, so a patch's delete and reinsert match.
+      (should (equal (nth 1 (car controls)) (1+ (nth 1 (car customs)))))
+      (should (equal (length skips) (if skipped 1 0)))
+      (when skipped
+	(should (equal (nth 2 (car skips)) qid))))))
+
+(ert-deftest dsh-bridge-question-toggle-preserves-detail ()
+  "An option toggle rewrites only the controls region: a marker and an overlay
+inside the `detail' keep their positions, and the detail is painted once."
+  (let ((painted 0))
+    (cl-letf (((symbol-function 'dsh-bridge--question-fontify-detail)
+	       (lambda (detail) (cl-incf painted) detail)))
+      (dsh-bridge-test--with-question
+	  '(((id . "q1") (question . "Execute this plan?")
+	     (detail . "## Plan\n\n1. Do the thing\n2. And another")
+	     (intent . ((kind . "plan-review") (approve . "Approve")))
+	     (options . (((label . "Approve")) ((label . "Refuse"))))))
+	(should (= painted 1))
+	(goto-char (point-min))
+	(search-forward "1. Do the thing")
+	(let ((marker (copy-marker (point)))
+	      (overlay (make-overlay (line-beginning-position)
+				     (line-end-position)))
+	      (mpos (point))
+	      (ostart (line-beginning-position)))
+	  (goto-char (point-min))
+	  (search-forward "1. Approve")
+	  (goto-char (line-beginning-position))
+	  (dsh-bridge--question-toggle-at-point)
+	  (should (equal (cdr (assoc "q1" dsh-bridge--question-selection))
+			 '("Approve")))
+	  (should (string-match-p "\\[x\\] 1\\. Approve" (buffer-string)))
+	  (should (= (marker-position marker) mpos))
+	  (should (= (overlay-start overlay) ostart))
+	  (should (eq (overlay-buffer overlay) (current-buffer)))
+	  (should (= painted 1)))))))
+
+(ert-deftest dsh-bridge-question-edits-are-not-undoable ()
+  "Toggles, skips and custom answers leave no undo entries and no modified
+flag: the read-only buffer is a projection of its state, not a document."
+  (dsh-bridge-test--with-question
+      '(((id . "q1") (question . "Go?")
+	 (options . (((label . "Yes")) ((label . "No"))))))
+    (should-not (buffer-modified-p))
+    (should (or (null buffer-undo-list) (eq buffer-undo-list t)))
+    (goto-char (point-min))
+    (search-forward "1. Yes")
+    (goto-char (line-beginning-position))
+    (dsh-bridge--question-toggle-at-point)
+    (dsh-bridge--question-skip)
+    (cl-letf (((symbol-function 'read-string) (lambda (&rest _) "text")))
+      (dsh-bridge--question-custom-answer "q1"))
+    (should-not (buffer-modified-p))
+    (should (or (null buffer-undo-list) (eq buffer-undo-list t)))))
+
+(ert-deftest dsh-bridge-question-property-map ()
+  "The locator properties survive every in-place operation.
+A block is one contiguous `dsh-bridge-question-id' run; its controls region is
+the option rows plus the custom row; the skip suffix exists exactly while the
+question is skipped."
+  (dsh-bridge-test--with-question
+      '(((id . "q1") (question . "Go?")
+	 (options . (((label . "Yes")) ((label . "No"))))))
+    (dsh-bridge-test--assert-question-properties "q1" '("Yes" "No") nil nil)
+    (dsh-bridge--question-toggle-option "q1" "Yes")
+    (dsh-bridge-test--assert-question-properties "q1" '("Yes" "No") nil nil)
+    (dsh-bridge-test--goto-question "q1")
+    (dsh-bridge--question-skip)
+    (should (member "q1" dsh-bridge--question-skipped))
+    (dsh-bridge-test--assert-question-properties "q1" '("Yes" "No") nil t)
+    (dsh-bridge--question-skip)
+    (should-not (member "q1" dsh-bridge--question-skipped))
+    (dsh-bridge-test--assert-question-properties "q1" '("Yes" "No") nil nil)
+    (cl-letf (((symbol-function 'read-string) (lambda (&rest _) "because")))
+      (dsh-bridge--question-custom-answer "q1"))
+    (dsh-bridge-test--assert-question-properties "q1" '("Yes" "No") t nil)
+    (cl-letf (((symbol-function 'read-string) (lambda (&rest _) "")))
+      (dsh-bridge--question-custom-answer "q1"))
+    (dsh-bridge-test--assert-question-properties "q1" '("Yes" "No") nil nil)))
+
+(ert-deftest dsh-bridge-question-radio-toggle-in-place ()
+  "A radio pick rewrites only its own question's controls; the other block's
+text and properties are untouched, and the previous mark is cleared."
+  (dsh-bridge-test--with-question
+      '(((id . "q1") (question . "First?")
+	 (options . (((label . "A")) ((label . "B")))))
+	((id . "q2") (question . "Second?")
+	 (options . (((label . "C"))))))
+    (dsh-bridge--question-toggle-option "q1" "A")
+    (let* ((block (dsh-bridge--question-block-bounds "q2"))
+	   (before (buffer-substring-no-properties (car block) (cdr block)))
+	   (ids (dsh-bridge-test--property-spans
+		 'dsh-bridge-question-id (car block) (cdr block))))
+      (dsh-bridge--question-toggle-option "q1" "B")
+      (should (string-match-p "\\[ \\] 1\\. A" (buffer-string)))
+      (should (string-match-p "\\[x\\] 2\\. B" (buffer-string)))
+      (let ((block (dsh-bridge--question-block-bounds "q2")))
+	(should (equal (buffer-substring-no-properties (car block) (cdr block))
+		       before))
+	(should (equal (dsh-bridge-test--property-spans
+			'dsh-bridge-question-id (car block) (cdr block))
+		       ids))))))
+
+(ert-deftest dsh-bridge-question-patch-keeps-point ()
+  "A toggle keeps point on the row it was on, at its column: a marker placed
+in the regenerated region would collapse to the region start."
+  (dsh-bridge-test--with-question
+      '(((id . "q1") (question . "Go?")
+	 (options . (((label . "Yes")) ((label . "No")) ((label . "Maybe"))))))
+    (goto-char (point-min))
+    (search-forward "2. No")
+    (forward-char -1)
+    (let ((line (line-number-at-pos))
+	  (column (current-column)))
+      (dsh-bridge--question-toggle-at-point)
+      (should (= (line-number-at-pos) line))
+      (should (= (current-column) column))
+      (should (equal (cdr (assoc "q1" dsh-bridge--question-selection))
+		     '("No"))))))
+
+(ert-deftest dsh-bridge-question-skip-patch-and-rescind ()
+  "Skipping adds the suffix and clears marks; unskipping removes it; a pick or
+a custom answer on a skipped question rescinds the skip."
+  (dsh-bridge-test--with-question
+      '(((id . "q1") (question . "Go?") (options . (((label . "Yes"))))))
+    (dsh-bridge--question-toggle-option "q1" "Yes")
+    (dsh-bridge-test--goto-question "q1")
+    (dsh-bridge--question-skip)
+    (should (member "q1" dsh-bridge--question-skipped))
+    (should (string-match-p "Question 1 of 1 — skipped" (buffer-string)))
+    (should (string-match-p "\\[ \\] 1\\. Yes" (buffer-string)))
+    (dsh-bridge-test--assert-question-properties "q1" '("Yes") nil t)
+    (dsh-bridge--question-skip)
+    (should-not (member "q1" dsh-bridge--question-skipped))
+    (should-not (string-match-p "— skipped" (buffer-string)))
+    (dsh-bridge-test--assert-question-properties "q1" '("Yes") nil nil)
+    ;; A pick rescinds the skip.
+    (dsh-bridge--question-skip)
+    (should (string-match-p "— skipped" (buffer-string)))
+    (dsh-bridge--question-toggle-option "q1" "Yes")
+    (should-not (member "q1" dsh-bridge--question-skipped))
+    (should-not (string-match-p "— skipped" (buffer-string)))
+    (should (string-match-p "\\[x\\] 1\\. Yes" (buffer-string)))
+    ;; A custom answer rescinds it too.
+    (dsh-bridge-test--goto-question "q1")
+    (dsh-bridge--question-skip)
+    (should (string-match-p "— skipped" (buffer-string)))
+    (cl-letf (((symbol-function 'read-string) (lambda (&rest _) "because")))
+      (dsh-bridge--question-custom-answer "q1"))
+    (should-not (string-match-p "— skipped" (buffer-string)))
+    (should (string-match-p "Custom answer: because" (buffer-string)))))
+
+(ert-deftest dsh-bridge-question-skip-second-block ()
+  "Skipping a later question puts the suffix on its own title line.
+Every block but the first begins on the separator newline that follows the
+previous block, so the title line cannot be found by the block start alone."
+  (dsh-bridge-test--with-question
+      '(((id . "q1") (question . "First?") (options . (((label . "A")))))
+	((id . "q2") (question . "Second?") (options . (((label . "B"))))))
+    (dsh-bridge-test--goto-question "q2")
+    (dsh-bridge--question-skip)
+    (should (string-match-p "^Question 2 of 2 — skipped$" (buffer-string)))
+    (should (string-match-p "^Question 1 of 2$" (buffer-string)))
+    (dsh-bridge-test--assert-question-properties "q2" '("B") nil t)
+    (dsh-bridge--question-skip)
+    (should (string-match-p "^Question 2 of 2$" (buffer-string)))
+    (should-not (string-match-p "— skipped" (buffer-string)))))
+
+(ert-deftest dsh-bridge-question-custom-patch-clears-single-select ()
+  "A single-select custom answer rewrites the custom row and clears the mark
+in place."
+  (dsh-bridge-test--with-question
+      '(((id . "q1") (question . "Go?")
+	 (options . (((label . "Yes")) ((label . "No"))))))
+    (dsh-bridge--question-toggle-option "q1" "Yes")
+    (should (string-match-p "\\[x\\] 1\\. Yes" (buffer-string)))
+    (cl-letf (((symbol-function 'read-string) (lambda (&rest _) "because")))
+      (dsh-bridge--question-custom-answer "q1"))
+    (should (string-match-p "\\[ \\] 1\\. Yes" (buffer-string)))
+    (should (string-match-p "Custom answer: because" (buffer-string)))
+    (dsh-bridge-test--assert-question-properties "q1" '("Yes" "No") t nil)))
+
+(ert-deftest dsh-bridge-question-resolve-patches-header ()
+  "A resolved frame banners the header line in place: the key-help paragraph,
+the options, and the `detail' survive, and the detail is not repainted."
+  (let ((painted 0))
+    (cl-letf (((symbol-function 'dsh-bridge--question-fontify-detail)
+	       (lambda (detail) (cl-incf painted) detail)))
+      (dsh-bridge-test--with-question
+	  '(((id . "q1") (question . "Execute?")
+	     (detail . "## Plan\n\nStep one")
+	     (intent . ((kind . "plan-review") (approve . "Approve")))
+	     (options . (((label . "Approve"))))))
+	(should (= painted 1))
+	(dsh-bridge--question-mark-resolved "q1" 'sent)
+	(should (equal dsh-bridge--question-resolution
+		       "Your answer was sent."))
+	(should (string-match-p "\\`Your answer was sent\\.\n" (buffer-string)))
+	(should-not (string-match-p "is waiting for your answer"
+				    (buffer-string)))
+	(should (string-match-p "Step one" (buffer-string)))
+	(should (string-match-p "C-c C-c submits" (buffer-string)))
+	(should (string-match-p "1\\. Approve" (buffer-string)))
+	(should (= painted 1))))))
+
+(ert-deftest dsh-bridge-question-patch-falls-back-to-render ()
+  "A patch that cannot locate its region rebuilds the buffer instead of
+corrupting it."
+  (dsh-bridge-test--with-question
+      '(((id . "q1") (question . "Go?")
+	 (options . (((label . "Yes")) ((label . "No"))))))
+    ;; Remove the property the patch locates the controls region by.
+    (let ((inhibit-read-only t))
+      (remove-text-properties (point-min) (point-max)
+			      '(dsh-bridge-question-controls nil)))
+    (dsh-bridge--question-toggle-option "q1" "Yes")
+    (should (equal (cdr (assoc "q1" dsh-bridge--question-selection))
+		   '("Yes")))
+    (should (string-match-p "\\[x\\] 1\\. Yes" (buffer-string)))
+    (dsh-bridge-test--assert-question-properties "q1" '("Yes" "No") nil nil)))
 
 ;;; Session report (DSH-Describe)
 

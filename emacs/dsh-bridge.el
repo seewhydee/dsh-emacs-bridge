@@ -4287,7 +4287,7 @@ the result on-screen."
 	    (if record
 		(setq-local dsh-bridge--question-resolution record)
 	      (error "dsh-bridge: unknown query resolution %S" outcome)))
-	  (dsh-bridge--question-render))))))
+	  (dsh-bridge--question-patch-header))))))
 
 (defun dsh-bridge--ask-user-session-clear (session-id)
   "Drop every pending ask for SESSION-ID, bannering any live question buffers.
@@ -4351,8 +4351,8 @@ in-progress marks untouched.  A name collision (two sessions sharing a
 label, each with a pending ask) gets a fresh name."
   (let ((existing (dsh-bridge--question-find-buffer request-id)))
     (if (and existing
-	     (with-current-buffer existing
-	       (not dsh-bridge--question-resolution)))
+	     (null (buffer-local-value 'dsh-bridge--question-resolution
+				       existing)))
 	existing
       (let* ((base (format "*dsh-bridge-question: %s*"
 			   (dsh-bridge--session-label session-id)))
@@ -4390,25 +4390,14 @@ FACE is set as the `face' property, the only one this buffer reads: it has no
 	  (put-text-property (point) next 'face face))
 	(goto-char next)))))
 
-(defvar dsh-bridge--question-detail-cache nil
-  "Hash table mapping a question `detail' string to its fontified copy.
-Nil until the first markdown render.")
-
 (defun dsh-bridge--question-fontify-detail (detail)
   "Return DETAIL fontified as GitHub-Flavored Markdown when available.
 Gated by `dsh-bridge-question-markdown' and a loadable `markdown-mode';
-otherwise return DETAIL unchanged.  The result is cached because
-`dsh-bridge--question-render' re-runs on every option toggle."
+otherwise return DETAIL unchanged.  The buffer paints its `detail' once, so
+there is nothing to cache."
   (if (not (and dsh-bridge-question-markdown (require 'markdown-mode nil t)))
       detail
-    (setq dsh-bridge--question-detail-cache
-	  (or dsh-bridge--question-detail-cache
-	      (make-hash-table :test #'equal)))
-    (when (> (hash-table-count dsh-bridge--question-detail-cache) 64)
-      (clrhash dsh-bridge--question-detail-cache))
-    (or (gethash detail dsh-bridge--question-detail-cache)
-	(puthash detail (dsh-bridge--question-fontify-detail-1 detail)
-		 dsh-bridge--question-detail-cache))))
+    (dsh-bridge--question-fontify-detail-1 detail)))
 
 (defun dsh-bridge--question-fontify-detail-1 (detail)
   "Fontify DETAIL with `gfm-view-mode' in a temporary buffer and return it."
@@ -4434,133 +4423,308 @@ RET and the number keys keep using the row's `dsh-bridge-option' /
   (put-text-property start end 'help-echo help)
   (put-text-property start end 'keymap dsh-bridge--question-row-map))
 
+(defmacro dsh-bridge--question-edit (&rest body)
+  "Run BODY as a programmatic edit of the read-only DSH-Question buffer.
+Undo recording is suppressed and the modified flag cleared: the buffer is a
+projection of its state variables, not a document the user edits."
+  (declare (indent 0) (debug t))
+  `(let ((inhibit-read-only t)
+	 (buffer-undo-list t))
+     (unwind-protect (progn ,@body)
+       (set-buffer-modified-p nil))))
+
+(defun dsh-bridge--question-goto-line-column (line column)
+  "Move point to LINE at COLUMN, clamping COLUMN to the line's own width."
+  (goto-char (point-min))
+  (forward-line (1- line))
+  (move-to-column column))
+
+(defun dsh-bridge--question-block-bounds (qid)
+  "Return the (START . END) of question QID's block, or nil when absent.
+START is the first position whose `dsh-bridge-question-id' is QID, and END is
+where that property changes again.  A block's separator newline belongs to the
+block that follows it, and the last block ends at `point-max'."
+  (let ((limit (point-max))
+	(pos (point-min))
+	start end)
+    (while (and (not start) (< pos limit))
+      (let ((next (next-single-property-change
+		   pos 'dsh-bridge-question-id nil limit)))
+	(when (equal (get-text-property pos 'dsh-bridge-question-id) qid)
+	  (setq start pos
+		end (next-single-property-change
+		     pos 'dsh-bridge-question-id nil limit)))
+	(setq pos next)))
+    (and start (cons start end))))
+
+(defun dsh-bridge--question-span (prop qid)
+  "Return the (START . END) of question QID's PROP span, or nil.
+The span lies inside QID's block and carries QID as its PROP value."
+  (let ((block (dsh-bridge--question-block-bounds qid)))
+    (when block
+      (let* ((limit (cdr block))
+	     (start (next-single-property-change (car block) prop nil limit)))
+	(when (and start (< start limit)
+		   (equal (get-text-property start prop) qid))
+	  (cons start
+		(or (next-single-property-change start prop nil limit)
+		    limit)))))))
+
+(defun dsh-bridge--question-header-bounds ()
+  "Return the (START . END) of the buffer's header/banner line, or nil.
+The header is the buffer's first paragraph and ends after its own newline, so
+patching it leaves the key-help paragraph below untouched."
+  (when (eq t (get-text-property (point-min) 'dsh-bridge-question-header))
+    (cons (point-min)
+	  (or (next-single-property-change
+	       (point-min) 'dsh-bridge-question-header nil (point-max))
+	      (point-max)))))
+
+(defun dsh-bridge--question-insert-controls (question selected custom)
+  "Insert QUESTION's option rows and custom row at point.
+SELECTED is the list of marked option labels and CUSTOM the typed custom
+answer, both read from this buffer's state.  Each row carries its
+`dsh-bridge-option' / `dsh-bridge-option-custom' property, its faces, and its
+mouse affordance, and the `dsh-bridge-question-controls' property covers the
+whole region.  Return the region as (START . END), END being just past the
+custom row's trailing newline: a patch deletes exactly what this re-inserts."
+  (let ((start (point))
+	(i 0))
+    (dolist (opt (alist-get 'options question))
+      (cl-incf i)
+      (let* ((label (or (alist-get 'label opt) ""))
+	     (desc (alist-get 'description opt))
+	     (marked (member label selected))
+	     (row-start (point)))
+	(insert "  ")
+	(dsh-bridge--insert "[" 'dsh-bridge-question-furniture-face)
+	(dsh-bridge--insert (if marked "x" " ")
+			    (if marked
+				'dsh-bridge-question-selected-face
+			      'dsh-bridge-question-furniture-face))
+	(dsh-bridge--insert "]" 'dsh-bridge-question-furniture-face)
+	(insert " ")
+	(dsh-bridge--insert (format "%d." i)
+			    'dsh-bridge-question-furniture-face)
+	(insert " ")
+	(dsh-bridge--insert label
+			    (if marked
+				'dsh-bridge-question-selected-face
+			      'dsh-bridge-question-option-face))
+	(if (and (stringp desc) (not (string-empty-p desc)))
+	    (progn
+	      (insert " ")
+	      (dsh-bridge--insert (concat "— " desc)
+				  'dsh-bridge-question-furniture-face)))
+	(insert "\n")
+	(put-text-property row-start (1- (point)) 'dsh-bridge-option label)
+	(put-text-property row-start (1- (point))
+			   'rear-nonsticky '(dsh-bridge-option))
+	(dsh-bridge--question-add-row-affordance
+	 row-start (1- (point)) "mouse-1: toggle this option")))
+    ;; The custom-answer row is always present (the web UI offers one per
+    ;; question).  Note that we don't draw this as a checkbox.
+    (let* ((has-custom (and custom (not (string-empty-p custom))))
+	   (row-start (point)))
+      (insert "      ")
+      (dsh-bridge--insert "c." 'dsh-bridge-question-furniture-face)
+      (insert " ")
+      (if has-custom
+	  (progn
+	    (dsh-bridge--insert (concat "Custom answer: " custom)
+				'dsh-bridge-question-custom-value-face)
+	    (insert " ")
+	    (dsh-bridge--insert "(RET to edit; empty clears)"
+				'dsh-bridge-question-furniture-face))
+	(dsh-bridge--insert "Type a custom answer..."
+			    'dsh-bridge-question-furniture-face)
+	(insert " ")
+	(dsh-bridge--insert "(RET here or `c')"
+			    'dsh-bridge-question-furniture-face))
+      (insert "\n")
+      (put-text-property row-start (1- (point))
+			 'dsh-bridge-option-custom t)
+      (put-text-property row-start (1- (point))
+			 'rear-nonsticky '(dsh-bridge-option-custom))
+      (dsh-bridge--question-add-row-affordance
+       row-start (1- (point)) "mouse-1: type a custom answer"))
+    (put-text-property start (point)
+		       'dsh-bridge-question-controls
+		       (alist-get 'id question))
+    (cons start (point))))
+
 (defun dsh-bridge--question-render ()
   "Populate the current question buffer from its state variables.
-The buffer is re-rendered from `dsh-bridge--question-questions' plus the
-selection/custom/skipped state on every change, so markers can never
-drift.	Each line of a question's block carries its question id as a
-text property.	A resolved buffer renders its resolution banner in place
-of the \"waiting for your answer\" header."
-  (let ((inhibit-read-only t))
-    (erase-buffer)
-    (if dsh-bridge--question-resolution
-	;; The session is no longer waiting; the resolution banner takes
-	;; the header's place.
-	(dsh-bridge--insert dsh-bridge--question-resolution
-			    'dsh-bridge-question-banner-face t)
-      (dsh-bridge--insert (format "Session \"%s\" is waiting for your answer\n"
-				  (dsh-bridge--session-label
-				   dsh-bridge--question-session))
-			  'dsh-bridge-question-heading-face))
-    ;; The buffer itself must say how to work it: the mode docstring is not
-    ;; visible, and the keys (RET selects, C-c C-c submits) are not guessable.
-    ;; `substitute-command-keys' faces the key specs it substitutes; the prose
-    ;; takes the furniture face only where those key faces are absent.
-    (let ((start (point)))
-      (insert (substitute-command-keys
-	       (concat
-		"Mark an option with \\[dsh-bridge--question-toggle-at-point] "
-		"or its number key.  To answer with free text, press "
-		"\\[dsh-bridge--question-toggle-at-point] on the `c' row "
-		"(or `c' anywhere in the question): the answer is read in the "
-		"minibuffer, and an empty entry clears it.  On a single-choice "
-		"question a custom answer replaces any marked option; on a "
-		"multi-choice one it accompanies them.\n"
-		"\\[dsh-bridge--question-skip] skips the question at point, "
-		"\\[dsh-bridge--question-next] moves between questions.\n"
-		"\\[dsh-bridge--question-submit] submits your answers, "
-		"\\[dsh-bridge--question-decline] declines (cancels the tool call).\n\n")))
-      (dsh-bridge--question-add-face
-       start (point) 'dsh-bridge-question-furniture-face))
-    (let ((n 0)
-	  (total (length dsh-bridge--question-questions)))
-      (dolist (question dsh-bridge--question-questions)
-	(let* ((qid (alist-get 'id question))
-	       (qtext (alist-get 'question question))
-	       (header (alist-get 'header question))
-	       (detail (alist-get 'detail question))
-	       (opts (alist-get 'options question))
-	       (selected (cdr (assoc qid dsh-bridge--question-selection)))
-	       (custom (cdr (assoc qid dsh-bridge--question-custom)))
-	       (skipped (member qid dsh-bridge--question-skipped))
-	       (block-start (point)))
-	  (when (> n 0) (insert "\n"))
-	  (cl-incf n)
-	  (dsh-bridge--insert (format "Question %d of %d" n total)
-			      'dsh-bridge-question-furniture-face)
-	  (when skipped
-	    (dsh-bridge--insert " — skipped" 'dsh-bridge-question-skip-face))
-	  (insert "\n\n")
-	  (when (and (stringp header) (not (string-empty-p header)))
-	    (dsh-bridge--insert (concat header "\n")
-				'dsh-bridge-question-heading-face))
-	  (dsh-bridge--insert (concat (or qtext "") "\n")
-			      'dsh-bridge-question-text-face)
-	  ;; The reviewed artifact (a plan-review's plan markdown) must be
-	  ;; visible: deciding on it blind is worse than not surfacing it.
-	  (when (and (stringp detail) (not (string-empty-p detail)))
-	    (let ((start (point)))
-	      (insert "\n" (dsh-bridge--question-fontify-detail detail) "\n")
-	      (dsh-bridge--question-add-face
-	       start (point) 'dsh-bridge-question-detail-face)))
-	  (insert "\n")
-	  (let ((i 0))
-	    (dolist (opt opts)
-	      (cl-incf i)
-	      (let* ((label (or (alist-get 'label opt) ""))
-		     (desc (alist-get 'description opt))
-		     (marked (member label selected))
-		     (start (point)))
-		(insert "  ")
-		(dsh-bridge--insert "[" 'dsh-bridge-question-furniture-face)
-		(dsh-bridge--insert (if marked "x" " ")
-				    (if marked
-					'dsh-bridge-question-selected-face
-				      'dsh-bridge-question-furniture-face))
-		(dsh-bridge--insert "]" 'dsh-bridge-question-furniture-face)
-		(insert " ")
-		(dsh-bridge--insert (format "%d." i)
-				    'dsh-bridge-question-furniture-face)
-		(insert " ")
-		(dsh-bridge--insert label
-				    (if marked
-					'dsh-bridge-question-selected-face
-				      'dsh-bridge-question-option-face))
-		(if (and (stringp desc) (not (string-empty-p desc)))
-		    (progn
-		      (insert " ")
-		      (dsh-bridge--insert (concat "— " desc)
-					  'dsh-bridge-question-furniture-face)))
-		(insert "\n")
-		(put-text-property start (1- (point)) 'dsh-bridge-option label)
-		(dsh-bridge--question-add-row-affordance
-		 start (1- (point)) "mouse-1: toggle this option"))))
-	  ;; The custom-answer row is always present (the web UI
-	  ;; offers one per question).	Note that we don't draw this
-	  ;; as a checkbox.
-	  (let* ((has-custom (and custom (not (string-empty-p custom))))
-		 (start (point)))
-	    (insert "      ")
-	    (dsh-bridge--insert "c." 'dsh-bridge-question-furniture-face)
-	    (insert " ")
-	    (if has-custom
-		(progn
-		  (dsh-bridge--insert (concat "Custom answer: " custom)
-				      'dsh-bridge-question-custom-value-face)
-		  (insert " ")
-		  (dsh-bridge--insert "(RET to edit; empty clears)"
-				      'dsh-bridge-question-furniture-face))
-	      (dsh-bridge--insert "Type a custom answer..."
-				  'dsh-bridge-question-furniture-face)
-	      (insert " ")
-	      (dsh-bridge--insert "(RET here or `c')"
-				  'dsh-bridge-question-furniture-face))
-	    (insert "\n")
-	    (put-text-property start (1- (point)) 'dsh-bridge-option-custom t)
-	    (dsh-bridge--question-add-row-affordance
-	     start (1- (point)) "mouse-1: type a custom answer"))
-	  (put-text-property block-start (point) 'dsh-bridge-question-id qid))))
-    (goto-char (point-min))))
+This is the buffer's initial paint and the patch functions' fallback when a
+block cannot be located.  Because it rebuilds everything, an open buffer's
+`detail', markers, and overlays are kept intact by the patch functions, not by
+this.  A resolved buffer renders its resolution banner in place of the
+\"waiting for your answer\" header."
+  (dsh-bridge--question-edit
+   (erase-buffer)
+   (let ((start (point)))
+     (if dsh-bridge--question-resolution
+	 ;; The session is no longer waiting; the resolution banner takes
+	 ;; the header's place.
+	 (dsh-bridge--insert dsh-bridge--question-resolution
+			     'dsh-bridge-question-banner-face t)
+       (dsh-bridge--insert (format "Session \"%s\" is waiting for your answer\n"
+				   (dsh-bridge--session-label
+				    dsh-bridge--question-session))
+			   'dsh-bridge-question-heading-face))
+     (put-text-property start (point) 'dsh-bridge-question-header t)
+     (put-text-property start (point) 'rear-nonsticky
+			'(dsh-bridge-question-header)))
+   ;; The buffer itself must say how to work it: the mode docstring is not
+   ;; visible, and the keys (RET selects, C-c C-c submits) are not guessable.
+   ;; `substitute-command-keys' faces the key specs it substitutes; the prose
+   ;; takes the furniture face only where those key faces are absent.
+   (let ((start (point)))
+     (insert (substitute-command-keys
+	      (concat
+	       "Mark an option with \\[dsh-bridge--question-toggle-at-point] "
+	       "or its number key.  To answer with free text, press "
+	       "\\[dsh-bridge--question-toggle-at-point] on the `c' row "
+	       "(or `c' anywhere in the question): the answer is read in the "
+	       "minibuffer, and an empty entry clears it.  On a single-choice "
+	       "question a custom answer replaces any marked option; on a "
+	       "multi-choice one it accompanies them.\n"
+	       "\\[dsh-bridge--question-skip] skips the question at point, "
+	       "\\[dsh-bridge--question-next] moves between questions.\n"
+	       "\\[dsh-bridge--question-submit] submits your answers, "
+	       "\\[dsh-bridge--question-decline] declines (cancels the tool call).\n\n")))
+     (dsh-bridge--question-add-face
+      start (point) 'dsh-bridge-question-furniture-face))
+   (let ((n 0)
+	 (total (length dsh-bridge--question-questions)))
+     (dolist (question dsh-bridge--question-questions)
+       (let* ((qid (alist-get 'id question))
+	      (qtext (alist-get 'question question))
+	      (header (alist-get 'header question))
+	      (detail (alist-get 'detail question))
+	      (selected (cdr (assoc qid dsh-bridge--question-selection)))
+	      (custom (cdr (assoc qid dsh-bridge--question-custom)))
+	      (skipped (member qid dsh-bridge--question-skipped))
+	      (block-start (point)))
+	 (when (> n 0) (insert "\n"))
+	 (cl-incf n)
+	 (dsh-bridge--insert (format "Question %d of %d" n total)
+			     'dsh-bridge-question-furniture-face)
+	 (when skipped
+	   (let ((skip-start (point)))
+	     (dsh-bridge--insert " — skipped" 'dsh-bridge-question-skip-face)
+	     (put-text-property skip-start (point)
+				'dsh-bridge-question-skip qid)
+	     (put-text-property skip-start (point) 'rear-nonsticky
+				'(dsh-bridge-question-skip))))
+	 (insert "\n\n")
+	 (when (and (stringp header) (not (string-empty-p header)))
+	   (dsh-bridge--insert (concat header "\n")
+			       'dsh-bridge-question-heading-face))
+	 (dsh-bridge--insert (concat (or qtext "") "\n")
+			     'dsh-bridge-question-text-face)
+	 ;; The reviewed artifact (a plan-review's plan markdown) must be
+	 ;; visible: deciding on it blind is worse than not surfacing it.
+	 (when (and (stringp detail) (not (string-empty-p detail)))
+	   (let ((start (point)))
+	     (insert "\n" (dsh-bridge--question-fontify-detail detail) "\n")
+	     (dsh-bridge--question-add-face
+	      start (point) 'dsh-bridge-question-detail-face)))
+	 (insert "\n")
+	 (dsh-bridge--question-insert-controls question selected custom)
+	 (put-text-property block-start (point) 'dsh-bridge-question-id qid))))
+   (goto-char (point-min))))
+
+(defun dsh-bridge--question-patch-controls (qid)
+  "Rewrite question QID's option rows and custom row from the current state.
+Point's line and column survive, because the region keeps its line count.  A
+full `dsh-bridge--question-render' is the fallback when the block or its
+controls region cannot be located."
+  (let* ((bounds (dsh-bridge--question-span 'dsh-bridge-question-controls qid))
+	 (question (seq-find (lambda (q) (equal (alist-get 'id q) qid))
+			     dsh-bridge--question-questions))
+	 (block (dsh-bridge--question-block-bounds qid))
+	 ;; Re-apply the block's own id string, never QID as handed in: a block
+	 ;; is one run for `next-single-property-change', which compares with
+	 ;; `eq', so an equal-but-distinct string would split it in two.
+	 (id (and block (get-text-property (car block)
+					   'dsh-bridge-question-id)))
+	 (line (line-number-at-pos))
+	 (column (current-column)))
+    (if (or (null bounds) (null question))
+	(progn
+	  (dsh-bridge--question-render)
+	  (dsh-bridge--question-goto-line-column line column))
+      (dsh-bridge--question-edit
+       (goto-char (car bounds))
+       (delete-region (car bounds) (cdr bounds))
+       (let ((region (dsh-bridge--question-insert-controls
+		      question
+		      (cdr (assoc qid dsh-bridge--question-selection))
+		      (cdr (assoc qid dsh-bridge--question-custom)))))
+	 ;; Plain `insert' inherits no text properties, so the block's
+	 ;; `dsh-bridge-question-id' run is re-applied over the rewritten
+	 ;; region in one shot.
+	 (put-text-property (car region) (cdr region)
+			    'dsh-bridge-question-id (or id qid))))
+      (dsh-bridge--question-goto-line-column line column))))
+
+(defun dsh-bridge--question-patch-skip (qid)
+  "Show or hide question QID's \"— skipped\" suffix to match the state.
+Point's line and column survive.  A full `dsh-bridge--question-render' is the
+fallback when QID's block cannot be located."
+  (let ((bounds (dsh-bridge--question-span 'dsh-bridge-question-skip qid))
+	(block (dsh-bridge--question-block-bounds qid))
+	(skipped (and (member qid dsh-bridge--question-skipped) t))
+	(line (line-number-at-pos))
+	(column (current-column)))
+    (cond
+     ((null block)
+      (dsh-bridge--question-render))
+     ((and skipped bounds))		; already shown
+     ((and skipped (null bounds))
+      (dsh-bridge--question-edit
+       ;; The block's first line is the title line; every block but the first
+       ;; starts on its own separator newline.
+       (goto-char (car block))
+       (when (eq (char-after) ?\n) (forward-char 1))
+       (let ((start (line-end-position)))
+	 (goto-char start)
+	 (dsh-bridge--insert " — skipped" 'dsh-bridge-question-skip-face)
+	 (put-text-property start (point) 'dsh-bridge-question-skip qid)
+	 (put-text-property
+	  start (point) 'dsh-bridge-question-id
+	  (or (get-text-property (car block) 'dsh-bridge-question-id) qid))
+	 (put-text-property start (point) 'rear-nonsticky
+			    '(dsh-bridge-question-skip)))))
+     (bounds
+      (dsh-bridge--question-edit
+       (delete-region (car bounds) (cdr bounds)))))
+    (dsh-bridge--question-goto-line-column line column)))
+
+(defun dsh-bridge--question-patch-header ()
+  "Replace the DSH-Question header line with the resolution banner.
+The banner text comes from `dsh-bridge--question-resolution'; the key-help
+paragraph below the header is left in place, and point's line and column
+survive.  A full `dsh-bridge--question-render' is the fallback when the header
+cannot be located."
+  (let ((bounds (dsh-bridge--question-header-bounds))
+	(line (line-number-at-pos))
+	(column (current-column)))
+    (if (null bounds)
+	(progn
+	  (dsh-bridge--question-render)
+	  (dsh-bridge--question-goto-line-column line column))
+      (dsh-bridge--question-edit
+       (goto-char (car bounds))
+       (delete-region (car bounds) (cdr bounds))
+       (let ((start (point)))
+	 (dsh-bridge--insert dsh-bridge--question-resolution
+			     'dsh-bridge-question-banner-face t)
+	 (put-text-property start (point) 'dsh-bridge-question-header t)
+	 (put-text-property start (point) 'rear-nonsticky
+			    '(dsh-bridge-question-header))))
+      (dsh-bridge--question-goto-line-column line column))))
 
 (defun dsh-bridge--question-at-point ()
   "The question id of the block at point, or nil."
@@ -4579,15 +4743,6 @@ of the \"waiting for your answer\" header."
 	(assoc-delete-all qid dsh-bridge--question-selection))
   (push (cons qid labels) dsh-bridge--question-selection))
 
-(defun dsh-bridge--question-rerender-at-point ()
-  "Re-render after a state change, restoring point by line and column."
-  (let ((line (line-number-at-pos))
-	(col (current-column)))
-    (dsh-bridge--question-render)
-    (goto-char (point-min))
-    (forward-line (1- line))
-    (move-to-column col)))
-
 (defun dsh-bridge--question-toggle-option (qid label)
   "Toggle LABEL for question QID (radio for single-select, checkbox for multi).
 A single-select pick supersedes any typed custom answer, and any pick rescinds
@@ -4602,7 +4757,8 @@ a skip."
 	      (assoc-delete-all qid dsh-bridge--question-custom))))
     (dsh-bridge--question-set-selection qid selected)
     (setq dsh-bridge--question-skipped (delete qid dsh-bridge--question-skipped))
-    (dsh-bridge--question-rerender-at-point)))
+    (dsh-bridge--question-patch-skip qid)
+    (dsh-bridge--question-patch-controls qid)))
 
 (defun dsh-bridge--question-custom-answer (qid)
   "Prompt for a custom (free-text) answer to question QID.
@@ -4626,7 +4782,8 @@ the marks (the harness's `matchesQuestions' wire rules)."
       (unless (dsh-bridge--question-multi-p qid)
 	(dsh-bridge--question-set-selection qid nil)))
     (setq dsh-bridge--question-skipped (delete qid dsh-bridge--question-skipped))
-    (dsh-bridge--question-rerender-at-point)))
+    (dsh-bridge--question-patch-skip qid)
+    (dsh-bridge--question-patch-controls qid)))
 
 (defun dsh-bridge--question-toggle-at-point ()
   "Toggle the option at point; on the custom row, prompt for custom text."
@@ -4702,7 +4859,8 @@ any marks and custom text for the question."
 	(dsh-bridge--question-set-selection qid nil)
 	(setq dsh-bridge--question-custom
 	      (assoc-delete-all qid dsh-bridge--question-custom)))
-      (dsh-bridge--question-rerender-at-point))))
+      (dsh-bridge--question-patch-skip qid)
+      (dsh-bridge--question-patch-controls qid))))
 
 (defun dsh-bridge--question-validate ()
   "Return this buffer's answers, or nil if a question is still unanswered.
