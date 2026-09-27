@@ -1290,8 +1290,8 @@ draft when the entry shown is pristine."
 ;;; The view buffers
 
 (ert-deftest dsh-bridge-view-mode-basics ()
-  "The view mode is read-only and binds g/q/r/k/B/i/l/v plus M-p/M-n — and no
-compose/fetch/targeting verbs."
+  "The view mode is read-only and binds g/q/r/k/B/i/l/v plus RET and
+M-p/M-n — and no compose/fetch/targeting verbs."
   (with-temp-buffer
     (dsh-bridge-view-mode)
     (should buffer-read-only)
@@ -1309,6 +1309,8 @@ compose/fetch/targeting verbs."
               #'dsh-bridge-view-toggle-activity))
   (should (eq (lookup-key dsh-bridge-view-mode-map (kbd "l"))
               #'dsh-bridge-list-sessions))
+  (should (eq (lookup-key dsh-bridge-view-mode-map (kbd "RET"))
+              #'dsh-bridge-view-enter))
   (should (eq (lookup-key dsh-bridge-view-mode-map (kbd "D"))
               #'dsh-bridge-describe-session))
   (should (eq (lookup-key dsh-bridge-view-mode-map (kbd "M-p"))
@@ -2497,6 +2499,75 @@ refill must still take a record that carries either."
       (should-not (dsh-bridge--view-turn-renders-empty-p nil "s1"))
       (setq-local dsh-bridge--view-activity t)
       (should-not (dsh-bridge--view-turn-renders-empty-p blank "s1")))))
+
+(ert-deftest dsh-bridge-view-link-target ()
+  "A local file link's line is parsed from its anchor or a :LINE suffix.
+Declined: non-file URLs, plain links with no line, unknown fragments."
+  (should (equal (dsh-bridge--view-link-target "PLAN.md#L169") '("PLAN.md" . 169)))
+  (should (equal (dsh-bridge--view-link-target "emacs/dsh-bridge.el#L24-L30")
+                 '("emacs/dsh-bridge.el" . 24)))
+  (should (equal (dsh-bridge--view-link-target "/abs/PLAN.md#l7") '("/abs/PLAN.md" . 7)))
+  (should (equal (dsh-bridge--view-link-target "PLAN.md:169") '("PLAN.md" . 169)))
+  (dolist (url '("https://x/y#L1" "PLAN.md" "PLAN.md#section" "PLAN.md#" "#L1"
+                 "PLAN.md#L0" ""))
+    (should-not (dsh-bridge--view-link-target url))))
+
+(ert-deftest dsh-bridge-view-follow-file-link ()
+  "The hook opens a line link at its line and declines every other URL."
+  (let ((opened nil)
+        (line nil))
+    (cl-letf (((symbol-function 'find-file)
+               (lambda (file &rest _) (setq opened file)))
+              ((symbol-function 'goto-line)
+               (lambda (n &rest _) (setq line n))))
+      (should (dsh-bridge--view-follow-file-link "emacs/dsh-bridge.el#L24-L30"))
+      (should (equal opened "emacs/dsh-bridge.el"))
+      (should (equal line 24))
+      (setq opened nil line nil)
+      (should-not (dsh-bridge--view-follow-file-link "https://x/y#L1"))
+      (should-not (dsh-bridge--view-follow-file-link "PLAN.md"))
+      (should-not (dsh-bridge--view-follow-file-link "PLAN.md#section"))
+      (should (null opened))
+      (should (null line)))))
+
+(ert-deftest dsh-bridge-view-enter-follows-link ()
+  "RET follows the link at point, and otherwise defers to the parent RET."
+  (with-temp-buffer
+    (dsh-bridge-view-mode)
+    (let ((followed nil)
+          (entered nil))
+      (cl-letf (((symbol-function 'markdown-follow-thing-at-point)
+                 (lambda (_arg) (setq followed t)))
+                ((symbol-function 'markdown-enter-key)
+                 (lambda () (setq entered t)))
+                ((symbol-function 'markdown-link-p) (lambda () t))
+                ((symbol-function 'markdown-wiki-link-p) (lambda () nil))
+                ((symbol-function 'markdown-link-at-pos) (lambda (&rest _) nil)))
+        (dsh-bridge-view-enter)
+        (should followed)
+        (should-not entered)
+        (setq followed nil)
+        ;; Away from a link the parent's RET runs.
+        (cl-letf (((symbol-function 'markdown-link-p) (lambda () nil)))
+          (dsh-bridge-view-enter)
+          (should-not followed)
+          (should entered))))))
+
+(ert-deftest dsh-bridge-view-follow-link-hook-installed ()
+  "A DSH-View buffer registers the file-link hook buffer-locally.
+Markdown-mode is not on the batch load-path, so its hook variable is
+provided here when absent; with markdown-mode loaded the mode body installs
+into the real variable instead."
+  (let ((was-bound (boundp 'markdown-follow-link-functions)))
+    (unwind-protect
+        (progn
+          (unless was-bound (set 'markdown-follow-link-functions nil))
+          (with-temp-buffer
+            (dsh-bridge-view-mode)
+            (should (memq #'dsh-bridge--view-follow-file-link
+                          (buffer-local-value 'markdown-follow-link-functions
+                                              (current-buffer))))))
+      (unless was-bound (makunbound 'markdown-follow-link-functions)))))
 
 (ert-deftest dsh-bridge-view-fill-provenance ()
   "A record fill records the render provenance, a splice extends it, and the

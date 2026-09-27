@@ -3607,6 +3607,80 @@ clickable (see `dsh-bridge--header-plan-at-mouse' and
 		    (list await))
 	      (and width (max 1 (- width (string-width prefix)))))))))
 
+;;; Links in reply bodies
+
+;; A reply is Markdown, and the model writes file references as links —
+;; `[dsh-bridge.el:4289](emacs/dsh-bridge.el#L4289)'.  Markdown mode
+;; fontifies those into links and wires mouse-1 to
+;; `markdown-follow-thing-at-point', which strips a `#Lnnn' anchor and opens
+;; the file's top; RET falls through to `markdown-enter-key' and its
+;; read-only error.  The functions below give a local file link with a line
+;; anchor the right behavior on both keys, through markdown-mode's own
+;; `markdown-follow-link-functions' hook.
+
+(defconst dsh-bridge--view-link-fragment-re
+  "\\`[Ll]?\\([0-9]+\\)\\(?:-[Ll]?[0-9]+\\)?\\'"
+  "A link fragment naming a line or line range, as in `#L24-L30'.")
+
+(defun dsh-bridge--view-link-target (url)
+  "The (FILE . LINE) named by a local file link URL, or nil.
+URL is a Markdown link's target.  A `#Lnnn' or `#Lnnn-Lmmm' fragment names
+LINE (the range's start); a `:nnn' path suffix names it too.  Returns nil for
+everything else — a `scheme://' URL, a plain file link with no line, or an
+unrecognized fragment like `#section' — so the caller leaves the URL to
+markdown-mode's own handling."
+  (when (and (stringp url)
+             (not (string-match-p "\\`[a-zA-Z][a-zA-Z0-9+.-]*://" url)))
+    (let (path line)
+      (if (string-match "\\`\\([^#]*\\)#\\(.*\\)\\'" url)
+          (let ((fragment (match-string 2 url)))
+            (setq path (match-string 1 url))
+            (when (string-match dsh-bridge--view-link-fragment-re fragment)
+              (setq line (string-to-number (match-string 1 fragment)))))
+        (if (string-match "\\`\\(.+\\):\\([0-9]+\\)\\'" url)
+            (setq path (match-string 1 url)
+                  line (string-to-number (match-string 2 url)))
+          (setq path url)))
+      (when (and path (not (string-empty-p path)) line (> line 0))
+        (cons path line)))))
+
+(defun dsh-bridge--view-follow-file-link (url)
+  "Follow URL as a local file link with a line anchor, or return nil.
+Registered buffer-locally in `markdown-follow-link-functions', so it runs
+before markdown-mode strips the anchor and visits the file's top; returns nil
+for any URL it does not claim."
+  (let ((target (dsh-bridge--view-link-target url)))
+    (when target
+      (find-file (car target))
+      (goto-line (cdr target))
+      t)))
+
+(defun dsh-bridge--view-link-at-point-p ()
+  "Whether a Markdown link, wiki link, or bare URL at point can be followed.
+Uses markdown-mode's own predicates, so RET follows exactly what mouse-1
+follows."
+  (and (fboundp 'markdown-follow-thing-at-point)
+       (or (and (fboundp 'markdown-link-p) (markdown-link-p))
+           (and (fboundp 'markdown-wiki-link-p) (markdown-wiki-link-p))
+           (and (fboundp 'markdown-link-at-pos)
+                (nth 3 (markdown-link-at-pos (point)))))))
+
+(defun dsh-bridge-view-enter ()
+  "RET in a DSH-View buffer: follow the link at point, else the usual RET.
+The model writes file references as Markdown links, such as
+`[dsh-bridge.el:4289](emacs/dsh-bridge.el#L4289)'; following one opens the
+file at the line its `#Lnnn' fragment names.  Away from a link this keeps
+`markdown-enter-key' (rendered-table row navigation), or `newline' where
+markdown-mode is not installed."
+  (interactive)
+  (cond
+   ((dsh-bridge--view-link-at-point-p)
+    (markdown-follow-thing-at-point nil))
+   ((fboundp 'markdown-enter-key)
+    (markdown-enter-key))
+   (t
+    (newline))))
+
 ;; A conditional expression cannot go directly in the parent slot of
 ;; `define-derived-mode', since the macro quotes it into the mode
 ;; metadata and the docstring generation calls `symbol-name' on it.
@@ -3625,10 +3699,17 @@ on GitHub-Flavored Markdown (via `gfm-view-mode').
 
 When invoked, the DSH-View buffer is typically bound to a DSH session;
 the commands below let you cycle through the session's turn history,
-compose a reply (prompt) for the session, etc.
+compose a reply (prompt) for the session, etc.  RET follows a Markdown
+link at point (the model's file references open at the line they name);
+away from a link it keeps its usual behavior.
 \\{dsh-bridge-view-mode-map}"
      (setq buffer-read-only t)
      (setq-local dsh-bridge--view-activity dsh-bridge-view-activity)
+     ;; Follow a reply's `[label](path#Lnnn)' links through markdown-mode's own
+     ;; hook, buffer-locally so the prompt buffer is untouched.
+     (when (boundp 'markdown-follow-link-functions)
+       (add-hook 'markdown-follow-link-functions
+                 #'dsh-bridge--view-follow-file-link nil t))
      (setq-local tool-bar-map dsh-bridge--view-tool-bar-map)))
 
 ;; The mode and its `gfm-view-mode' parent are chosen at load time, so the
@@ -3636,10 +3717,16 @@ compose a reply (prompt) for the session, etc.
 ;; declare them (mirroring the prompt mode) to keep the compile clean.
 (declare-function dsh-bridge-view-mode "dsh-bridge")
 (declare-function gfm-view-mode "markdown-mode")
+(declare-function markdown-enter-key "markdown-mode")
+(declare-function markdown-follow-thing-at-point "markdown-mode")
+(declare-function markdown-link-at-pos "markdown-mode")
+(declare-function markdown-link-p "markdown-mode")
+(declare-function markdown-wiki-link-p "markdown-mode")
 
-;; The parent keymap is named only in the branch that required markdown-mode,
-;; so declare it for the byte-compiler.
+;; These are named only in the branch that required markdown-mode, so declare
+;; them for the byte-compiler.
 (defvar gfm-view-mode-map)
+(defvar markdown-follow-link-functions)
 
 ;; Defined after the mode's menu (from-menu items resolve the menu bindings
 ;; at load time); declare it for the byte-compiler.
@@ -3647,6 +3734,9 @@ compose a reply (prompt) for the session, etc.
 
 (defvar-keymap dsh-bridge-view-mode-map
   :doc "Keymap for `dsh-bridge-view-mode'."
+  ;; Follow a reply's Markdown link; `gfm-view-mode' leaves RET on
+  ;; `markdown-enter-key', which cannot insert into a read-only buffer.
+  "RET" #'dsh-bridge-view-enter
   "r"	#'dsh-bridge-reply
   "M-p" #'dsh-bridge-view-previous-reply
   "M-n" #'dsh-bridge-view-next-reply

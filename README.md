@@ -177,6 +177,7 @@ the web UI's "Send to Emacs" button (see below).
 The following commands are available in a DSH-View buffer:
 
 * `g` — re-fetch the current session's newest turn.
+* `RET` — follow the link at point (a file reference opens at its line).
 * `r` — open a DSH-Prompt buffer for the current session.
 * `B` — branch the shown turn into a new session.
 * `k` — stop the shown session's running turn.
