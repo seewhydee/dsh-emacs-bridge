@@ -1,13 +1,14 @@
 # dsh-emacs-bridge
 
-This is a two-way bridge between [GNU Emacs](https://www.gnu.org/software/emacs/)
-and a [Deepseek Harness](https://github.com/deepseek-ai/deepseek-harness) 
-session.  The bridge moves text from Emacs to DeepSeek Harness (DSH),
-and vice versa, over loopback HTTP.  This lets you type in Emacs and
-read DSH's replies without copy-pasting, while also avoiding streaming
-voluminous LLM outputs through Emacs.
+This is a two-way bridge between
+[GNU Emacs](https://www.gnu.org/software/emacs/) and the
+[Deepseek Harness](https://github.com/deepseek-ai/deepseek-harness)
+(DSH).  The bridge allows you to control DSH from entirely within
+Emacs, including submitting prompts, reading replies, and controlling
+sessions and their properties.  The Emacs-side user interface is
+designed to closely follow existing Emacs conventions and standards.
 
-It consists of two components:
+The bridge consists of two components:
 
 - `dsh-plugin/` — a DeepSeek Harness plugin (`dsh-emacs-bridge`).
 - `emacs/dsh-bridge.el` — an Emacs package to interact with the
@@ -35,12 +36,12 @@ make package
 Then, in Emacs:
 
 1. `M-x package-install-file RET /path/to/dsh-bridge-<version>.tar RET`
-2. (*optional*) If you run DSH from a source checkout, customize the
-   variable `dsh-bridge-dsh-command` (e.g., `M-x customize-variable
-   RET dsh-bridge-dsh-command RET`) with the DSH command (see below).
-   Skip this if `dsh` is on the executable path or run via `npx`.
-3. `M-x dsh-bridge-install-plugin` — install the bundled plugin into DSH.
-4. Start or restart `dsh web`.
+2. (*optional*) If you run DSH from a source checkout, meaning that
+   `dsh` is *not* on the executable path or run via `npx`, customize
+   `dsh-bridge-dsh-command` (e.g., `M-x customize-variable RET
+   dsh-bridge-dsh-command RET`) to specify how to run DSH (see below).
+3. `M-x dsh-bridge-install-plugin`
+4. Start or restart `dsh web`
 
 To remove the plugin later, run `M-x dsh-bridge-uninstall-plugin`.
 
@@ -95,10 +96,10 @@ replacing the path with the actual path to `dsh-bridge.el`:
 (load "/path/to/dsh-emacs-bridge/emacs/dsh-bridge.el")
 ```
 
-Optionally, you can also load `dsh-bridge-install.el`, which contains
-the previously-mentioned `M-x dsh-bridge-install-plugin` command.  But
-if you installed the DSH plugin directly by following the steps in the
-preceding section, you probably won't need these.
+Optionally, you can also load `dsh-bridge-install.el`, which supplies
+the `M-x dsh-bridge-install-plugin` command (see above).  But if you
+installed the DSH plugin directly by following the steps in the
+preceding section, you can skip this.
 
 ## Usage
 
@@ -107,10 +108,10 @@ From Emacs, the main entry-points are these two commands:
 - `M-x dsh-bridge` — open a transient menu for DSH commands.
 - `M-x dsh-bridge-list-sessions` — show a list of DSH sessions.
 
-Consider giving either of these a global keybinding, e.g.,
+Consider giving either or both a global keybinding, e.g.,
 
 ```elisp
-(keymap-global-set "C-c d" #'dsh-bridge)
+(keymap-global-set "C-c d" #'dsh-bridge-list-sessions)
 ```
 
 ### Transient menu
@@ -122,8 +123,8 @@ menu:
 
 * `q` — exit the transient menu.
 * `r` — open a buffer to type in a prompt.
-* `s` — send the region or buffer as a prompt (if the session is busy, the prompt is queued).
-* `d` — send the region or buffer as a draft (can still edit in DSH before submitting).
+* `s` — send region or buffer as a prompt (if session is busy, prompt is queued).
+* `d` — send region or buffer as a draft (can still edit in DSH before submitting).
 * `f` — fetch and display the session's latest reply.
 * `D` — describe the session.
 * `t` — set the default target session.
@@ -145,9 +146,9 @@ the leftmost column, and the `S` (state) column shows each session's
 live status.  The following commands are available from here:
 
 * `q` — quit the window and bury the buffer.
-* `RET` — do the next appropriate thing for the session at point:
-          e.g., if it is running, view the current replies; if waiting
-          for a prompt, open a buffer to type a prompt.
+* `RET` — do the next appropriate thing for the session at point: if
+          running, view current replies; if waiting for a prompt, open
+          a prompt buffer; etc.
 * `r` — open a buffer to type a prompt for the session at point.
 * `f` — fetch and display the output from the session at point.
 * `a` — answer a pending user query for the session at point.
@@ -177,7 +178,6 @@ the web UI's "Send to Emacs" button (see below).
 The following commands are available in a DSH-View buffer:
 
 * `g` — re-fetch the current session's newest turn.
-* `RET` — follow the link at point (a file reference opens at its line).
 * `r` — open a DSH-Prompt buffer for the current session.
 * `B` — branch the shown turn into a new session.
 * `k` — stop the shown session's running turn.
@@ -203,14 +203,14 @@ GFM horizontal-rule syntax, so they render cleanly).
 A turn whose tool calls successfully changed files ends with a
 `Changed files:` footer, a plain list of one clickable entry per file.
 Clicking a path (or typing `RET` with point on it) visits the file,
-resolved against the session directory.  There is currently no recorded
-diff or review view: the previous hunk viewer was removed pending a
-redesign (see `PLAN.md`).
+resolved against the session directory.  There is currently no
+recorded diff or review view: the previous hunk viewer was removed
+pending a redesign (see `PLAN.md`).
 
 Customize `dsh-bridge-view-changed-files` to `nil` to omit the footer.
 A turn that produced no assistant text but did run a tool is still
-served, so a purely file-changing turn shows its footer (and no reply);
-refresh (`g`) after a turn completes to pick up its files.
+served, so a purely file-changing turn shows its footer (and no
+reply); refresh (`g`) after a turn completes to pick up its files.
 
 #### Turn activity
 
@@ -221,13 +221,13 @@ one-line summary of each reasoning (thinking) block.  The toggle is
 buffer-local and starts from `dsh-bridge-view-activity` (default
 `nil`); it is also in the buffer's menu.
 
-The thinking lines are summaries that the host derives from the model's
-reasoning blocks; the full chain of thought never reaches Emacs.
-Activity streams in live, mid-turn, so a turn whose opening step is
-tool-only or reasoning-only shows its lines before it has any reply
-text.  Long sessions keep activity only for recent turns; within a turn
-the host keeps the newest entries, so a busy live turn keeps streaming
-and its oldest lines slide out.
+The thinking lines are summaries that the host derives from the
+model's reasoning blocks; the full chain of thought never reaches
+Emacs.  Activity streams in live, mid-turn, so a turn whose opening
+step is tool-only or reasoning-only shows its lines before it has any
+reply text.  Long sessions keep activity only for recent turns; within
+a turn the host keeps the newest entries, so a busy live turn keeps
+streaming and its oldest lines slide out.
 
 #### Agent queries and approval requests
 
@@ -240,28 +240,19 @@ In this buffer, mark the option(s) you choose with `RET`.  You can
 also navigate to a question block and type your desired option's
 number key, or type `c` and write a freeform answer via the
 minibuffer.  To submit the answers, type `C-c C-c`.  Alternatively,
-type `C-c C-k` to decline the query, canceling the tool call.
+type `C-c C-k` to decline the query.
 
-Some agent tools ask for explicit approval before acting; for example,
-`danger-full-access` asks the user before allowing sandbox escalation.
-Such a request is surfaced in the DSH-View buffer; type the same `a` key
-to see the request's details and decide.  A session cannot wait on a
-query and an approval at once, so a pending query takes precedence;
-otherwise `a` shows the approval.  The details (the tool, the asker's
-reason, and the tool call's arguments) appear in a help window while
-the minibuffer prompts: type `y` to allow the operation once, `n` to
-reject it, or `c` to cancel the request (the asking tool call then
-fails).  Quitting the prompt (e.g. with `C-g`) leaves the approval
-pending; run `a` again to re-read the details and decide.
+In addition, some agent tools ask for approval before acting; for
+example, `danger-full-access` asks before sandbox escalation.  Such
+requests are also surfaced in the DSH-View buffer.  Type `a` to see
+the request details in a help window; then you can type `y` to accept
+the request once, `n` to reject it, or `c` to cancel it.  Quitting
+(`C-g`) leaves the approval pending; type `a` again to restart it.
 
-Both waits are offered to Emacs and, when the web UI is open, to its own
-panel at the same time: whichever answers first settles the request and
-dismisses the other presentation.  To have Emacs only display approvals
-and leave the decision to the web UI, customize
-`dsh-bridge-approval-answer` to `notify-only`: `a` then shows the
-details read-only, and the notification connection tells the host not
-to offer approvals to Emacs for a decision.  See "Permissions,
-authentication, and failure bounds" below for the trust boundary.
+If the web UI is open, the query or approval is shown there too;
+whichever answers first (Emacs or web UI) settles the request and
+dismisses the other presentation.  To change this (e.g., letting the
+web UI handle all requests), customize `dsh-bridge-approval-answer`.
 
 ### DSH-Prompt buffer
 
@@ -336,15 +327,6 @@ The DSH plugin adds a "Send to Emacs" button that lets you push
 specific assistant messages to Emacs.  This automatically pops to the
 DSH-View buffer in Emacs.  You can use `i` in the DSH-View buffer (or
 run `M-x dsh-bridge-receive`) to pull the last message pushed.
-
-## Development testing
-
-Running `make test` launches the standard unit test suite (Vitest for
-plugin, ERT for elisp).  Running `make integration-test` performs a
-suite of integration tests that boots the plugin against a live
-DeepSeek Harness host with a mock LLM; see `integration/README.md`.
-It is not part of `make test` (which stays fast); run it before
-committing a host-plugin change and before a release.
 
 ## Permissions, authentication, and failure bounds
 
