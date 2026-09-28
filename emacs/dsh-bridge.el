@@ -656,51 +656,44 @@ Each entry has the form (SESSION-ID . (USED-TOKENS . CONTEXT-WINDOW)).")
 
 (defvar dsh-bridge--session-plan nil
   "Alist of cached plan-mode state per DSH session.
-Each entry is (SESSION-ID . PLAN), where PLAN is the `/session`
-report's `plan` alist: `active` plus, when known, `pending` (the
-wanted state, i.e. the toggle's direction) or `queued` (a pending
-change whose direction is unknown).  An entry whose PLAN is nil is a
-known-absent section (the session's preset mounts no plan mode); an
-absent entry means the session has not been seeded.")
+Each entry is (SESSION-ID . PLAN), where PLAN is the session report's
+plan alist, keyed by `active' and (optionally) `pending' or `queued'.
+An entry whose PLAN is nil is a known-absent section; an absent entry
+means the session has not been seeded.")
 
 (defvar dsh-bridge--session-goal nil
   "Alist of cached goal state per DSH session.
-Each entry is (SESSION-ID . GOAL), where GOAL is the `/session` report's
-`goal` alist (a null goal clears the entry); an absent entry means the
-session has not been seeded.")
+Each entry is (SESSION-ID . GOAL), where GOAL is the session report's
+goal alist.  An absent entry means the session has not been seeded.")
 
+;; `dsh-bridge--parse-json-body' maps JSON false to nil, while the SSE
+;; decoder leaves it as `:false`.  Callers that must distinguish a
+;; present false from an absent key test key presence separately.
 (defun dsh-bridge--json-false-p (value)
-  "Whether VALUE is JSON false as either decoder represents it.
-`dsh-bridge--parse-json-body` maps JSON false to nil, while the SSE
-decoder leaves it as `:false`; callers that must distinguish a
-present false from an absent key test key presence separately."
+  "Whether VALUE is either nil or `:false'."
   (or (null value) (eq value :false)))
 
-(defun dsh-bridge--goal-section-id (section)
-  "The goal id inside SECTION, a `/session` goal alist, or nil."
-  (and (consp section)
-       (alist-get 'id (alist-get 'goal section))))
-
 (defun dsh-bridge--goal-replace (session-id new)
-  "Replace SESSION-ID's cached goal with NEW.
-A NEW section lacking `activation` inherits the cached activation only
-when it names the same goal; a new or cleared goal never inherits a
-stale one.  The SSE decoder's `:null' (a cleared goal) normalizes to
-nil, so the entry's representation does not depend on the decoder."
-  (let* ((entry (assoc session-id dsh-bridge--session-goal))
-	 (old (cdr entry))
-	 activation-pair)
-    (when (eq new :null)
-      (setq new nil))
-    (when (and (consp new) (consp old)
-	       (null (assq 'activation new))
-	       (equal (dsh-bridge--goal-section-id new)
-		      (dsh-bridge--goal-section-id old))
-	       (setq activation-pair (assq 'activation old)))
-      (push `(activation . ,(cdr activation-pair)) new))
-    (setq dsh-bridge--session-goal
-	  (assoc-delete-all session-id dsh-bridge--session-goal))
-    (push (cons session-id new) dsh-bridge--session-goal)))
+  "Replace SESSION-ID's cached goal data with NEW.
+NEW should be an alist of the type stored in a session report's `goal'
+entry.  If the existing cache entry records the same goal as NEW and has
+an `activation' entry, and NEW does not, copy the `activation' over."
+  ;; SSE decoder's `:null' (a cleared goal) normalizes to nil
+  (when (eq new :null) (setq new nil))
+  (let ((entry (assoc session-id dsh-bridge--session-goal)))
+    (if (null entry)
+	(push (cons session-id new) dsh-bridge--session-goal)
+      ;; Update an existing entry, possibly retaining `activation' if
+      ;; it's absent from NEW.
+      (let ((old (cdr entry))
+	    activation)
+	(when (and (consp new) (consp old)
+		   (null (assq 'activation new))
+		   (equal (alist-get 'id (alist-get 'goal old))
+			  (alist-get 'id (alist-get 'goal new)))
+		   (setq activation (assq 'activation old)))
+	  (push activation new)))
+      (setcdr entry new))))
 
 (defun dsh-bridge--goal-activation-update (session-id activation goal-id revision)
   "Set SESSION-ID's cached goal ACTIVATION, when GOAL-ID/REVISION match.
@@ -719,14 +712,14 @@ ignored; a session with no cached goal is left alone."
 			(assq-delete-all 'activation section))))))))
 
 (defun dsh-bridge--plan-goal-store (session-id report)
-  "Seed SESSION-ID's plan and goal caches from REPORT, a `/session` body."
+  "Seed SESSION-ID's plan and goal caches from REPORT."
   (setq dsh-bridge--session-plan
 	(assoc-delete-all session-id dsh-bridge--session-plan))
   (push (cons session-id (alist-get 'plan report)) dsh-bridge--session-plan)
   (dsh-bridge--goal-replace session-id (alist-get 'goal report)))
 
 (defun dsh-bridge--fetch-plan-goal (session-id)
-  "Seed the plan and goal caches for SESSION-ID from one `/session` read.
+  "Seed plan and goal caches for SESSION-ID from latest session read.
 Read-through: a session already cached is returned as-is.  The request
 binds `dsh-bridge-timeout` to `dsh-bridge-describe-timeout` because a
 cold target folds its whole persisted log.  Returns (PLAN . GOAL), the
@@ -6124,7 +6117,7 @@ request fails."
   "The wanted plan-mode state in PLAN: its pending direction, else active."
   (let ((pending (assq 'pending plan)))
     (if pending
-	(not (dsh-bridge--json-false-p (cdr pending)))
+		(not (dsh-bridge--json-false-p (cdr pending)))
       (eq (alist-get 'active plan) t))))
 
 (defun dsh-bridge--plan-outcome-message (active outcome)
