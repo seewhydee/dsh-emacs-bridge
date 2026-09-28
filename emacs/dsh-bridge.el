@@ -1123,23 +1123,23 @@ Currently supported events are:
 		  (assoc-delete-all id dsh-bridge--session-context))
 	    (push (cons id (cons used window)) dsh-bridge--session-context)
 	    ;; Redraw the prompt and view headers in the same tick.
-	    (dsh-bridge--refresh-headers))))
+	    (force-mode-line-update t))))
        ((equal kind "plan")
 	(setq dsh-bridge--session-plan
 	      (assoc-delete-all id dsh-bridge--session-plan))
 	(push (cons id (alist-get 'plan event)) dsh-bridge--session-plan)
-	(dsh-bridge--refresh-headers)
+	(force-mode-line-update t)
 	(dsh-bridge--describe-maybe-refresh id))
        ((equal kind "goal")
 	(dsh-bridge--goal-replace id (alist-get 'goal event))
-	(dsh-bridge--refresh-headers)
+	(force-mode-line-update t)
 	(dsh-bridge--describe-maybe-refresh id))
        ((equal kind "goal-activation")
 	(let ((activation (alist-get 'activation event)))
 	  (when (member activation '("armed" "disarmed"))
 	    (dsh-bridge--goal-activation-update
 	     id activation (alist-get 'goalId event) (alist-get 'revision event))
-	    (dsh-bridge--refresh-headers)
+	    (force-mode-line-update t)
 	    (dsh-bridge--describe-maybe-refresh id))))
        ((equal kind "ask-user")
 	(let ((request-id (alist-get 'questionId event))
@@ -6623,17 +6623,6 @@ FORCE argument of `dsh-bridge-stop-session'."
 
 ;;; Session targeting
 
-(defun dsh-bridge--refresh-headers ()
-  "Refresh the header lines of DSH bridge buffers."
-  (dolist (buf (dsh-bridge--view-buffers))
-    (with-current-buffer buf
-      (setq header-line-format dsh-bridge--view-header-line-format)))
-  (dolist (buf (buffer-list))
-    (with-current-buffer buf
-      (when (eq major-mode 'dsh-bridge-prompt-mode)
-	(setq header-line-format dsh-bridge--prompt-header-line-format))))
-  (force-mode-line-update t))
-
 (defun dsh-bridge-set-prompt-session (session-id)
   "Bind the current buffer, which must be a DSH-Prompt buffer, to SESSION-ID.
 If SESSION-ID is nil, the buffer instead follows the default target.
@@ -6669,7 +6658,7 @@ host round-trip."
   (interactive
    (list (dsh-bridge--read-session-id "Default target: ")))
   (setq dsh-bridge-default-session session-id)
-  (dsh-bridge--refresh-headers)
+  (force-mode-line-update t)
   (dsh-bridge--refresh-sessions-buffer)
   ;; Re-point any DSH-Prompt buffer that follows the default target at its
   ;; effective session's workspace.
@@ -7808,7 +7797,7 @@ The `:set' action of `dsh-bridge-status-indicator': changing the indicator
 style updates an open DSH-Sessions list and the DSH-View header immediately
 (the DSH-Prompt header is `(:eval ...)' and re-renders on redisplay).  Reads
 the sessions cache only; never hits the host."
-  (dsh-bridge--refresh-headers)
+  (force-mode-line-update t)
   (when (buffer-live-p (get-buffer "*dsh-bridge-sessions*"))
     (with-current-buffer "*dsh-bridge-sessions*"
       (when (eq major-mode 'dsh-bridge-sessions-mode)
