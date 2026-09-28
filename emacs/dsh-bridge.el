@@ -6063,29 +6063,33 @@ refused.  Only meaningful in a DSH-View buffer."
 
 ;;; Plan mode and goals
 
-(defun dsh-bridge--plan-goal-refresh (session-id &optional keep-existing)
-  "Refresh SESSION-ID's plan/goal caches, and return the session report.
-When KEEP-EXISTING is non-nil, a session that already has an entry in
-both caches is left alone and nil is returned.  Otherwise a fresh report
-is read (so a mutation command sees the state it is about to change),
-both caches are seeded from it, and the report alist is returned; nil
-when the request fails.  The request binds `dsh-bridge-timeout' because
-a cold target folds its whole persisted log."
+(defun dsh-bridge--plan-goal-refresh (session-id &optional keep-cache signal-error)
+  "Refresh the plan/goal cache entries for SESSION-ID.
+If KEEP-CACHE is non-nil, do nothing if both caches have entries for
+SESSION-ID, rather than fetching a fresh report from the bridge.  If
+SIGNAL-ERROR is non-nil, a report that cannot be read signals a
+`user-error' instead of silently leaving the caches, and any stale
+entries in them, in place."
   (let ((plan-entry (assoc session-id dsh-bridge--session-plan))
 	(goal-entry (assoc session-id dsh-bridge--session-goal)))
-    (unless (and keep-existing plan-entry goal-entry)
+    (unless (and keep-cache plan-entry goal-entry)
+      ;; Bind `dsh-bridge-timeout' because a cold target folds its
+      ;; whole persisted log.
       (let* ((dsh-bridge-timeout dsh-bridge-describe-timeout)
 	     (path (dsh-bridge--path "/session" session-id))
 	     (result (dsh-bridge--request "GET" path nil)))
-	(when (eq (car-safe result) 200)
+	(cond
+	 ((eq (car-safe result) 200)
 	  (let* ((report (cdr result))
 		 (plan (alist-get 'plan report))
 		 (goal (alist-get 'goal report)))
 	    (setq dsh-bridge--session-plan
 		  (cons (cons session-id plan)
 			(assoc-delete-all session-id dsh-bridge--session-plan)))
-	    (dsh-bridge--goal-replace session-id goal)
-	    report))))))
+	    (dsh-bridge--goal-replace session-id goal)))
+	 (signal-error
+	  (user-error "dsh-bridge: could not read session \"%s\""
+		      (dsh-bridge--session-label session-id))))))))
 
 (defun dsh-bridge--plan-effective (plan)
   "The wanted plan-mode state in PLAN: its pending direction, else active."
@@ -6111,52 +6115,48 @@ a cold target folds its whole persisted log."
       (message "dsh-bridge: objective must not be empty"))
     value))
 
-(defun dsh-bridge--goal-report (session)
-  "Return SESSION's fresh report alist, or signal a `user-error'."
-  (or (dsh-bridge--plan-goal-refresh session)
-      (user-error "dsh-bridge: could not read session \"%s\""
-		  (dsh-bridge--session-label session))))
-
-(defun dsh-bridge--goal-snapshot (report)
-  "The goal snapshot in REPORT's goal section, or nil."
-  (alist-get 'goal (alist-get 'goal report)))
+(defun dsh-bridge--session-goal (session-id)
+  "Return SESSION-ID's current goal section, or nil when it has no goal.
+This function reads a fresh copy from the DSH bridge, and signals a
+`user-error' if no report is available."
+  (dsh-bridge--plan-goal-refresh session-id nil t)
+  (cdr-safe (assoc session-id dsh-bridge--session-goal)))
 
 (defun dsh-bridge--goal-command (operation &optional session extra-args)
   "Post a goal OPERATION to the DSH bridge for SESSION.
 OPERATION is one of `set', `pause', `resume', or `clear'.  When SESSION
-is nil, act on the session at hand, from `dsh-bridge--interaction-session'.
+is nil, act on the session at hand (`dsh-bridge--interaction-session').
 EXTRA-ARGS, when non-nil, is an alist appended to the request payload.
-`set' creates or replaces a goal; the other operations require a current
-goal, and signal a `user-error' without one."
+`set' creates or replaces a goal."
   (unless session
     (setq session (dsh-bridge--interaction-session t)))
-  (let ((report (dsh-bridge--goal-report session)))
-    (unless (or (eq operation 'set) (consp (dsh-bridge--goal-snapshot report)))
+  (let* ((op (concat "/goal/" (symbol-name operation)))
+	 (payload (append `((sessionId . ,session)) extra-args))
+	 (result (dsh-bridge--request "POST" op payload))
+	 (status (car result))
+	 (alist (cdr result)))
+    (cond
+     ((eq status 200)
+      (dsh-bridge--plan-goal-refresh session)
+      (message "dsh-bridge: %s"
+	       (pcase operation
+		 ('set (format "goal %s: %s"
+			       (if (equal (alist-get 'operation alist)
+					  "created")
+				   "set" "updated")
+			       (or (alist-get 'objective alist)
+				   (alist-get 'objective extra-args))))
+		 ('pause "goal paused")
+		 ('resume "goal resumed")
+		 ('clear "goal cleared"))))
+     ((and (eq status 404)
+	   (equal (alist-get 'code alist) "GOAL_NOT_FOUND"))
       (user-error "dsh-bridge: this session has no goal"))
-    (let* ((op (concat "/goal/" (symbol-name operation)))
-	   (payload (append (list (cons 'sessionId session))
-			    extra-args))
-	   (result (dsh-bridge--request "POST" op payload))
-	   (status (car result))
-	   (alist (cdr result)))
-      (cond
-       ((eq status 200)
-	(dsh-bridge--plan-goal-refresh session)
-	(message "dsh-bridge: %s"
-		 (pcase operation
-		   ('set (format "goal %s: %s"
-				 (if (equal (alist-get 'operation alist) "created")
-				     "set" "updated")
-				 (or (alist-get 'objective alist)
-				     (alist-get 'objective extra-args))))
-		   ('pause "goal paused")
-		   ('resume "goal resumed")
-		   ('clear "goal cleared"))))
-       ((eq status 501)
-	(message "dsh-bridge: %s"
-		 (or (alist-get 'error alist) "this profile has no goal service")))
-       (t
-	(message "dsh-bridge: %s" (dsh-bridge--goal-error-message status alist)))))))
+     ((eq status 501)
+      (message "dsh-bridge: %s"
+	       (or (alist-get 'error alist) "this profile has no goal service")))
+     (t
+      (message "dsh-bridge: %s" (dsh-bridge--goal-error-message status alist))))))
 
 ;;;###autoload
 (defun dsh-bridge-toggle-plan-mode (&optional arg)
@@ -6169,8 +6169,8 @@ advisory cache.	 A session whose preset mounts no plan mode is reported
 and nothing is sent."
   (interactive "P")
   (let* ((session (dsh-bridge--interaction-session t))
-	 (report (dsh-bridge--goal-report session))
-	 (plan (alist-get 'plan report)))
+	 (plan (progn (dsh-bridge--plan-goal-refresh session nil t)
+		      (cdr-safe (assoc session dsh-bridge--session-plan)))))
     (when (null plan)
       (user-error "dsh-bridge: session \"%s\" has no plan mode"
 		  (dsh-bridge--session-label session)))
@@ -6197,7 +6197,7 @@ and nothing is sent."
 	   (message "dsh-bridge: plan mode change cancelled"))
 	  ("noop"
 	   (message "dsh-bridge: plan mode already %s" (if active "on" "off")))
-	  (_ (format "dsh-bridge: %s" outcome))))
+	  (_ (message "dsh-bridge: %s" (alist-get 'outcome alist)))))
        ((eq status 501)
 	(message "dsh-bridge: %s"
 		 (or (alist-get 'error alist) "no plan mode controller")))
@@ -6214,8 +6214,7 @@ round cap, defaulting to the current cap.  A complete goal is replaced
 rather than edited; the host reports which happened."
   (interactive "P")
   (let* ((session (dsh-bridge--interaction-session t))
-	 (report (dsh-bridge--goal-report session))
-	 (snapshot (dsh-bridge--goal-snapshot report))
+	 (snapshot (alist-get 'goal (dsh-bridge--session-goal session)))
 	 (current (dsh-bridge--normalized-string (alist-get 'objective snapshot)))
 	 (objective (dsh-bridge--read-goal-objective current))
 	 (cap (and arg (read-number "Max goal rounds: "
@@ -6245,29 +6244,27 @@ The decision is read fresh from `/session' so the menu checkbox and the
 command agree."
   (interactive)
   (let* ((session (dsh-bridge--interaction-session t))
-	 (report (dsh-bridge--goal-report session))
-	 (goal (alist-get 'goal report))
-	 (snapshot (dsh-bridge--goal-snapshot report))
+	 (section (dsh-bridge--session-goal session))
+	 (snapshot (alist-get 'goal section))
 	 (phase (alist-get 'phase snapshot)))
     (unless (consp snapshot)
       (user-error "dsh-bridge: this session has no goal"))
     (if (and (equal phase "active")
-	     (equal (alist-get 'activation goal) "armed"))
-	(dsh-bridge--goal-command 'pause)
-      (dsh-bridge--goal-command 'resume))))
+	     (equal (alist-get 'activation section) "armed"))
+	(dsh-bridge--goal-command 'pause session)
+      (dsh-bridge--goal-command 'resume session))))
 
 ;;;###autoload
 (defun dsh-bridge-clear-goal ()
   "Clear the session's current goal after confirmation."
   (interactive)
   (let* ((session (dsh-bridge--interaction-session t))
-	 (report (dsh-bridge--goal-report session))
-	 (snapshot (dsh-bridge--goal-snapshot report)))
+	 (snapshot (alist-get 'goal (dsh-bridge--session-goal session))))
     (unless (consp snapshot)
       (user-error "dsh-bridge: this session has no goal"))
     (when (y-or-n-p (format "Clear the goal \"%s\"? "
 			    (alist-get 'objective snapshot)))
-      (dsh-bridge--goal-command 'clear))))
+      (dsh-bridge--goal-command 'clear session))))
 
 (defun dsh-bridge--header-indicator-act (event command)
   "Run COMMAND for the session whose header indicator was clicked in EVENT.
