@@ -655,16 +655,17 @@ what the user answered.	 PLIST is keyed by:
 Each entry has the form (SESSION-ID . (USED-TOKENS . CONTEXT-WINDOW)).")
 
 (defvar dsh-bridge--session-plan nil
-  "Alist of cached plan-mode state per DSH session.
-Each entry is (SESSION-ID . PLAN), where PLAN is the session report's
+  "Alist of (SESSION-ID . PLAN) entries caching session plans.
+Each SESSION-ID is a session id string, and PLAN is the session report's
 plan alist, keyed by `active' and (optionally) `pending' or `queued'.
 An entry whose PLAN is nil is a known-absent section; an absent entry
 means the session has not been seeded.")
 
 (defvar dsh-bridge--session-goal nil
-  "Alist of cached goal state per DSH session.
-Each entry is (SESSION-ID . GOAL), where GOAL is the session report's
-goal alist.  An absent entry means the session has not been seeded.")
+  "Alist of (SESSION-ID . GOAL) entries caching session goals.
+Each SESSION-ID is a session id string, and GOAL is the session report's
+goal alist.  An entry whose GOAL is nil is a known-absent section; an
+absent entry means the session has not been seeded.")
 
 ;; `dsh-bridge--parse-json-body' maps JSON false to nil, while the SSE
 ;; decoder leaves it as `:false`.  Callers that must distinguish a
@@ -1069,56 +1070,55 @@ Currently supported events are:
     (let ((kind (alist-get 'kind event))
 	  (id	(alist-get 'sessionId event)))
       (cond
+       ;; All notification types require an id to be specified.
+       ((null id))
        ((equal kind "turn-start")
-	(when id
-	  ;; A new turn retires any answered note left by the last one.
-	  (dsh-bridge--view-answer-note-clear id)
-	  ;; Clear any recorded last-active resolution, since this
-	  ;; session is the host's newest activity.
-	  (unless (equal (car-safe dsh-bridge--last-resolved-active) id)
-	    (setq dsh-bridge--last-resolved-active nil))
-	  (dsh-bridge--status-set id 'running (alist-get 'time event))
-	  (dsh-bridge--status-event-render id)
-	  (dsh-bridge--models-event-refresh id)
-	  (when (and dsh-bridge-turn-boundary-echo
-		     (not (dsh-bridge--view-displayed-p id)))
-	    (message "dsh-bridge: session \"%s\" is running..."
-		     (dsh-bridge--session-label id)))
-	  ;; A turn boundary also grows the turn list, so refresh the
-	  ;; cache now so the header-line is immediately up to date.
-	  (run-at-time 0 nil #'dsh-bridge--view-turns-cache-refresh id)))
+	;; A new turn retires any answered note left by the last one.
+	(dsh-bridge--view-answer-note-clear id)
+	;; Clear any recorded last-active resolution, since this
+	;; session is the host's newest activity.
+	(unless (equal (car-safe dsh-bridge--last-resolved-active) id)
+	  (setq dsh-bridge--last-resolved-active nil))
+	(dsh-bridge--status-set id 'running (alist-get 'time event))
+	(dsh-bridge--status-event-render id)
+	(dsh-bridge--models-event-refresh id)
+	(when (and dsh-bridge-turn-boundary-echo
+		   (not (dsh-bridge--view-displayed-p id)))
+	  (message "dsh-bridge: session \"%s\" is running..."
+		   (dsh-bridge--session-label id)))
+	;; A turn boundary also grows the turn list, so refresh the
+	;; cache now so the header-line is immediately up to date.
+	(run-at-time 0 nil #'dsh-bridge--view-turns-cache-refresh id))
        ((equal kind "turn-complete")
-	(when id
-	  (dsh-bridge--view-answer-note-clear id)
-	  (dsh-bridge--status-set id 'idle)
-	  ;; Fold the turn's timestamp into the session cache.
-	  (dsh-bridge--session-update-last-active id (alist-get 'time event))
-	  ;; Avoid the header line showing the stale `awaiting' state.
-	  (dsh-bridge--ask-user-session-clear id)
-	  (dsh-bridge--approval-session-clear id)
-	  (dsh-bridge--status-event-render id)
-	  (dsh-bridge--models-event-refresh id)
-	  (dsh-bridge--describe-maybe-refresh id)
-	  (dsh-bridge--turn-complete-act id (alist-get 'reason event)
-					 (alist-get 'turn event))))
+	(dsh-bridge--view-answer-note-clear id)
+	(dsh-bridge--status-set id 'idle)
+	;; Fold the turn's timestamp into the session cache.
+	(dsh-bridge--session-update-last-active id (alist-get 'time event))
+	;; Avoid the header line showing the stale `awaiting' state.
+	(dsh-bridge--ask-user-session-clear id)
+	(dsh-bridge--approval-session-clear id)
+	(dsh-bridge--status-event-render id)
+	(dsh-bridge--models-event-refresh id)
+	(dsh-bridge--describe-maybe-refresh id)
+	(dsh-bridge--turn-complete-act id (alist-get 'reason event)
+				       (alist-get 'turn event)))
        ((equal kind "replies-changed")
-	(when id
-	  ;; The first text segment after an answer retires its note; the
-	  ;; refill below then splices the segment in under the usual
-	  ;; marker.  The note's segment baseline does the same check, so a
-	  ;; missed frame only delays the refresh, never strands the note.
-	  (dsh-bridge--view-answer-note-clear id)
-	  (run-at-time 0 nil #'dsh-bridge--turns-changed id)))
+	;; The first text segment after an answer retires its note;
+	;; the refill below splices the segment in.  The note's
+	;; segment baseline does the same check, so a missed frame
+	;; only delays the refresh, never strands the note.
+	(dsh-bridge--view-answer-note-clear id)
+	(run-at-time 0 nil #'dsh-bridge--turns-changed id))
        ((equal kind "activity-changed")
 	;; A nudge, like `replies-changed', but one nobody asked for while the
 	;; session's views render no activity: skip the refetch entirely then,
 	;; rather than paying for a fetch whose result nothing displays.
-	(when (and id (dsh-bridge--session-activity-shown-p id))
+	(when (dsh-bridge--session-activity-shown-p id)
 	  (run-at-time 0 nil #'dsh-bridge--turns-changed id)))
        ((equal kind "context")
 	(let ((used (alist-get 'usedTokens event))
 	      (window (alist-get 'contextWindow event)))
-	  (when (and id (numberp used) (numberp window))
+	  (when (and (numberp used) (numberp window))
 	    (setq dsh-bridge--session-context
 		  (assoc-delete-all id dsh-bridge--session-context))
 	    (push (cons id (cons used window)) dsh-bridge--session-context)
@@ -1126,22 +1126,20 @@ Currently supported events are:
 	    (dsh-bridge--refresh-view-headers)
 	    (force-mode-line-update t))))
        ((equal kind "plan")
-	(when id
-	  (setq dsh-bridge--session-plan
-		(assoc-delete-all id dsh-bridge--session-plan))
-	  (push (cons id (alist-get 'plan event)) dsh-bridge--session-plan)
-	  (dsh-bridge--refresh-view-headers)
-	  (force-mode-line-update t)
-	  (dsh-bridge--describe-maybe-refresh id)))
+	(setq dsh-bridge--session-plan
+	      (assoc-delete-all id dsh-bridge--session-plan))
+	(push (cons id (alist-get 'plan event)) dsh-bridge--session-plan)
+	(dsh-bridge--refresh-view-headers)
+	(force-mode-line-update t)
+	(dsh-bridge--describe-maybe-refresh id))
        ((equal kind "goal")
-	(when id
-	  (dsh-bridge--goal-replace id (alist-get 'goal event))
-	  (dsh-bridge--refresh-view-headers)
-	  (force-mode-line-update t)
-	  (dsh-bridge--describe-maybe-refresh id)))
+	(dsh-bridge--goal-replace id (alist-get 'goal event))
+	(dsh-bridge--refresh-view-headers)
+	(force-mode-line-update t)
+	(dsh-bridge--describe-maybe-refresh id))
        ((equal kind "goal-activation")
 	(let ((activation (alist-get 'activation event)))
-	  (when (and id (member activation '("armed" "disarmed")))
+	  (when (member activation '("armed" "disarmed"))
 	    (dsh-bridge--goal-activation-update
 	     id activation (alist-get 'goalId event) (alist-get 'revision event))
 	    (dsh-bridge--refresh-view-headers)
@@ -1150,19 +1148,19 @@ Currently supported events are:
        ((equal kind "ask-user")
 	(let ((request-id (alist-get 'questionId event))
 	      (questions (alist-get 'questions event)))
-	  (when (and id request-id questions)
+	  (when (and request-id questions)
 	    ;; A fresh question owns the terminal slot; drop any answered
 	    ;; note so it cannot resurface behind the awaiting note.
 	    (dsh-bridge--view-answer-note-clear id)
 	    (dsh-bridge--ask-user-arrive id request-id questions))))
        ((equal kind "ask-user-resolved")
-	(when (and id (alist-get 'questionId event))
+	(when (alist-get 'questionId event)
 	  (dsh-bridge--ask-user-resolved id (alist-get 'questionId event)
 					 (alist-get 'outcome event))))
        ((equal kind "approval")
 	(let ((approval-id (alist-get 'approvalId event))
 	      (tool-name (alist-get 'toolName event)))
-	  (when (and id approval-id tool-name)
+	  (when (and approval-id tool-name)
 	    ;; A fresh approval owns the terminal slot; drop any answered
 	    ;; note so it cannot resurface behind the awaiting note.
 	    (dsh-bridge--view-answer-note-clear id)
@@ -1173,7 +1171,7 @@ Currently supported events are:
 		   :reason (alist-get 'reason event)
 		   :detail (alist-get 'detail event))))))
        ((equal kind "approval-resolved")
-	(when (and id (alist-get 'approvalId event))
+	(when (alist-get 'approvalId event)
 	  (dsh-bridge--approval-resolved id (alist-get 'approvalId event)
 					 (alist-get 'outcome event))))))))
 
