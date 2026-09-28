@@ -2370,7 +2370,7 @@ these letters; this table serves the dispatcher's layout alone.")
     "Layout of the `dsh-bridge' dispatcher, grouped by purpose.
 The verbs are defined in `dsh-bridge--verb-suffixes'."))
 
-;;; DSH-View buffer (*dsh-bridge-output*)
+;;; The DSH-View buffer
 
 ;; The DSH-View buffer shows one turn, consisting of sequential
 ;; messages ("segments") separated by horizontal-rule dividers.
@@ -2486,10 +2486,7 @@ rendered items in front of the recorded body end.")
 
 (defconst dsh-bridge--view-header-line-format
   '(:eval (dsh-bridge--view-header-line (dsh-bridge--header-window-width)))
-  "Value of `header-line-format' in DSH-View buffers.
-The `:eval' form runs once for each window being redisplayed, with that
-window selected, so the line is truncated to the width of the window it
-is drawn in.")
+  "Value of `header-line-format' in DSH-View buffers.")
 
 (defvar dsh-bridge--view-segment-divider "\n\n---\n"
   "Text between two segments of the same turn in DSH-View buffers.
@@ -6373,7 +6370,11 @@ session, and when the activation is unknown (never asserted as disarmed)."
   "Whether the Goal Active menu checkbox is checked (the goal is armed)."
   (equal (alist-get 'activation (dsh-bridge--menu-goal-state)) "armed"))
 
-;;; The prompt buffer
+;;; The DSH-Prompt buffer
+
+(defconst dsh-bridge--prompt-header-line-format
+  '(:eval (dsh-bridge--prompt-header-line (dsh-bridge--header-window-width)))
+  "Value of `header-line-format' in DSH-Prompt buffers.")
 
 (defun dsh-bridge--prompt-sent-marker (session-id)
   "The \" ✓ sent HH:MM\" marker when the buffer text was just sent, else \"\".
@@ -6467,15 +6468,14 @@ their tag lines are visible in the buffer itself."
 
 (defun dsh-bridge--prompt-mode-setup ()
   "Common setup for `dsh-bridge-prompt-mode'."
-  (setq-local header-line-format '(:eval (dsh-bridge--prompt-header-line (dsh-bridge--header-window-width))))
+  (setq-local header-line-format dsh-bridge--prompt-header-line-format)
   (setq-local revert-buffer-function #'dsh-bridge--revert-prompt-buffer)
   (setq-local tool-bar-map dsh-bridge--prompt-tool-bar-map)
-  (font-lock-add-keywords
-   nil
-   '((dsh-bridge--attachment-tag-search
-      (1 '(face dsh-bridge-attachment-face
-		rear-nonsticky t)
-	 t)))))
+  (font-lock-add-keywords nil
+			  '((dsh-bridge--attachment-tag-search
+			     (1 '(face dsh-bridge-attachment-face
+				       rear-nonsticky t)
+				t)))))
 
 (declare-function markdown-mode "markdown-mode")
 ;; As for DSH-View, the parent keymap is named only in the branch that
@@ -6635,8 +6635,7 @@ FORCE argument of `dsh-bridge-stop-session'."
   (dolist (buf (buffer-list))
     (with-current-buffer buf
       (when (eq major-mode 'dsh-bridge-prompt-mode)
-	(setq header-line-format
-	      '(:eval (dsh-bridge--prompt-header-line (dsh-bridge--header-window-width))))))))
+	(setq header-line-format dsh-bridge--prompt-header-line-format)))))
 
 (defun dsh-bridge-set-prompt-session (session-id)
   "Bind the current buffer, which must be a DSH-Prompt buffer, to SESSION-ID.
@@ -6651,7 +6650,7 @@ prompt-history walk when the binding changes."
     (setq-local dsh-bridge--prompt-history-index nil)
     (setq-local dsh-bridge--prompt-draft nil))
   (setq-local dsh-bridge--prompt-session session-id)
-  (setq header-line-format '(:eval (dsh-bridge--prompt-header-line (dsh-bridge--header-window-width))))
+  (setq header-line-format dsh-bridge--prompt-header-line-format)
   (dsh-bridge--apply-session-directory session-id nil (current-buffer))
   (dsh-bridge--refresh-prompt-metadata)
   (when (called-interactively-p 'any)
@@ -7839,10 +7838,6 @@ ensures that paint lands in the same tick as the other surfaces."
     (with-current-buffer "*dsh-bridge-sessions*"
       (when (eq major-mode 'dsh-bridge-sessions-mode)
 	(dsh-bridge--status-reprint-row session-id)))))
-;; Redraw header/mode lines immediately so the prompt buffer's `(:eval)'
-;; header picks the tracker change up in the same paint (not just on the next
-;; unrelated redisplay).
-(force-mode-line-update t)
 
 (defun dsh-bridge--status-reprint-row (session-id)
   "Re-print only the sessions-list row for SESSION-ID from the tracker.
