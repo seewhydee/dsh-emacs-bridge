@@ -6094,15 +6094,6 @@ a cold target folds its whole persisted log."
 	(not (dsh-bridge--json-false-p (cdr pending)))
       (eq (alist-get 'active plan) t))))
 
-(defun dsh-bridge--plan-outcome-message (active outcome)
-  "A message for plan-mode OUTCOME after requesting ACTIVE."
-  (pcase outcome
-    ("committed" (format "plan mode %s" (if active "on" "off")))
-    ("queued" (format "plan mode %s applies from the next step" (if active "on" "off")))
-    ("cancelled" "plan mode change cancelled")
-    ("noop" (format "plan mode already %s" (if active "on" "off")))
-    (_ (format "plan mode: %s" outcome))))
-
 (defun dsh-bridge--goal-error-message (status alist)
   "Report a failed goal POST with STATUS and ALIST, adding a CAS hint."
   (let ((code (alist-get 'code alist))
@@ -6186,24 +6177,33 @@ and nothing is sent."
     (let* ((active (if arg
 		       (> (prefix-numeric-value arg) 0)
 		     (not (dsh-bridge--plan-effective plan))))
+	   (payload `((sessionId . ,session)
+		      (active . ,(if active t json-false))))
 	   ;; json.el encodes nil as null, which the host rejects; the
 	   ;; `json-false' marker encodes as a real JSON boolean.
-	   (result (dsh-bridge--request
-		    "POST" "/plan-mode"
-		    (list (cons 'sessionId session)
-			  (cons 'active (if active t json-false)))))
+	   (result (dsh-bridge--request "POST" "/plan-mode" payload))
 	   (status (car result))
 	   (alist (cdr result)))
       (cond
        ((and (eq status 200) (alist-get 'outcome alist))
 	(dsh-bridge--plan-goal-refresh session)
-	(message "dsh-bridge: %s"
-		 (dsh-bridge--plan-outcome-message active (alist-get 'outcome alist))))
+	(pcase (alist-get 'outcome alist)
+	  ("committed"
+	   (message "dsh-bridge: plan mode %s" (if active "on" "off")))
+	  ("queued"
+	   (message "dsh-bridge: plan mode %s from next step"
+		    (if active "on" "off")))
+	  ("cancelled"
+	   (message "dsh-bridge: plan mode change cancelled"))
+	  ("noop"
+	   (message "dsh-bridge: plan mode already %s" (if active "on" "off")))
+	  (_ (format "dsh-bridge: %s" outcome))))
        ((eq status 501)
 	(message "dsh-bridge: %s"
-		 (or (alist-get 'error alist) "this session mounts no plan mode controller")))
+		 (or (alist-get 'error alist) "no plan mode controller")))
        (t
-	(message "dsh-bridge: %s" (dsh-bridge--error-message nil status alist)))))))
+	(message "dsh-bridge: %s"
+		 (dsh-bridge--error-message nil status alist)))))))
 
 ;;;###autoload
 (defun dsh-bridge-set-goal (&optional arg)
