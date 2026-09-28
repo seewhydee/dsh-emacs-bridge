@@ -36,6 +36,12 @@
 ;;; - `dsh-bridge-it-attach-file`: C-c C-a staging plus send-time tag
 ;;;   stripping through the real attachment store.
 ;;; - the incremental DSH-View filling tests (see the section below).
+;;; - `dsh-bridge-it-goal-lifecycle`: the goal commands create, edit, pause,
+;;;   resume, toggle, and clear a goal on a live host.
+;;; - `dsh-bridge-it-toggle-plan-mode`: the plan-mode toggle through the
+;;;   preset's controller.
+;;; - `dsh-bridge-it-goal-frames-refresh-the-cache`: a goal mutated out of
+;;;   band reaches Emacs over the SSE frames alone.
 ;;;
 ;;; Run via `make integration-test`: `emacs --batch -L emacs -L integration -l
 ;;; integration/dsh-bridge-it.el -f ert-run-tests-batch-and-exit`.  The fixture
@@ -1108,6 +1114,225 @@ activity the host already serves, without waiting for the first reply."
         (should (string-match-p "Think before asking" (buffer-string)))
         (should (string-match-p "ask_user_question" (buffer-string))))
       (dsh-bridge-it--answer-pending session-id "Go"))))
+
+;;; Plan mode and goals against a live host
+;;
+;; The unit suite drives these commands with `dsh-bridge--request' and
+;; `dsh-bridge--plan-goal-refresh' stubbed, so it never sees the wire shape of
+;; the report a command reads or the route and payload it posts.  These seats
+;; drive the real commands from a real DSH-Prompt buffer against the fixture,
+;; and check three views of the result at every step: the host's own report,
+;; the caches behind the header cells and menu items, and the message the
+;; command reports.
+
+(defun dsh-bridge-it--report (session-id)
+  "SESSION-ID's live `/session' report alist, or nil on a failed read."
+  (let ((result (dsh-bridge--request
+                 "GET" (dsh-bridge--path "/session" session-id) nil)))
+    (and (eq (car result) 200) (cdr result))))
+
+(defun dsh-bridge-it--host-goal (session-id)
+  "SESSION-ID's goal section from its live report, or nil."
+  (alist-get 'goal (dsh-bridge-it--report session-id)))
+
+(defun dsh-bridge-it--cached-goal (session-id)
+  "SESSION-ID's cached goal section, or nil."
+  (cdr (assoc session-id dsh-bridge--session-goal)))
+
+(defun dsh-bridge-it--messages (thunk)
+  "Run THUNK, returning the list of `message' strings it reported."
+  (let (messages)
+    (cl-letf (((symbol-function 'message)
+               (lambda (fmt &rest args) (push (apply #'format fmt args) messages))))
+      (funcall thunk))
+    messages))
+
+(defun dsh-bridge-it--message-some (pattern messages)
+  "Whether some string in MESSAGES matches PATTERN."
+  (seq-some (lambda (message) (string-match-p pattern message)) messages))
+
+(defun dsh-bridge-it--cell-text (cell)
+  "The string parts of a header CELL concatenated, or \"\".
+A header cell mixes its strings with markers (e.g. an untruncatable
+suffix), so it cannot be concatenated wholesale."
+  (apply #'concat (seq-filter #'stringp cell)))
+
+(defmacro dsh-bridge-it--with-prompt (session-id &rest body)
+  "Run BODY inside the real DSH-Prompt buffer bound to SESSION-ID.
+This is the path every plan/goal command resolves its target through."
+  (declare (indent 1) (debug t))
+  `(let ((dsh-bridge-default-session ,session-id))
+     (dsh-bridge-prompt)
+     (with-current-buffer (dsh-bridge--prompt-buffer ,session-id)
+       ,@body)))
+
+(ert-deftest dsh-bridge-it-goal-lifecycle ()
+  "The goal commands create, edit, pause, resume, toggle, and clear a goal.
+Driven from a live DSH-Prompt buffer: `set' must work on a session with no
+goal at all (it is the one operation that does not require a current goal),
+while every other operation must refuse without one.  Each step is checked
+against the host's report, the cached goal the header cell and menu render,
+and the message the command reports."
+  (dsh-bridge-it--with-fixture
+    (let ((session-id (dsh-bridge-it--create-session
+                       (expand-file-name "../" dsh-bridge-it--directory))))
+      (dsh-bridge-it--with-prompt session-id
+        (should-not (dsh-bridge-it--host-goal session-id))
+
+        ;; Create: the host reports `created', and Emacs reports the
+        ;; objective it just read.
+        (let ((messages (dsh-bridge-it--messages
+                         (lambda ()
+                           (cl-letf (((symbol-function 'read-string)
+                                      (lambda (&rest _) "ship it")))
+                             (dsh-bridge-set-goal))))))
+          (should (dsh-bridge-it--message-some "goal set: ship it" messages)))
+        (let ((goal (dsh-bridge-it--host-goal session-id)))
+          (should (equal (alist-get 'objective (alist-get 'goal goal)) "ship it"))
+          (should (equal (alist-get 'phase (alist-get 'goal goal)) "active"))
+          (should (equal (alist-get 'activation goal) "armed")))
+        ;; The cache the header renders agrees, and the same read seeded the
+        ;; plan half (which is what lets the menu answer without refetching).
+        (should (equal (alist-get 'objective
+                                  (alist-get 'goal
+                                             (dsh-bridge-it--cached-goal session-id)))
+                       "ship it"))
+        (should (assoc session-id dsh-bridge--session-plan))
+        (should (string-match-p "active: ship it"
+                                (dsh-bridge-it--cell-text
+                                 (dsh-bridge--header-goal-cell session-id))))
+        (setq dsh-bridge--sessions-cache
+              (alist-get 'sessions (cdr (dsh-bridge--request "GET" "/sessions" nil))))
+        (should (dsh-bridge--menu-goal-available))
+
+        ;; Edit: the round cap rides along as an extra payload field.
+        (let ((messages (dsh-bridge-it--messages
+                         (lambda ()
+                           (cl-letf (((symbol-function 'read-string)
+                                      (lambda (&rest _) "ship it now"))
+                                     ((symbol-function 'read-number)
+                                      (lambda (&rest _) 12)))
+                             (dsh-bridge-set-goal 4))))))
+          (should (dsh-bridge-it--message-some "goal updated: ship it now" messages)))
+        (let ((snapshot (alist-get 'goal (dsh-bridge-it--host-goal session-id))))
+          (should (equal (alist-get 'objective snapshot) "ship it now"))
+          (should (equal (alist-get 'maxGoalRounds snapshot) 12)))
+
+        ;; An unchanged objective with no cap sends nothing.
+        (cl-letf (((symbol-function 'read-string) (lambda (&rest _) "ship it now")))
+          (should (dsh-bridge-it--message-some
+                   "goal unchanged" (dsh-bridge-it--messages #'dsh-bridge-set-goal))))
+
+        ;; Pause disarms; resume rearms.
+        (should (dsh-bridge-it--message-some
+                 "goal paused" (dsh-bridge-it--messages #'dsh-bridge-pause-goal)))
+        (let ((goal (dsh-bridge-it--host-goal session-id)))
+          (should (equal (alist-get 'phase (alist-get 'goal goal)) "paused"))
+          (should (equal (alist-get 'activation goal) "disarmed")))
+        (should (equal (alist-get 'phase
+                                  (alist-get 'goal
+                                             (dsh-bridge-it--cached-goal session-id)))
+                       "paused"))
+        (should (equal (dsh-bridge-it--cell-text
+                        (dsh-bridge--header-goal-cell session-id))
+                       "paused: ship it now"))
+        (should (dsh-bridge-it--message-some
+                 "goal resumed" (dsh-bridge-it--messages #'dsh-bridge-resume-goal)))
+        (should (equal (alist-get 'activation (dsh-bridge-it--host-goal session-id))
+                       "armed"))
+
+        ;; toggle-goal pauses an armed active goal, and resumes it next time.
+        (should (dsh-bridge-it--message-some
+                 "goal paused" (dsh-bridge-it--messages #'dsh-bridge-toggle-goal)))
+        (should (dsh-bridge-it--message-some
+                 "goal resumed" (dsh-bridge-it--messages #'dsh-bridge-toggle-goal)))
+
+        ;; Clear, then a goal-requiring operation refuses without one.  The
+        ;; cache keeps a known-absent entry, so the header cell is hidden
+        ;; without the session reading as unseeded.
+        (let ((messages (dsh-bridge-it--messages
+                         (lambda ()
+                           (cl-letf (((symbol-function 'y-or-n-p) (lambda (&rest _) t)))
+                             (dsh-bridge-clear-goal))))))
+          (should (dsh-bridge-it--message-some "goal cleared" messages)))
+        (should-not (dsh-bridge-it--host-goal session-id))
+        (should (assoc session-id dsh-bridge--session-goal))
+        (should-not (dsh-bridge-it--cached-goal session-id))
+        (should-not (dsh-bridge--header-goal-cell session-id))
+        (should-error (dsh-bridge-pause-goal) :type 'user-error)))))
+
+(ert-deftest dsh-bridge-it-toggle-plan-mode ()
+  "Toggling plan mode from a live prompt buffer drives the preset controller.
+The command reads the report over the wire, POSTs the toggle, re-reads it,
+and reports; the cached plan section behind the header cell and the menu's
+Plan Mode item, and the host's own report, all follow."
+  (dsh-bridge-it--with-fixture
+    (let ((session-id (dsh-bridge-it--create-session
+                       (expand-file-name "../" dsh-bridge-it--directory))))
+      (dsh-bridge-it--with-prompt session-id
+        ;; The standard preset mounts plan mode, off.
+        (let ((plan (alist-get 'plan (dsh-bridge-it--report session-id))))
+          (should (consp plan))
+          (should-not (dsh-bridge--plan-effective plan)))
+        ;; On.  The outcome may be committed or queued until the next step,
+        ;; so assert the wanted direction rather than the committed flag.
+        (should (dsh-bridge-it--message-some
+                 "plan mode on" (dsh-bridge-it--messages #'dsh-bridge-toggle-plan-mode)))
+        (should (dsh-bridge--plan-effective
+                 (cdr (assoc session-id dsh-bridge--session-plan))))
+        (should (dsh-bridge--plan-effective
+                 (alist-get 'plan (dsh-bridge-it--report session-id))))
+        (should (string-match-p "plan"
+                                (dsh-bridge-it--cell-text
+                                 (dsh-bridge--header-plan-cell session-id))))
+        (should (dsh-bridge--menu-plan-available))
+        ;; Off again.
+        (should (dsh-bridge-it--message-some
+                 "plan mode off" (dsh-bridge-it--messages #'dsh-bridge-toggle-plan-mode)))
+        (should-not (dsh-bridge--plan-effective
+                     (cdr (assoc session-id dsh-bridge--session-plan))))
+        (should-not (dsh-bridge--plan-effective
+                     (alist-get 'plan (dsh-bridge-it--report session-id))))))))
+
+(ert-deftest dsh-bridge-it-goal-frames-refresh-the-cache ()
+  "A goal mutated out of band reaches Emacs over the SSE frames alone.
+Nothing here drives an Emacs command: the goal is created and then paused
+straight through the host's own routes, so the caches and the header cell
+can move only if the live `goal' frame (and the phase change it carries) is
+delivered and folded.  Waiting for the response headers first avoids racing
+the stream's connect, since the frames are not replayed."
+  (dsh-bridge-it--with-fixture
+    (let ((session-id (dsh-bridge-it--create-session
+                       (expand-file-name "../" dsh-bridge-it--directory))))
+      (dsh-bridge-it--notifications-start)
+      (should (dsh-bridge-it--wait
+               (lambda () dsh-bridge--notifications-headers-done) 15000))
+      (dsh-bridge-it--post "/dsh-bridge/goal/set"
+                           (list (cons 'sessionId session-id)
+                                 (cons 'objective "frame it")))
+      (should (dsh-bridge-it--wait
+               (lambda ()
+                 (equal (alist-get 'objective
+                                   (alist-get 'goal
+                                              (dsh-bridge-it--cached-goal session-id)))
+                        "frame it"))
+               15000))
+      (should (string-match-p "active: frame it"
+                              (dsh-bridge-it--cell-text
+                               (dsh-bridge--header-goal-cell session-id))))
+      ;; The pause reaches the cache as the phase change it is.
+      (dsh-bridge-it--post "/dsh-bridge/goal/pause"
+                           (list (cons 'sessionId session-id)))
+      (should (dsh-bridge-it--wait
+               (lambda ()
+                 (equal (alist-get 'phase
+                                   (alist-get 'goal
+                                              (dsh-bridge-it--cached-goal session-id)))
+                        "paused"))
+               15000))
+      (should (equal (dsh-bridge-it--cell-text
+                      (dsh-bridge--header-goal-cell session-id))
+                     "paused: frame it")))))
 
 (provide 'dsh-bridge-it)
 ;;; dsh-bridge-it.el ends here
