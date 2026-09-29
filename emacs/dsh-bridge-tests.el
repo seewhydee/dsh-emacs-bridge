@@ -9125,7 +9125,9 @@ The report echoes the id named in the request path, so following a
 parent-session link describes the parent."
   (declare (indent 1))
   `(let ((dsh-bridge--sessions-cache '(((id . "s1") (title . "cached") (live . t)
-                                        (cwd . "/tmp")))))
+                                        (cwd . "/tmp"))))
+         (dsh-bridge--session-plan nil)
+         (dsh-bridge--session-goal nil))
      (unwind-protect
          (cl-letf (((symbol-function 'dsh-bridge--request)
                     (lambda (_method path &rest _)
@@ -9190,6 +9192,27 @@ parent-session link describes the parent."
     (with-current-buffer dsh-bridge-describe-buffer-name
       (should (equal (dsh-bridge--effective-session) "s1")))))
 
+(ert-deftest dsh-bridge-describe-session-seeds-plan-goal ()
+  "The describe fetch seeds the plan/goal caches from the same report.
+A view or prompt opened next then reads the seeded caches through,
+instead of re-fetching the identical report."
+  (dsh-bridge-test--with-describe
+   '((plan . ((active . t)))
+     (goal . ((goal . ((id . "g") (revision . 1)
+                       (objective . "ship") (phase . "active")))
+              (roundsStarted . 0))))
+   (dsh-bridge-describe-session "s1")
+   (should (eq (alist-get 'active (cdr (assoc "s1" dsh-bridge--session-plan))) t))
+   (should (equal (alist-get 'objective
+                             (alist-get 'goal (cdr (assoc "s1" dsh-bridge--session-goal))))
+                  "ship"))
+   ;; The seed counts as the read-through seed: no second fetch.
+   (let ((calls 0))
+     (cl-letf (((symbol-function 'dsh-bridge--request)
+                (lambda (&rest _) (setq calls (1+ calls)) (cons 500 nil))))
+       (dsh-bridge--plan-goal-refresh "s1" t)
+       (should (= calls 0))))))
+
 (ert-deftest dsh-bridge-describe-session-parent-xref-navigates ()
   "A parent-session xref describes the parent, and `l' returns."
   (dsh-bridge-test--with-describe '((parentSession . "parent"))
@@ -9249,6 +9272,8 @@ pinning the retry to that id."
 (ert-deftest dsh-bridge-describe-session-revert-refetches ()
   "`g' re-fetches the report and preserves point."
   (let ((dsh-bridge--sessions-cache nil)
+        (dsh-bridge--session-plan nil)
+        (dsh-bridge--session-goal nil)
         (titles '("first" "second")))
     (unwind-protect
         (cl-letf (((symbol-function 'dsh-bridge--request)
@@ -9675,6 +9700,8 @@ one must not disturb `l'/`r' navigation."
 (ert-deftest dsh-bridge-describe-session-uses-effective-session ()
   "Called from a DSH-View buffer, the report targets that buffer's session."
   (let ((dsh-bridge--sessions-cache '(((id . "s9") (title . "view session") (live . t))))
+        (dsh-bridge--session-plan nil)
+        (dsh-bridge--session-goal nil)
         (path nil))
     (unwind-protect
         (progn

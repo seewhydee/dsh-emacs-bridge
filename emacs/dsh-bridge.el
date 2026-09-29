@@ -6063,6 +6063,16 @@ refused.  Only meaningful in a DSH-View buffer."
 
 ;;; Plan mode and goals
 
+(defun dsh-bridge--plan-goal-store (session-id report)
+  "Seed the plan/goal cache entries for SESSION-ID from REPORT.
+REPORT is the alist body of a successful \"/session\" response.  This is
+the write half of `dsh-bridge--plan-goal-refresh', shared with
+`dsh-bridge-describe-session', whose fetch returns the same report."
+  (setq dsh-bridge--session-plan
+	(cons (cons session-id (alist-get 'plan report))
+	      (assoc-delete-all session-id dsh-bridge--session-plan)))
+  (dsh-bridge--goal-replace session-id (alist-get 'goal report)))
+
 (defun dsh-bridge--plan-goal-refresh (session-id &optional keep-cache signal-error)
   "Refresh the plan/goal cache entries for SESSION-ID.
 If KEEP-CACHE is non-nil, do nothing if both caches have entries for
@@ -6080,13 +6090,7 @@ entries in them, in place."
 	     (result (dsh-bridge--request "GET" path nil)))
 	(cond
 	 ((eq (car-safe result) 200)
-	  (let* ((report (cdr result))
-		 (plan (alist-get 'plan report))
-		 (goal (alist-get 'goal report)))
-	    (setq dsh-bridge--session-plan
-		  (cons (cons session-id plan)
-			(assoc-delete-all session-id dsh-bridge--session-plan)))
-	    (dsh-bridge--goal-replace session-id goal)))
+	  (dsh-bridge--plan-goal-store session-id (cdr result)))
 	 (signal-error
 	  (user-error "dsh-bridge: could not read session \"%s\""
 		      (dsh-bridge--session-label session-id))))))))
@@ -7675,7 +7679,8 @@ effective session; with a prefix argument, prompt for any session id.
 The report is a `help-mode' buffer: `g' re-fetches it, `l'/`r' walk the
 describe history, and the session label in a DSH-View/DSH-Prompt header
 line opens it with a mouse click.  A cold session is read from its
-persisted log and is never resumed."
+persisted log and is never resumed.  A successful fetch also seeds the
+plan/goal caches (see `dsh-bridge--plan-goal-store')."
   (interactive
    (list (cond
 	  ((and current-prefix-arg (eq major-mode 'dsh-bridge-sessions-mode))
@@ -7696,6 +7701,11 @@ persisted log and is never resumed."
 	 (session (and id (dsh-bridge--session-for-id id)))
 	 (buffer (get-buffer-create dsh-bridge-describe-buffer-name))
 	 (here (eq (current-buffer) buffer)))
+    ;; The report's plan/goal sections are the same ones the header caches
+    ;; fetch through `dsh-bridge--plan-goal-refresh'; seeding them here
+    ;; spares a view or prompt opened next the identical repeat fetch.
+    (when (and report id)
+      (dsh-bridge--plan-goal-store id report))
     (with-current-buffer buffer
       (unless (derived-mode-p 'help-mode)
 	(dsh-bridge-describe-mode))
