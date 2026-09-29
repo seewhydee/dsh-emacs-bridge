@@ -3168,7 +3168,9 @@ raw id is not used, so an untitled row reads as untitled."
                  (push (list method path payload) calls)
                  (cons 200 (list (cons 'ok t))))))
       (with-temp-buffer
-        (insert (propertize "s1 row" 'tabulated-list-id "s1"))
+        (dsh-bridge-sessions-mode)
+        (let ((inhibit-read-only t))
+          (insert (propertize "s1 row" 'tabulated-list-id "s1")))
         (goto-char (point-min))
         (dsh-bridge-rename-session)))
     (let ((rename (cadr (assoc "/sessions/rename"
@@ -3189,7 +3191,9 @@ raw id is not used, so an untitled row reads as untitled."
               ((symbol-function 'message)
                (lambda (&rest args) (setq msg (apply #'format args)))))
       (with-temp-buffer
-        (insert (propertize "s1 row" 'tabulated-list-id "s1"))
+        (dsh-bridge-sessions-mode)
+        (let ((inhibit-read-only t))
+          (insert (propertize "s1 row" 'tabulated-list-id "s1")))
         (goto-char (point-min))
         (dsh-bridge-archive-session)))
     (let ((archive (cadr (assoc "/sessions/archive"
@@ -3208,7 +3212,9 @@ raw id is not used, so an untitled row reads as untitled."
                  (setq called (list method path payload))
                  (cons 200 (list (cons 'ok t))))))
       (with-temp-buffer
-        (insert (propertize "s1 row" 'tabulated-list-id "s1"))
+        (dsh-bridge-sessions-mode)
+        (let ((inhibit-read-only t))
+          (insert (propertize "s1 row" 'tabulated-list-id "s1")))
         (goto-char (point-min))
         (dsh-bridge-archive-session)))
     (should (null called))))
@@ -3227,11 +3233,12 @@ stopActivity."
                                    (cons 'reason "WORKSPACE_ACTIVE_SESSION"))))))
               ((symbol-function 'dsh-bridge--fetch-sessions)
                (lambda () (cons 200 nil)))
-              ((symbol-function 'dsh-bridge--refresh-sessions-buffer) #'ignore)
               ((symbol-function 'message)
                (lambda (&rest args) (setq msg (apply #'format args)))))
       (with-temp-buffer
-        (insert (propertize "s1 row" 'tabulated-list-id "s1"))
+        (dsh-bridge-sessions-mode)
+        (let ((inhibit-read-only t))
+          (insert (propertize "s1 row" 'tabulated-list-id "s1")))
         (goto-char (point-min))
         (dsh-bridge-archive-session)))
     ;; Oldest first: the refused plain archive, then the stop-and-archive.
@@ -3250,11 +3257,12 @@ stopActivity."
                  (cons 200 (list (cons 'ok t)))))
               ((symbol-function 'dsh-bridge--fetch-sessions)
                (lambda () (cons 200 nil)))
-              ((symbol-function 'dsh-bridge--refresh-sessions-buffer) #'ignore)
               ((symbol-function 'message)
                (lambda (&rest args) (setq msg (apply #'format args)))))
       (with-temp-buffer
-        (insert (propertize "s1 row" 'tabulated-list-id "s1"))
+        (dsh-bridge-sessions-mode)
+        (let ((inhibit-read-only t))
+          (insert (propertize "s1 row" 'tabulated-list-id "s1")))
         (goto-char (point-min))
         (dsh-bridge-unarchive-session)))
     (let ((unarchive (cadr (assoc "/sessions/unarchive"
@@ -3285,6 +3293,36 @@ stopActivity."
                                   :type 'user-error)))
         (should (string-match-p "archived" (error-message-string caught)))))
     (should-not resumed)))
+
+(ert-deftest dsh-bridge-resume-session-single-fetch-fills-list ()
+  "Resuming fetches the roster once and re-fills an open sessions list.
+The fetch backs both the cache lookup and the list refresh, so it must not
+be repeated for the two."
+  (when (get-buffer "*dsh-bridge-sessions*")
+    (kill-buffer "*dsh-bridge-sessions*"))
+  (let* ((fetches 0)
+         (fetch-stub (lambda ()
+                       (setq fetches (1+ fetches))
+                       (let ((sessions
+                              '(((id . "s1") (live . t) (title . "T")
+                                 (lastActive . 1000)))))
+                         (setq dsh-bridge--sessions-cache sessions)
+                         (cons 200 sessions)))))
+    (cl-letf (((symbol-function 'dsh-bridge--request)
+               (lambda (_method path _payload)
+                 (if (equal path "/sessions/resume")
+                     (cons 200 (list (cons 'live t)))
+                   (cons 200 nil))))
+              ((symbol-function 'dsh-bridge--fetch-sessions) fetch-stub)
+              ((symbol-function 'message) #'ignore))
+      (unwind-protect
+          (with-current-buffer (get-buffer-create "*dsh-bridge-sessions*")
+            (dsh-bridge-sessions-mode)
+            (should (dsh-bridge--resume-session "s1"))
+            (should (= fetches 1))
+            (should (assoc "s1" tabulated-list-entries)))
+        (when (buffer-live-p (get-buffer "*dsh-bridge-sessions*"))
+          (kill-buffer "*dsh-bridge-sessions*"))))))
 
 (ert-deftest dsh-bridge-session-entry-marks-archived ()
   "An archived row's session cell carries the [archived] marker and face."
@@ -3596,7 +3634,9 @@ old plugin, or an empty body must never block the stop."
                  (push (list method path payload) calls)
                  (cons 200 (list (cons 'ok t))))))
       (with-temp-buffer
-        (insert (propertize "s1 row" 'tabulated-list-id "s1"))
+        (dsh-bridge-sessions-mode)
+        (let ((inhibit-read-only t))
+          (insert (propertize "s1 row" 'tabulated-list-id "s1")))
         (goto-char (point-min))
         (dsh-bridge-rename-workspace)))
     (let ((rename (cadr (assoc "/workspaces/rename"
@@ -3621,7 +3661,6 @@ default target alone (only the dispatcher's titled create binds it)."
                                              (list (cons 'id "w2") (cons 'title "WS B"))))))
                    (cons 201 (list (cons 'sessionId "s-new"))))))
               ((symbol-function 'dsh-bridge--fetch-sessions) (lambda () nil))
-              ((symbol-function 'dsh-bridge--refresh-sessions-buffer) (lambda (&optional _) nil))
               ((symbol-function 'dsh-bridge-set-default-target)
                (lambda (id) (setq bound-target id))))
       ;; Without SET-TITLE: the DSH-Sessions "+" route, which never asks.
@@ -3656,8 +3695,7 @@ This is the transient dispatcher's route, which must produce a completable
               ((symbol-function 'read-string)
                (lambda (&rest _) (setq prompts (1+ prompts))
                  (nth (1- prompts) '("" "   " "My New Session"))))
-              ((symbol-function 'dsh-bridge--fetch-sessions) (lambda () nil))
-              ((symbol-function 'dsh-bridge--refresh-sessions-buffer) (lambda (&optional _) nil)))
+              ((symbol-function 'dsh-bridge--fetch-sessions) (lambda () nil)))
       (let ((dsh-bridge-default-session nil))
         (dsh-bridge-create-session t)))
     (let ((create (cadr (assoc "/sessions/create"
@@ -3698,8 +3736,7 @@ matches no workspace names a new one."
                  (if (equal path "/workspaces")
                      (cons 200 (list (cons 'workspaces nil)))
                    (cons 201 (list (cons 'sessionId "s-new"))))))
-              ((symbol-function 'dsh-bridge--fetch-sessions) (lambda () nil))
-              ((symbol-function 'dsh-bridge--refresh-sessions-buffer) (lambda (&optional _) nil)))
+              ((symbol-function 'dsh-bridge--fetch-sessions) (lambda () nil)))
       (let ((dsh-bridge-default-session nil))
         (dsh-bridge-create-session)))
     ;; An empty roster yields an empty candidate list, not a sentinel entry.
@@ -3733,8 +3770,7 @@ The host's workspace registry rejects a path that is not fully qualified."
                  (if (equal path "/workspaces")
                      (cons 200 (list (cons 'workspaces nil)))
                    (cons 201 (list (cons 'sessionId "s-new"))))))
-              ((symbol-function 'dsh-bridge--fetch-sessions) (lambda () nil))
-              ((symbol-function 'dsh-bridge--refresh-sessions-buffer) (lambda (&optional _) nil)))
+              ((symbol-function 'dsh-bridge--fetch-sessions) (lambda () nil)))
       (let ((dsh-bridge-default-session nil))
         (dsh-bridge-create-session)))
     (let ((create (cadr (assoc "/sessions/create"
@@ -3807,13 +3843,35 @@ would otherwise leave point on the row that held the line before."
         (should (equal (tabulated-list-get-id) "s-new"))))
     (kill-buffer "*dsh-bridge-sessions*")))
 
+(ert-deftest dsh-bridge-create-session-goto-only-in-sessions-list ()
+  "Creating from another buffer never moves point in that buffer.
+The new session's row is selected in the sessions list; with no list open
+there is nothing to select, and the invoking buffer is left alone."
+  (when (get-buffer "*dsh-bridge-sessions*")
+    (kill-buffer "*dsh-bridge-sessions*"))
+  (let ((dsh-bridge-default-session nil))
+    (cl-letf (((symbol-function 'dsh-bridge--read-workspace)
+               (lambda (_prompt) "w1"))
+              ((symbol-function 'dsh-bridge--request)
+               (lambda (_method path _payload)
+                 (if (equal path "/sessions/create")
+                     (cons 201 (list (cons 'sessionId "s-new")))
+                   (cons 200 nil))))
+              ((symbol-function 'dsh-bridge--fetch-sessions)
+               (lambda () (cons 200 nil)))
+              ((symbol-function 'message) #'ignore))
+      (with-temp-buffer
+        (insert "caller text")
+        (goto-char (point-min))
+        (dsh-bridge-create-session)
+        (should (= (point) (point-min)))))))
+
 (ert-deftest dsh-bridge-create-session-default-accepts-ret ()
   "RET (the prompt default) addresses the default workspace by id.
 The default is the effective session's workspace, verified against the fresh
 roster, so accepting it skips name matching entirely."
   (let ((called nil) (seen-prompt nil))
     (cl-letf (((symbol-function 'dsh-bridge--fetch-sessions) (lambda () nil))
-              ((symbol-function 'dsh-bridge--refresh-sessions-buffer) (lambda (&optional _) nil))
               ((symbol-function 'dsh-bridge--request)
                (lambda (method path payload)
                  (push (list method path payload) called)
@@ -3924,8 +3982,7 @@ other; the directory must come from the prompt."
                  (if (equal path "/workspaces")
                      (cons 200 (list (cons 'workspaces nil)))
                    (cons 201 (list (cons 'sessionId "s-new"))))))
-              ((symbol-function 'dsh-bridge--fetch-sessions) (lambda () nil))
-              ((symbol-function 'dsh-bridge--refresh-sessions-buffer) (lambda (&optional _) nil)))
+              ((symbol-function 'dsh-bridge--fetch-sessions) (lambda () nil)))
       (let ((dsh-bridge-default-session nil))
         (dsh-bridge-create-session)))
     (should prompted)
@@ -4083,6 +4140,79 @@ stay available instead of a bare error message."
       (dsh-bridge-list-sessions))
     (should (string-match-p "failed to fetch sessions" msg))
     (should-not (get-buffer "*dsh-bridge-sessions*"))))
+
+(ert-deftest dsh-bridge-list-sessions-refreshes-open-list ()
+  "Invoking the list command again re-fetches the roster.
+The command is the list's entry point, not merely a window switch: a list
+already on screen is re-populated (in-buffer `g' stays the other refresh)."
+  (when (get-buffer "*dsh-bridge-sessions*")
+    (kill-buffer "*dsh-bridge-sessions*"))
+  (let ((fetches 0)
+        (roster '(((id . "s1") (live . t) (title . "One")
+                   (lastActive . 1000))))
+        (dsh-bridge-default-session nil))
+    (cl-letf (((symbol-function 'dsh-bridge--fetch-sessions)
+               (lambda ()
+                 (setq fetches (1+ fetches))
+                 (cons 200 roster)))
+              ((symbol-function 'pop-to-buffer) (lambda (&rest _) nil)))
+      (dsh-bridge-list-sessions)
+      (setq roster '(((id . "s1") (live . t) (title . "One")
+                      (lastActive . 1000))
+                     ((id . "s2") (live . t) (title . "Two")
+                      (lastActive . 2000))))
+      (dsh-bridge-list-sessions))
+    ;; One fetch per invocation: the second must not reuse the first roster.
+    (should (= fetches 2))
+    (let ((buf (get-buffer "*dsh-bridge-sessions*")))
+      (should (assoc "s2" (buffer-local-value 'tabulated-list-entries buf))))
+    (kill-buffer "*dsh-bridge-sessions*")))
+
+(ert-deftest dsh-bridge-list-sessions-in-buffer-refuses-foreign-buffer ()
+  "The populate primitive refuses a buffer that is not a DSH-Sessions buffer."
+  (with-temp-buffer
+    (should-error (dsh-bridge--list-sessions-in-buffer) :type 'error)))
+
+(ert-deftest dsh-bridge-refresh-sessions-buffer-signals-foreign-buffer ()
+  "Refresh refuses a same-named buffer that is not a DSH-Sessions buffer.
+The strict list primitive signals before it fetches, so the roster is not
+even requested."
+  (when (get-buffer "*dsh-bridge-sessions*")
+    (kill-buffer "*dsh-bridge-sessions*"))
+  (let ((fetched nil)
+        (buf (get-buffer-create "*dsh-bridge-sessions*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer buf
+            (fundamental-mode)
+            (insert "user notes"))
+          (cl-letf (((symbol-function 'dsh-bridge--fetch-sessions)
+                     (lambda () (setq fetched t) (cons 200 nil))))
+            (should-error (dsh-bridge--refresh-sessions-buffer) :type 'error))
+          (should-not fetched)
+          (should (equal (with-current-buffer buf (buffer-string))
+                         "user notes")))
+      (kill-buffer buf))))
+
+(ert-deftest dsh-bridge-sessions-fill-live-refuses-foreign-buffer ()
+  "Filling refuses a same-named buffer in another mode without touching it.
+`tabulated-list-print' does not check the mode, so the painter's own guard
+is what keeps a repurposed buffer's contents from being overwritten."
+  (when (get-buffer "*dsh-bridge-sessions*")
+    (kill-buffer "*dsh-bridge-sessions*"))
+  (let ((buf (get-buffer-create "*dsh-bridge-sessions*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer buf
+            (fundamental-mode)
+            (insert "user notes"))
+          (cl-letf (((symbol-function 'dsh-bridge--fetch-sessions)
+                     (lambda ()
+                       (cons 200 '(((id . "s1") (live . t) (title . "T")))))))
+            (should-error (dsh-bridge--sessions-fill-live) :type 'error))
+          (should (equal (with-current-buffer buf (buffer-string))
+                         "user notes")))
+      (kill-buffer buf))))
 
 ;;; Plugin management: probe, diagnosis, install/uninstall
 
