@@ -3501,17 +3501,14 @@ read still happens, since it words the confirmation."
       (should (equal (cdr (assoc 'sessionId (caddr stop))) "s1")))))
 
 (ert-deftest dsh-bridge-stop-session-no-target-noop ()
-  "With no session at hand the command reports and sends nothing."
-  (let ((called nil) (msg nil))
+  "With no session at hand the command refuses and sends nothing."
+  (let ((called nil) (dsh-bridge-default-session nil))
     (cl-letf (((symbol-function 'dsh-bridge--request)
-               (lambda (&rest args) (setq called args) (cons 200 nil)))
-              ((symbol-function 'message)
-               (lambda (&rest args) (setq msg (apply #'format args)))))
+               (lambda (&rest args) (setq called args) (cons 200 nil))))
       (with-temp-buffer
         (dsh-bridge-view-mode)
-        (dsh-bridge-stop-session)))
-    (should-not called)
-    (should (string-match-p "no session to stop" msg))))
+        (should-error (dsh-bridge-stop-session) :type 'user-error)))
+    (should-not called)))
 
 (ert-deftest dsh-bridge-stop-confirmation-names-pending-interaction ()
   "A pending question or approval is named in the stop confirmation."
@@ -6383,8 +6380,8 @@ Both commands run in the clicked window's buffer."
     (unwind-protect
         (progn
           (set-window-buffer (selected-window) buffer)
-          (cl-letf (((symbol-function 'dsh-bridge--interaction-session)
-                     (lambda (&optional _) "s1"))
+          (cl-letf (((symbol-function 'dsh-bridge--effective-session)
+                     (lambda (&rest _) "s1"))
                     ((symbol-function 'dsh-bridge-toggle-plan-mode)
                      (lambda (arg)
                        (setq plan-arg arg plan-buffer (current-buffer))))
@@ -6423,8 +6420,8 @@ Both commands run in the clicked window's buffer."
                     ((symbol-function 'dsh-bridge-toggle-goal)
                      (lambda (&rest _) (setq ran t))))
             ;; The cell names a session the buffer is not bound to.
-            (cl-letf (((symbol-function 'dsh-bridge--interaction-session)
-                       (lambda (&optional _) "s1")))
+            (cl-letf (((symbol-function 'dsh-bridge--effective-session)
+                       (lambda (&rest _) "s1")))
               (should-error
                (dsh-bridge--header-plan-at-mouse
                 (list 'mouse-1
@@ -6434,9 +6431,8 @@ Both commands run in the clicked window's buffer."
                                   0))))
                :type 'user-error))
             ;; No session at all: a buffer following last-active only.
-            (cl-letf (((symbol-function 'dsh-bridge--interaction-session)
-                       (lambda (&optional signal)
-                         (if signal (user-error "dsh-bridge: no session to act on") nil))))
+            ;; The real resolver signals; no mock needed.
+            (let ((dsh-bridge-default-session nil))
               (should-error
                (dsh-bridge--header-goal-at-mouse
                 (list 'mouse-1
@@ -8314,6 +8310,35 @@ ask, that question is unambiguous, so it is used."
         (dsh-bridge-answer))
       (should (equal answered "s2")))))
 
+(ert-deftest dsh-bridge-answer-default-target-does-not-pin ()
+  "From an unrelated buffer, `dsh-bridge-answer' finds the pending session.
+The default target is an explicit target for mutations, but the command
+deliberately skips it (NODEFAULT) so its unique-pending fallback keeps
+working from any buffer."
+  (let ((dsh-bridge-default-session "s9")
+        (dsh-bridge--pending-questions (dsh-bridge-test--pending-ask "s2" "Q?"))
+        (answered nil))
+    (with-temp-buffer
+      (cl-letf (((symbol-function 'dsh-bridge--question-buffer)
+                 (lambda (session &rest _) (setq answered session) (current-buffer)))
+                ((symbol-function 'pop-to-buffer) (lambda (&rest _) nil)))
+        (dsh-bridge-answer))
+      (should (equal answered "s2")))))
+
+(ert-deftest dsh-bridge-answer-unbound-prompt-uses-unique-pending ()
+  "An unbound DSH-Prompt buffer (one following the default target) still
+answers by unique pending session, not by its default target."
+  (let ((dsh-bridge-default-session "s9")
+        (dsh-bridge--pending-questions (dsh-bridge-test--pending-ask "s2" "Q?"))
+        (answered nil))
+    (with-temp-buffer
+      (dsh-bridge-prompt-mode)
+      (cl-letf (((symbol-function 'dsh-bridge--question-buffer)
+                 (lambda (session &rest _) (setq answered session) (current-buffer)))
+                ((symbol-function 'pop-to-buffer) (lambda (&rest _) nil)))
+        (dsh-bridge-answer))
+      (should (equal answered "s2")))))
+
 (ert-deftest dsh-bridge-answer-ambiguous-pending-errors ()
   "With no explicit target and several pending questions, refuse to guess."
   (let ((dsh-bridge-default-session nil)
@@ -9395,7 +9420,7 @@ rows; one with stats alone renders the Stats section and no other."
   "The plan toggle reads fresh state, maps pending to direction, and POSTs."
   (let ((dsh-bridge--session-plan '(("s1" (active . t) (pending . :false))))
         (calls nil))
-    (cl-letf (((symbol-function 'dsh-bridge--interaction-session) (lambda (&optional _) "s1"))
+    (cl-letf (((symbol-function 'dsh-bridge--effective-session) (lambda (&rest _) "s1"))
               ((symbol-function 'dsh-bridge--plan-goal-refresh) (lambda (&rest _) nil))
               ((symbol-function 'dsh-bridge--request)
                (lambda (method path payload)
@@ -9406,7 +9431,7 @@ rows; one with stats alone renders the Stats section and no other."
   ;; A numeric prefix sets explicitly instead of toggling.
   (let ((dsh-bridge--session-plan '(("s1" (active . t))))
         (calls nil))
-    (cl-letf (((symbol-function 'dsh-bridge--interaction-session) (lambda (&optional _) "s1"))
+    (cl-letf (((symbol-function 'dsh-bridge--effective-session) (lambda (&rest _) "s1"))
               ((symbol-function 'dsh-bridge--plan-goal-refresh) (lambda (&rest _) nil))
               ((symbol-function 'dsh-bridge--request)
                (lambda (method path payload)
@@ -9424,7 +9449,7 @@ rows; one with stats alone renders the Stats section and no other."
   ;; A missing plan section is refused, and nothing is sent.
   (let ((dsh-bridge--session-plan nil)
         (posted nil))
-    (cl-letf (((symbol-function 'dsh-bridge--interaction-session) (lambda (&optional _) "s1"))
+    (cl-letf (((symbol-function 'dsh-bridge--effective-session) (lambda (&rest _) "s1"))
               ((symbol-function 'dsh-bridge--plan-goal-refresh) (lambda (&rest _) nil))
               ((symbol-function 'dsh-bridge--request)
                (lambda (&rest _) (setq posted t) (cons 200 nil))))
@@ -9433,7 +9458,7 @@ rows; one with stats alone renders the Stats section and no other."
   ;; A failed fresh read refuses rather than toggling the stale cache.
   (let ((dsh-bridge--session-plan '(("s1" (active . t))))
         (posted nil))
-    (cl-letf (((symbol-function 'dsh-bridge--interaction-session) (lambda (&optional _) "s1"))
+    (cl-letf (((symbol-function 'dsh-bridge--effective-session) (lambda (&rest _) "s1"))
               ((symbol-function 'dsh-bridge--request)
                (lambda (method &rest _)
                  (when (equal method "POST") (setq posted t))
@@ -9445,7 +9470,7 @@ rows; one with stats alone renders the Stats section and no other."
   "set-goal marshals the objective, skips a no-op, and reads a cap on prefix."
   (let ((section (dsh-bridge-test--goal-section "active" "armed" "old")))
     (let ((calls nil))
-      (cl-letf (((symbol-function 'dsh-bridge--interaction-session) (lambda (&optional _) "s1"))
+      (cl-letf (((symbol-function 'dsh-bridge--effective-session) (lambda (&rest _) "s1"))
                 ((symbol-function 'dsh-bridge--session-goal) (lambda (_id) section))
                 ((symbol-function 'dsh-bridge--plan-goal-refresh) (lambda (&rest _) nil))
                 ((symbol-function 'read-string) (lambda (&rest _) "new"))
@@ -9457,7 +9482,7 @@ rows; one with stats alone renders the Stats section and no other."
         (should (equal (car calls) '("POST" "/goal/set" ((sessionId . "s1") (objective . "new")))))))
     ;; An unchanged objective with no cap change sends nothing.
     (let ((posted nil))
-      (cl-letf (((symbol-function 'dsh-bridge--interaction-session) (lambda (&optional _) "s1"))
+      (cl-letf (((symbol-function 'dsh-bridge--effective-session) (lambda (&rest _) "s1"))
                 ((symbol-function 'dsh-bridge--session-goal) (lambda (_id) section))
                 ((symbol-function 'read-string) (lambda (&rest _) "old"))
                 ((symbol-function 'dsh-bridge--request)
@@ -9466,7 +9491,7 @@ rows; one with stats alone renders the Stats section and no other."
         (should-not posted)))
     ;; A prefix argument reads and sends the round cap.
     (let ((calls nil))
-      (cl-letf (((symbol-function 'dsh-bridge--interaction-session) (lambda (&optional _) "s1"))
+      (cl-letf (((symbol-function 'dsh-bridge--effective-session) (lambda (&rest _) "s1"))
                 ((symbol-function 'dsh-bridge--session-goal) (lambda (_id) section))
                 ((symbol-function 'dsh-bridge--plan-goal-refresh) (lambda (&rest _) nil))
                 ((symbol-function 'read-string) (lambda (&rest _) "old"))
@@ -9480,7 +9505,7 @@ rows; one with stats alone renders the Stats section and no other."
     ;; Empty input re-prompts rather than sending an empty objective.
     (let ((calls nil)
           (responses '("" "new")))
-      (cl-letf (((symbol-function 'dsh-bridge--interaction-session) (lambda (&optional _) "s1"))
+      (cl-letf (((symbol-function 'dsh-bridge--effective-session) (lambda (&rest _) "s1"))
                 ((symbol-function 'dsh-bridge--session-goal) (lambda (_id) section))
                 ((symbol-function 'dsh-bridge--plan-goal-refresh) (lambda (&rest _) nil))
                 ((symbol-function 'read-string) (lambda (&rest _) (pop responses)))
@@ -9493,7 +9518,7 @@ rows; one with stats alone renders the Stats section and no other."
     ;; A failed fresh read refuses rather than editing the stale goal.
     (let ((dsh-bridge--session-goal (list (cons "s1" section)))
           (posted nil))
-      (cl-letf (((symbol-function 'dsh-bridge--interaction-session) (lambda (&optional _) "s1"))
+      (cl-letf (((symbol-function 'dsh-bridge--effective-session) (lambda (&rest _) "s1"))
                 ((symbol-function 'dsh-bridge--request)
                  (lambda (method &rest _)
                    (when (equal method "POST") (setq posted t))
@@ -9504,7 +9529,7 @@ rows; one with stats alone renders the Stats section and no other."
 (ert-deftest dsh-bridge-set-goal-creates-without-an-existing-goal ()
   "set-goal creates a goal for a session that has none."
   (let ((calls nil))
-    (cl-letf (((symbol-function 'dsh-bridge--interaction-session) (lambda (&optional _) "s1"))
+    (cl-letf (((symbol-function 'dsh-bridge--effective-session) (lambda (&rest _) "s1"))
               ((symbol-function 'dsh-bridge--session-goal) (lambda (_id) nil))
               ((symbol-function 'dsh-bridge--plan-goal-refresh) (lambda (&rest _) nil))
               ((symbol-function 'read-string) (lambda (&rest _) "first"))
@@ -9524,7 +9549,7 @@ objective in its confirmation) reads one."
                   ("resume" . dsh-bridge-resume-goal)
                   ("clear" . dsh-bridge-clear-goal)))
     (let ((calls nil))
-      (cl-letf (((symbol-function 'dsh-bridge--interaction-session) (lambda (&optional _) "s1"))
+      (cl-letf (((symbol-function 'dsh-bridge--effective-session) (lambda (&rest _) "s1"))
                 ((symbol-function 'dsh-bridge--session-goal)
                  (lambda (_id) (dsh-bridge-test--goal-section "active" "armed")))
                 ((symbol-function 'dsh-bridge--plan-goal-refresh) (lambda (&rest _) nil))
@@ -9542,23 +9567,42 @@ objective in its confirmation) reads one."
 The host owns the no-goal refusal for pause/resume (404 `GOAL_NOT_FOUND',
 surfaced as a `user-error' rather than acted on from a cache); clear
 refuses earlier because it must name the objective it would clear."
-  (cl-letf (((symbol-function 'dsh-bridge--interaction-session)
-             (lambda (&optional signal)
-               (if signal (user-error "dsh-bridge: no session to act on") nil))))
-    (should-error (dsh-bridge-pause-goal) :type 'user-error))
-  (cl-letf (((symbol-function 'dsh-bridge--interaction-session) (lambda (&optional _) "s1"))
+  (with-temp-buffer
+    (let ((dsh-bridge-default-session nil))
+      (should-error (dsh-bridge-pause-goal) :type 'user-error)))
+  (cl-letf (((symbol-function 'dsh-bridge--effective-session) (lambda (&rest _) "s1"))
             ((symbol-function 'dsh-bridge--request)
              (lambda (&rest _) (cons 404 '((error . "no current goal")
                                            (code . "GOAL_NOT_FOUND"))))))
     (should-error (dsh-bridge-pause-goal) :type 'user-error)
     (should-error (dsh-bridge-resume-goal) :type 'user-error))
   (let ((posted nil))
-    (cl-letf (((symbol-function 'dsh-bridge--interaction-session) (lambda (&optional _) "s1"))
+    (cl-letf (((symbol-function 'dsh-bridge--effective-session) (lambda (&rest _) "s1"))
               ((symbol-function 'dsh-bridge--session-goal) (lambda (_id) nil))
               ((symbol-function 'dsh-bridge--request)
                (lambda (&rest _) (setq posted t) (cons 200 nil))))
       (should-error (dsh-bridge-clear-goal) :type 'user-error)
       (should-not posted))))
+
+(ert-deftest dsh-bridge-toggle-plan-mode-uses-default-target ()
+  "From an unrelated buffer, a mutation verb acts on the default target.
+The dispatcher's state-changing verbs no longer require a bridge buffer:
+the user-pinned default is an explicit target."
+  (let ((dsh-bridge-default-session "s1")
+        (dsh-bridge--session-plan '(("s1" . ((active . nil)))))
+        (dsh-bridge--session-goal nil)
+        (calls nil))
+    (cl-letf (((symbol-function 'dsh-bridge--plan-goal-refresh) (lambda (&rest _) nil))
+              ((symbol-function 'dsh-bridge--request)
+               (lambda (method path payload)
+                 (push (list method path payload) calls)
+                 (cons 200 '((outcome . "committed"))))))
+      (with-temp-buffer
+        (dsh-bridge-toggle-plan-mode))
+      ;; The cached plan says inactive, so the toggle queues plan mode on.
+      (should (equal (car calls)
+                     (list "POST" "/plan-mode"
+                           '((sessionId . "s1") (active . t))))))))
 
 (ert-deftest dsh-bridge-toggle-goal-dispatches ()
   "toggle-goal pauses an armed active goal and resumes anything else.
@@ -9568,7 +9612,7 @@ wrong level would silently turn every toggle into a resume."
                   ("active" "disarmed" "/goal/resume")
                   ("paused" "armed" "/goal/resume")))
     (let ((calls nil))
-      (cl-letf (((symbol-function 'dsh-bridge--interaction-session) (lambda (&optional _) "s1"))
+      (cl-letf (((symbol-function 'dsh-bridge--effective-session) (lambda (&rest _) "s1"))
                 ((symbol-function 'dsh-bridge--session-goal)
                  (lambda (_id) (dsh-bridge-test--goal-section (nth 0 case) (nth 1 case))))
                 ((symbol-function 'dsh-bridge--plan-goal-refresh) (lambda (&rest _) nil))
@@ -9579,12 +9623,42 @@ wrong level would silently turn every toggle into a resume."
         (dsh-bridge-toggle-goal)
         (should (equal (nth 1 (car calls)) (nth 2 case)))))))
 
-(ert-deftest dsh-bridge-interaction-session-describe-arm ()
-  "A DSH-Describe buffer's interaction target is the described session."
-  (with-temp-buffer
-    (dsh-bridge-describe-mode)
-    (setq-local dsh-bridge--describe-session "s1")
-    (should (equal (dsh-bridge--interaction-session) "s1"))))
+(ert-deftest dsh-bridge-effective-session-resolution ()
+  "The resolver ladder: the buffer's own binding, then the default target.
+REQUIRE signals instead of returning nil; NODEFAULT skips the default
+fallback; a DSH-Sessions buffer's binding is the row at point."
+  (let ((dsh-bridge-default-session nil))
+    (with-temp-buffer
+      (dsh-bridge-describe-mode)
+      (setq-local dsh-bridge--describe-session "s1")
+      (should (equal (dsh-bridge--effective-session) "s1"))))
+  ;; A plain buffer has only the default target; REQUIRE accepts it.
+  (let ((dsh-bridge-default-session "s9"))
+    (with-temp-buffer
+      (should (equal (dsh-bridge--effective-session) "s9"))
+      (should (equal (dsh-bridge--effective-session nil nil t) "s9"))
+      (should-not (dsh-bridge--effective-session nil t))))
+  ;; With no binding and no default, REQUIRE signals.
+  (let ((dsh-bridge-default-session nil))
+    (with-temp-buffer
+      (should-not (dsh-bridge--effective-session))
+      (should-error (dsh-bridge--effective-session nil nil t)
+                    :type 'user-error)))
+  ;; A DSH-Sessions buffer's binding is the row at point, not the default.
+  (let ((dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t))
+                                      ((id . "s2") (title . "U") (live . t))))
+        (dsh-bridge-default-session "s9"))
+    (cl-letf (((symbol-function 'dsh-bridge--fetch-sessions)
+               (lambda () (cons 200 dsh-bridge--sessions-cache))))
+      (unwind-protect
+          (with-current-buffer (get-buffer-create "*dsh-bridge-sessions*")
+            (dsh-bridge-sessions-mode)
+            (dsh-bridge--list-sessions-in-buffer)
+            (should (dsh-bridge--sessions-goto-id "s2"))
+            (should (equal (dsh-bridge--effective-session) "s2"))
+            (should (equal (dsh-bridge--effective-session nil nil t) "s2")))
+        (when (buffer-live-p (get-buffer "*dsh-bridge-sessions*"))
+          (kill-buffer "*dsh-bridge-sessions*"))))))
 
 (ert-deftest dsh-bridge-describe-goal-no-action-buttons ()
   "The Goal section renders its facts without in-buffer action buttons.
@@ -9609,7 +9683,7 @@ report no longer offers an Actions row."
         (dsh-bridge--session-plan '(("s1" . ((active . t)))))
         (dsh-bridge--session-goal
          (list (cons "s1" (dsh-bridge-test--goal-section "active" "armed")))))
-    (cl-letf (((symbol-function 'dsh-bridge--interaction-session) (lambda (&optional _) "s1")))
+    (cl-letf (((symbol-function 'dsh-bridge--effective-session) (lambda (&rest _) "s1")))
       (should (dsh-bridge--menu-plan-available))
       (should (dsh-bridge--menu-plan-selected))
       (should (dsh-bridge--menu-goal-available))
@@ -9618,14 +9692,14 @@ report no longer offers an Actions row."
     ;; projection gives the direction) but shades Goal Active (activation
     ;; is process-local).
     (setq dsh-bridge--sessions-cache '(((id . "s1") (live . nil))))
-    (cl-letf (((symbol-function 'dsh-bridge--interaction-session) (lambda (&optional _) "s1")))
+    (cl-letf (((symbol-function 'dsh-bridge--effective-session) (lambda (&rest _) "s1")))
       (should (dsh-bridge--menu-plan-available))
       (should-not (dsh-bridge--menu-goal-available)))
     ;; A complete goal shades the Goal Active item.
     (setq dsh-bridge--sessions-cache '(((id . "s1") (live . t)))
           dsh-bridge--session-goal
           (list (cons "s1" (dsh-bridge-test--goal-section "complete" "disarmed"))))
-    (cl-letf (((symbol-function 'dsh-bridge--interaction-session) (lambda (&optional _) "s1")))
+    (cl-letf (((symbol-function 'dsh-bridge--effective-session) (lambda (&rest _) "s1")))
       (should-not (dsh-bridge--menu-goal-available)))))
 
 (ert-deftest dsh-bridge-menu-plan-goal-seed-on-open ()
@@ -9636,7 +9710,7 @@ shaded until another buffer seeds the session."
         (dsh-bridge--session-plan nil)
         (dsh-bridge--session-goal nil)
         (fetches 0))
-    (cl-letf (((symbol-function 'dsh-bridge--interaction-session) (lambda (&optional _) "s1"))
+    (cl-letf (((symbol-function 'dsh-bridge--effective-session) (lambda (&rest _) "s1"))
               ((symbol-function 'dsh-bridge--request)
                (lambda (_method _path _payload)
                  (setq fetches (1+ fetches))
@@ -9653,7 +9727,7 @@ shaded until another buffer seeds the session."
           dsh-bridge--session-goal
           (list (cons "s1" (dsh-bridge-test--goal-section "active" "armed")))
           fetches 0)
-    (cl-letf (((symbol-function 'dsh-bridge--interaction-session) (lambda (&optional _) "s1"))
+    (cl-letf (((symbol-function 'dsh-bridge--effective-session) (lambda (&rest _) "s1"))
               ((symbol-function 'dsh-bridge--request)
                (lambda (_method _path _payload)
                  (setq fetches (1+ fetches))
@@ -9663,7 +9737,7 @@ shaded until another buffer seeds the session."
     ;; A failed seed leaves the items shaded without erroring.
     (setq dsh-bridge--session-plan nil
           dsh-bridge--session-goal nil)
-    (cl-letf (((symbol-function 'dsh-bridge--interaction-session) (lambda (&optional _) "s1"))
+    (cl-letf (((symbol-function 'dsh-bridge--effective-session) (lambda (&rest _) "s1"))
               ((symbol-function 'dsh-bridge--request)
                (lambda (_method _path _payload) (cons 500 nil))))
       (should-not (dsh-bridge--menu-plan-available)))))

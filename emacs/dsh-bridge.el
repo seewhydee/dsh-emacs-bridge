@@ -674,28 +674,6 @@ absent entry means the session has not been seeded.")
   "Whether VALUE is either nil or `:false'."
   (or (null value) (eq value :false)))
 
-(defun dsh-bridge--interaction-session (&optional signal-error)
-  "Return the DSH session the user is directly interacting with.
-For a current DSH-View, DSH-Prompt, or DSH-Describe-Session buffer, this
-is the session that is currently \"in use\"; for a DSH-Sessions buffer,
-it is the session at point.  If there is no such session, return nil if
-SIGNAL-ERROR is omitted or nil, or signal an error otherwise.
-
-This function is used in lieu of `dsh-bridge--effective-session' in
-cases where the user must be interacting explicitly with a session,
-rather than via an unrelated buffer (via the transient menu)."
-  (or (cond
-       ((eq major-mode 'dsh-bridge-view-mode)
-	dsh-bridge--view-content-session)
-       ((eq major-mode 'dsh-bridge-prompt-mode)
-	(dsh-bridge--effective-session))
-       ((eq major-mode 'dsh-bridge-describe-mode)
-	dsh-bridge--describe-session)
-       ((eq major-mode 'dsh-bridge-sessions-mode)
-	(tabulated-list-get-id)))
-      (if signal-error
-	  (user-error "dsh-bridge: no session to act on"))))
-
 (defun dsh-bridge--goal-replace (session-id new)
   "Replace SESSION-ID's cached goal data with NEW.
 NEW should be an alist of the type stored in a session report's `goal'
@@ -1564,19 +1542,31 @@ basename, raw cwd, or an empty string."
 
 ;;; Target helpers
 
-(defun dsh-bridge--effective-session (&optional buffer nodefault)
+(defun dsh-bridge--effective-session (&optional buffer nodefault require)
   "The session id BUFFER acts on, or nil for last-active.
 If BUFFER is nil, it defaults to the current buffer.
-If NODEFAULT is non-nil, return nil if there is no buffer-local session
-binding, without falling back on `dsh-bridge-default-session'."
-  (let ((mode (with-current-buffer (or buffer (current-buffer))
-		major-mode)))
-    (or (cond
-	 ((eq mode 'dsh-bridge-prompt-mode) dsh-bridge--prompt-session)
-	 ((eq mode 'dsh-bridge-view-mode) dsh-bridge--view-content-session)
-	 ((eq mode 'dsh-bridge-describe-mode) dsh-bridge--describe-session)
-	 (t nil))
-	(unless nodefault dsh-bridge-default-session))))
+
+If the buffer is bound to a DSH session (DSH-Prompt, DSH-View, or
+DSH-Describe buffer acting on a specific session), return the session
+id (a string).  Otherwise, fall back on `dsh-bridge-default-session'.
+Return nil if there is no explicit session target; a request may then
+leave the choice to the host, which resolves its last-active session.
+
+If NODEFAULT is non-nil, skip the default-target fallback.
+
+If REQUIRE is non-nil, signal a `user-error' instead of returning nil."
+  (let* ((mode (buffer-local-value 'major-mode
+				   (or buffer (current-buffer))))
+	 (session (pcase mode
+		    ('dsh-bridge-prompt-mode dsh-bridge--prompt-session)
+		    ('dsh-bridge-view-mode dsh-bridge--view-content-session)
+		    ('dsh-bridge-describe-mode dsh-bridge--describe-session)
+		    ('dsh-bridge-sessions-mode (tabulated-list-get-id)))))
+    (unless (or session nodefault)
+      (setq session dsh-bridge-default-session))
+    (if (and require (null session))
+	(user-error "dsh-bridge: no session to act on")
+      session)))
 
 (defun dsh-bridge--cache-last-active ()
   "Return the cached id of the most recently active live session, or nil.
@@ -5452,46 +5442,31 @@ answer; an already-resolved question is bannered in place."
 ;; The `a' (answer) key: one DWIM command for query and approval
 
 (defun dsh-bridge-answer ()
-  "Handle the pending ask-user query or approval for the session at hand.
-In a DSH-View / DSH-Prompt / DSH-Sessions buffer, acts on the shown / point
-session.  An unbound DSH-Prompt buffer (one following last-active) handles
-the only session with a pending query or approval, and refuses to guess when
-several are pending.  A session cannot be parked on both at once, so a
-pending ask-user query takes precedence over a pending approval.
-
-A query opens its DSH-Question buffer.	An approval is decided with a
-minibuffer prompt that shows the request's details; with
-`dsh-bridge-approval-answer' at `notify-only' the details are only displayed,
-read-only, and the web UI decides.  Otherwise reports that nothing is
-pending."
+  "Handle any pending query or approval for the DSH session at hand.
+In a DSH-View, DSH-Prompt, or DSH-Sessions buffer, act on the buffer's
+session.  Do not use `dsh-bridge-default-session' as a fallback default."
   (interactive)
-  (let ((session (dsh-bridge--interaction-session)))
-    (unless session
-      (let ((pending (delete-dups
-		      (append (mapcar #'car dsh-bridge--pending-questions)
-			      (mapcar #'car dsh-bridge--pending-approvals)))))
-	(cond ((= (length pending) 1)
-	       (setq session (car pending)))
-	      ((> (length pending) 1)
-	       (user-error "dsh-bridge: %d sessions have pending queries or approvals; pick one in DSH-Sessions"
-			   (length pending))))))
-    (let ((question (and session (dsh-bridge--pending-question session)))
-	  (approval (and session (dsh-bridge--pending-approval-entry session))))
-      (cond
-       (question
-	(pop-to-buffer (dsh-bridge--question-buffer session (car question) (cdr question))))
-       (approval
-	(if (eq dsh-bridge-approval-answer 'notify-only)
-	    (progn
-	      (dsh-bridge--approval-show session (cdr approval))
-	      (message (concat "dsh-bridge: approval answering is disabled "
-			       "(dsh-bridge-approval-answer is notify-only); "
-			       "resolve this request in the web UI")))
-	  (dsh-bridge--approval-prompt session (car approval) (cdr approval))))
-       (session
-	(message "dsh-bridge: session \"%s\" has no pending query or approval"
-		 (dsh-bridge--session-label session)))
-       (t (message "dsh-bridge: no pending query or approval"))))))
+  ;; Exclude the default target: answering requires context, which is
+  ;; missing if we're in an unrelated buffer.  Workflow via the
+  ;; transient menu is to go to the view buffer, then type "a".
+  (let* ((session (dsh-bridge--effective-session nil t t))
+	 (question (and session (dsh-bridge--pending-question session)))
+	 (approval (and session (dsh-bridge--pending-approval-entry session))))
+    (cond
+     (question
+      (pop-to-buffer (dsh-bridge--question-buffer session (car question) (cdr question))))
+     (approval
+      (if (eq dsh-bridge-approval-answer 'notify-only)
+	  (progn
+	    (dsh-bridge--approval-show session (cdr approval))
+	    (message (concat "dsh-bridge: approval answering is disabled "
+			     "(dsh-bridge-approval-answer is notify-only); "
+			     "resolve this request in the web UI")))
+	(dsh-bridge--approval-prompt session (car approval) (cdr approval))))
+     (session
+      (message "dsh-bridge: session \"%s\" has no pending query or approval"
+	       (dsh-bridge--session-label session)))
+     (t (message "dsh-bridge: no pending query or approval")))))
 
 (defvar-keymap dsh-bridge-question-mode-map
   :parent special-mode-map
@@ -5864,10 +5839,8 @@ candidates annotated with the display name), then posts the selection through
 the genuine `session.selectModel' handler — so the change applies to this
 session and persists as the default, exactly as the web UI does."
   (interactive)
-  (let* ((session-id (dsh-bridge--effective-session))
-	 (data (and session-id (dsh-bridge--fetch-models session-id t))))
-    (unless session-id
-      (user-error "dsh-bridge: no session selected; bind the prompt buffer (`C-c C-s') or set a default target"))
+  (let* ((session-id (dsh-bridge--effective-session nil nil t))
+	 (data (dsh-bridge--fetch-models session-id t)))
     (if (null data)
 	(message "dsh-bridge: model catalog unavailable")
       (let* ((catalog (dsh-bridge--model-catalog data))
@@ -6129,11 +6102,11 @@ This function reads a fresh copy from the DSH bridge, and signals a
 (defun dsh-bridge--goal-command (operation &optional session extra-args)
   "Post a goal OPERATION to the DSH bridge for SESSION.
 OPERATION is one of `set', `pause', `resume', or `clear'.  When SESSION
-is nil, act on the session at hand (`dsh-bridge--interaction-session').
-EXTRA-ARGS, when non-nil, is an alist appended to the request payload.
-`set' creates or replaces a goal."
+is nil, act on the session at hand (the REQUIRE form of
+`dsh-bridge--effective-session').  EXTRA-ARGS, when non-nil, is an alist
+appended to the request payload.  `set' creates or replaces a goal."
   (unless session
-    (setq session (dsh-bridge--interaction-session t)))
+    (setq session (dsh-bridge--effective-session nil nil t)))
   (let* ((op (concat "/goal/" (symbol-name operation)))
 	 (payload (append `((sessionId . ,session)) extra-args))
 	 (result (dsh-bridge--request "POST" op payload))
@@ -6172,7 +6145,7 @@ disables.  The direction is read fresh from `/session', never from the
 advisory cache.	 A session whose preset mounts no plan mode is reported
 and nothing is sent."
   (interactive "P")
-  (let* ((session (dsh-bridge--interaction-session t))
+  (let* ((session (dsh-bridge--effective-session nil nil t))
 	 (plan (progn (dsh-bridge--plan-goal-refresh session nil t)
 		      (cdr-safe (assoc session dsh-bridge--session-plan)))))
     (when (null plan)
@@ -6217,7 +6190,7 @@ objective sends nothing.  With a prefix argument, also read the goal
 round cap, defaulting to the current cap.  A complete goal is replaced
 rather than edited; the host reports which happened."
   (interactive "P")
-  (let* ((session (dsh-bridge--interaction-session t))
+  (let* ((session (dsh-bridge--effective-session nil nil t))
 	 (snapshot (alist-get 'goal (dsh-bridge--session-goal session)))
 	 (current (dsh-bridge--normalized-string (alist-get 'objective snapshot)))
 	 (objective (dsh-bridge--read-goal-objective current))
@@ -6247,7 +6220,7 @@ rather than edited; the host reports which happened."
 The decision is read fresh from `/session' so the menu checkbox and the
 command agree."
   (interactive)
-  (let* ((session (dsh-bridge--interaction-session t))
+  (let* ((session (dsh-bridge--effective-session nil nil t))
 	 (section (dsh-bridge--session-goal session))
 	 (snapshot (alist-get 'goal section))
 	 (phase (alist-get 'phase snapshot)))
@@ -6262,7 +6235,7 @@ command agree."
 (defun dsh-bridge-clear-goal ()
   "Clear the session's current goal after confirmation."
   (interactive)
-  (let* ((session (dsh-bridge--interaction-session t))
+  (let* ((session (dsh-bridge--effective-session nil nil t))
 	 (snapshot (alist-get 'goal (dsh-bridge--session-goal session))))
     (unless (consp snapshot)
       (user-error "dsh-bridge: this session has no goal"))
@@ -6272,9 +6245,9 @@ command agree."
 
 (defun dsh-bridge--header-indicator-act (event command)
   "Run COMMAND for the session whose header indicator was clicked in EVENT.
-The clicked window's interaction session must be the id carried on the
-clicked cell, so a display-only prediction (a last-active fallback the
-buffer is not bound to) is never mutated."
+The clicked window must have a session target (either bound to the
+buffer, or a non-nil `dsh-bridge-default-session') matching the id on
+the clicked cell; otherwise, signal an error."
   (let* ((position (event-start event))
 	 (window (and position (posn-window position)))
 	 (string-pos (and position (posn-string position)))
@@ -6287,7 +6260,7 @@ buffer is not bound to) is never mutated."
     ;; A header-line click does not select its window: the cell's keymap
     ;; overrides the global [header-line mouse-1] binding that would.
     (with-selected-window window
-      (let ((session (dsh-bridge--interaction-session t)))
+      (let ((session (dsh-bridge--effective-session nil nil t)))
 	(unless (equal cell-id session)
 	  (user-error
 	   "dsh-bridge: the clicked indicator belongs to another session"))
@@ -6313,8 +6286,8 @@ and refusal rules match the command, its `A' binding, and its menu item."
 ;;; Menu state helpers (evaluated when a mode menu is built)
 
 (defun dsh-bridge--menu-session ()
-  "The session a plan/goal menu item acts on, or nil outside DSH buffers."
-  (ignore-errors (dsh-bridge--interaction-session)))
+  "The session a plan/goal menu item acts on: the buffer's effective session."
+  (dsh-bridge--effective-session))
 
 (defun dsh-bridge--menu-plan-state ()
   "The cached plan section for the menu's session, or nil.
@@ -6552,7 +6525,7 @@ actually idle session settles host-side as a no-op.  This mirrors the
 FORCE argument of `dsh-bridge-stop-session'."
   (interactive "P")
   (if (or force
-	  (eq (dsh-bridge--status-state (dsh-bridge--interaction-session))
+	  (eq (dsh-bridge--status-state (dsh-bridge--effective-session))
 	      'running))
       (dsh-bridge-stop-session force)
     (dsh-bridge-erase-prompt)))
@@ -6726,28 +6699,22 @@ advisory: a read that fails simply drops that part of the text."
 
 (defun dsh-bridge-stop-session (&optional force)
   "Stop the running turn of the session at hand.
-In a DSH-View buffer the session is the one shown; in DSH-Prompt it is
-the buffer's effective session; in DSH-Sessions it is the row under
-point.	A session that is not running is left alone: the
-command reports it and sends nothing.  Otherwise it asks for
-confirmation, then asks the host to stop the session's active turn.
-The confirmation names a pending question or approval, and any prompts
-already queued for the session (see `dsh-bridge--stop-confirmation').
+This is the DSH session the buffer is acting on, or the session at point
+in a DSH-Sessions buffer, or a non-nil `dsh-bridge-default-session'.
+Raise an error if there is no such session.
 
-Stopping aborts only the active turn.  Input already queued for the
-session survives and can start a new turn right after the stop, matching
-the web UI's stop button.
+A session that is not running is left alone.  Otherwise, this command
+asks for confirmation before asking the host to stop the active turn.
+Note that stopping aborts only the active turn; input already queued for
+the session survives and can start a new turn right afterward.
 
 With FORCE (a prefix argument), skip the local \"is it running?\" check
-and ask the host anyway, for when Emacs' cached status is stale.  The
-confirmation prompt still applies, and the host still settles an idle
-agent as a no-op."
+and ask the host anyway.  The confirmation prompt still applies, and the
+host still settles an idle agent as a no-op."
   (interactive "P")
-  (let ((id (dsh-bridge--interaction-session)))
+  (let ((id (dsh-bridge--effective-session nil nil t)))
     (cond
-     ((null id)
-      (message "dsh-bridge: no session to stop"))
-     ((and (not force) (not (eq (dsh-bridge--status-state id) 'running)))
+      ((and (not force) (not (eq (dsh-bridge--status-state id) 'running)))
       (message "dsh-bridge: session \"%s\" is not running"
 	       (dsh-bridge--session-label id)))
      ((not (y-or-n-p (dsh-bridge--stop-confirmation id)))
@@ -7688,8 +7655,6 @@ plan/goal caches (see `dsh-bridge--plan-goal-store')."
 	       (dsh-bridge--read-session-id "Describe session: ")))
 	  (current-prefix-arg
 	   (dsh-bridge--read-session-id "Describe session: "))
-	  ((eq major-mode 'dsh-bridge-sessions-mode)
-	   (tabulated-list-get-id))
 	  (t (dsh-bridge--effective-session)))))
   (let* ((result (let ((dsh-bridge-timeout dsh-bridge-describe-timeout))
 		   (dsh-bridge--request "GET" (dsh-bridge--path "/session" session-id) nil)))
@@ -8028,16 +7993,7 @@ waiting for it is given an explicit terminal note instead of a blank."
 
 ;;;###autoload
 (defun dsh-bridge-list-sessions ()
-  "List DSH sessions in a tabulated buffer.
-In the session list: `RET' opens the session under point (resuming a saved
-session on demand; the default target is untouched), `t' sets the default
-target, `u' clears it, `f' peeks the session's latest turn, `v' toggles
-archived-session visibility, `R' renames the session, `d' archives it, `U'
-unarchives it, `+' creates a session, `W' renames the row's workspace, `D'
-shows session details, `g' re-fetches, `S' sorts by column.  An archived
-session is marked `[archived]' and is read-only: `RET', `r', and `t' refuse
-it until `U' restores it, while `f' still displays its turns.  Legend: `*' =
-default target, `…' = running."
+  "List the DeepSeek Harness (DSH) sessions in a tabulated list buffer."
   (interactive)
   (if (dsh-bridge--list-sessions-in-buffer)
       (pop-to-buffer "*dsh-bridge-sessions*")
@@ -8047,14 +8003,16 @@ default target, `…' = running."
 
 ;;;###autoload
 (transient-define-prefix dsh-bridge ()
-  "Dispatch DSH bridge actions.
-The header shows the effective session of the buffer the dispatcher was
-invoked from; the verbs act on it.	`s' sends the region or buffer as a
-prompt, `d' sends it as a draft, `r' opens the prompt buffer for the
-effective session, `f' fetches the latest turn, `t' sets the default target,
-`u' clears it, `k' stops the running session, `l' lists sessions, `p'
-toggles plan mode, `G' sets the goal, `A' pauses or resumes it, and `X'
-clears it."
+  "Dispatch actions for the DeepSeek Harness (DSH) bridge.
+This command opens a transient menu listing a set of actions.
+Type the corresponding key to perform an action: f to fetch the latest
+turn, r to compose a reply, etc.
+
+The first line in the transient menu shows what session the action works
+on: the invoking buffer's own session, else the default target, else the
+last-active session as an advisory display.  If there is no explicit
+session target, some actions work on the last-active session in DSH, but
+actions that change the session state (k, p, G, A, X) signal an error."
   dsh-bridge--dispatcher-layout)
 
 ;;; Menu bar (under Tools)
