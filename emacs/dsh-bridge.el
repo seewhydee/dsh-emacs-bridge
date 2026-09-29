@@ -16,7 +16,7 @@
 ;; along with this program.	 If not, see <https://www.gnu.org/licenses/>.
 
 ;; Author: Chong Yidong <cyd@stupidchicken.com>
-;; Version: 0.15.0
+;; Version: 0.15.1
 ;; Package-Requires: ((emacs "29.1"))
 ;; Keywords: tools, convenience
 
@@ -77,7 +77,7 @@
 
 ;;; Common utility functions/variables
 
-(defconst dsh-bridge-version "0.15.0"
+(defconst dsh-bridge-version "0.15.1"
   "Version string for the DSH-Bridge package.
 This should match the version reported by the running DSH plugin.")
 
@@ -5443,12 +5443,20 @@ answer; an already-resolved question is bannered in place."
 
 (defun dsh-bridge-answer ()
   "Handle any pending query or approval for the DSH session at hand.
-In a DSH-View, DSH-Prompt, or DSH-Sessions buffer, act on the buffer's
-session.  Do not use `dsh-bridge-default-session' as a fallback default."
+In a DSH-View, DSH-Prompt, or DSH-Describe buffer, act on the buffer's
+session; in a DSH-Sessions buffer, act on the session at point.  Do not
+use `dsh-bridge-default-session' as a fallback default.
+
+This command either handles a query or an approval, whichever the
+session is parked on (these are mutually exclusive).  Handling a query
+opens a DSH-Question buffer; handling an approval reads an answer with
+the minibuffer or shows the appproval request, depending on the value of
+`dsh-bridge-approval-answer'.  If there is no active query nor approval
+request, report that nothing is pending."
   (interactive)
-  ;; Exclude the default target: answering requires context, which is
-  ;; missing if we're in an unrelated buffer.  Workflow via the
-  ;; transient menu is to go to the view buffer, then type "a".
+  ;; NODEFAULT plus REQUIRE: the default target is a mutation target,
+  ;; never an answer target.  Workflow via the transient menu is to go
+  ;; to the view buffer, then type "a".
   (let* ((session (dsh-bridge--effective-session nil t t))
 	 (question (and session (dsh-bridge--pending-question session)))
 	 (approval (and session (dsh-bridge--pending-approval-entry session))))

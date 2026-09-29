@@ -8294,10 +8294,10 @@ selected label; a submit the host does not accept leaves no note behind."
       (when (dsh-bridge--question-find-buffer qid)
         (kill-buffer (dsh-bridge--question-find-buffer qid))))))
 
-(ert-deftest dsh-bridge-answer-unbound-uses-unique-pending ()
-  "An unbound DSH-Prompt buffer answers the only pending question.
-The command must not guess a last-active session; with exactly one pending
-ask, that question is unambiguous, so it is used."
+(ert-deftest dsh-bridge-answer-unbound-refuses ()
+  "An unbound DSH-Prompt buffer refuses rather than guessing a target.
+The command must not guess a last-active session, and a sole pending
+question is not read as an implicit target."
   (let ((dsh-bridge-default-session nil)
         (dsh-bridge--last-resolved-active '("s1" . "T"))
         (dsh-bridge--pending-questions (dsh-bridge-test--pending-ask "s2" "Q?"))
@@ -8307,40 +8307,25 @@ ask, that question is unambiguous, so it is used."
       (cl-letf (((symbol-function 'dsh-bridge--question-buffer)
                  (lambda (session &rest _) (setq answered session) (current-buffer)))
                 ((symbol-function 'pop-to-buffer) (lambda (&rest _) nil)))
-        (dsh-bridge-answer))
-      (should (equal answered "s2")))))
+        (should-error (dsh-bridge-answer) :type 'user-error))
+      (should-not answered))))
 
 (ert-deftest dsh-bridge-answer-default-target-does-not-pin ()
-  "From an unrelated buffer, `dsh-bridge-answer' finds the pending session.
-The default target is an explicit target for mutations, but the command
-deliberately skips it (NODEFAULT) so its unique-pending fallback keeps
-working from any buffer."
+  "The default target is a mutation target, never an answer target.
+An unrelated buffer refuses even when the default target is itself the
+session with a pending question."
   (let ((dsh-bridge-default-session "s9")
-        (dsh-bridge--pending-questions (dsh-bridge-test--pending-ask "s2" "Q?"))
+        (dsh-bridge--pending-questions (dsh-bridge-test--pending-ask "s9" "Q?"))
         (answered nil))
     (with-temp-buffer
       (cl-letf (((symbol-function 'dsh-bridge--question-buffer)
                  (lambda (session &rest _) (setq answered session) (current-buffer)))
                 ((symbol-function 'pop-to-buffer) (lambda (&rest _) nil)))
-        (dsh-bridge-answer))
-      (should (equal answered "s2")))))
+        (should-error (dsh-bridge-answer) :type 'user-error))
+      (should-not answered))))
 
-(ert-deftest dsh-bridge-answer-unbound-prompt-uses-unique-pending ()
-  "An unbound DSH-Prompt buffer (one following the default target) still
-answers by unique pending session, not by its default target."
-  (let ((dsh-bridge-default-session "s9")
-        (dsh-bridge--pending-questions (dsh-bridge-test--pending-ask "s2" "Q?"))
-        (answered nil))
-    (with-temp-buffer
-      (dsh-bridge-prompt-mode)
-      (cl-letf (((symbol-function 'dsh-bridge--question-buffer)
-                 (lambda (session &rest _) (setq answered session) (current-buffer)))
-                ((symbol-function 'pop-to-buffer) (lambda (&rest _) nil)))
-        (dsh-bridge-answer))
-      (should (equal answered "s2")))))
-
-(ert-deftest dsh-bridge-answer-ambiguous-pending-errors ()
-  "With no explicit target and several pending questions, refuse to guess."
+(ert-deftest dsh-bridge-answer-unbound-several-pending-refuses ()
+  "An unbound buffer refuses when several sessions have pending questions."
   (let ((dsh-bridge-default-session nil)
         (dsh-bridge--pending-questions
          (append (dsh-bridge-test--pending-ask "s1" "One?")
@@ -8367,7 +8352,8 @@ lack rather than answering s2's question."
       (should (string-match-p "no pending query or approval" msg)))))
 
 (ert-deftest dsh-bridge-answer-unbound-no-pending ()
-  "An unbound prompt buffer with nothing pending says so, without error."
+  "An unbound prompt buffer refuses, naming no session rather than no query.
+Nothing pending anywhere does not make any session an answer target."
   (let ((dsh-bridge-default-session nil)
         (dsh-bridge--pending-questions nil)
         (msg nil))
@@ -8375,8 +8361,8 @@ lack rather than answering s2's question."
       (dsh-bridge-prompt-mode)
       (cl-letf (((symbol-function 'message)
                  (lambda (&rest args) (setq msg (apply #'format args)))))
-        (dsh-bridge-answer))
-      (should (string-match-p "no pending query or approval" msg)))))
+        (should-error (dsh-bridge-answer) :type 'user-error))
+      (should-not msg))))
 
 (ert-deftest dsh-bridge-view-awaiting-ask-frames-refresh-tail ()
   "An ask-user frame flips a following view's running marker to the awaiting
@@ -10485,12 +10471,11 @@ status and view, without moving the user's windows."
     (should-not dsh-bridge--pending-approvals)))
 
 (ert-deftest dsh-bridge-answer-targeting-approval ()
-  "With no explicit target, `dsh-bridge-answer' prompts for the only pending
-approval; with several pending interactions it refuses to guess; a view's
-explicit session is respected even when another session has the only pending
-approval."
+  "An unbound buffer never prompts for an approval, however many are pending;
+a view's explicit session is respected even when another session has the only
+pending approval."
   (let ((dsh-bridge-default-session nil))
-    ;; Exactly one pending approval: unambiguous, so it is prompted.
+    ;; Exactly one pending approval, but no session at hand: refuse.
     (let ((dsh-bridge--pending-questions nil)
           (dsh-bridge--pending-approvals
            (dsh-bridge-test--pending-approval-registry "s1" "a1"))
@@ -10500,9 +10485,9 @@ approval."
         (cl-letf (((symbol-function 'dsh-bridge--approval-prompt)
                    (lambda (session approval-id _plist)
                      (setq prompted (list session approval-id)))))
-          (dsh-bridge-answer))
-        (should (equal prompted '("s1" "a1")))))
-    ;; Several pending approvals: refuse to guess.
+          (should-error (dsh-bridge-answer) :type 'user-error))
+        (should-not prompted)))
+    ;; Several pending approvals: still no session to answer for.
     (let ((dsh-bridge--pending-questions nil)
           (dsh-bridge--pending-approvals
            (append (dsh-bridge-test--pending-approval-registry "s1" "a1")
@@ -10529,7 +10514,7 @@ approval."
 
 (ert-deftest dsh-bridge-answer-prefers-question-over-approval ()
   "A session with both registries populated answers the query, not the
-approval, and the no-target fallback refuses when the union is ambiguous."
+approval; an unbound buffer refuses, so the union is never guessed at."
   (let ((dsh-bridge-default-session nil))
     ;; Same session: the query wins.
     (let ((dsh-bridge--pending-questions (dsh-bridge-test--pending-ask "s1" "Q?"))
@@ -10547,7 +10532,8 @@ approval, and the no-target fallback refuses when the union is ambiguous."
         (should-not prompted))
       (when (dsh-bridge--question-find-buffer "q1")
         (kill-buffer (dsh-bridge--question-find-buffer "q1"))))
-    ;; One query and one approval in different sessions: the union is ambiguous.
+    ;; One query and one approval in different sessions: an unbound
+    ;; buffer refuses rather than guessing across the union.
     (let ((dsh-bridge--pending-questions (dsh-bridge-test--pending-ask "s1" "Q?"))
           (dsh-bridge--pending-approvals
            (dsh-bridge-test--pending-approval-registry "s2" "a2")))

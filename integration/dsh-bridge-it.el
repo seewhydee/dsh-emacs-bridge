@@ -380,16 +380,17 @@ follow-up."
     (let ((session-id (dsh-bridge-it--create-session
                        (expand-file-name "../" dsh-bridge-it--directory))))
       (dsh-bridge-it--notifications-start)
-      (dsh-bridge-send-text "Pick a color for me." session-id)
+      (dsh-bridge-it--prompt-send session-id "Pick a color for me.")
       (should (dsh-bridge-it--wait
                (lambda () (assoc session-id dsh-bridge--pending-questions))
                15000))
       ;; The bridge mints the question id, so read it from the pending
       ;; registry rather than assuming the asker's own id.
       (let ((question-id (caar (cdr (assoc session-id dsh-bridge--pending-questions)))))
-        ;; Exactly one question is pending, so `dsh-bridge-answer' opens its
-        ;; buffer from anywhere.
-        (dsh-bridge-answer)
+        ;; `dsh-bridge-answer' acts on the buffer's own session, so drive it
+        ;; from the view following the asking session.
+        (with-current-buffer (dsh-bridge-it--view session-id)
+          (dsh-bridge-answer))
         (with-current-buffer (dsh-bridge--question-find-buffer question-id)
           (should (eq major-mode 'dsh-bridge-question-mode))
           (dsh-bridge--question-decline))

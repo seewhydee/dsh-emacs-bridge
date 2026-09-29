@@ -24,8 +24,21 @@ re-verification checklist.
 
 Ordered by recommended sequence, but out-of-sequence implementation is
 acceptable based on user needs. Harness seams were verified against
-DSH 0.1.7-rc.2; the peer floor in `dsh-plugin/package.json` is pinned
-to match.
+DSH 0.2.0-rc.1; the peer floor in `dsh-plugin/package.json` is pinned
+to match. rc.1 moved nothing the bridge folds: every package the bridge
+compiles against changed only its version field and internal pins,
+except `dsh-session`, whose added `ToolCallRecovery` export and
+rewritten `interruptedTurnClosers` internals the bridge never calls.
+The peer floor stays a caret deliberately: on 0.x a caret locks the
+minor, so the current `^0.2.0-rc.1` is `>=0.2.0-rc.1 <0.3.0` and the
+next harness minor line will be refused. The harness does not warn
+about a mismatch: `evaluatePluginCompatibility` makes every
+`@deepseek-ai/dsh-*` peer a hard `incompatible-version` refusal at
+install or enable, exemptible only per exact version. That refusal is
+the sole mechanical signal that the host-side shapes the bridge folds —
+those the three runtime imports reach and those it only types against —
+were re-checked, so a new harness minor line owes a floor bump and an
+integration run rather than a pre-widened range.
 
 ### 1. Permission mode (display only, implemented)
 
