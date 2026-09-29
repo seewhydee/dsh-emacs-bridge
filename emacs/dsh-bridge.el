@@ -7746,7 +7746,15 @@ Signal an error when the current buffer is not a DSH-Sessions buffer."
 	(mapcar #'dsh-bridge--session-entry
 		(seq-filter #'dsh-bridge--session-visible-p sessions)))
   (tabulated-list-init-header)
-  (tabulated-list-print t))
+  (let* ((id (tabulated-list-get-id))
+	 (oldpoint (and id (point))))
+    ;; The REMEMBER-POS arg for `tabulated-list-print' keeps point on
+    ;; the same session across the reprint, but this fails if the
+    ;; session is no longer listed (e.g., archived while archived
+    ;; sessions are hidden).  In that case, reset point manually.
+    (tabulated-list-print t)
+    (when (and id (not (equal (tabulated-list-get-id) id)))
+      (goto-char oldpoint))))
 
 (defun dsh-bridge--sessions-fill-live ()
   "Fetch the session roster and fill the open DSH-Sessions buffer, if any.
