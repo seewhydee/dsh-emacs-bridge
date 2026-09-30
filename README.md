@@ -203,6 +203,11 @@ If Markdown mode is installed, and `dsh-bridge-view-gfm` is non-nil,
 the reply is font-locked as GitHub-Flavored Markdown (the dividers use
 GFM horizontal-rule syntax, so they render cleanly).
 
+By default, a DSH-View buffer shows only the assistant's replies.
+Type `v` (`dsh-bridge-view-toggle-activity`) to toggle viewing other
+activity reports in the buffer, including tool calls, tool call
+results, and reasoning block summaries.
+
 #### Changed files
 
 A turn whose tool calls successfully changed files ends with a
@@ -216,23 +221,6 @@ Customize `dsh-bridge-view-changed-files` to `nil` to omit the footer.
 A turn that produced no assistant text but did run a tool is still
 served, so a purely file-changing turn shows its footer (and no
 reply); refresh (`g`) after a turn completes to pick up its files.
-
-#### Turn activity
-
-By default a DSH-View buffer shows only the assistant's replies.  Type
-`v` (`dsh-bridge-view-toggle-activity`) to interleave the shown turn's
-*activity*: one line per tool call, one line per tool result, and a
-one-line summary of each reasoning (thinking) block.  The toggle is
-buffer-local and starts from `dsh-bridge-view-activity` (default
-`nil`); it is also in the buffer's menu.
-
-The thinking lines are summaries that the host derives from the
-model's reasoning blocks; the full chain of thought never reaches
-Emacs.  Activity streams in live, mid-turn, so a turn whose opening
-step is tool-only or reasoning-only shows its lines before it has any
-reply text.  Long sessions keep activity only for recent turns; within
-a turn the host keeps the newest entries, so a busy live turn keeps
-streaming and its oldest lines slide out.
 
 #### Agent queries and approval requests
 
