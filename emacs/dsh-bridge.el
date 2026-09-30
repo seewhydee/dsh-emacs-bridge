@@ -35,8 +35,8 @@
 
 ;; The interactive entry points for the DSH-Emacs bridge are:
 ;;
-;; `dsh-bridge'					  - transient dispatcher
-;; `dsh-bridge-list-sessions'	  - browse DSH sessions
+;; `dsh-bridge' - transient dispatcher
+;; `dsh-bridge-list-sessions' - browse DSH sessions
 ;; Consider giving one or both of these a global keybinding.
 ;;
 ;; M-x dsh-bridge opens a transient menu that prompts for the next
@@ -52,7 +52,7 @@
 ;; The DSH-View buffer shows assistant text fetched from DSH.
 ;; Typically, each DSH-View buffer contains one turn (i.e., all
 ;; replies from a prompt to an idle reply), with mid-turn segments
-;; separated by dividers.  From here, type "r" to compose a reply for
+;; separated by dividers.  From here, type r to compose a reply for
 ;; the session, M-p/M-n to cycle through the turn history, etc.
 ;;
 ;; From the DSH-Prompt buffer, you can type out prompts for DSH and
