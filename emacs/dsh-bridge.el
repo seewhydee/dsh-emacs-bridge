@@ -16,7 +16,7 @@
 ;; along with this program.	 If not, see <https://www.gnu.org/licenses/>.
 
 ;; Author: Chong Yidong <cyd@stupidchicken.com>
-;; Version: 0.15.1
+;; Version: 0.16.0
 ;; Package-Requires: ((emacs "29.1"))
 ;; Keywords: tools, convenience
 
@@ -41,8 +41,8 @@
 ;;
 ;; M-x dsh-bridge opens a transient menu that prompts for the next
 ;; command, with the top line showing the session your next command
-;; will act on.	 From here, you can send the region/buffer to DSH as a
-;; prompt or draft prompt, fetch output from the session, etc.
+;; will act on.  From here, you can open a prompt buffer for the
+;; session, fetch output from it, etc.
 ;;
 ;; M-x dsh-bridge-list-sessions opens a buffer with a tabulated list
 ;; of DSH sessions.  You can type RET to act on the session at point
@@ -77,7 +77,7 @@
 
 ;;; Common utility functions/variables
 
-(defconst dsh-bridge-version "0.15.1"
+(defconst dsh-bridge-version "0.16.0"
   "Version string for the DSH-Bridge package.
 This should match the version reported by the running DSH plugin.")
 
@@ -321,16 +321,13 @@ segment, or when the turn ends."
   "Whether to guard against duplicate prompting in the DSH-Prompt buffer.
 If non-nil, when `\\[dsh-bridge-send-and-exit]' is called with the
 prompt text exactly matching the text last sent to the DSH session, ask
-for confirmation first.
-
-This option does not affect `\\[dsh-bridge-draft]'."
+for confirmation first."
   :type 'boolean
   :group 'dsh-bridge)
 
 (defcustom dsh-bridge-send-while-running 'ask
   "How `\\[dsh-bridge-send-and-exit]' sends to a session that is running.
-This choice applies only to the DSH-Prompt buffer; `\\[dsh-bridge-send]'
-queues a prompt sent from any other buffer on a busy session, silently.
+This choice applies only to the DSH-Prompt buffer.
 
 - `ask' prompts, offering to queue the prompt, steer the running turn,
   or cancel the send.
@@ -584,10 +581,10 @@ resolved as last-active for a request without an explicit session.
 LABEL is the session display label.
 
 The record goes stale and is dropped when another session starts a turn,
-when an explicitly targeted send or draft names a different session, or
-when the session disappears from the roster.  It deliberately outlives a
-newer live session appearing in the roster: naming the host's own
-resolution, including a cold session the local replica cannot see, is
+when an explicitly targeted prompt send or draft push names a different
+session, or when the session disappears from the roster.  It deliberately
+outlives a newer live session appearing in the roster: naming the host's
+own resolution, including a cold session the local replica cannot see, is
 what it is for.")
 
 (defvar dsh-bridge--focus nil
@@ -2005,12 +2002,6 @@ Advisory display cache only (see `dsh-bridge--last-resolved-active')."
 	    (cons id (or (alist-get 'title alist)
 			 (dsh-bridge--session-label id)))))))
 
-(defun dsh-bridge--region-or-buffer ()
-  "Return the region text if the region is active, else the whole buffer."
-  (if (use-region-p)
-      (buffer-substring-no-properties (region-beginning) (region-end))
-    (buffer-substring-no-properties (point-min) (point-max))))
-
 ;;; Prompt history
 
 ;; The prompt history functionality is tied to DSH-Prompt buffers, for
@@ -2029,8 +2020,8 @@ cache for the authoritative DSH-side history; each entry is updated when
   "Alist of (SESSION-ID . (TEXT . TS)) for the most recent prompt send.
 TEXT is the sent prompt; TS is the float-time it was sent.  This
 variable is updated by `dsh-bridge--prompt-history-record-send', and
-used by the prompt header and the resend guard.	 Drafts are not
-recorded, so the guard never mistakes a draft push for a resend.")
+used by the prompt header and the resend guard.	 A composer draft push
+is not recorded, so the guard never mistakes one for a resend.")
 
 ;; Prompt history is tracked with two buffer-local variables.
 ;; Whenever `dsh-bridge--prompt-session' is reset, they must be reset.
@@ -2189,9 +2180,12 @@ If walking through the prompt history, then:
 
 ;;; Text senders (internal)
 
-(defun dsh-bridge-send-text (text &optional session-id on-success attachments mode)
+(defun dsh-bridge-send-text (text &optional on-success attachments mode)
   "Send TEXT to the DSH session as a prompt.
-SESSION-ID overrides the effective session for this call only.
+The session is resolved from the invoking buffer: its own session binding
+first, then the pinned target.  A caller that must address a particular
+session does so by calling this from a buffer bound to it (see
+`dsh-bridge-set-prompt-session') or by pinning that session.
 
 If ON-SUCCESS is a function, it is called with SENT-SESSION-ID in the
 success branch of the send, after the history is recorded.  The callback
@@ -2206,7 +2200,7 @@ waits for the running turn, and `steer' to steer the nearest step of a
 running turn (the web UI's \"steer message\").	The host cannot report
 whether a steer reached a step boundary, so a steered send says only
 that steering was requested."
-  (let* ((target (or session-id (dsh-bridge--effective-session)))
+  (let* ((target (dsh-bridge--effective-session))
 	 (generation dsh-bridge--status-generation)
 	 (payload `((text . ,text))))
     (when target
@@ -2470,8 +2464,6 @@ the visited file (not the buffer text) is attached."
 
 (defconst dsh-bridge--verb-suffixes
   '(("r" dsh-bridge--dispatcher-prompt :description "reply/open prompt buffer")
-    ("s" dsh-bridge--dispatcher-send :description "send region/buffer (prompt)")
-    ("d" dsh-bridge--dispatcher-draft :description "send region/buffer (draft)")
     ("f" dsh-bridge--dispatcher-fetch :description "fetch latest turn")
     ("D" dsh-bridge--dispatcher-describe :description "describe session")
     ("t" dsh-bridge--dispatcher-pin :description "pin this session")
@@ -4203,24 +4195,6 @@ newest cached turn."
 
 ;;; Verbs
 
-;;;###autoload
-(defun dsh-bridge-send (&optional session-id)
-  "Send the region, or the whole buffer, to the DSH session as a prompt.
-The session is the effective session of the current buffer; with a
-prefix argument, choose a session for this call only.
-
-Attachment tag lines in the sent text (see `dsh-bridge-attach-file') are
-uploaded with the prompt and stripped from its text.  Sending a region
-attaches only the tags inside the region.
-
-A send to a session that is already running is queued and runs as its
-own turn after the current one.	 This command never steers and never
-prompts for a choice; use `\\[dsh-bridge-send-and-exit]' in a
-DSH-Prompt buffer, or `\\[dsh-bridge-stop-session]', for turn control."
-  (interactive (list (dsh-bridge--read-session-override "Send to session: ")))
-  (let ((parsed (dsh-bridge--parse-attachments (dsh-bridge--region-or-buffer))))
-    (dsh-bridge-send-text (car parsed) session-id nil (cdr parsed))))
-
 (defun dsh-bridge--busy-send-choice ()
   "Ask how to send a prompt to a running session.
 Return `queue', `steer', or `cancel'.  Quitting with \\[keyboard-quit]
@@ -4253,8 +4227,8 @@ STEER."
 ;;;###autoload
 (defun dsh-bridge-send-and-exit (&optional steer)
   "Send a DSH-Prompt buffer as a prompt, then bury it and switch away.
-This command must be called in a DSH-Prompt buffer.  Unlike
-`dsh-bridge-send', it always sends the entire buffer contents.
+This command must be called in a DSH-Prompt buffer.  It always sends the
+entire buffer contents.
 
 Attachment tag lines (see `dsh-bridge-attach-file') are uploaded with
 the prompt and removed from the kept text on success, so an immediate
@@ -4317,7 +4291,6 @@ and bury the buffer (see `dsh-bridge--prompt-exit')."
 	  (user-error "dsh-bridge: send cancelled"))
 	(dsh-bridge-send-text
 	 text
-	 dsh-bridge--prompt-session
 	 (lambda (sent-id)
 	   ;; This is still the prompt buffer: the ON-SUCCESS callback runs
 	   ;; in the buffer that sent the text (see `dsh-bridge-send-text').
@@ -4418,46 +4391,6 @@ invoked from.  SENT-AT, if non-nil, is the ms-epoch the prompt was sent;
       (dsh-bridge--exit-to-view
        (dsh-bridge--after-prompt-view sent-session-id sent-at)
        window))))
-
-;;;###autoload
-(defun dsh-bridge-draft (&optional session-id)
-  "Send the region, or the whole buffer, to the DSH composer as a draft.
-Like `dsh-bridge-send', but nothing is submitted; the text lands in the
-composer for review.  With a prefix argument, choose a session for this call
-only.  Whole-buffer drafts confirm exactly like whole-buffer sends.
-
-Composer drafts carry text only, so attachment tag lines are stripped
-from the pushed text (with a message) rather than uploaded.
-
-A target-less push from a DSH-Prompt buffer is resolved by the host,
-which reports the session it chose; on success the buffer is bound to
-that session, since its text now lives in that session's composer."
-  (interactive (list (dsh-bridge--read-session-override "Draft to session: ")))
-  (let ((whole (not (use-region-p))))
-    (when (and whole buffer-read-only)
-      (user-error "dsh-bridge: buffer is read-only and no region is active"))
-    (when (and whole
-	       (not (eq major-mode 'dsh-bridge-prompt-mode))
-	       (not (y-or-n-p
-		     (format "Send the whole %s buffer to DSH as a draft? "
-			     (buffer-name)))))
-      (user-error "dsh-bridge: aborted"))
-    (let ((parsed (dsh-bridge--parse-attachments (dsh-bridge--region-or-buffer)))
-	  ;; A `dsh-bridge-pinned-target' push still carries an explicit
-	  ;; target; only a push with no target at all needs the pin.
-	  (lazy-p (and (eq major-mode 'dsh-bridge-prompt-mode)
-		       (null dsh-bridge--prompt-session)
-		       (null dsh-bridge-pinned-target))))
-      (when (cdr parsed)
-	(message "dsh-bridge: drafts do not carry attachments; pushing text only"))
-      (dsh-bridge-send-draft
-       (car parsed) session-id
-       (lambda (sent-id)
-	 ;; Runs in the draft's buffer (see `dsh-bridge-send-draft').
-	 (when (and lazy-p sent-id)
-	   (dsh-bridge-set-prompt-session sent-id)
-	   (message "dsh-bridge: prompt buffer bound to session \"%s\""
-		    (dsh-bridge--session-label sent-id))))))))
 
 ;;;###autoload
 (defun dsh-bridge-fetch (&optional session-id same-window)
@@ -6614,7 +6547,6 @@ session, attaching a file, selecting a model, etc.
   :doc "Keymap for `dsh-bridge-prompt-mode'."
   "C-c C-c" #'dsh-bridge-send-and-exit
   "C-c C-a" #'dsh-bridge-attach-file
-  "C-c C-d" #'dsh-bridge-draft
   "C-c C-k" #'dsh-bridge-prompt-stop-or-erase
   "C-c C-f" #'dsh-bridge-fetch
   "C-c C-m" #'dsh-bridge-select-model
@@ -6678,8 +6610,6 @@ FORCE argument of `dsh-bridge-stop-session'."
   `("DSH Bridge"
     ["Send" dsh-bridge-send-and-exit
      :help "Send the whole buffer to DSH and bury the prompt buffer"]
-    ["Send as Draft" dsh-bridge-draft
-     :help "Send the region (or whole buffer) to the DSH composer as a draft"]
     ["Erase Prompt" dsh-bridge-erase-prompt
      :help "Clear the prompt buffer"]
     "---"
@@ -6720,8 +6650,6 @@ FORCE argument of `dsh-bridge-stop-session'."
 (defvar dsh-bridge--prompt-tool-bar-map
   (let ((map (make-sparse-keymap)))
     (tool-bar-local-item-from-menu 'dsh-bridge-send-and-exit "mail/send" map
-				   dsh-bridge-prompt-mode-map :vert-only t)
-    (tool-bar-local-item-from-menu 'dsh-bridge-draft "mail/save-draft" map
 				   dsh-bridge-prompt-mode-map :vert-only t)
     (tool-bar-local-item-from-menu 'dsh-bridge-attach-file "attach" map
 				   dsh-bridge-prompt-mode-map :vert-only t)
@@ -8254,16 +8182,6 @@ wraps.  A pinned menu reports that it is locked instead of cycling."
   (interactive)
   (dsh-bridge--dispatcher-cycle))
 
-(defun dsh-bridge--dispatcher-send ()
-  "Send the region or buffer to the dispatcher's focus session."
-  (interactive)
-  (dsh-bridge-send (dsh-bridge--focus-session)))
-
-(defun dsh-bridge--dispatcher-draft ()
-  "Send the region or buffer to the dispatcher's focus session as a draft."
-  (interactive)
-  (dsh-bridge-draft (dsh-bridge--focus-session)))
-
 (defun dsh-bridge--dispatcher-fetch ()
   "Fetch the latest turn of the dispatcher's focus session."
   (interactive)
@@ -8365,8 +8283,8 @@ user-confirmed, so the mutators may still act on it."
 (transient-define-prefix dsh-bridge (&optional arg)
   "Dispatch actions for the DeepSeek Harness (DSH) bridge.
 This command opens a transient menu listing a set of actions.
-Type the corresponding key to perform an action: f to fetch the latest
-turn, r to compose a reply, etc.
+Type the corresponding key to perform an action: r to reply (or open a
+prompt buffer), f to fetch the latest turn, etc.
 
 The first line in the transient menu is the menu's focus: the session
 every key in it acts on.  It is the pinned target when one is set, else
@@ -8379,13 +8297,9 @@ by cycling or pinning.
 With a prefix argument, re-fetch the session roster before painting,
 instead of trusting the cached one."
   [:description (lambda () (dsh-bridge--dispatcher-header))]
-  ["Compose"
+  ["Send/Receive"
    ("r" dsh-bridge--dispatcher-prompt :description "reply/open prompt buffer")
-   ("s" dsh-bridge--dispatcher-send :description "send region/buffer (prompt)")
-   ("d" dsh-bridge--dispatcher-draft :description "send region/buffer (draft)")]
-  ["Read"
-   ("f" dsh-bridge--dispatcher-fetch :description "fetch latest turn")
-   ("D" dsh-bridge--dispatcher-describe :description "describe session")]
+   ("f" dsh-bridge--dispatcher-fetch :description "fetch latest turn")]
   ["Plan and goal"
    ("p" dsh-bridge--dispatcher-plan :description "toggle plan mode"
     :transient dsh-bridge--dispatcher-stay-p)
@@ -8396,6 +8310,7 @@ instead of trusting the cached one."
    ("X" dsh-bridge--dispatcher-clear-goal :description "clear the goal"
     :transient dsh-bridge--dispatcher-stay-p)]
   ["Sessions"
+   ("D" dsh-bridge--dispatcher-describe :description "describe session")
    ("t" dsh-bridge--dispatcher-pin :description "pin this session" :transient t)
    ("u" dsh-bridge--dispatcher-unpin :description "unpin" :transient t)
    ("T" dsh-bridge--dispatcher-pin-by-title :description "pin by title" :transient t)
@@ -8439,8 +8354,6 @@ already used the focus."
      "---"
      ["Edit Prompt Buffer" dsh-bridge-prompt
       :help "Pop to the DSH prompt buffer"]
-     ["Send Region or Buffer" dsh-bridge-send
-      :help "Send the region (or whole buffer) to DSH as a prompt"]
      "---"
      ["Fetch Latest Turn" dsh-bridge-fetch
       :help "Fetch the latest assistant turn into a DSH-View buffer"]

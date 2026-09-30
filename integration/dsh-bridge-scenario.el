@@ -161,8 +161,11 @@ The bearer token comes from `dsh-bridge-token-file', which
       ("send"
        (dsh-bridge-scenario--script-mock
         (alist-get 'mockScript dsh-bridge-scenario--scenario))
-       (dsh-bridge-send-text (alist-get 'text step)
-                             dsh-bridge-scenario--session-id))
+       ;; `dsh-bridge-send-text' resolves its target from the invoking
+       ;; buffer, so drive it from the prompt buffer bound to the session.
+       (with-current-buffer
+           (dsh-bridge--prompt-buffer dsh-bridge-scenario--session-id)
+         (dsh-bridge-send-text (alist-get 'text step))))
       ("push-script"
        (dsh-bridge-scenario--script-mock
         (alist-get 'mockScript dsh-bridge-scenario--scenario)))

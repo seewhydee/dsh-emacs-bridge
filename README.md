@@ -125,8 +125,6 @@ available from here:
 * `q` — exit the transient menu.
 * `M-p`/`M-n` — cycle through other sessions, ordered by age.
 * `r` — open a buffer to type in a prompt.
-* `s` — send region or buffer as a prompt (queued if session is busy).
-* `d` — send region or buffer as a draft (can edit in DSH before submitting).
 * `f` — fetch and display the latest set of replies.
 * `D` — describe the session.
 * `t` — pin the current session as the target.
@@ -244,7 +242,6 @@ session.
 The following commands are available from the DSH-Prompt buffer:
 
 * `C-c C-c` — send the prompt, and pop to a DSH-View buffer to see the reply.
-* `C-c C-d` — push the buffer to the DSH composer as a draft.
 * `C-c C-a` — attach a file to the prompt (see below).
 * `C-c C-m` — set the model and reasoning effort.
 * `C-c C-s` — rebind the buffer to another session.

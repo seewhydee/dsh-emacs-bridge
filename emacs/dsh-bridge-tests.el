@@ -51,6 +51,16 @@
            ,@body)
        (delete-file file))))
 
+(defmacro dsh-bridge-test--with-prompt-session (session-id &rest body)
+  "Run BODY in a DSH-Prompt buffer bound to SESSION-ID.
+`dsh-bridge-send-text' resolves its target from the invoking buffer, so a
+test that needs a particular session must run inside such a buffer."
+  (declare (indent 1))
+  `(with-temp-buffer
+     (dsh-bridge-prompt-mode)
+     (setq-local dsh-bridge--prompt-session ,session-id)
+     ,@body))
+
 (ert-deftest dsh-bridge-extra-headers-with-token ()
   (dsh-bridge-test--with-token-file "secret"
     (should (equal (dsh-bridge--extra-headers nil)
@@ -487,14 +497,15 @@ The refusal names the verb and points at the keys that confirm or pin."
       (should (equal called '((nil "s1")))))))
 
 (ert-deftest dsh-bridge-dispatcher-verbs-address-the-focus ()
-  "Reads and sends address the displayed focus, not the invoking buffer.
+  "Reads address the displayed focus, not the invoking buffer.
 A menu opened in session Y's buffer while focused on X reads X."
   (let ((dsh-bridge--sessions-cache
          '(((id . "s1") (title . "T1") (live . t))
            ((id . "s2") (title . "T2") (live . t))))
-        (sent nil) (fetched nil) (described nil))
-    (cl-letf (((symbol-function 'dsh-bridge-send)
-               (lambda (&optional id) (setq sent id)))
+        (prompted nil) (fetched nil) (described nil))
+    (cl-letf (((symbol-function 'dsh-bridge--prompt-buffer)
+               (lambda (id) (setq prompted id) (current-buffer)))
+              ((symbol-function 'pop-to-buffer) #'ignore)
               ((symbol-function 'dsh-bridge-fetch)
                (lambda (&optional id _) (setq fetched id)))
               ((symbol-function 'dsh-bridge-describe-session)
@@ -503,10 +514,10 @@ A menu opened in session Y's buffer while focused on X reads X."
       (with-temp-buffer
         (dsh-bridge-view-mode)
         (setq-local dsh-bridge--view-content-session "s1")
-        (dsh-bridge--dispatcher-send)
+        (dsh-bridge--dispatcher-prompt)
         (dsh-bridge--dispatcher-fetch)
         (dsh-bridge--dispatcher-describe))
-      (should (equal sent "s2"))
+      (should (equal prompted "s2"))
       (should (equal fetched "s2"))
       (should (equal described "s2")))))
 
@@ -691,41 +702,26 @@ to the recorded session itself leaves it in place."
       (dsh-bridge-send-text "hello"))
     (should (equal dsh-bridge--last-resolved-active '("s1" . "T1")))))
 
-(ert-deftest dsh-bridge-draft-explicit-target-clears-stale-last-resolved ()
-  "A draft push to an explicit target retires a differing record too."
-  (let ((dsh-bridge-pinned-target "s2")
-        (dsh-bridge--last-resolved-active '("s1" . "T1")))
-    (cl-letf (((symbol-function 'dsh-bridge--http)
-               (lambda (&rest _) (list nil "{\"ok\":true}" 200))))
-      (dsh-bridge-send-draft "hello"))
-    (should (null dsh-bridge--last-resolved-active)))
-  (let ((dsh-bridge-pinned-target "s1")
-        (dsh-bridge--last-resolved-active '("s1" . "T1")))
-    (cl-letf (((symbol-function 'dsh-bridge--http)
-               (lambda (&rest _) (list nil "{\"ok\":true}" 200))))
-      (dsh-bridge-send-draft "hello"))
-    (should (equal dsh-bridge--last-resolved-active '("s1" . "T1")))))
-
 (ert-deftest dsh-bridge-send-text-missing-response-session ()
-  "A response without a `sessionId' falls back to the requested target; with
+  "A response without a `sessionId' falls back to the resolved target; with
 neither, the send is still reported but no session state is touched."
-  ;; Explicit target: the fallback keeps the normal bookkeeping.
-  (let ((dsh-bridge-pinned-target "s1")
-        (dsh-bridge--session-status nil)
-        (dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t))))
-        (dsh-bridge--prompt-history nil)
-        (dsh-bridge--last-sent nil)
-        (sent 'uncalled)
-        (msg nil))
-    (cl-letf (((symbol-function 'dsh-bridge--http)
-               (lambda (_method _path _payload)
-                 (list nil "{\"ok\":true}" 200)))
-              ((symbol-function 'message)
-               (lambda (&rest args) (setq msg (apply #'format args)))))
-      (dsh-bridge-send-text "hello" nil (lambda (id) (setq sent id))))
-    (should (equal sent "s1"))
-    (should (eq (dsh-bridge--status-state "s1") 'running))
-    (should (string-match-p "prompt sent" msg)))
+  ;; A resolved target: the fallback keeps the normal bookkeeping.
+  (dsh-bridge-test--with-prompt-session "s1"
+    (let ((dsh-bridge--session-status nil)
+          (dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t))))
+          (dsh-bridge--prompt-history nil)
+          (dsh-bridge--last-sent nil)
+          (sent 'uncalled)
+          (msg nil))
+      (cl-letf (((symbol-function 'dsh-bridge--http)
+                 (lambda (_method _path _payload)
+                   (list nil "{\"ok\":true}" 200)))
+                ((symbol-function 'message)
+                 (lambda (&rest args) (setq msg (apply #'format args)))))
+        (dsh-bridge-send-text "hello" (lambda (id) (setq sent id))))
+      (should (equal sent "s1"))
+      (should (eq (dsh-bridge--status-state "s1") 'running))
+      (should (string-match-p "prompt sent" msg))))
   ;; No target at all: the host named no session, so nothing is tracked or
   ;; rendered, but the prompt is still reported as sent.
   (let ((dsh-bridge-pinned-target nil)
@@ -737,7 +733,7 @@ neither, the send is still reported but no session state is touched."
                  (list nil "{\"ok\":true}" 200)))
               ((symbol-function 'message)
                (lambda (&rest args) (setq msg (apply #'format args)))))
-      (dsh-bridge-send-text "hello" nil (lambda (id) (setq sent id))))
+      (dsh-bridge-send-text "hello" (lambda (id) (setq sent id))))
     (should (null sent))
     (should (null dsh-bridge--session-status))
     (should (string-match-p "no session" msg))))
@@ -927,18 +923,8 @@ blanked when a new composition starts, not when a draft is sent."
         (should (equal (buffer-string) "unrelated unsent text")))))
   (kill-buffer "*dsh-bridge-prompt*"))
 
-(ert-deftest dsh-bridge-send-text-override-wins-over-default ()
-  "An explicit session override beats the pinned target in the /send payload."
-  (let ((captured nil)
-        (dsh-bridge-pinned-target "pin"))
-    (cl-letf (((symbol-function 'dsh-bridge--http)
-               (lambda (_method _path payload)
-                 (setq captured payload) nil)))
-      (dsh-bridge-send-text "hi" "override"))
-    (should (equal (cdr (assoc 'sessionId captured)) "override"))))
-
 (ert-deftest dsh-bridge-send-text-no-target-omits-session ()
-  "With neither a pinned target nor an override, no sessionId key is sent."
+  "With neither a buffer session nor a pinned target, no sessionId is sent."
   (let ((captured nil)
         (dsh-bridge-pinned-target nil))
     (cl-letf (((symbol-function 'dsh-bridge--http)
@@ -947,90 +933,6 @@ blanked when a new composition starts, not when a draft is sent."
       (dsh-bridge-send-text "hi"))
     (should (equal (cdr (assoc 'text captured)) "hi"))
     (should (null (assoc 'sessionId captured)))))
-
-(ert-deftest dsh-bridge-send-sends-region-when-active ()
-  "`dsh-bridge-send' sends the region when one is active, without asking."
-  (let ((transient-mark-mode t) captured)
-    (with-temp-buffer
-      (insert "before region after")
-      (goto-char 8)
-      (set-mark (point-max))
-      (cl-letf (((symbol-function 'dsh-bridge--http)
-                 (lambda (_method _path payload)
-                   (setq captured payload) nil))
-                ;; The guard must not fire for a region send.
-                ((symbol-function 'y-or-n-p)
-                 (lambda (&rest _) (error "dsh-bridge: guard asked for a region"))))
-        (call-interactively #'dsh-bridge-send)))
-    (should (equal (cdr (assoc 'text captured)) "region after"))))
-
-(ert-deftest dsh-bridge-send-whole-buffer-no-confirm ()
-  "A whole-buffer send proceeds without asking for confirmation."
-  (let ((asked nil) captured)
-    (with-temp-buffer
-      (insert "whole")
-      (cl-letf (((symbol-function 'dsh-bridge--http)
-                 (lambda (_method _path payload)
-                   (setq captured payload) nil))
-                ((symbol-function 'y-or-n-p)
-                 (lambda (&rest _) (setq asked t) t)))
-        (dsh-bridge-send)))
-    (should (null asked))
-    (should (equal (cdr (assoc 'text captured)) "whole"))))
-
-(ert-deftest dsh-bridge-draft-whole-buffer-confirms ()
-  "A whole-buffer draft asks y-or-n-p first (guard symmetry with send)."
-  (let ((asked nil) captured)
-    (with-temp-buffer
-      (insert "whole")
-      (cl-letf (((symbol-function 'dsh-bridge--http)
-                 (lambda (_method _path payload)
-                   (setq captured payload) nil))
-                ((symbol-function 'y-or-n-p)
-                 (lambda (&rest _) (setq asked t) t)))
-        (dsh-bridge-draft)))
-    (should asked)
-    (should (equal (cdr (assoc 'text captured)) "whole"))))
-
-(ert-deftest dsh-bridge-send-active-region-in-read-only-works ()
-  "A region in a read-only buffer is sendable."
-  (let ((transient-mark-mode t) captured)
-    (with-temp-buffer
-      (insert "alpha beta")
-      (dsh-bridge-view-mode)
-      (goto-char 7)
-      (set-mark (point-max))
-      (cl-letf (((symbol-function 'dsh-bridge--http)
-                 (lambda (_method _path payload)
-                   (setq captured payload) nil)))
-        (dsh-bridge-send)))
-    (should (equal (cdr (assoc 'text captured)) "beta"))))
-
-(ert-deftest dsh-bridge-send-prefix-override ()
-  "With a prefix argument, send targets the completing-read session for this
-call only, leaving the pinned target untouched."
-  (let ((transient-mark-mode t)
-        (current-prefix-arg t)
-        (captured nil)
-        (dsh-bridge-pinned-target "pin"))
-    (with-temp-buffer
-      (insert "text")
-      (goto-char (point-min))
-      (set-mark (point-max))
-      (cl-letf (((symbol-function 'dsh-bridge--fetch-sessions)
-                 (lambda () (cons 200 '(((id . "live-1") (title . "Live One")
-                                          (live . t))))))
-                ((symbol-function 'completing-read)
-                 (lambda (_prompt _table &rest _) "Live One"))
-                ((symbol-function 'dsh-bridge--http)
-                 (lambda (_method _path payload)
-                   (setq captured payload) nil)))
-        (call-interactively #'dsh-bridge-send)))
-    (should (equal (cdr (assoc 'sessionId captured)) "live-1"))
-    (should (equal (cdr (assoc 'text captured)) "text"))
-    (should (equal dsh-bridge-pinned-target "pin"))))
-
-;;; Fetch and the output buffer
 
 (ert-deftest dsh-bridge-fetch-uses-pinned-target ()
   "`dsh-bridge-fetch' requests /turns with the pinned target when the
@@ -1269,8 +1171,6 @@ binds the compose keys plus fetch/set-session/list."
               #'dsh-bridge-send-and-exit))
   (should (eq (lookup-key dsh-bridge-prompt-mode-map (kbd "C-c C-a"))
               #'dsh-bridge-attach-file))
-  (should (eq (lookup-key dsh-bridge-prompt-mode-map (kbd "C-c C-d"))
-              #'dsh-bridge-draft))
   (should (eq (lookup-key dsh-bridge-prompt-mode-map (kbd "C-c C-k"))
               #'dsh-bridge-prompt-stop-or-erase))
   (should (eq (lookup-key dsh-bridge-prompt-mode-map (kbd "C-c C-f"))
@@ -1679,10 +1579,9 @@ M-p/M-n — and no compose/fetch/targeting verbs."
               #'dsh-bridge-view-previous-reply))
   (should (eq (lookup-key dsh-bridge-view-mode-map (kbd "M-n"))
               #'dsh-bridge-view-next-reply))
-  (dolist (key '("s" "d" "f" "t" "u"))
+  (dolist (key '("f" "t" "u"))
     (should-not (eq (lookup-key dsh-bridge-view-mode-map (kbd key))
                     (cadr (assoc key dsh-bridge--verb-suffixes))))))
-
 (ert-deftest dsh-bridge-view-mode-gfm ()
   "When markdown-mode is loadable, the view mode derives from gfm-view-mode for
 GFM rendering (read-only, native code-block font-locking); the bridge's own
@@ -5680,7 +5579,7 @@ nothing was sent."
                      (lambda (&rest _)
                        (if choice choice (error "should not prompt"))))
                     ((symbol-function 'dsh-bridge-send-text)
-                     (lambda (_text &optional _session-id on-success _attachments m)
+                     (lambda (_text &optional on-success _attachments m)
                        (setq mode m)
                        (when on-success (funcall on-success "s1"))))
                     ((symbol-function 'dsh-bridge--prompt-exit) #'ignore))
@@ -5737,7 +5636,7 @@ nothing was sent."
           (cl-letf (((symbol-function 'read-multiple-choice)
                      (lambda (&rest _) (error "should not prompt")))
                     ((symbol-function 'dsh-bridge-send-text)
-                     (lambda (_text &optional _session-id on-success _attachments m)
+                     (lambda (_text &optional on-success _attachments m)
                        (setq mode m)
                        (when on-success (funcall on-success "s1"))))
                     ((symbol-function 'dsh-bridge--prompt-exit) #'ignore))
@@ -5763,7 +5662,8 @@ nothing was sent."
                    (list nil "{\"ok\":true,\"sessionId\":\"s1\"}" 200)))
                 ((symbol-function 'message)
                  (lambda (fmt &rest args) (setq msg (apply #'format fmt args)))))
-        (dsh-bridge-send-text "hi" "s1" nil nil (car case)))
+        (dsh-bridge-test--with-prompt-session "s1"
+          (dsh-bridge-send-text "hi" nil nil (car case))))
       (should (equal (alist-get 'mode payload) (cdr case)))
       (should (string-match-p (pcase (car case)
                                 ('steer "steering requested")
@@ -5784,7 +5684,8 @@ running status and the next send prompts."
     (cl-letf (((symbol-function 'dsh-bridge--http)
                (lambda (&rest _) (list nil "{\"ok\":true,\"sessionId\":\"s1\"}" 200)))
               ((symbol-function 'message) #'ignore))
-      (dsh-bridge-send-text "one" "s1"))
+      (dsh-bridge-test--with-prompt-session "s1"
+        (dsh-bridge-send-text "one")))
     (should (eq (dsh-bridge--status-state "s1") 'running))
     ;; The racing case: the notifier settles the turn while the request is in
     ;; flight, so its idle is the truth and the stale running mark is skipped.
@@ -5793,7 +5694,8 @@ running status and the next send prompts."
                  (dsh-bridge--status-set "s1" 'idle)
                  (list nil "{\"ok\":true,\"sessionId\":\"s1\"}" 200)))
               ((symbol-function 'message) #'ignore))
-      (dsh-bridge-send-text "two" "s1"))
+      (dsh-bridge-test--with-prompt-session "s1"
+        (dsh-bridge-send-text "two")))
     (should (eq (dsh-bridge--status-state "s1") 'idle))))
 
 (ert-deftest dsh-bridge-send-text-steer-records-history ()
@@ -5805,55 +5707,10 @@ running status and the next send prompts."
                (lambda (&rest _)
                  (list nil "{\"ok\":true,\"sessionId\":\"s1\"}" 200)))
               ((symbol-function 'message) #'ignore))
-      (dsh-bridge-send-text "hello" "s1" nil nil 'steer))
+      (dsh-bridge-test--with-prompt-session "s1"
+        (dsh-bridge-send-text "hello" nil nil 'steer)))
     (should (equal (cdr (assoc "s1" dsh-bridge--prompt-history))
                    (list "hello")))))
-
-(ert-deftest dsh-bridge-draft-pins-lazy-push-from-prompt-buffer ()
-  "A target-less draft push from a prompt buffer adopts the host's session.
-The pushed text now lives in that session's composer, so a later send from
-the same buffer must not go elsewhere."
-  (dsh-bridge-test--kill-prompt-buffer)
-  (let ((dsh-bridge-pinned-target nil)
-        (dsh-bridge--last-resolved-active nil)
-        (dsh-bridge--sessions-cache '(((id . "s1") (title . "T1") (live . t))))
-        (dsh-bridge--session-models nil)
-        (dsh-bridge--session-context nil)
-        (messages '()))
-    (cl-letf (((symbol-function 'dsh-bridge--http)
-               (lambda (_method _path _payload)
-                 (list nil "{\"sessionId\":\"s1\",\"title\":\"T1\"}" 200)))
-              ((symbol-function 'message)
-               (lambda (fmt &rest args)
-                 (push (apply #'format fmt args) messages))))
-      (with-current-buffer (get-buffer-create "*dsh-bridge-prompt*")
-        (dsh-bridge-prompt-mode)
-        (insert "draft text")
-        (dsh-bridge-draft)
-        (should (equal dsh-bridge--prompt-session "s1"))))
-    (should (member "dsh-bridge: prompt buffer bound to session \"T1\""
-                    messages)))
-  (dsh-bridge-test--kill-prompt-buffer))
-
-(ert-deftest dsh-bridge-draft-does-not-pin-other-buffers ()
-  "Only a prompt buffer adopts a draft's host-resolved session."
-  (let ((dsh-bridge-pinned-target nil)
-        (messages '()))
-    (cl-letf (((symbol-function 'dsh-bridge--http)
-               (lambda (_method _path _payload)
-                 (list nil "{\"sessionId\":\"s1\"}" 200)))
-              ((symbol-function 'message)
-               (lambda (fmt &rest args)
-                 (push (apply #'format fmt args) messages))))
-      (with-temp-buffer
-        (transient-mark-mode 1)
-        (insert "region text")
-        (goto-char (point-min))
-        (set-mark (point-max))
-        (dsh-bridge-draft)
-        (should (null dsh-bridge--prompt-session))))
-    (should-not (seq-some (lambda (m) (string-match-p "bound to session" m))
-                          messages))))
 
 (ert-deftest dsh-bridge-turn-reason-phrase ()
   "The turn-end reason kind maps to a truthful human verb."
@@ -6072,7 +5929,7 @@ it announced.  A view that already holds content needs no replay."
       (dsh-bridge-prompt-mode)
       (insert "hello")
       (cl-letf (((symbol-function 'dsh-bridge-send-text)
-                 (lambda (_text &optional _session-id on-success _attachments _mode)
+                 (lambda (_text &optional on-success _attachments _mode)
                    (when on-success (funcall on-success "s1"))))
                 ((symbol-function 'dsh-bridge--prompt-exit)
                  (lambda (&rest args) (setq captured args))))
@@ -7727,7 +7584,8 @@ re-renders the surfaces, and announces it."
               ((symbol-function 'dsh-bridge--status-event-render)
                (lambda (id) (push id rendered)))
               ((symbol-function 'dsh-bridge--prompt-history-record-send) #'ignore))
-      (dsh-bridge-send-text "hello" "s1"))
+      (dsh-bridge-test--with-prompt-session "s1"
+        (dsh-bridge-send-text "hello")))
     (should (eq (dsh-bridge--status-state "s1") 'running))
     (should (equal rendered '("s1")))
     (should (string-match-p "prompt sent" msg))))
@@ -10548,15 +10406,14 @@ removes them from the kept text."
           (insert "look at this\n")
           (dsh-bridge--insert-attachment-tag file)
           (cl-letf (((symbol-function 'dsh-bridge-send-text)
-                     (lambda (text &optional session-id on-success attachments _mode)
-                       (setq captured (list text session-id attachments))
+                     (lambda (text &optional on-success attachments _mode)
+                       (setq captured (list text attachments))
                        (when on-success (funcall on-success "s1"))))
                     ((symbol-function 'dsh-bridge--prompt-exit)
                      (lambda (&rest _) nil)))
             (dsh-bridge-send-and-exit))
           (should (equal (car captured) "look at this\n"))
-          (should (equal (cadr captured) "s1"))
-          (should (equal (caddr captured) (list (list :path file))))
+          (should (equal (cadr captured) (list (list :path file))))
           (should (= (dsh-bridge--attachment-count) 0))
           (should (equal (buffer-string) "look at this\n")))
       (delete-file file)
@@ -10576,7 +10433,7 @@ removes them from the kept text."
           (dsh-bridge-prompt-mode)
           (dsh-bridge--insert-attachment-tag file)
           (cl-letf (((symbol-function 'dsh-bridge-send-text)
-                     (lambda (text &optional _session-id on-success _attachments _mode)
+                     (lambda (text &optional on-success _attachments _mode)
                        (setq captured text)
                        (when on-success (funcall on-success "s1"))))
                     ((symbol-function 'dsh-bridge--prompt-exit)
@@ -10612,73 +10469,6 @@ removes them from the kept text."
       (delete-file file)
       (dsh-bridge-test--kill-prompt-buffer))))
 
-(ert-deftest dsh-bridge-draft-strips-attachments ()
-  "A draft push drops the tag lines and pushes text only."
-  (dsh-bridge-test--kill-prompt-buffer)
-  (let ((file (dsh-bridge-test--temp-file "draft.txt" "x"))
-        (captured nil)
-        (dsh-bridge-pinned-target "s1"))
-    (unwind-protect
-        (with-temp-buffer
-          (dsh-bridge-prompt-mode)
-          (insert "text\n")
-          (dsh-bridge--insert-attachment-tag file)
-          (cl-letf (((symbol-function 'dsh-bridge-send-draft)
-                     (lambda (text &optional _session-id _on-success)
-                       (setq captured text)))
-                    ((symbol-function 'message) (lambda (&rest _) nil)))
-            (dsh-bridge-draft))
-          (should (equal captured "text\n")))
-      (delete-file file)
-      (dsh-bridge-test--kill-prompt-buffer))))
-
-(ert-deftest dsh-bridge-send-carries-tags ()
-  "`dsh-bridge-send' parses tag lines from its region or buffer."
-  (let ((file (dsh-bridge-test--temp-file "send.txt" "x"))
-        (captured nil)
-        (dsh-bridge-pinned-target "s1"))
-    (unwind-protect
-        (with-temp-buffer
-          (insert "text\n")
-          (dsh-bridge--insert-attachment-tag file)
-          (cl-letf (((symbol-function 'dsh-bridge-send-text)
-                     (lambda (text &optional _session-id _on-success attachments)
-                       (setq captured (list text attachments)))))
-            (dsh-bridge-send))
-          (should (equal (car captured) "text\n"))
-          (should (equal (cadr captured) (list (list :path file)))))
-      (delete-file file))))
-
-(ert-deftest dsh-bridge-send-attaches-only-tags-inside-region ()
-  "Sending a region attaches only the tag lines inside the region."
-  (let ((inside (dsh-bridge-test--temp-file "inside.txt" "i"))
-        (outside (dsh-bridge-test--temp-file "outside.txt" "o"))
-        (captured nil)
-        (dsh-bridge-pinned-target "s1"))
-    (unwind-protect
-        (with-temp-buffer
-          ;; Batch Emacs has Transient Mark mode off, and `use-region-p'
-          ;; requires it.
-          (transient-mark-mode 1)
-          (insert "lead\n")
-          (dsh-bridge--insert-attachment-tag outside)
-          (let ((start (point)) end)
-            (insert "body\n")
-            (dsh-bridge--insert-attachment-tag inside)
-            (setq end (point))
-            (insert "tail\n")
-            (set-mark start)
-            (goto-char end)
-            (setq mark-active t))
-          (cl-letf (((symbol-function 'dsh-bridge-send-text)
-                     (lambda (text &optional _session-id _on-success attachments)
-                       (setq captured (list text attachments)))))
-            (dsh-bridge-send))
-          (should (equal (car captured) "body\n"))
-          (should (equal (cadr captured) (list (list :path inside)))))
-      (delete-file inside)
-      (delete-file outside))))
-
 (ert-deftest dsh-bridge-attach-file-binds-invoking-session ()
   "Attaching from a session-carrying buffer creates the prompt buffer
 bound to the invoking buffer's effective session, not to the default."
@@ -10707,10 +10497,11 @@ bound to the invoking buffer's effective session, not to the default."
                (lambda (_m _p _pl) (list nil "{\"sessionId\":\"s1\"}" 200)))
               ((symbol-function 'dsh-bridge--status-event-render) #'ignore)
               ((symbol-function 'message) #'ignore))
-      (dsh-bridge-send-text "" "s1" nil '((:path "/tmp/x.png")))
-      (should (null dsh-bridge--prompt-history))
-      (should (null dsh-bridge--last-sent))
-      (dsh-bridge-send-text "hello" "s1")
+      (dsh-bridge-test--with-prompt-session "s1"
+        (dsh-bridge-send-text "" nil '((:path "/tmp/x.png")))
+        (should (null dsh-bridge--prompt-history))
+        (should (null dsh-bridge--last-sent))
+        (dsh-bridge-send-text "hello"))
       (should (equal (cdr (assoc "s1" dsh-bridge--prompt-history)) '("hello")))
       (should (equal (caar dsh-bridge--last-sent) "s1")))))
 
@@ -11340,7 +11131,7 @@ cache — the footer's attribution source."
     (should (local-variable-p 'tool-bar-map))
     (should (keymapp tool-bar-map))
     (should (equal (dsh-bridge-test--tool-bar-commands tool-bar-map)
-                   '(dsh-bridge-send-and-exit dsh-bridge-draft
+                   '(dsh-bridge-send-and-exit
                      dsh-bridge-attach-file dsh-bridge-prompt-stop-or-erase
                      dsh-bridge-list-sessions quit-window)))
     (should (eq (lookup-key tool-bar-map [Send]) #'dsh-bridge-send-and-exit))))

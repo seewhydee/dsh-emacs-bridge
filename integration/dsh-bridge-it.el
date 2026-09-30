@@ -286,7 +286,7 @@ fixture-booting tests can share one Emacs process."
      (vector (list :kind "text" :text "Report me.")))
     (let ((session-id (dsh-bridge-it--create-session
                        (expand-file-name "../" dsh-bridge-it--directory))))
-      (dsh-bridge-send-text "Please report." session-id)
+      (dsh-bridge-it--send-text session-id "Please report.")
       (should (dsh-bridge-it--wait-for-turns session-id 30000))
       (dsh-bridge-describe-session session-id)
       (with-current-buffer dsh-bridge-describe-buffer-name
@@ -312,7 +312,7 @@ source as `parentSession' with `isSeeded' set."
     (let* ((session-id (dsh-bridge-it--create-session
                         (expand-file-name "../" dsh-bridge-it--directory)))
            (before (dsh-bridge-it--session-ids)))
-      (dsh-bridge-send-text "Please branch." session-id)
+      (dsh-bridge-it--send-text session-id "Please branch.")
       ;; Wait for the anchor, not merely for a turn: the reply folds into
       ;; `/turns' a moment before the turn closes, and an open turn is not
       ;; branchable.
@@ -351,7 +351,7 @@ and the pending-question registry populates over SSE."
     (let ((session-id (dsh-bridge-it--create-session
                        (expand-file-name "../" dsh-bridge-it--directory))))
       (dsh-bridge-it--notifications-start)
-      (dsh-bridge-send-text "Pick a color for me." session-id)
+      (dsh-bridge-it--send-text session-id "Pick a color for me.")
       ;; The ask surfaces via the waterfall answerer → SSE → Emacs.
       (should (dsh-bridge-it--wait
                (lambda () (assoc session-id dsh-bridge--pending-questions))
@@ -465,7 +465,7 @@ registry."
         (list :kind "text" :text "Good.")))
       (let ((session-id (dsh-bridge-it--create-session
                          (expand-file-name "../" dsh-bridge-it--directory))))
-        (dsh-bridge-send-text "Are you still there?" session-id)
+        (dsh-bridge-it--send-text session-id "Are you still there?")
         (should (dsh-bridge-it--wait
                  (lambda () (assoc session-id dsh-bridge--pending-questions))
                  30000))))))
@@ -534,7 +534,7 @@ host resumed it: the roster still lists it and a second turn completes."
            (vector (list :kind "text" :text "First life.")))
           (let ((session-id (dsh-bridge-it--create-session
                              (expand-file-name "../" dsh-bridge-it--directory))))
-            (dsh-bridge-send-text "Seed me." session-id)
+            (dsh-bridge-it--send-text session-id "Seed me.")
             (should (dsh-bridge-it--wait-for-turns session-id 30000))
             ;; Restart the host on the same home: the session is now
             ;; persisted-only.  The token file survives (same home).
@@ -550,7 +550,7 @@ host resumed it: the roster still lists it and a second turn completes."
             ;; completes.
             (dsh-bridge-it--script-mock
              (vector (list :kind "text" :text "Second life.")))
-            (dsh-bridge-send-text "Wake up." session-id)
+            (dsh-bridge-it--send-text session-id "Wake up.")
             (should (dsh-bridge-it--wait
                      (lambda ()
                        (let* ((result (dsh-bridge--request
@@ -672,6 +672,15 @@ composed with the suffix helper the incremental fill keeps separate."
       ""
     (concat (dsh-bridge--view-turn-body turn)
             (dsh-bridge--view-turn-suffix turn session-id))))
+
+(defun dsh-bridge-it--send-text (session-id text)
+  "Send TEXT to SESSION-ID as a raw prompt through the real sender.
+Unlike `dsh-bridge-it--prompt-send', this skips the prompt buffer's
+send-and-exit flow: the text goes straight to `dsh-bridge-send-text',
+which resolves its target from the invoking buffer, so the call runs
+inside the DSH-Prompt buffer bound to SESSION-ID."
+  (with-current-buffer (dsh-bridge--prompt-buffer session-id)
+    (dsh-bridge-send-text text)))
 
 (defun dsh-bridge-it--prompt-send (session-id text)
   "Send TEXT to SESSION-ID through the real prompt-buffer flow.
@@ -857,7 +866,7 @@ collapses, and the view lands at the new turn's tail."
       ;; the newer record replaces the body wholesale.
       (dsh-bridge-it--script-mock
        (vector (list :kind "text" :text "Turn two.")))
-      (dsh-bridge-send-text "Two." session-id)
+      (dsh-bridge-it--send-text session-id "Two.")
       (should (dsh-bridge-it--wait
                (lambda ()
                  (let ((text (dsh-bridge-it--view-text session-id))
@@ -896,9 +905,9 @@ than stop on the last populated turn."
     (let ((session-id (dsh-bridge-it--create-session
                        (expand-file-name "../" dsh-bridge-it--directory))))
       (dsh-bridge-it--notifications-start)
-      (dsh-bridge-send-text "Prompt one." session-id)
+      (dsh-bridge-it--send-text session-id "Prompt one.")
       (should (dsh-bridge-it--wait-for-completed-turn session-id 30000))
-      (dsh-bridge-send-text "Prompt two." session-id)
+      (dsh-bridge-it--send-text session-id "Prompt two.")
       ;; Wait for the *second* turn specifically; the first is already a
       ;; completed newest turn and would satisfy a looser predicate.
       (should (dsh-bridge-it--wait
