@@ -111,34 +111,27 @@ From Emacs, the main entry-points are these two commands:
 Consider giving either or both a global keybinding, e.g.,
 
 ```elisp
-(keymap-global-set "C-c d" #'dsh-bridge-list-sessions)
+(keymap-global-set "C-c d" #'dsh-bridge)
 ```
 
 ### Transient menu
 
 The `M-x dsh-bridge` command opens a transient menu that prompts for
-the next command.  The top line is the menu's *focus*: the session every
-key in it acts on.  The focus is the pinned target when one is set, else
-the invoking buffer's own session, else the last-active session as a
-provisional guess (shown with its position in the session cycle).  A
-provisional guess may be read and sent to, but the session-state
-mutators below refuse it until you confirm it, by cycling or by pinning;
-the refusal names the keys that do so.
-
-The following commands are available from the transient menu:
+the next command.  The top line shows the session being acted on
+(chosen based on your recent activity); you can cycle through
+available sessions with `M-p`/`M-n`.  The following commands are
+available from this menu:
 
 * `q` — exit the transient menu.
-* `M-p`/`M-n` — move the focus to the next older / newer session and
-  confirm it.  The cycle is every non-archived session, so cold ones are
-  reachable too.
+* `M-p`/`M-n` — cycle through other sessions, ordered by age.
 * `r` — open a buffer to type in a prompt, bound to the focus.
-* `s` — send region or buffer as a prompt (if session is busy, prompt is queued).
-* `d` — send region or buffer as a draft (can still edit in DSH before submitting).
-* `f` — fetch and display the session's latest reply.
+* `s` — send region or buffer as a prompt (if session is busy, it is queued).
+* `d` — send region or buffer as a draft (can edit in DSH before submitting).
+* `f` — fetch and display the latest set of replies.
 * `D` — describe the session.
-* `t` — pin the focus session as the target (one keystroke, no prompt).
-* `T` — pin a session chosen by title.
-* `u` — unpin; the focus stays on the session the pin named.
+* `t` — pin the current session as the target.
+* `T` — prompt for a session by title, and pin it.
+* `u` — unpin the currently pinned session.
 * `k` — stop the running session.
 * `l` — open the DSH-Sessions buffer.
 * `+` — create a new session, prompting for its workspace and its title;
@@ -147,18 +140,6 @@ The following commands are available from the transient menu:
 * `G` — set or edit the goal objective (with `C-u`, also the round cap).
 * `A` — pause an armed goal, or resume and rearm a stopped one.
 * `X` — clear the current goal.
-
-While a pin is set the menu's target is locked to it, so the
-session-state mutators always act on the pinned session; `M-p`/`M-n`
-report that instead of cycling.  `t`, `T`, `u`, and `l` stay available,
-so the pin can always be replaced or dropped without leaving the menu.
-Pinning survives across menu invocations until you unpin it, and is
-Emacs-local (never saved to disk).
-
-Opening the menu seeds the session list if it is empty, so the focus is
-named from the first paint.  With a prefix argument (`C-u M-x
-dsh-bridge`) the list is re-fetched first, which is the way to refresh
-it if the host was restarted and the cached list has gone stale.
 
 ### DSH-Sessions buffer
 
