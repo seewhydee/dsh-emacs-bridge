@@ -21,7 +21,7 @@ STAGE := .package/dsh-bridge-$(VERSION)
 
 PLUGIN_SRC := $(wildcard dsh-plugin/src/*.ts dsh-plugin/src/client/*.ts dsh-plugin/src/client/*.tsx)
 
-.PHONY: all build package test clean
+.PHONY: all build package test clean no-stale-elc
 
 all: package
 
@@ -61,11 +61,20 @@ $(TAR): build emacs/dsh-bridge.el emacs/dsh-bridge-install.el dsh-plugin/package
 	  > $(STAGE)/dsh-bridge-pkg.el
 	tar --format=ustar -cf $@ -C .package dsh-bridge-$(VERSION)
 
-test:
+test: no-stale-elc
 	cd dsh-plugin && pnpm test
 	emacs --batch -Q -L emacs --eval '(progn (require (quote dsh-bridge)) (when (featurep (quote dsh-bridge-install)) (error "dsh-bridge.el loaded the optional install library eagerly")))'
 	emacs --batch -L emacs -l emacs/dsh-bridge-tests.el \
 	      -f ert-run-tests-batch-and-exit
+
+# Emacs loads a byte-compiled file in preference to newer source, so an
+# emacs/*.elc left from an earlier compile makes the Emacs test layers grade
+# code that is not in the tree.  Any target that boots Emacs against -L emacs
+# must grade source, so drop the artifacts outright: an mtime comparison only
+# guesses at staleness, and a .elc copied in from another tree — or compiled
+# from an uncommitted buffer — can compare as fresh.
+no-stale-elc:
+	rm -f emacs/*.elc
 
 # Integration-testing framework (integration/): boots a live DSH host with the
 # freshly built plugin and a mock LLM, then runs the Vitest seam specs and the
@@ -73,7 +82,7 @@ test:
 # unit-only and fast. The framework needs a working `dsh` (on PATH, or via
 # DSH_BRIDGE_DSH_COMMAND) and, for a checkout dsh, DSH_BRIDGE_FIXTURE_CWD —
 # see integration/README.md.
-integration-test: build
+integration-test: build no-stale-elc
 	cd integration && { test -d node_modules || pnpm install; }
 	cd integration && pnpm test
 	emacs --batch -L emacs -L integration -l integration/dsh-bridge-it.el \
