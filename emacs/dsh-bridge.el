@@ -437,7 +437,7 @@ the answerer; a request that arrives with no browser open fails closed."
 
 (defface dsh-bridge-archived-face
   '((t :inherit shadow))
-  "Face for the archived marker in the DSH-Sessions buffer."
+  "Face for an archived session's row in the DSH-Sessions buffer."
   :group 'dsh-bridge)
 
 (defface dsh-bridge-describe-heading-face
@@ -1437,42 +1437,27 @@ appropriate directory, do nothing."
 	 (with-current-buffer buf
 	   (setq default-directory (file-name-as-directory dir))))))
 
-(defun dsh-bridge--session-untitled-p (session)
-  "Whether SESSION is a known session carrying no title.
-SESSION is a string (a session ID) or a session data alist; a bare id
-counts as untitled only when the sessions cache has a row for it, so an
-id with no cached row is not \"known untitled\"."
-  (let ((alist (if (stringp session)
-		   (dsh-bridge--session-for-id session)
-		 session)))
-    (and alist
-	 (null (dsh-bridge--normalized-string (alist-get 'title alist))))))
-
-(defun dsh-bridge--session-label (session &optional no-default add-fallback-face)
+(defun dsh-bridge--session-label (session &optional no-default)
   "Return the display label for SESSION.
 SESSION should be a string (a session ID), or a session data alist in
 the format described in `dsh-bridge--sessions-cache'.
 
-The label is the session's title, falling back on \"[Untitled Session]\"
-if the session is known but untitled.  With NO-DEFAULT, a session that
-is neither titled nor identifiable returns nil, ignoring this fallback.
-
-If ADD-FALLBACK-FACE is non-nil, apply `dsh-bridge-untitled-face' as a
-face property for any fallback string."
+The label is the session's title, else \"[Untitled Session]\".  A bare id
+with no cached row labels as the id itself, since that is the only name
+there is.  With NO-DEFAULT, an untitled session labels as nil instead of
+the placeholder, so a caller can skip it; a bare id still labels as
+itself."
   (let* ((alist (if (stringp session)
 		    (dsh-bridge--session-for-id session)
 		  session))
 	 (title (dsh-bridge--normalized-string (alist-get 'title alist))))
     (or title
-	(let ((fallback
-	       (if (dsh-bridge--session-untitled-p alist)
-		   (unless no-default "[Untitled Session]")
-		 (or (dsh-bridge--normalized-string session)
-		     (alist-get 'id session)
-		     (unless no-default "[Untitled Session]")))))
-	  (if (and add-fallback-face (stringp fallback))
-	      (propertize fallback 'face 'dsh-bridge-untitled-face)
-	    fallback)))))
+	;; No title.  A known row (ALIST) is an untitled session; with no
+	;; row at all, the id string is the only name available.
+	(if alist
+	    (unless no-default "[Untitled Session]")
+	  (or (dsh-bridge--normalized-string session)
+	      (unless no-default "[Untitled Session]"))))))
 
 (defvar dsh-bridge--session-link-map
   (let ((map (make-sparse-keymap)))
@@ -6789,23 +6774,27 @@ Archived sessions are hidden unless `dsh-bridge--sessions-archived-p' (or
 			  'dsh-bridge-age-ts activity))
 	 (workspace (dsh-bridge--workspace-label session))
 	 (cwd (alist-get 'cwd session))
-	 (workspace-cell (if (and (stringp cwd) (not (string-empty-p cwd)))
-			     (propertize workspace 'help-echo cwd)
-			   workspace))
-	 (title (let ((label (dsh-bridge--session-label session nil t)))
-		  (if (alist-get 'archived session)
-		      (concat label
-			      (propertize "	 [archived]"
-					  'face 'dsh-bridge-archived-face))
-		    label)))
-	 (cols (vector (dsh-bridge--default-target-marker session)
-		       (dsh-bridge--status-glyph (alist-get 'id session))
-		       title
-		       age
-		       workspace-cell)))
-    (when dsh-bridge-show-session-ids
-      (setq cols (vconcat cols (vector id))))
-    (list id cols)))
+	 (archived (alist-get 'archived session))
+	 (title (or (dsh-bridge--session-label session t)
+		    (propertize "[Untitled Session]"
+				'face 'dsh-bridge-untitled-face))))
+    ;; Grey out an archived session's row, and name the state in the label.
+    ;; Greying the label replaces the untitled fallback's face.
+    (when archived
+      (setq title (concat (propertize title 'face 'dsh-bridge-archived-face)
+			  (propertize "\t [archived]"
+				      'face 'dsh-bridge-archived-face))
+	    age (propertize age 'face 'dsh-bridge-archived-face)
+	    workspace (propertize workspace 'face 'dsh-bridge-archived-face)))
+    ;; Add help-echo to the workspace cell to show its directory
+    (and (stringp cwd) (not (string-empty-p cwd))
+	 (setq workspace (propertize workspace 'help-echo cwd)))
+    (let ((cols (vector (dsh-bridge--default-target-marker session)
+			(dsh-bridge--status-glyph (alist-get 'id session))
+			title age workspace)))
+      (when dsh-bridge-show-session-ids
+	(setq cols (vconcat cols (vector id))))
+      (list id cols))))
 
 (defvar-keymap dsh-bridge-sessions-mode-map
   :parent tabulated-list-mode-map

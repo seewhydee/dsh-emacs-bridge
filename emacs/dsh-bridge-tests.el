@@ -399,17 +399,7 @@ placeholder so completion can skip such sessions."
     (should (equal (dsh-bridge--session-label "missing" t) "missing"))
     (should (equal (dsh-bridge--session-label '((id . "s7") (title . "T7")) t) "T7"))
     (should (null (dsh-bridge--session-label '((cwd . "/x")) t)))
-    (should (null (dsh-bridge--session-label nil t)))
-    ;; ADD-FALLBACK-FACE marks only fallback labels (untitled / raw id), never
-    ;; a real title.
-    (should (eq (get-text-property
-                 0 'face (dsh-bridge--session-label '((id . "s5")) nil t))
-                'dsh-bridge-untitled-face))
-    (should (eq (get-text-property
-                 0 'face (dsh-bridge--session-label nil nil t))
-                'dsh-bridge-untitled-face))
-    (should-not (get-text-property
-                 0 'face (dsh-bridge--session-label '((id . "s6") (title . "T6")) nil t)))))
+    (should (null (dsh-bridge--session-label nil t)))))
 
 (ert-deftest dsh-bridge-read-session-id-skips-untitled ()
   "Untitled sessions are not completion candidates; a titled one still is.
@@ -3090,7 +3080,7 @@ Emoji glyphs are double-width; in a one-column cell
 
 (ert-deftest dsh-bridge-session-cell-untitled ()
   "The session cell shows the title, or \"[Untitled Session]\" (untitled face).
-The cell is `dsh-bridge--session-label' with the fallback-face argument; the
+The cell falls back on the placeholder with `dsh-bridge-untitled-face'; the
 raw id is not used, so an untitled row reads as untitled."
   (let ((dsh-bridge--session-status nil)
         (a '((id . "aaaaaa") (live . t) (cwd . "/x")))
