@@ -3,10 +3,10 @@
 This is a two-way bridge between
 [GNU Emacs](https://www.gnu.org/software/emacs/) and the
 [Deepseek Harness](https://github.com/deepseek-ai/deepseek-harness)
-(DSH).  The bridge allows you to control DSH from entirely within
-Emacs, including submitting prompts, reading replies, and controlling
-sessions and their properties.  The Emacs-side user interface is
-designed to closely follow existing Emacs conventions and standards.
+(DSH).  It lets you control DSH from entirely within Emacs, including
+submitting prompts, reading replies, and controlling sessions and
+their properties.  The Emacs-side user interface is designed to
+closely follow existing Emacs conventions and standards.
 
 The bridge consists of two components:
 
@@ -105,8 +105,8 @@ preceding section, you can skip this.
 
 From Emacs, the main entry-points are these two commands:
 
-- `M-x dsh-bridge` — open a transient menu for DSH commands.
-- `M-x dsh-bridge-list-sessions` — show a list of DSH sessions.
+* `M-x dsh-bridge` — open a transient menu for DSH commands.
+* `M-x dsh-bridge-list-sessions` — show a list of DSH sessions.
 
 Consider giving either or both a global keybinding, e.g.,
 
@@ -117,26 +117,26 @@ Consider giving either or both a global keybinding, e.g.,
 ### Transient menu
 
 The `M-x dsh-bridge` command opens a transient menu that prompts for
-the next command.  The top line shows the session being acted on
-(chosen based on your recent activity); you can cycle through
+the next command.  The menu's top line shows the session to be acted
+on (chosen based on your recent activity); you can cycle through
 available sessions with `M-p`/`M-n`.  The following commands are
-available from this menu:
+available from here:
 
 * `q` — exit the transient menu.
 * `M-p`/`M-n` — cycle through other sessions, ordered by age.
-* `r` — open a buffer to type in a prompt, bound to the focus.
-* `s` — send region or buffer as a prompt (if session is busy, it is queued).
+* `r` — open a buffer to type in a prompt.
+* `s` — send region or buffer as a prompt (queued if session is busy).
 * `d` — send region or buffer as a draft (can edit in DSH before submitting).
 * `f` — fetch and display the latest set of replies.
 * `D` — describe the session.
 * `t` — pin the current session as the target.
 * `T` — prompt for a session by title, and pin it.
-* `u` — unpin the currently pinned session.
+* `u` — unpin the currently-pinned session.
 * `k` — stop the running session.
 * `l` — open the DSH-Sessions buffer.
-* `+` — create a new session, prompting for its workspace and its title;
-        the new session is pinned and becomes the focus.
-* `p` — toggle plan mode for the focus session.
+* `+` — create a new session, prompting for its workspace and title;
+        the new session is pinned.
+* `p` — toggle plan mode.
 * `G` — set or edit the goal objective (with `C-u`, also the round cap).
 * `A` — pause an armed goal, or resume and rearm a stopped one.
 * `X` — clear the current goal.
@@ -193,75 +193,57 @@ The following commands are available in a DSH-View buffer:
 * `l` — open the DSH-Sessions buffer.
 * `q` — quit the window and bury the buffer.
 
-When created, a DSH-View buffer usually follows the latest turn, so
-that the buffer is automatically updated as more replies arrive.
-Walking back through older turns with `M-p` suspends following;
-cycling back to the newest turn with `M-n` resumes it automatically.
-To customize this behavior, change `dsh-bridge-view-follow-at-newest`.
+When created, a DSH-View buffer usually follows the latest turn,
+automatically updated as more replies arrive.  Walking back through
+older turns with `M-p` suspends following; cycling back to the newest
+turn with `M-n` resumes it automatically.  To customize this behavior,
+change `dsh-bridge-view-follow-at-newest`.
 
 If Markdown mode is installed, and `dsh-bridge-view-gfm` is non-nil,
-the reply is font-locked as GitHub-Flavored Markdown (the dividers use
-GFM horizontal-rule syntax, so they render cleanly).
+the replies are font-locked as GitHub-Flavored Markdown.
 
 By default, a DSH-View buffer shows only the assistant's replies.
 Type `v` (`dsh-bridge-view-toggle-activity`) to toggle viewing other
 activity reports in the buffer, including tool calls, tool call
 results, and reasoning block summaries.
 
-#### Changed files
-
-A turn whose tool calls successfully changed files ends with a
-`Changed files:` footer, a plain list of one clickable entry per file.
-Clicking a path (or typing `RET` with point on it) visits the file,
-resolved against the session directory.  There is currently no
-recorded diff or review view: the previous hunk viewer was removed
-pending a redesign (see `PLAN.md`).
-
-Customize `dsh-bridge-view-changed-files` to `nil` to omit the footer.
-A turn that produced no assistant text but did run a tool is still
-served, so a purely file-changing turn shows its footer (and no
-reply); refresh (`g`) after a turn completes to pick up its files.
-
 #### Agent queries and approval requests
 
 If the model requests additional user input via the
 `ask_user_question` tool, the query is surfaced in the DSH-View
 buffer.  Type `a` here (or in the DSH-Sessions buffer with point on
-the session) to open a buffer for handling the query.
+the session) to open a buffer for handling the query.  In the
+resulting buffer, navigate to each question block and mark your
+desired option with `RET` (or choose it with a number key), or type
+`c` to enter a custom answer.  To submit the answers, type `C-c C-c`.
+Alternatively, type `C-c C-k` to decline the query.
 
-In this buffer, mark the option(s) you choose with `RET`.  You can
-also navigate to a question block and type your desired option's
-number key, or type `c` and write a freeform answer via the
-minibuffer.  To submit the answers, type `C-c C-c`.  Alternatively,
-type `C-c C-k` to decline the query.
+Special approval requests from the model (e.g., for sandbox
+escalation) are also surfaced in the DSH-View buffer.  Upon receiving
+such a request, type `a` to see the details in a help window; then you
+can type `y` to accept the request once, `n` to reject it, or `c` to
+cancel it.  Quitting (`C-g`) leaves the approval pending; type `a`
+again to restart it.
 
-In addition, some agent tools ask for approval before acting; for
-example, `danger-full-access` asks before sandbox escalation.  Such
-requests are also surfaced in the DSH-View buffer.  Type `a` to see
-the request details in a help window; then you can type `y` to accept
-the request once, `n` to reject it, or `c` to cancel it.  Quitting
-(`C-g`) leaves the approval pending; type `a` again to restart it.
-
-If the web UI is open, the query or approval is shown there too;
-whichever answers first (Emacs or web UI) settles the request and
+If the web UI is open, the query or approval is shown there too.
+Whichever answers first, Emacs or web UI, settles the request and
 dismisses the other presentation.  To change this (e.g., letting the
 web UI handle all requests), customize `dsh-bridge-approval-answer`.
 
 ### DSH-Prompt buffer
 
-This buffer is used to compose a prompt, or reply, for a DSH session.
-It is opened by `r` from the transient menu, DSH-View buffer, or the
+The DSH-Prompt buffer is used to compose a prompt, or reply.  It is
+opened by `r` from the transient menu, DSH-View buffer, or the
 DSH-Sessions buffer.  You can also open it with `RET` from the
 DSH-Sessions, if the session is waiting for a prompt.
 
-The target session affected is determined by how the buffer was
-invoked; for instance, `r` from a DSH-View buffer opens a prompt for
-the same session.
+The target session is determined by how the buffer was invoked; for
+instance, `r` from a DSH-View buffer opens a prompt for the same
+session.
 
 The following commands are available from the DSH-Prompt buffer:
 
-* `C-c C-c` — send the buffer as a prompt, and pop to the DSH-View
-              buffer to watch the reply.
+* `C-c C-c` — send the prompt, and pop to a DSH-View buffer to see the reply.
 * `C-c C-d` — push the buffer to the DSH composer as a draft.
 * `C-c C-a` — attach a file to the prompt (see below).
 * `C-c C-m` — set the model and reasoning effort.
@@ -271,17 +253,18 @@ The following commands are available from the DSH-Prompt buffer:
 * `C-c C-l` — open the DSH-Sessions buffer.
 * `M-p`/`M-n` — walk the session's prompt history.
 
-If `C-c C-c` is invoked while the session is running, it asks how to
-send the prompt: queue to run after the current turn, steer the
-running turn, or cancel.  Customize `dsh-bridge-send-while-running` to
-change this behavior.  To unconditionally steer, type `C-u C-c C-c`.
+When Markdown mode is installed, this buffer derives from it, so most
+markdown editing commands are also available.
+
+If the session is running when you invoke `C-c C-c`, the command asks
+how exactly to send the prompt; you queue it to run after the current
+turn, steer the running turn, or cancel.  Customize
+`dsh-bridge-send-while-running` to change this behavior.  To
+unconditionally steer, type `C-u C-c C-c`.
 
 While walking the prompt history with `M-p`/`M-n`, you may edit
 earlier prompts.  This blocks further history navigation; to resume,
 you must send the prompt first, or revert with `M-x revert-buffer`.
-
-When Markdown mode is installed, this buffer derives from it, so most
-markdown editing commands are also available.
 
 #### Attachments
 
@@ -292,7 +275,7 @@ the minibuffer, and inserts a tag line into the prompt buffer:
 <#attachment filename="/home/you/screenshot.png">
 ```
 If you change your mind and no longer want to attach the file, just
-delete the tag line before sending the prompt.
+delete the tag line before sending.
 
 From elsewhere in Emacs, you can also run this command (`M-x
 dsh-bridge-attach-file`) directly to open a DSH-Prompt buffer with the
@@ -328,23 +311,18 @@ never contacts a third-party service.  Every route is gated by a
 shared bearer token, generated on first use and stored with owner-only
 permissions at `~/.dsh/dsh-bridge-token`.  Emacs reads that file
 directly, and the browser plugin fetches it from a route fenced to
-loopback peers and same-origin pages.  Request bodies are capped at 1
-MiB, and messages waiting for Emacs sit in a bounded outbox that
-evicts the oldest entries (with a warning).
+loopback peers and same-origin pages.  Any third party with access to
+the token can do everything this Emacs package can: send prompts, read
+session logs, answer queries and approval requests, interrupt running
+turns, etc.  Approvals submitted via this route grant no authority the
+web UI could not grant.
 
-Turn activity is bounded too: `/turns` carries at most 60 activity
-entries per turn — the oldest slide out first, so a live turn's newest
-activity is always sent — and activity for at most the newest 40 turns,
-so the payload cannot grow without limit over a long session.
-Reasoning crosses the wire only as a one-line summary; the full text
-stays on the host.
-
-Note that any third party with access to the token can do everything
-this Emacs package can: send prompts, read session logs (including
-persisted ones), answer the model's questions and approval requests,
-interrupt running turns, name files for the host to attach, etc.
-However, approvals submitted via this route grant no authority the web
-UI could not grant.
+Request bodies are capped at 1 MiB, and messages waiting for Emacs sit
+in a bounded outbox that evicts the oldest entries (with a warning).
+The turn activity reporter, `/turns`, carries at most 60 of the latest
+activity entries per turn, and activity for at most the newest 40
+turns.  At present, reasoning activity is only shown as one-line
+summaries, with the full text staying in DSH.
 
 ## License
 
