@@ -1,6 +1,6 @@
 # AGENTS.md
 
-`dsh-emacs-bridge` is a two-way bridge between [Emacs](https://www.gnu.org/software/emacs/) and a running DeepSeek Harness (DSH) session, over loopback HTTP + SSE. Emacs is a companion to a live session, not a replacement client. A design principle: let DSH shoulder onerous model-wrangling (e.g. streaming chain-of-thought).
+`dsh-emacs-bridge` is a two-way bridge between GNU Emacs and a running DeepSeek Harness (DSH) session, over loopback HTTP + SSE. Key design principles: (i) let DSH shoulder onerous model-wrangling like streaming chain-of-thought; (ii) offer a DSH controller that fits Emacs UX conventions, not just remaking the DSH web interface inside Emacs.
 
 ## Repository layout
 
@@ -26,11 +26,11 @@ Documentation pointers, kept current by policy:
 
 Update AGENTS.md sparingly. A new entry must pass one of these tests:
 
-- It is a **policy or invariant** a code reader cannot discover from the code (locked names, the version-bump rule, fence/auth policy, testing gates, licensing).
+- It is a **policy or invariant** a code reader cannot easily discover (locked names, the version-bump rule, fence/auth policy, testing gates, licensing).
 - It is a **cross-cutting constraint** that binds changes beyond the one at hand ("no route binds beyond loopback", "`logic.ts` imports no runtime", "every contribution is an effect").
 - It is a **pointer** to where a contract is authoritatively documented (the route inventory in `index.ts`, the SSE frames in `logic.ts`).
 
-Do not add an entry merely to document some feature or fix you just implemented. Behavior descriptions and implementation details belong in the code and its comments, in README.md (high-profile user-facing behavior), or in PLAN.md (design rationale) — not here. A useful gut check: would an agent working on an *unrelated* part of the project go wrong without knowing this? If not, leave it out.
+Do not add an entry merely to document some change you just made. Behavior descriptions and implementation details belong in the code and its comments, in README.md (high-profile user-facing behavior), or in PLAN.md (design rationale), not here. A useful gut check: would an agent working on an *unrelated* part of the project go wrong without knowing this? If not, omit it.
 
 ## Names (locked)
 
@@ -62,7 +62,7 @@ The `;; Version:` header of `emacs/dsh-bridge.el` is the source of truth. Two co
 
 ### README.md
 
-The README.md serves as a short introduction and quickstart; it is not an exhaustive user manual, and it is NOT a place to document minor tweaks. Keep the contents factually correct; if you make an important user-facing change, consider documenting it here, but note that the bar for inclusion is high. If in doubt, suggest the `README.md` change to the user as an optional follow-up.
+The README.md serves as a short introduction and quickstart; it is not an exhaustive user manual, and it is NOT a place to document minor tweaks. Keep its contents factually correct. If you make an important user-facing change, consider documenting it here, but note that the bar for inclusion is high. If in doubt, suggest the `README.md` change to the user as an optional follow-up.
 
 ### Host plugin (`dsh-plugin/src/`)
 
@@ -95,7 +95,7 @@ The README.md serves as a short introduction and quickstart; it is not an exhaus
 ### Emacs package (`emacs/`)
 
 - Two libraries, `lexical-binding: t`. `dsh-bridge.el` is self-contained and must never `require` the companion at load time; the sole seam is `dsh-bridge--ensure-plugin`. Both files ship in the package tar.
-- Docstrings state the function's intention, document its arguments and return value, and flag gotchas — nothing more. The code, not the docstring, is the contract: never use the docstring to narrate the implementation step by step. Tricky implementation details (why a splice is sound, why a race is safe) belong in code comments next to the code they describe.
+- Docstrings state the function's intention, its arguments and return value, and notable gotchas — nothing more. The code, not the docstring, is the contract: never use the docstring to narrate the implementation step by step. Tricky implementation details (why a splice is sound, why a race is safe) belong in code comments next to the code they describe.
 - A command that mutates a session resolves its target with the REQUIRE form of `dsh-bridge--effective-session`: the buffer's own binding (view: shown session; prompt: bound session; describe: shown session; sessions list: row at point), then the pinned target, refusing with a `user-error` when neither names one. The advisory last-active caches are display-only, never a mutation target. Direct calls are the only resolution path: the `dsh-bridge` dispatcher keeps a menu-scoped focus of its own, which its suffixes pass to the verbs explicitly, and `dsh-bridge--effective-session` is never taught about it. `dsh-bridge-answer` deliberately adds NODEFAULT on top: it acts only on the buffer's own binding and refuses from a buffer that names no session, so answering always carries the context of the session that asked, and a sole pending session elsewhere is never an implicit target.
 - DSH-View bodies are filled incrementally by `dsh-bridge--view-fill` under a recorded provenance; any mismatch falls back to a full re-render. Do not add a splice path that cannot prove those checks, and keep terminal furniture (answer/approval notes, changed-files footer) out of the body.
 - DSH-Question buffer edits go through `dsh-bridge--question-edit` (read-only, undo suppressed, modified flag cleared). A state change patches the affected region, found by text property, instead of re-rendering: a question's `detail`, and any markers or overlays inside it, must survive, so `dsh-bridge--question-render` stays the initial paint and the fallback only. A patch must re-apply the buffer's own question-id string, never the caller's — `next-single-property-change` compares with `eq`, so an equal-but-distinct string splits a block in two.
