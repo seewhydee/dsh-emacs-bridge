@@ -159,60 +159,60 @@ reports (nil . nil) instead of letting the signal escape."
       (should (equal (dsh-bridge--request "GET" "/x" nil) (cons 401 nil)))
       (should (null dsh-bridge--bridge-status-cache)))))
 
-;;; Targeting: the effective-session rule and the default target
+;;; Targeting: the effective-session rule and the pinned target
 
 (ert-deftest dsh-bridge-effective-session-default-only ()
-  "With no buffer session, the effective session is the default target."
-  (let ((dsh-bridge-default-session "s1"))
+  "With no buffer session, the effective session is the pinned target."
+  (let ((dsh-bridge-pinned-target "s1"))
     (with-temp-buffer
       (should (equal (dsh-bridge--effective-session) "s1")))))
 
 (ert-deftest dsh-bridge-effective-session-nil-without-default ()
-  "With no buffer session and no default target, the effective session is nil
+  "With no buffer session and no pinned target, the effective session is nil
 (last-active)."
-  (let ((dsh-bridge-default-session nil))
+  (let ((dsh-bridge-pinned-target nil))
     (with-temp-buffer
       (should (null (dsh-bridge--effective-session))))))
 
 (ert-deftest dsh-bridge-effective-session-prompt-binding-wins ()
-  "A prompt-buffer binding beats the default target."
-  (let ((dsh-bridge-default-session "default"))
+  "A prompt-buffer binding beats the pinned target."
+  (let ((dsh-bridge-pinned-target "default"))
     (with-temp-buffer
       (dsh-bridge-prompt-mode)
       (setq-local dsh-bridge--prompt-session "bound")
       (should (equal (dsh-bridge--effective-session) "bound")))))
 
 (ert-deftest dsh-bridge-effective-session-output-content-wins ()
-  "The output buffer's shown session beats the default target."
-  (let ((dsh-bridge-default-session "default"))
+  "The output buffer's shown session beats the pinned target."
+  (let ((dsh-bridge-pinned-target "default"))
     (with-temp-buffer
       (dsh-bridge-view-mode)
       (setq-local dsh-bridge--view-content-session "shown")
       (should (equal (dsh-bridge--effective-session) "shown")))))
 
-(ert-deftest dsh-bridge-set-default-target-local ()
-  "`dsh-bridge-set-default-target' sets the Emacs-side default directly and
+(ert-deftest dsh-bridge-pin-target-local ()
+  "`dsh-bridge-pin-target' sets the Emacs-side default directly and
 never POSTs /select (the host pin is gone)."
-  (let ((dsh-bridge-default-session "old") (posts nil))
+  (let ((dsh-bridge-pinned-target "old") (posts nil))
     (cl-letf (((symbol-function 'dsh-bridge--request)
                (lambda (method path _payload)
                  (when (equal method "POST") (push path posts))
                  (cons 200 (list (cons 'sessions nil))))))
-      (dsh-bridge-set-default-target "new"))
-    (should (equal dsh-bridge-default-session "new"))
+      (dsh-bridge-pin-target "new"))
+    (should (equal dsh-bridge-pinned-target "new"))
     (should-not (member "/select" posts))))
 
-(ert-deftest dsh-bridge-clear-default-target-local ()
-  "`dsh-bridge-clear-default-target' clears the default target, no host
+(ert-deftest dsh-bridge-unpin-target-local ()
+  "`dsh-bridge-unpin-target' clears the pinned target, no host
 round-trip."
-  (let ((dsh-bridge-default-session "pinned"))
-    (dsh-bridge-clear-default-target))
-  (should (null dsh-bridge-default-session)))
+  (let ((dsh-bridge-pinned-target "pinned"))
+    (dsh-bridge-unpin-target))
+  (should (null dsh-bridge-pinned-target)))
 
-(ert-deftest dsh-bridge-set-default-target-offers-saved-sessions ()
+(ert-deftest dsh-bridge-pin-target-offers-saved-sessions ()
   "Completion offers live and saved sessions, and only sessions."
   (let ((table-seen nil)
-        (dsh-bridge-default-session nil))
+        (dsh-bridge-pinned-target nil))
     (cl-letf (((symbol-function 'dsh-bridge--fetch-sessions)
                (lambda ()
                  (cons 200
@@ -222,62 +222,434 @@ round-trip."
                (lambda (_prompt table &rest _rest)
                  (setq table-seen table)
                  "A")))
-      (call-interactively #'dsh-bridge-set-default-target))
+      (call-interactively #'dsh-bridge-pin-target))
     (should (equal (all-completions "" table-seen) '("A" "B")))))
 
 (ert-deftest dsh-bridge-dispatcher-header-labels ()
-  "The dispatcher header labels the effective session with the right qualifier.
+  "The dispatcher header renders the focus from the record alone.
 A leading space (protecting the status glyph from the menu cursor) is
-present iff the indicator style produces a glyph."
+present iff the indicator style produces a glyph.  The `(i/n)' position
+is shown only while unpinned and only for a focus inside a multi-session
+cycle set, and provenance is never rendered."
   (let ((dsh-bridge--sessions-cache
          '(((id . "s1") (title . "T") (live . t) (running . t))))
         ;; The tracker outranks the row's `running' flag for a live session,
         ;; so the idle glyph below proves the tracker entry is consulted.
         (dsh-bridge--session-status '(("s1" idle)))
-        (dsh-bridge-status-indicator 'geometric))
-    ;; Bound buffer session: plain label.
+        (dsh-bridge-status-indicator 'geometric)
+        (dsh-bridge--dispatcher-roster 'ok)
+        (dsh-bridge--focus-cycle '("s1")))
+    ;; A focus from the invoking buffer: plain label.
+    (let ((dsh-bridge--focus '(:session "s1" :provenance buffer)))
+      ;; string-equal: the glyph carries face properties.
+      (should (string-equal (dsh-bridge--dispatcher-header) " \u25cf T")))
+    ;; An advisory focus renders exactly like a confirmed one: provenance is
+    ;; machinery, not display.
+    (let ((dsh-bridge--focus '(:session "s1" :provenance advisory)))
+      (should (string-equal (dsh-bridge--dispatcher-header) " \u25cf T")))
+    ;; A pinned focus announces itself, bracketed, with no position.
+    (let ((dsh-bridge--focus '(:session "s1" :provenance pinned)))
+      (should (string-equal (dsh-bridge--dispatcher-header) " \u25cf T [pinned]")))
+    ;; A multi-session cycle set adds the focus's position.
+    (let ((dsh-bridge--focus-cycle '("s2" "s1" "s3"))
+          (dsh-bridge--sessions-cache
+           '(((id . "s1") (title . "T") (live . t) (running . t))
+             ((id . "s2") (title . "U") (live . t))
+             ((id . "s3") (title . "V") (live . t)))))
+      (let ((dsh-bridge--focus '(:session "s1" :provenance cycled)))
+        (should (string-equal (dsh-bridge--dispatcher-header) " \u25cf T (2/3)")))
+      ;; A pinned focus suppresses the position even in a large set.
+      (let ((dsh-bridge--focus '(:session "s1" :provenance pinned)))
+        (should (string-equal (dsh-bridge--dispatcher-header) " \u25cf T [pinned]"))))
+    ;; No sessions: the header says so instead of staying blank, and an
+    ;; unreachable host has its own line.
+    (let ((dsh-bridge--focus nil)
+          (dsh-bridge--dispatcher-roster 'empty))
+      (should (string-equal (dsh-bridge--dispatcher-header) "no sessions")))
+    (let ((dsh-bridge--focus nil)
+          (dsh-bridge--dispatcher-roster 'unreachable))
+      (should (string-equal (dsh-bridge--dispatcher-header) "host unreachable")))
+    (let ((dsh-bridge--focus nil)
+          (dsh-bridge--dispatcher-roster nil)
+          (dsh-bridge--sessions-cache nil))
+      (should (string-equal (dsh-bridge--dispatcher-header) "no sessions")))
+    ;; A focus outside the cycle snapshot (pinned from outside the roster)
+    ;; shows its label without a position; its status is simply unknown.
+    (let ((dsh-bridge--focus '(:session "s9" :provenance pinned)))
+      (should (string-equal (dsh-bridge--dispatcher-header) " ? s9 [pinned]")))
+    ;; With indicator style `none' there is no glyph, hence no leading space
+    ;; -- for an unpinned focus either.
+    (let ((dsh-bridge-status-indicator 'none)
+          (dsh-bridge--focus '(:session "s1" :provenance pinned)))
+      (should (string-equal (dsh-bridge--dispatcher-header) "T [pinned]")))
+    (let ((dsh-bridge-status-indicator 'none)
+          (dsh-bridge--focus '(:session "s1" :provenance cycled)))
+      (should (string-equal (dsh-bridge--dispatcher-header) "T")))))
+
+(ert-deftest dsh-bridge-dispatcher-focus-resolution ()
+  "The dispatcher's focus resolves pin, then buffer binding, then advisory.
+The pinned target wins over the invoking buffer's own binding; without a
+pin the buffer binding wins; with neither, the focus is only an advisory
+last-active guess."
+  (let ((dsh-bridge--sessions-cache
+         '(((id . "s1") (title . "T1") (live . t) (lastActive . 10))
+           ((id . "s2") (title . "T2") (live . t) (lastActive . 20))))
+        (dsh-bridge--last-resolved-active nil)
+        (dsh-bridge--focus nil))
     (with-temp-buffer
       (dsh-bridge-prompt-mode)
       (setq-local dsh-bridge--prompt-session "s1")
-      ;; string-equal: the glyph carries face properties.
-      (should (string-equal (dsh-bridge--dispatcher-header) " ● T")))
-    ;; Default target: (default) qualifier.
-    (with-temp-buffer
-      (let ((dsh-bridge-default-session "s1"))
-        (should (string-equal (dsh-bridge--dispatcher-header) " ● T (default)"))))
-    ;; Resolved last-active: (last active) qualifier.
-    (with-temp-buffer
-      (let ((dsh-bridge-default-session nil)
-            (dsh-bridge--last-resolved-active '("s1" . "T")))
-        (should (string-equal (dsh-bridge--dispatcher-header)
-                              " ● T (last active)"))))
-    ;; Resolved last-active without a label: computed from the id.
-    (with-temp-buffer
-      (let ((dsh-bridge-default-session nil)
-            (dsh-bridge--last-resolved-active '("s1" . nil)))
-        (should (string-equal (dsh-bridge--dispatcher-header)
-                              " ● T (last active)"))))
-    ;; Nothing bound and nothing resolved: the cache's last-active live
-    ;; session is named, with the (last active) qualifier.
-    (with-temp-buffer
-      (let ((dsh-bridge-default-session nil)
-            (dsh-bridge--last-resolved-active nil))
-        (should (string-equal (dsh-bridge--dispatcher-header) " ● T (last active)"))))
-    ;; Nothing bound, resolved, or live: empty header.
-    (with-temp-buffer
-      (let ((dsh-bridge-default-session nil)
+      ;; Pin beats the buffer binding.
+      (let ((dsh-bridge-pinned-target "s2"))
+        (should (equal (dsh-bridge--dispatcher-focus-init) "s2"))
+        (should (eq (plist-get dsh-bridge--focus :provenance) 'pinned))
+        (should-not (dsh-bridge--focus-advisory-p)))
+      ;; Buffer binding beats the advisory guess.
+      (let ((dsh-bridge-pinned-target nil))
+        (should (equal (dsh-bridge--dispatcher-focus-init) "s1"))
+        (should (eq (plist-get dsh-bridge--focus :provenance) 'buffer))
+        (should-not (dsh-bridge--focus-advisory-p)))
+      ;; With neither, the newest live session is only an advisory guess.
+      (setq-local dsh-bridge--prompt-session nil)
+      (let ((dsh-bridge-pinned-target nil))
+        (should (equal (dsh-bridge--dispatcher-focus-init) "s2"))
+        (should (eq (plist-get dsh-bridge--focus :provenance) 'advisory))
+        (should (dsh-bridge--focus-advisory-p)))
+      ;; The host's recorded resolution outranks the local cache.
+      (let ((dsh-bridge-pinned-target nil)
+            (dsh-bridge--last-resolved-active '("s1" . "T1")))
+        (should (equal (dsh-bridge--dispatcher-focus-init) "s1")))
+      ;; Nothing names a session: no focus, so the header explains itself.
+      (let ((dsh-bridge-pinned-target nil)
             (dsh-bridge--last-resolved-active nil)
             (dsh-bridge--sessions-cache nil))
-        (should (string-equal (dsh-bridge--dispatcher-header) ""))))
-    ;; With indicator style `none' there is no glyph, hence no leading space.
+        (should (null (dsh-bridge--dispatcher-focus-init)))
+        (should (null dsh-bridge--focus))
+        (should-not (dsh-bridge--focus-advisory-p))))))
+
+(ert-deftest dsh-bridge-dispatcher-focus-falls-back-outside-menu ()
+  "Outside a menu, the focus accessors fall back on the buffer's session.
+This keeps a suffix command usable in isolation, and keeps direct callers
+on `dsh-bridge--effective-session'."
+  (let ((dsh-bridge--focus nil)
+        (dsh-bridge-pinned-target nil))
     (with-temp-buffer
-      (let ((dsh-bridge-status-indicator 'none)
-            (dsh-bridge-default-session "s1"))
-        (should (string-equal (dsh-bridge--dispatcher-header) "T (default)"))))))
+      (dsh-bridge-prompt-mode)
+      (setq-local dsh-bridge--prompt-session "s1")
+      (should (equal (dsh-bridge--focus-session) "s1"))
+      (should-not (dsh-bridge--focus-advisory-p)))
+    ;; With a menu open, the record answers instead.
+    (let ((dsh-bridge--focus '(:session "s2" :provenance advisory)))
+      (with-temp-buffer
+        (dsh-bridge-prompt-mode)
+        (setq-local dsh-bridge--prompt-session "s1")
+        (should (equal (dsh-bridge--focus-session) "s2"))
+        (should (dsh-bridge--focus-advisory-p))))))
+
+(ert-deftest dsh-bridge-dispatcher-cycle-snapshot ()
+  "The cycle set is the non-archived roster, newest first.
+Live and cold sessions are both included; an archived row and a row with
+no id are excluded.  The snapshot does not follow later cache updates,
+so mid-menu SSE traffic cannot reshuffle the positions."
+  (let ((dsh-bridge--sessions-cache
+         '(((id . "s1") (title . "T1") (live . t) (lastActive . 10))
+           ((id . "s2") (title . "T2") (live . t) (lastActive . 30))
+           ((id . "s3") (title . "T3") (archived . t) (lastActive . 40))
+           ((title . "not a session") (lastActive . 50))
+           ((id . "s4") (title . "T4") (lastActive . 20))))
+        (dsh-bridge--focus-cycle nil))
+    (should (equal (dsh-bridge--dispatcher-cycle-init) '("s2" "s4" "s1")))
+    (should (equal (dsh-bridge--cycle-index "s4") 1))
+    (should (null (dsh-bridge--cycle-index "s3")))
+    (should (null (dsh-bridge--cycle-index nil)))
+    ;; A later cache change leaves the snapshot alone.
+    (setq dsh-bridge--sessions-cache
+          '(((id . "s1") (title . "T1") (live . t) (lastActive . 99))))
+    (should (equal dsh-bridge--focus-cycle '("s2" "s4" "s1")))))
+
+(ert-deftest dsh-bridge-dispatcher-seed ()
+  "The roster seed fetches only when the cache is cold, or when forced.
+The fetch is bounded by `dsh-bridge-roster-timeout', and the outcomes --
+fetched, host answered with nothing, host unreachable -- are recorded for
+the header."
+  (let ((dsh-bridge--sessions-cache nil)
+        (dsh-bridge--dispatcher-roster nil)
+        (dsh-bridge--plugin-diagnosed nil)
+        (dsh-bridge--bridge-status-cache 'running)
+        (dsh-bridge-timeout 8)
+        (dsh-bridge-roster-timeout 1.5)
+        (seen-timeout nil)
+        (calls 0))
+    (cl-letf (((symbol-function 'dsh-bridge--ensure-plugin) #'ignore))
+      ;; A cold cache seeds, with the roster timeout bound.
+      (cl-letf (((symbol-function 'dsh-bridge--fetch-sessions)
+                 (lambda ()
+                   (setq calls (1+ calls)
+                         seen-timeout dsh-bridge-timeout)
+                   (setq dsh-bridge--sessions-cache
+                         '(((id . "s1") (title . "T1") (live . t))))
+                   (cons 200 dsh-bridge--sessions-cache))))
+        (should (eq (dsh-bridge--dispatcher-seed) 'ok))
+        (should (= calls 1))
+        (should (= seen-timeout 1.5)))
+      ;; A warm cache is taken on faith: no fetch, and no plugin probe.
+      (setq calls 0)
+      (cl-letf (((symbol-function 'dsh-bridge--fetch-sessions)
+                 (lambda () (setq calls (1+ calls)) (cons 200 nil)))
+                ((symbol-function 'dsh-bridge--ensure-plugin)
+                 (lambda () (error "should not probe on a warm cache"))))
+        (should (eq (dsh-bridge--dispatcher-seed) 'ok))
+        (should (= calls 0)))
+      ;; The prefix argument forces a refresh even with a warm cache.
+      (cl-letf (((symbol-function 'dsh-bridge--fetch-sessions)
+                 (lambda ()
+                   (setq calls (1+ calls))
+                   (cons 200 '(((id . "s1") (title . "T1") (live . t)))))))
+        (should (eq (dsh-bridge--dispatcher-seed t) 'ok))
+        (should (= calls 1)))
+      ;; The host answered, and the roster is empty.
+      (setq dsh-bridge--sessions-cache nil)
+      (cl-letf (((symbol-function 'dsh-bridge--fetch-sessions)
+                 (lambda () (cons 200 nil))))
+        (should (eq (dsh-bridge--dispatcher-seed) 'empty)))
+      ;; A transport failure is the unreachable story.
+      (setq dsh-bridge--sessions-cache nil)
+      (cl-letf (((symbol-function 'dsh-bridge--fetch-sessions)
+                 (lambda () (cons nil nil))))
+        (should (eq (dsh-bridge--dispatcher-seed) 'unreachable)))
+      ;; So is a plugin probe that signals before any fetch happens.
+      (setq dsh-bridge--sessions-cache nil
+            dsh-bridge--bridge-status-cache nil)
+      (cl-letf (((symbol-function 'dsh-bridge--ensure-plugin)
+                 (lambda () (error "dsh-bridge: no bridge")))
+                ((symbol-function 'dsh-bridge--fetch-sessions)
+                 (lambda () (cons 200 nil))))
+        (should (eq (dsh-bridge--dispatcher-seed) 'unreachable))))))
+
+(ert-deftest dsh-bridge-dispatcher-cycling ()
+  "Cycling walks the snapshot, wraps, and confirms an advisory focus.
+A pinned menu refuses to cycle and says so."
+  (let ((dsh-bridge--focus-cycle '("s1" "s2" "s3"))
+        (dsh-bridge--sessions-cache
+         '(((id . "s1") (title . "T1") (live . t))
+           ((id . "s2") (title . "T2") (live . t))
+           ((id . "s3") (title . "T3") (live . t))))
+        (dsh-bridge--focus '(:session "s1" :provenance advisory)))
+    ;; M-n walks toward newer sessions and confirms the guess.
+    (dsh-bridge--dispatcher-next)
+    (should (equal (plist-get dsh-bridge--focus :session) "s2"))
+    (should (eq (plist-get dsh-bridge--focus :provenance) 'cycled))
+    (should-not (dsh-bridge--focus-advisory-p))
+    ;; Swallowing the confirmation is not possible by cycling back.
+    (dsh-bridge--dispatcher-previous)
+    (should (equal (plist-get dsh-bridge--focus :session) "s1"))
+    (should (eq (plist-get dsh-bridge--focus :provenance) 'cycled))
+    ;; M-p wraps backward to the oldest.
+    (dsh-bridge--dispatcher-previous)
+    (should (equal (plist-get dsh-bridge--focus :session) "s3"))
+    ;; A pin locks cycling.
+    (dsh-bridge--focus-set "s1" 'pinned)
+    (dsh-bridge--dispatcher-next)
+    (should (equal (plist-get dsh-bridge--focus :session) "s1"))
+    ;; A one-session set cycles nowhere, but still confirms the guess: the
+    ;; refusal message points at M-n/M-p, so they must have an effect.
+    (setq dsh-bridge--focus-cycle '("s1"))
+    (dsh-bridge--focus-set "s1" 'advisory)
+    (dsh-bridge--dispatcher-next)
+    (should (equal (plist-get dsh-bridge--focus :session) "s1"))
+    (should-not (dsh-bridge--focus-advisory-p))))
+
+(ert-deftest dsh-bridge-dispatcher-mutators-refuse-advisory ()
+  "A session-state mutator refuses an advisory focus and acts otherwise.
+The refusal names the verb and points at the keys that confirm or pin."
+  (let ((dsh-bridge--sessions-cache '(((id . "s1") (title . "T1") (live . t))))
+        (called nil)
+        (message-log nil))
+    (cl-letf (((symbol-function 'dsh-bridge-stop-session)
+               (lambda (&rest args) (push args called)))
+              ((symbol-function 'message)
+               (lambda (fmt &rest args)
+                 (setq message-log (apply #'format fmt args)))))
+      ;; Advisory: refuse, and do not reach the command.
+      (dsh-bridge--focus-set "s1" 'advisory)
+      (dsh-bridge--dispatcher-stop)
+      (should (null called))
+      (should (string-match-p "needs a confirmed target" message-log))
+      (should (string-match-p "stopping" message-log))
+      ;; Confirmed by cycling: proceed, addressed to the focus.
+      (dsh-bridge--focus-set "s1" 'cycled)
+      (dsh-bridge--dispatcher-stop)
+      (should (equal called '((nil "s1"))))
+      ;; Pinned: proceed too.
+      (setq called nil)
+      (dsh-bridge--focus-set "s1" 'pinned)
+      (dsh-bridge--dispatcher-stop)
+      (should (equal called '((nil "s1")))))))
+
+(ert-deftest dsh-bridge-dispatcher-verbs-address-the-focus ()
+  "Reads and sends address the displayed focus, not the invoking buffer.
+A menu opened in session Y's buffer while focused on X reads X."
+  (let ((dsh-bridge--sessions-cache
+         '(((id . "s1") (title . "T1") (live . t))
+           ((id . "s2") (title . "T2") (live . t))))
+        (sent nil) (fetched nil) (described nil))
+    (cl-letf (((symbol-function 'dsh-bridge-send)
+               (lambda (&optional id) (setq sent id)))
+              ((symbol-function 'dsh-bridge-fetch)
+               (lambda (&optional id _) (setq fetched id)))
+              ((symbol-function 'dsh-bridge-describe-session)
+               (lambda (&optional id) (setq described id))))
+      (dsh-bridge--focus-set "s2" 'cycled)
+      (with-temp-buffer
+        (dsh-bridge-view-mode)
+        (setq-local dsh-bridge--view-content-session "s1")
+        (dsh-bridge--dispatcher-send)
+        (dsh-bridge--dispatcher-fetch)
+        (dsh-bridge--dispatcher-describe))
+      (should (equal sent "s2"))
+      (should (equal fetched "s2"))
+      (should (equal described "s2")))))
+
+(ert-deftest dsh-bridge-dispatcher-pin-and-unpin-write-the-focus ()
+  "Pin and unpin re-point the focus record so the header follows.
+Pinning an advisory guess is allowed; unpinning leaves the pinned session
+as an explicitly confirmed focus."
+  (let ((dsh-bridge--sessions-cache
+         '(((id . "s1") (title . "T1") (live . t))
+           ((id . "s2") (title . "T2") (live . t))))
+        (dsh-bridge-pinned-target nil))
+    ;; Pin the advisory focus.
+    (dsh-bridge--focus-set "s1" 'advisory)
+    (dsh-bridge--dispatcher-pin)
+    (should (equal dsh-bridge-pinned-target "s1"))
+    (should (eq (plist-get dsh-bridge--focus :provenance) 'pinned))
+    ;; A pinned menu cannot cycle, but T moves the pin.
+    (cl-letf (((symbol-function 'dsh-bridge--read-session-id)
+               (lambda (&rest _) "s2")))
+      (dsh-bridge--dispatcher-pin-by-title))
+    (should (equal dsh-bridge-pinned-target "s2"))
+    (should (equal (plist-get dsh-bridge--focus :session) "s2"))
+    (should (eq (plist-get dsh-bridge--focus :provenance) 'pinned))
+    ;; Unpin: the name stays the focus, now explicitly confirmed.
+    (dsh-bridge--dispatcher-unpin)
+    (should (null dsh-bridge-pinned-target))
+    (should (equal (plist-get dsh-bridge--focus :session) "s2"))
+    (should-not (dsh-bridge--focus-advisory-p))))
+
+(ert-deftest dsh-bridge-dispatcher-create-pins-and-focuses ()
+  "`+' pins the created session and re-points the focus at it."
+  (let ((dsh-bridge--sessions-cache nil)
+        (dsh-bridge--focus-cycle '(("s9" . "old")))
+        (dsh-bridge-pinned-target nil)
+        (dsh-bridge--focus '(:session "s9" :provenance advisory)))
+    (cl-letf (((symbol-function 'dsh-bridge-create-session)
+               (lambda (&rest _) "new-1")))
+      (dsh-bridge--dispatcher-create))
+    (should (equal dsh-bridge-pinned-target "new-1"))
+    (should (equal (plist-get dsh-bridge--focus :session) "new-1"))
+    (should (eq (plist-get dsh-bridge--focus :provenance) 'pinned))))
+
+(ert-deftest dsh-bridge-dispatcher-exit-clears-menu-state ()
+  "The focus is menu-scoped: the exit hook drops it, not the pin."
+  (let ((dsh-bridge-pinned-target "s1"))
+    (dsh-bridge--focus-set "s1" 'pinned)
+    (setq dsh-bridge--focus-cycle '(("s1" . "T1"))
+          dsh-bridge--dispatcher-roster 'ok)
+    (dsh-bridge--dispatcher-exit)
+    (should (null dsh-bridge--focus))
+    (should (null dsh-bridge--focus-cycle))
+    (should (null dsh-bridge--dispatcher-roster))
+    (should (equal dsh-bridge-pinned-target "s1"))))
+
+(ert-deftest dsh-bridge-dispatcher-stay-verbs ()
+  "The in-menu verbs are declared transient, so their keys do not close it.
+A plain suffix exits on Emacs 31.1's transient; cycling, pinning, and the
+mutators that refuse inside the menu must stay.  The conditional mutators
+resolve through a trampoline that reads the previous invocation's outcome,
+because transient picks the pre-command before the command runs."
+  (let ((simple '("M-p" "M-n" "t" "u" "T"))
+        (conditional '("k" "p" "G" "A" "X")))
+    ;; The layout carries the declaration: `t' for the verbs that just
+    ;; return to the menu, the trampoline for the ones that can refuse.
+    (dolist (key simple)
+      (should (eq (plist-get (cdr (transient-get-suffix 'dsh-bridge key))
+                             :transient)
+                  t)))
+    (dolist (key conditional)
+      (should (eq (plist-get (cdr (transient-get-suffix 'dsh-bridge key))
+                             :transient)
+                  'dsh-bridge--dispatcher-stay-p)))
+    ;; ...and transient resolves it to the intended pre-command.
+    (cl-letf (((symbol-function 'dsh-bridge--dispatcher-seed)
+               (lambda (&optional _) 'ok))
+              ((symbol-function 'dsh-bridge--ensure-plugin) #'ignore))
+      (dsh-bridge)
+      (let ((map (transient--make-predicate-map)))
+        (dolist (key simple)
+          (should (eq (lookup-key map (vector (plist-get
+                                               (cdr (transient-get-suffix
+                                                     'dsh-bridge key))
+                                               :command)))
+                      'transient--do-call)))
+        (dolist (key conditional)
+          (should (eq (lookup-key map (vector (plist-get
+                                               (cdr (transient-get-suffix
+                                                     'dsh-bridge key))
+                                               :command)))
+                      'dsh-bridge--dispatcher-stay-p)))))
+    (dsh-bridge--dispatcher-exit))
+  ;; The trampoline stays after a refusal and exits after a real mutation.
+  (dsh-bridge--focus-set "s1" 'advisory)
+  (should-not (dsh-bridge--dispatcher-may-mutate "stopping"))
+  (should (eq (dsh-bridge--dispatcher-stay-p) 'transient--do-stay))
+  (dsh-bridge--focus-set "s1" 'cycled)
+  (should (dsh-bridge--dispatcher-may-mutate "stopping"))
+  (should (eq (dsh-bridge--dispatcher-stay-p) 'transient--do-exit)))
+
+(ert-deftest dsh-bridge-dispatcher-empty-roster-message ()
+  "A mutator with no session at all names the way to create one.
+It must not fall through to the underlying command's `user-error', which
+would leave the menu with a bare error instead of advice."
+  (let ((dsh-bridge--sessions-cache nil)
+        (dsh-bridge--focus nil)
+        (message-log nil))
+    (cl-letf (((symbol-function 'message)
+               (lambda (fmt &rest args) (setq message-log (apply #'format fmt args)))))
+      (should-not (dsh-bridge--dispatcher-may-mutate "stopping")))
+    (should (string-match-p "no sessions" message-log))
+    (should (string-match-p "\\+" message-log))))
+
+(ert-deftest dsh-bridge-dispatcher-advisory-guess-includes-cold ()
+  "A roster whose sessions are all cold still names an advisory focus.
+DSH applies cold state aggressively, so the guess falls back past the
+live-only cache to the newest roster session; the header then shows it
+rather than claiming there are no sessions."
+  (let ((dsh-bridge--sessions-cache
+         '(((id . "cold-2") (title . "C2") (lastActive . 20))
+           ((id . "cold-1") (title . "C1") (lastActive . 10))))
+        (dsh-bridge--last-resolved-active nil)
+        (dsh-bridge--focus nil)
+        (dsh-bridge--focus-cycle nil)
+        (dsh-bridge--dispatcher-roster 'ok))
+    (should (equal (dsh-bridge--advisory-session) "cold-2"))
+    (should (equal (dsh-bridge--dispatcher-focus-init) "cold-2"))
+    (should (eq (plist-get dsh-bridge--focus :provenance) 'advisory))
+    (should (string-match-p "C2" (dsh-bridge--dispatcher-header)))))
+
+(ert-deftest dsh-bridge-dispatcher-create-prompts-for-a-title ()
+  "`+' asks for a title, as the retired titled-create binding did."
+  (let ((dsh-bridge--sessions-cache nil)
+        (dsh-bridge-pinned-target nil)
+        (asked nil))
+    (cl-letf (((symbol-function 'dsh-bridge-create-session)
+               (lambda (&optional set-title) (setq asked set-title) "new-1")))
+      (dsh-bridge--dispatcher-create))
+    (should (eq asked t))
+    (should (equal dsh-bridge-pinned-target "new-1"))))
 
 (ert-deftest dsh-bridge-send-text-records-last-resolved ()
   "A nil-target send records the host-resolved session for display."
-  (let ((dsh-bridge-default-session nil)
+  (let ((dsh-bridge-pinned-target nil)
         (dsh-bridge--last-resolved-active nil))
     (cl-letf (((symbol-function 'dsh-bridge--http)
                (lambda (_method _path payload)
@@ -291,7 +663,7 @@ present iff the indicator style produces a glyph."
 (ert-deftest dsh-bridge-explicit-target-does-not-record-last-resolved ()
   "An explicit target is not the host's last-active resolution; nothing is
 recorded."
-  (let ((dsh-bridge-default-session "s1")
+  (let ((dsh-bridge-pinned-target "s1")
         (dsh-bridge--last-resolved-active nil))
     (cl-letf (((symbol-function 'dsh-bridge--http)
                (lambda (_method _path payload)
@@ -306,13 +678,13 @@ recorded."
 The user's actual activity moved to another session, so the recorded
 resolution must stop shadowing the computed last-active fallback; a send
 to the recorded session itself leaves it in place."
-  (let ((dsh-bridge-default-session "s2")
+  (let ((dsh-bridge-pinned-target "s2")
         (dsh-bridge--last-resolved-active '("s1" . "T1")))
     (cl-letf (((symbol-function 'dsh-bridge--http)
                (lambda (&rest _) (list nil "{\"ok\":true}" 200))))
       (dsh-bridge-send-text "hello"))
     (should (null dsh-bridge--last-resolved-active)))
-  (let ((dsh-bridge-default-session "s1")
+  (let ((dsh-bridge-pinned-target "s1")
         (dsh-bridge--last-resolved-active '("s1" . "T1")))
     (cl-letf (((symbol-function 'dsh-bridge--http)
                (lambda (&rest _) (list nil "{\"ok\":true}" 200))))
@@ -321,13 +693,13 @@ to the recorded session itself leaves it in place."
 
 (ert-deftest dsh-bridge-draft-explicit-target-clears-stale-last-resolved ()
   "A draft push to an explicit target retires a differing record too."
-  (let ((dsh-bridge-default-session "s2")
+  (let ((dsh-bridge-pinned-target "s2")
         (dsh-bridge--last-resolved-active '("s1" . "T1")))
     (cl-letf (((symbol-function 'dsh-bridge--http)
                (lambda (&rest _) (list nil "{\"ok\":true}" 200))))
       (dsh-bridge-send-draft "hello"))
     (should (null dsh-bridge--last-resolved-active)))
-  (let ((dsh-bridge-default-session "s1")
+  (let ((dsh-bridge-pinned-target "s1")
         (dsh-bridge--last-resolved-active '("s1" . "T1")))
     (cl-letf (((symbol-function 'dsh-bridge--http)
                (lambda (&rest _) (list nil "{\"ok\":true}" 200))))
@@ -338,7 +710,7 @@ to the recorded session itself leaves it in place."
   "A response without a `sessionId' falls back to the requested target; with
 neither, the send is still reported but no session state is touched."
   ;; Explicit target: the fallback keeps the normal bookkeeping.
-  (let ((dsh-bridge-default-session "s1")
+  (let ((dsh-bridge-pinned-target "s1")
         (dsh-bridge--session-status nil)
         (dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t))))
         (dsh-bridge--prompt-history nil)
@@ -356,7 +728,7 @@ neither, the send is still reported but no session state is touched."
     (should (string-match-p "prompt sent" msg)))
   ;; No target at all: the host named no session, so nothing is tracked or
   ;; rendered, but the prompt is still reported as sent.
-  (let ((dsh-bridge-default-session nil)
+  (let ((dsh-bridge-pinned-target nil)
         (dsh-bridge--session-status nil)
         (sent 'uncalled)
         (msg nil))
@@ -404,7 +776,7 @@ placeholder so completion can skip such sessions."
 (ert-deftest dsh-bridge-read-session-id-skips-untitled ()
   "Untitled sessions are not completion candidates; a titled one still is.
 Excluding them is why the dispatcher's create verb demands a title."
-  (let ((table-seen nil) (seen-prompt nil) (dsh-bridge-default-session nil))
+  (let ((table-seen nil) (seen-prompt nil) (dsh-bridge-pinned-target nil))
     (cl-letf (((symbol-function 'dsh-bridge--fetch-sessions)
                (lambda ()
                  (cons 200
@@ -415,7 +787,7 @@ Excluding them is why the dispatcher's create verb demands a title."
                (lambda (prompt table &rest _rest)
                  (setq table-seen table seen-prompt prompt)
                  "T")))
-      (should (equal (dsh-bridge--read-session-id "Default target: ") "s1")))
+      (should (equal (dsh-bridge--read-session-id "Pinned target: ") "s1")))
     ;; The two untitled rows do not become candidates.
     (should (equal (all-completions "" table-seen) '("T")))))
 
@@ -424,12 +796,12 @@ Excluding them is why the dispatcher's create verb demands a title."
 reader signals rather than offering a non-session sentinel."
   (cl-letf (((symbol-function 'dsh-bridge--fetch-sessions)
              (lambda () (cons 200 '(((id . "s2") (live . t) (cwd . "/b")))))))
-    (should-error (dsh-bridge--read-session-id "Default target: ")
+    (should-error (dsh-bridge--read-session-id "Pinned target: ")
                   :type 'user-error)))
 
 (ert-deftest dsh-bridge-read-session-id-offers-sessions-only ()
   "The session reader offers sessions only, never a (default) sentinel."
-  (let ((table-seen nil) (dsh-bridge-default-session nil))
+  (let ((table-seen nil) (dsh-bridge-pinned-target nil))
     (cl-letf (((symbol-function 'dsh-bridge--fetch-sessions)
                (lambda ()
                  (cons 200 '(((id . "s1") (title . "A") (live . t) (cwd . "/a"))))))
@@ -443,7 +815,7 @@ reader signals rather than offering a non-session sentinel."
   "A shared title is one candidate that says how many sessions match;
 choosing it prompts for the distinguishing workspace, and the workspace
 alone is the follow-up candidate."
-  (let ((tables '()) (answers '("T" "WS-B")) (dsh-bridge-default-session nil))
+  (let ((tables '()) (answers '("T" "WS-B")) (dsh-bridge-pinned-target nil))
     (cl-letf (((symbol-function 'dsh-bridge--fetch-sessions)
                (lambda ()
                  (cons 200
@@ -473,7 +845,7 @@ alone is the follow-up candidate."
   "Workspace labels that do not distinguish fall back to id tails, and the
 tails lengthen until they are pairwise distinct."
   (let ((table-seen nil) (answers '("T" "0abcdef"))
-        (dsh-bridge-default-session nil))
+        (dsh-bridge-pinned-target nil))
     (cl-letf (((symbol-function 'dsh-bridge--fetch-sessions)
                (lambda ()
                  (cons 200
@@ -513,7 +885,7 @@ suffixes the follow-up prompt will offer."
 (ert-deftest dsh-bridge-send-draft-posts-to-draft ()
   "send-draft POSTs the text (and the effective session) to /draft."
   (let ((captured nil)
-        (dsh-bridge-default-session "s1"))
+        (dsh-bridge-pinned-target "s1"))
     (cl-letf (((symbol-function 'dsh-bridge--http)
                (lambda (method path payload)
                  (setq captured (list method path payload)) nil)))
@@ -524,9 +896,9 @@ suffixes the follow-up prompt will offer."
     (should (equal (cdr (assoc 'sessionId (caddr captured))) "s1"))))
 
 (ert-deftest dsh-bridge-send-draft-override-wins-over-default ()
-  "An explicit session override beats the default target in the /draft payload."
+  "An explicit session override beats the pinned target in the /draft payload."
   (let ((captured nil)
-        (dsh-bridge-default-session "pin"))
+        (dsh-bridge-pinned-target "pin"))
     (cl-letf (((symbol-function 'dsh-bridge--http)
                (lambda (method path payload)
                  (setq captured (list method path payload)) nil)))
@@ -537,7 +909,7 @@ suffixes the follow-up prompt will offer."
 (ert-deftest dsh-bridge-send-draft-keeps-prompt-text ()
   "A successful draft push leaves the prompt buffer alone; the buffer is
 blanked when a new composition starts, not when a draft is sent."
-  (let ((dsh-bridge-default-session "s1"))
+  (let ((dsh-bridge-pinned-target "s1"))
     (cl-letf (((symbol-function 'dsh-bridge--http)
                (lambda (_m _p _pl) (list nil "{\"sessionId\":\"s1\"}" 200))))
       (with-current-buffer (get-buffer-create "*dsh-bridge-prompt*")
@@ -556,9 +928,9 @@ blanked when a new composition starts, not when a draft is sent."
   (kill-buffer "*dsh-bridge-prompt*"))
 
 (ert-deftest dsh-bridge-send-text-override-wins-over-default ()
-  "An explicit session override beats the default target in the /send payload."
+  "An explicit session override beats the pinned target in the /send payload."
   (let ((captured nil)
-        (dsh-bridge-default-session "pin"))
+        (dsh-bridge-pinned-target "pin"))
     (cl-letf (((symbol-function 'dsh-bridge--http)
                (lambda (_method _path payload)
                  (setq captured payload) nil)))
@@ -566,9 +938,9 @@ blanked when a new composition starts, not when a draft is sent."
     (should (equal (cdr (assoc 'sessionId captured)) "override"))))
 
 (ert-deftest dsh-bridge-send-text-no-target-omits-session ()
-  "With neither a default target nor an override, no sessionId key is sent."
+  "With neither a pinned target nor an override, no sessionId key is sent."
   (let ((captured nil)
-        (dsh-bridge-default-session nil))
+        (dsh-bridge-pinned-target nil))
     (cl-letf (((symbol-function 'dsh-bridge--http)
                (lambda (_method _path payload)
                  (setq captured payload) nil)))
@@ -636,11 +1008,11 @@ blanked when a new composition starts, not when a draft is sent."
 
 (ert-deftest dsh-bridge-send-prefix-override ()
   "With a prefix argument, send targets the completing-read session for this
-call only, leaving the default target untouched."
+call only, leaving the pinned target untouched."
   (let ((transient-mark-mode t)
         (current-prefix-arg t)
         (captured nil)
-        (dsh-bridge-default-session "pin"))
+        (dsh-bridge-pinned-target "pin"))
     (with-temp-buffer
       (insert "text")
       (goto-char (point-min))
@@ -656,14 +1028,14 @@ call only, leaving the default target untouched."
         (call-interactively #'dsh-bridge-send)))
     (should (equal (cdr (assoc 'sessionId captured)) "live-1"))
     (should (equal (cdr (assoc 'text captured)) "text"))
-    (should (equal dsh-bridge-default-session "pin"))))
+    (should (equal dsh-bridge-pinned-target "pin"))))
 
 ;;; Fetch and the output buffer
 
-(ert-deftest dsh-bridge-fetch-uses-default-target ()
-  "`dsh-bridge-fetch' requests /turns with the default target when the
+(ert-deftest dsh-bridge-fetch-uses-pinned-target ()
+  "`dsh-bridge-fetch' requests /turns with the pinned target when the
 current buffer has no session of its own."
-  (let ((dsh-bridge-default-session "s1")
+  (let ((dsh-bridge-pinned-target "s1")
         (captured nil))
     (cl-letf (((symbol-function 'dsh-bridge--http)
                (lambda (_method path _payload)
@@ -673,7 +1045,7 @@ current buffer has no session of its own."
 
 (ert-deftest dsh-bridge-fetch-populates-output ()
   "Fetch writes the newest turn into *dsh-bridge-output* in `dsh-bridge-view-mode'."
-  (let ((dsh-bridge-default-session "s1"))
+  (let ((dsh-bridge-pinned-target "s1"))
     (cl-letf (((symbol-function 'dsh-bridge--http)
                (lambda (_method _path _payload)
                  (list nil
@@ -696,8 +1068,8 @@ current buffer has no session of its own."
 
 (ert-deftest dsh-bridge-fetch-peek-labels-content-session ()
   "A peek/override fetch labels the output buffer with the content's session,
-not the default target."
-  (let ((dsh-bridge-default-session "s1"))
+not the pinned target."
+  (let ((dsh-bridge-pinned-target "s1"))
     (cl-letf (((symbol-function 'dsh-bridge--http)
                (lambda (_method _path _payload)
                  (list nil
@@ -725,7 +1097,7 @@ so the check must compare against t, not truthiness (a regression: a
                       (cons (concat "{\"sessionId\":\"s1\",\"turns\":[],"
                                     "\"running\":false}")
                             'idle)))
-    (let ((dsh-bridge-default-session "s1")
+    (let ((dsh-bridge-pinned-target "s1")
           (dsh-bridge--session-status nil))
       (cl-letf (((symbol-function 'dsh-bridge--http)
                  (lambda (_method _path _payload)
@@ -737,7 +1109,7 @@ so the check must compare against t, not truthiness (a regression: a
 (ert-deftest dsh-bridge-fetch-running-turn-follows ()
   "A fetch whose newest turn is still running turns on following: the view
 then grows in place as further segments commit."
-  (let ((dsh-bridge-default-session "s1"))
+  (let ((dsh-bridge-pinned-target "s1"))
     (cl-letf (((symbol-function 'dsh-bridge--http)
                (lambda (_method _path _payload)
                  (list nil
@@ -759,7 +1131,7 @@ then grows in place as further segments commit."
 
 (ert-deftest dsh-bridge-fetch-idle-turn-stays-snapshot ()
   "A fetch of a completed (idle) newest turn does not turn on following."
-  (let ((dsh-bridge-default-session "s1"))
+  (let ((dsh-bridge-pinned-target "s1"))
     (cl-letf (((symbol-function 'dsh-bridge--http)
                (lambda (_method _path _payload)
                  (list nil
@@ -777,7 +1149,7 @@ then grows in place as further segments commit."
   "A fetch records the response's whole `turns' array (newest first) as the
 cache entry, including the shown newest turn, so the position count and
 later incremental requests see every turn."
-  (let ((dsh-bridge-default-session "s1")
+  (let ((dsh-bridge-pinned-target "s1")
         (dsh-bridge--turns-cache nil))
     (cl-letf (((symbol-function 'dsh-bridge--http)
                (lambda (_method _path _payload)
@@ -799,7 +1171,7 @@ later incremental requests see every turn."
   "A nil-target fetch records the host-resolved session for display; an
 explicit target is not the host's resolution, so nothing is recorded."
   (dolist (case (list (cons nil t) (cons "s1" nil)))
-    (let ((dsh-bridge-default-session (car case))
+    (let ((dsh-bridge-pinned-target (car case))
           (dsh-bridge--last-resolved-active nil))
       (cl-letf (((symbol-function 'dsh-bridge--http)
                  (lambda (_method _path _payload)
@@ -815,7 +1187,7 @@ explicit target is not the host's resolution, so nothing is recorded."
 (ert-deftest dsh-bridge-fetch-missing-session-id-signals ()
   "A `/turns' response without a sessionId is a protocol error: the view is
 not opened and no guessed target is used."
-  (let ((dsh-bridge-default-session "s1"))
+  (let ((dsh-bridge-pinned-target "s1"))
     (cl-letf (((symbol-function 'dsh-bridge--http)
                (lambda (_method _path _payload)
                  (list nil "{\"turns\":[]}" 200))))
@@ -837,7 +1209,7 @@ not opened and no guessed target is used."
 
 (ert-deftest dsh-bridge-fetch-sets-output-directory ()
   "Fetch sets the output buffer's default-directory to the session cwd."
-  (let ((dsh-bridge-default-session "s1"))
+  (let ((dsh-bridge-pinned-target "s1"))
     (cl-letf (((symbol-function 'dsh-bridge--http)
                (lambda (_method _path _payload)
                  (list nil
@@ -871,16 +1243,16 @@ not opened and no guessed target is used."
   (with-temp-buffer
     (should-error (dsh-bridge-set-prompt-session "s1") :type 'user-error)))
 
-(ert-deftest dsh-bridge-set-default-target-sets-prompt-directory ()
-  "Setting the default target re-points an unbound prompt buffer's directory."
+(ert-deftest dsh-bridge-pin-target-sets-prompt-directory ()
+  "Setting the pinned target re-points an unbound prompt buffer's directory."
   (when (get-buffer "*dsh-bridge-prompt*")
     (kill-buffer "*dsh-bridge-prompt*"))
   (let ((dsh-bridge--sessions-cache '(((id . "s1") (cwd . "/w/sess1") (live . t))))
-        (dsh-bridge-default-session nil))
+        (dsh-bridge-pinned-target nil))
     (cl-letf (((symbol-function 'dsh-bridge--fetch-sessions) (lambda () nil)))
       (with-current-buffer (get-buffer-create "*dsh-bridge-prompt*")
         (dsh-bridge-prompt-mode))
-      (dsh-bridge-set-default-target "s1")
+      (dsh-bridge-pin-target "s1")
       (with-current-buffer "*dsh-bridge-prompt*"
         (should (equal default-directory "/w/sess1/")))))
   (kill-buffer "*dsh-bridge-prompt*"))
@@ -1086,21 +1458,21 @@ bare; the cache arms only predict what a target-less send would hit."
       (setq-local dsh-bridge--prompt-session "s1")
       (should (string-match-p " T$" (dsh-bridge--prompt-header-line))))
     (with-temp-buffer
-      (let ((dsh-bridge-default-session "s1"))
+      (let ((dsh-bridge-pinned-target "s1"))
         (dsh-bridge-prompt-mode)
         (should (string-match-p " T$" (dsh-bridge--prompt-header-line)))
         (should-not (string-match-p "(default)"
                                     (dsh-bridge--prompt-header-line)))))
     ;; Unbound, but the host's recorded resolution names a session.
     (with-temp-buffer
-      (let ((dsh-bridge-default-session nil)
+      (let ((dsh-bridge-pinned-target nil)
             (dsh-bridge--last-resolved-active '("s1" . "T")))
         (dsh-bridge-prompt-mode)
         (should (string-match-p " T (last active)$"
                                 (dsh-bridge--prompt-header-line)))))
     ;; Unbound and unresolved: the computed cache arm is likewise a guess.
     (with-temp-buffer
-      (let ((dsh-bridge-default-session nil)
+      (let ((dsh-bridge-pinned-target nil)
             (dsh-bridge--last-resolved-active nil)
             (dsh-bridge-status-indicator 'geometric))
         (dsh-bridge-prompt-mode)
@@ -1109,7 +1481,7 @@ bare; the cache arms only predict what a target-less send would hit."
     ;; Nothing bound, resolved, or live: no session label, only the status
     ;; glyph for the unresolved session.
     (with-temp-buffer
-      (let ((dsh-bridge-default-session nil)
+      (let ((dsh-bridge-pinned-target nil)
             (dsh-bridge--last-resolved-active nil)
             (dsh-bridge--sessions-cache nil))
         (dsh-bridge-prompt-mode)
@@ -1119,7 +1491,7 @@ bare; the cache arms only predict what a target-less send would hit."
 
 (ert-deftest dsh-bridge-set-prompt-session-binds ()
   "`C-c C-s' rebinds the current DSH-Prompt buffer's session."
-  (let ((dsh-bridge-default-session "default"))
+  (let ((dsh-bridge-pinned-target "default"))
     (with-temp-buffer
       (dsh-bridge-prompt-mode)
       (cl-letf (((symbol-function 'dsh-bridge--read-session-id)
@@ -1141,7 +1513,7 @@ empty roster errors instead of yielding a follow-the-default binding."
 
 (ert-deftest dsh-bridge-prompt-history-navigation ()
   "M-p/M-n cycle the prompt buffer through the session's prompt history."
-  (let ((dsh-bridge-default-session "s1"))
+  (let ((dsh-bridge-pinned-target "s1"))
     (with-temp-buffer
       (dsh-bridge-prompt-mode)
       (setq-local dsh-bridge--prompt-session "s1")
@@ -1174,7 +1546,7 @@ empty roster errors instead of yielding a follow-the-default binding."
 
 (ert-deftest dsh-bridge-prompt-history-fetches ()
   "M-p fetches the effective session's prompts from the host when not cached."
-  (let ((dsh-bridge-default-session "s1"))
+  (let ((dsh-bridge-pinned-target "s1"))
     (with-temp-buffer
       (dsh-bridge-prompt-mode)
       (setq-local dsh-bridge--prompt-session "s1")
@@ -1191,7 +1563,7 @@ empty roster errors instead of yielding a follow-the-default binding."
 
 (ert-deftest dsh-bridge-prompt-history-no-prompts ()
   "M-p with an empty session history reports it and leaves the buffer alone."
-  (let ((dsh-bridge-default-session "s1"))
+  (let ((dsh-bridge-pinned-target "s1"))
     (with-temp-buffer
       (dsh-bridge-prompt-mode)
       (setq-local dsh-bridge--prompt-session "s1")
@@ -1224,7 +1596,7 @@ empty roster errors instead of yielding a follow-the-default binding."
 
 (ert-deftest dsh-bridge-prompt-history-edited-blocks-walk ()
   "Editing a history entry blocks walking until it is sent or reverted."
-  (let ((dsh-bridge-default-session "s1"))
+  (let ((dsh-bridge-pinned-target "s1"))
     (with-temp-buffer
       (dsh-bridge-prompt-mode)
       (setq-local dsh-bridge--prompt-session "s1")
@@ -1243,7 +1615,7 @@ empty roster errors instead of yielding a follow-the-default binding."
 (ert-deftest dsh-bridge-prompt-revert-history ()
   "`revert-buffer' restores an edited history entry, or returns to the
 draft when the entry shown is pristine."
-  (let ((dsh-bridge-default-session "s1"))
+  (let ((dsh-bridge-pinned-target "s1"))
     (with-temp-buffer
       (dsh-bridge-prompt-mode)
       (setq-local dsh-bridge--prompt-session "s1")
@@ -1266,7 +1638,7 @@ draft when the entry shown is pristine."
 
 (ert-deftest dsh-bridge-send-text-records-history ()
   "A successful send records the prompt into the session history cache."
-  (let ((dsh-bridge-default-session "s1")
+  (let ((dsh-bridge-pinned-target "s1")
         (dsh-bridge--prompt-history nil))
     (cl-letf (((symbol-function 'dsh-bridge--http)
                (lambda (_method _path payload)
@@ -1337,8 +1709,8 @@ outline navigation (p/n/f/b/u)."
 
 (ert-deftest dsh-bridge-reply-binds-shown-session ()
   "`dsh-bridge-reply' in the output buffer binds the prompt to the shown
-session and never touches the default target."
-  (let ((dsh-bridge-default-session "target")
+session and never touches the pinned target."
+  (let ((dsh-bridge-pinned-target "target")
         (dsh-bridge--sessions-cache '(((id . "shown") (live . t))))
         (bound nil) (popped nil))
     (with-temp-buffer
@@ -1351,7 +1723,7 @@ session and never touches the default target."
                  (lambda (buf action) (setq popped (list buf action)))))
         (dsh-bridge-reply))
       (should (equal bound "shown"))
-      (should (equal dsh-bridge-default-session "target"))
+      (should (equal dsh-bridge-pinned-target "target"))
       (should (equal (car popped) (get-buffer-create "*dsh-bridge-prompt*")))
       (should (equal (cadr popped) dsh-bridge-prompt-display-action)))))
 
@@ -1806,6 +2178,7 @@ A turn renders as the whole run from a prompt to a reply — its committed
 segments joined by `---' horizontal rules, the finished turn ending cleanly
 after its last segment."
   (let ((dsh-bridge--turns-cache (dsh-bridge-test--view-cache dsh-bridge-test--view-turns))
+        (dsh-bridge--session-status nil)
         (newest (nth 0 dsh-bridge-test--view-turns)))
     (with-temp-buffer
       (dsh-bridge-view-mode)
@@ -1948,7 +2321,7 @@ With the session idle, the same step keeps the plain follow fill."
 (ert-deftest dsh-bridge-fetch-resets-turn-navigation ()
   "Fetching a fresh turn resets turn navigation to rest: no mid-browse state,
 and the view is bound to the fetched turn's number."
-  (let ((dsh-bridge-default-session "s1")
+  (let ((dsh-bridge-pinned-target "s1")
         (dsh-bridge--turns-cache nil))
     (cl-letf (((symbol-function 'dsh-bridge--http)
                (lambda (_method _path _payload)
@@ -2609,7 +2982,7 @@ not the top: the flip is a provenance-mismatch rebuild under follow."
 ;;; The sessions list
 
 (ert-deftest dsh-bridge-sessions-keymap ()
-  "RET visits, r opens, t sets the default target, u clears it, f peeks, k
+  "RET visits, r opens, t sets the pinned target, u clears it, f peeks, k
 stops a running session, v toggles archived visibility, R renames, d archives,
 U unarchives, + creates, W renames the workspace, and p is previous-line again."
   (should (eq (lookup-key dsh-bridge-sessions-mode-map (kbd "RET"))
@@ -2617,9 +2990,9 @@ U unarchives, + creates, W renames the workspace, and p is previous-line again."
   (should (eq (lookup-key dsh-bridge-sessions-mode-map (kbd "r"))
               #'dsh-bridge-open-session))
   (should (eq (lookup-key dsh-bridge-sessions-mode-map (kbd "t"))
-              #'dsh-bridge-set-default-target-at-point))
+              #'dsh-bridge-pin-target-at-point))
   (should (eq (lookup-key dsh-bridge-sessions-mode-map (kbd "u"))
-              #'dsh-bridge-clear-default-target))
+              #'dsh-bridge-unpin-target))
   (should (eq (lookup-key dsh-bridge-sessions-mode-map (kbd "f"))
               #'dsh-bridge-peek-session))
   (should (eq (lookup-key dsh-bridge-sessions-mode-map (kbd "k"))
@@ -2643,10 +3016,10 @@ U unarchives, + creates, W renames the workspace, and p is previous-line again."
               #'previous-line)))
 
 (ert-deftest dsh-bridge-open-session-binds-prompt-not-default ()
-  "RET binds the prompt buffer to the row's session; the default target is
+  "RET binds the prompt buffer to the row's session; the pinned target is
 untouched."
   (let ((dsh-bridge--sessions-cache '(((id . "live-1") (live . t) (cwd . "/w"))))
-        (dsh-bridge-default-session "default")
+        (dsh-bridge-pinned-target "default")
         (bound nil) (popped nil))
     ;; `tabulated-list-get-id' is a defsubst: byte-compilation inlines it,
     ;; so cl-letf cannot mock it.  Stand point on a real tabulated-list-id
@@ -2660,7 +3033,7 @@ untouched."
         (goto-char (point-min))
         (dsh-bridge-open-session)))
     (should (equal bound "live-1"))
-    (should (equal dsh-bridge-default-session "default"))
+    (should (equal dsh-bridge-pinned-target "default"))
     (should popped)))
 
 (ert-deftest dsh-bridge-open-session-not-live-errors ()
@@ -2939,9 +3312,9 @@ launcher left behind, so the frame keeps two usable windows."
 	(should-not shown)
 	(should-not prompted)))
 
-(ert-deftest dsh-bridge-visit-session-keeps-default-target ()
-  "RET acts on the row without touching the default target."
-  (let ((dsh-bridge-default-session "default")
+(ert-deftest dsh-bridge-visit-session-keeps-pinned-target ()
+  "RET acts on the row without touching the pinned target."
+  (let ((dsh-bridge-pinned-target "default")
 		(alist '((sessionId . "s1") (turns))))
 	(cl-letf (((symbol-function 'dsh-bridge--pending-question) (lambda (_id) nil))
 			  ((symbol-function 'dsh-bridge--ensure-session-live) (lambda (_id) t))
@@ -2950,7 +3323,7 @@ launcher left behind, so the frame keeps two usable windows."
 			   (lambda (_id) 'prompt-buffer))
 			  ((symbol-function 'pop-to-buffer-same-window) (lambda (&rest _) nil)))
 	  (dsh-bridge-test--visit-session "s1"))
-	(should (equal dsh-bridge-default-session "default"))))
+	(should (equal dsh-bridge-pinned-target "default"))))
 
 (ert-deftest dsh-bridge-view-for-session-running-placeholder ()
   "A running session with no committed turn shows the running placeholder."
@@ -2965,43 +3338,41 @@ launcher left behind, so the frame keeps two usable windows."
 	  (dsh-bridge--view-for-session "s1" alist))
 	(should (equal waited '("s1" nil "/w")))))
 
-(ert-deftest dsh-bridge-set-default-target-at-point ()
-  "`t' sets the default target to the row's session."
+(ert-deftest dsh-bridge-pin-target-at-point ()
+  "`t' sets the pinned target to the row's session."
   (let ((dsh-bridge--sessions-cache '(((id . "live-1") (live . t))))
-        (dsh-bridge-default-session nil))
-    (cl-letf (((symbol-function 'dsh-bridge-set-default-target)
-               (lambda (id) (setq dsh-bridge-default-session id))))
+        (dsh-bridge-pinned-target nil))
+    (cl-letf (((symbol-function 'dsh-bridge-pin-target)
+               (lambda (id) (setq dsh-bridge-pinned-target id))))
       (with-temp-buffer
         (insert (propertize "live-1 row" 'tabulated-list-id "live-1"))
         (goto-char (point-min))
-        (dsh-bridge-set-default-target-at-point)))
-    (should (equal dsh-bridge-default-session "live-1"))))
+        (dsh-bridge-pin-target-at-point)))
+    (should (equal dsh-bridge-pinned-target "live-1"))))
 
-(ert-deftest dsh-bridge-set-default-target-at-point-unknown-errors ()
-  "`t' on an id the cache does not know refuses with an error.
-No default target is set, and no resume is attempted."
+(ert-deftest dsh-bridge-pin-target-at-point-unknown-errors ()
+  "`t' pins an id the cache does not know, without resuming it.
+A cold or unknown session binds directly: the pin is a targeting choice,
+not a request, so no resume is attempted."
   (let ((dsh-bridge--sessions-cache nil)
-        (dsh-bridge-default-session nil)
-        (set nil) (resumed nil) (caught nil))
-    (cl-letf (((symbol-function 'dsh-bridge-set-default-target)
+        (dsh-bridge-pinned-target nil)
+        (set nil) (resumed nil))
+    (cl-letf (((symbol-function 'dsh-bridge-pin-target)
                (lambda (id) (setq set id)))
               ((symbol-function 'dsh-bridge--resume-session)
                (lambda (id) (setq resumed id) nil)))
       (with-temp-buffer
         (insert (propertize "gone row" 'tabulated-list-id "gone"))
         (goto-char (point-min))
-        (setq caught (should-error (dsh-bridge-set-default-target-at-point)
-                                   :type 'error))))
-    (should (null set))
-    (should (null resumed))
-    (should (null dsh-bridge-default-session))
-    (should (string-match-p "\"gone\" is dead" (error-message-string caught)))))
+        (dsh-bridge-pin-target-at-point)))
+    (should (equal set "gone"))
+    (should (null resumed))))
 
 (ert-deftest dsh-bridge-list-sessions-columns-and-marker ()
   "The session list shows marker/S/Session/Age/Workspace columns."
   (when (get-buffer "*dsh-bridge-sessions*")
     (kill-buffer "*dsh-bridge-sessions*"))
-  (let ((dsh-bridge-default-session "live-1")
+  (let ((dsh-bridge-pinned-target "live-1")
         (dsh-bridge-status-indicator 'geometric))
     (cl-letf (((symbol-function 'dsh-bridge--fetch-sessions)
                (lambda ()
@@ -3027,10 +3398,10 @@ No default target is set, and no resume is attempted."
              (saved-cells (cadr saved)))
         (should live)
         (should saved)
-        ;; Default-target marker (index 0): "*" + face for the default target.
+        ;; Pinned-target marker (index 0): "*" + face for the pinned target.
         (should (equal (aref live-cells 0) "*"))
         (should (eq (get-text-property 0 'face (aref live-cells 0))
-                    'dsh-bridge-default-target-face))
+                    'dsh-bridge-pinned-target-face))
         (should (equal (aref saved-cells 0) " "))
         ;; Status cell (index 1): the state glyph — filled square for running
         ;; (amber), `?' for saved (no live agent).
@@ -3057,7 +3428,7 @@ Emoji glyphs are double-width; in a one-column cell
 `display' property, so the row must print it unelided."
   (when (get-buffer "*dsh-bridge-sessions*")
     (kill-buffer "*dsh-bridge-sessions*"))
-  (let ((dsh-bridge-default-session nil)
+  (let ((dsh-bridge-pinned-target nil)
         (dsh-bridge-status-indicator 'emoji))
     (cl-letf (((symbol-function 'dsh-bridge--fetch-sessions)
                (lambda ()
@@ -3098,7 +3469,7 @@ raw id is not used, so an untitled row reads as untitled."
   "With `dsh-bridge-show-session-ids' non-nil, an Id column appears."
   (when (get-buffer "*dsh-bridge-sessions*")
     (kill-buffer "*dsh-bridge-sessions*"))
-  (let ((dsh-bridge-default-session nil)
+  (let ((dsh-bridge-pinned-target nil)
         (dsh-bridge-show-session-ids t))
     (cl-letf (((symbol-function 'dsh-bridge--fetch-sessions)
                (lambda () (cons 200 '(((id . "live-1") (live . t) (cwd . "/a"))))))
@@ -3114,7 +3485,7 @@ raw id is not used, so an untitled row reads as untitled."
   "The `v' toggle shows/hides archived sessions; live and cold rows stay visible."
   (when (get-buffer "*dsh-bridge-sessions*")
     (kill-buffer "*dsh-bridge-sessions*"))
-  (let ((dsh-bridge-default-session nil))
+  (let ((dsh-bridge-pinned-target nil))
     (cl-letf (((symbol-function 'dsh-bridge--fetch-sessions)
                (lambda ()
                  (cons 200
@@ -3530,7 +3901,7 @@ read still happens, since it words the confirmation."
 
 (ert-deftest dsh-bridge-stop-session-no-target-noop ()
   "With no session at hand the command refuses and sends nothing."
-  (let ((called nil) (dsh-bridge-default-session nil))
+  (let ((called nil) (dsh-bridge-pinned-target nil))
     (cl-letf (((symbol-function 'dsh-bridge--request)
                (lambda (&rest args) (setq called args) (cons 200 nil))))
       (with-temp-buffer
@@ -3637,7 +4008,7 @@ old plugin, or an empty body must never block the stop."
 
 (ert-deftest dsh-bridge-create-session-marshals-args ()
   "Create fetches /workspaces, POSTs the chosen workspace, and leaves the
-default target alone (only the dispatcher's titled create binds it)."
+pinned target alone (only the dispatcher's titled create binds it)."
   (let ((called nil) (bound-target 'unset))
     (cl-letf (((symbol-function 'completing-read)
                (lambda (_prompt _table &rest _rest) "WS B"))
@@ -3651,10 +4022,10 @@ default target alone (only the dispatcher's titled create binds it)."
                                              (list (cons 'id "w2") (cons 'title "WS B"))))))
                    (cons 201 (list (cons 'sessionId "s-new"))))))
               ((symbol-function 'dsh-bridge--fetch-sessions) (lambda () nil))
-              ((symbol-function 'dsh-bridge-set-default-target)
+              ((symbol-function 'dsh-bridge-pin-target)
                (lambda (id) (setq bound-target id))))
       ;; Without SET-TITLE: the DSH-Sessions "+" route, which never asks.
-      (let ((dsh-bridge-default-session nil))
+      (let ((dsh-bridge-pinned-target nil))
         (cl-letf (((symbol-function 'read-string)
                    (lambda (&rest _) (ert-fail "prompted for a title without set-title"))))
           (dsh-bridge-create-session))))
@@ -3686,7 +4057,7 @@ This is the transient dispatcher's route, which must produce a completable
                (lambda (&rest _) (setq prompts (1+ prompts))
                  (nth (1- prompts) '("" "   " "My New Session"))))
               ((symbol-function 'dsh-bridge--fetch-sessions) (lambda () nil)))
-      (let ((dsh-bridge-default-session nil))
+      (let ((dsh-bridge-pinned-target nil))
         (dsh-bridge-create-session t)))
     (let ((create (cadr (assoc "/sessions/create"
                                (mapcar (lambda (c) (list (cadr c) c)) called)))))
@@ -3694,18 +4065,6 @@ This is the transient dispatcher's route, which must produce a completable
       (should (equal (cdr (assoc 'title (caddr create))) "My New Session"))
       ;; The two blank answers were rejected by re-prompting.
       (should (= prompts 3)))))
-
-(ert-deftest dsh-bridge-create-titled-session-forwards-title-and-binds ()
-  "The dispatcher's create verb demands a title and binds the new session as
-the default target."
-  (let ((seen 'none) (bound nil))
-    (cl-letf (((symbol-function 'dsh-bridge-create-session)
-               (lambda (&optional set-title) (setq seen set-title) "s-new"))
-              ((symbol-function 'dsh-bridge-set-default-target)
-               (lambda (id) (setq bound id))))
-      (dsh-bridge-create-titled-session))
-    (should (eq seen t))
-    (should (equal bound "s-new"))))
 
 (ert-deftest dsh-bridge-create-session-empty-workspaces ()
   "With no workspaces, a fresh name creates one at the prompted directory.
@@ -3727,7 +4086,7 @@ matches no workspace names a new one."
                      (cons 200 (list (cons 'workspaces nil)))
                    (cons 201 (list (cons 'sessionId "s-new"))))))
               ((symbol-function 'dsh-bridge--fetch-sessions) (lambda () nil)))
-      (let ((dsh-bridge-default-session nil))
+      (let ((dsh-bridge-pinned-target nil))
         (dsh-bridge-create-session)))
     ;; An empty roster yields an empty candidate list, not a sentinel entry.
     (should (equal (all-completions "" table-seen) nil))
@@ -3761,7 +4120,7 @@ The host's workspace registry rejects a path that is not fully qualified."
                      (cons 200 (list (cons 'workspaces nil)))
                    (cons 201 (list (cons 'sessionId "s-new"))))))
               ((symbol-function 'dsh-bridge--fetch-sessions) (lambda () nil)))
-      (let ((dsh-bridge-default-session nil))
+      (let ((dsh-bridge-pinned-target nil))
         (dsh-bridge-create-session)))
     (let ((create (cadr (assoc "/sessions/create"
                                (mapcar (lambda (c) (list (cadr c) c)) called)))))
@@ -3780,14 +4139,14 @@ The host's workspace registry rejects a path that is not fully qualified."
                (lambda (method path payload)
                  (push (list method path payload) called)
                  (cons 200 (list (cons 'workspaces nil))))))
-      (let ((dsh-bridge-default-session nil))
+      (let ((dsh-bridge-pinned-target nil))
         (should-error (dsh-bridge-create-session) :type 'user-error)))
     (should-not (assoc "/sessions/create"
                        (mapcar (lambda (c) (list (cadr c) c)) called)))))
 
 (ert-deftest dsh-bridge-create-session-reports-host-error ()
   "A failed POST surfaces the host's own error message, not a generic one."
-  (let ((dsh-bridge-default-session nil) (caught nil))
+  (let ((dsh-bridge-pinned-target nil) (caught nil))
     (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) "WS A"))
               ((symbol-function 'dsh-bridge--request)
                (lambda (method path payload)
@@ -3807,7 +4166,7 @@ would otherwise leave point on the row that held the line before."
   (when (get-buffer "*dsh-bridge-sessions*")
     (kill-buffer "*dsh-bridge-sessions*"))
   (let* ((created nil)
-         (dsh-bridge-default-session nil)
+         (dsh-bridge-pinned-target nil)
          (old '((id . "s-old") (title . "Old") (live . t) (lastActive . 1000)
                 (cwd . "/a") (workspace . "WS")))
          (new '((id . "s-new") (title . "New") (live . t) (lastActive . 2000)
@@ -3839,7 +4198,7 @@ The new session's row is selected in the sessions list; with no list open
 there is nothing to select, and the invoking buffer is left alone."
   (when (get-buffer "*dsh-bridge-sessions*")
     (kill-buffer "*dsh-bridge-sessions*"))
-  (let ((dsh-bridge-default-session nil))
+  (let ((dsh-bridge-pinned-target nil))
     (cl-letf (((symbol-function 'dsh-bridge--read-workspace)
                (lambda (_prompt) "w1"))
               ((symbol-function 'dsh-bridge--request)
@@ -3876,7 +4235,7 @@ roster, so accepting it skips name matching entirely."
       (let ((dsh-bridge--sessions-cache
              '(((id . "s1") (live . t) (lastActive . 20)
                 (workspace . "WS B") (workspaceId . "w2"))))
-            (dsh-bridge-default-session "s1"))
+            (dsh-bridge-pinned-target "s1"))
         (cl-letf (((symbol-function 'completing-read)
                    ;; Stands in for accepting the prompt default: "".
                    (lambda (prompt &rest _rest)
@@ -3895,7 +4254,7 @@ roster, so accepting it skips name matching entirely."
 (ert-deftest dsh-bridge-create-session-default-verified-against-roster ()
   "A cached workspace id absent from the fresh roster is not the default.
 RET then has no default to accept, so it is refused."
-  (let ((dsh-bridge-default-session "s1"))
+  (let ((dsh-bridge-pinned-target "s1"))
     (cl-letf (((symbol-function 'dsh-bridge--request)
                (lambda (method path payload)
 		 (if (equal path "/workspaces")
@@ -3915,16 +4274,16 @@ it.  A cached id the roster no longer knows yields no default."
   (let ((roster '(((id . "w9") (title . "WS X") (path . "/x")))))
     (let ((dsh-bridge--sessions-cache
            '(((id . "s1") (workspace . "WS X") (workspaceId . "w9"))))
-          (dsh-bridge-default-session "s1"))
+          (dsh-bridge-pinned-target "s1"))
       (should (equal (alist-get 'id (dsh-bridge--workspace-default roster)) "w9")))
     ;; A workspace archived (or otherwise gone) is not offered.
     (let ((dsh-bridge--sessions-cache
            '(((id . "s1") (workspace . "WS gone") (workspaceId . "w-gone"))))
-          (dsh-bridge-default-session "s1"))
+          (dsh-bridge-pinned-target "s1"))
       (should-not (dsh-bridge--workspace-default roster)))
     ;; No effective session: no default.
     (let ((dsh-bridge--sessions-cache nil)
-          (dsh-bridge-default-session nil))
+          (dsh-bridge-pinned-target nil))
       (should-not (dsh-bridge--workspace-default roster)))))
 
 (ert-deftest dsh-bridge-read-workspace-return-shapes ()
@@ -3973,7 +4332,7 @@ other; the directory must come from the prompt."
                      (cons 200 (list (cons 'workspaces nil)))
                    (cons 201 (list (cons 'sessionId "s-new"))))))
               ((symbol-function 'dsh-bridge--fetch-sessions) (lambda () nil)))
-      (let ((dsh-bridge-default-session nil))
+      (let ((dsh-bridge-pinned-target nil))
         (dsh-bridge-create-session)))
     (should prompted)
     (let ((create (cadr (assoc "/sessions/create"
@@ -4010,7 +4369,7 @@ a filled circle for an idle live session, a filled square for a running one,
 
 (ert-deftest dsh-bridge-sessions-revert-refetches ()
   "`g' in the sessions buffer re-fetches the list from the host."
-  (let ((dsh-bridge-default-session nil))
+  (let ((dsh-bridge-pinned-target nil))
     (cl-letf (((symbol-function 'dsh-bridge--fetch-sessions)
                (lambda () (cons 200 '(((id . "live-1") (live . t) (cwd . "/a"))))))
               ((symbol-function 'pop-to-buffer) (lambda (&rest _) nil)))
@@ -4104,7 +4463,7 @@ so the list's actions (`+' create, `g' re-fetch, `v' archived visibility)
 stay available instead of a bare error message."
   (when (get-buffer "*dsh-bridge-sessions*")
     (kill-buffer "*dsh-bridge-sessions*"))
-  (let ((dsh-bridge-default-session nil))
+  (let ((dsh-bridge-pinned-target nil))
     (cl-letf (((symbol-function 'dsh-bridge--fetch-sessions)
                (lambda () (cons 200 nil)))
               ((symbol-function 'pop-to-buffer) (lambda (&rest _) nil)))
@@ -4122,7 +4481,7 @@ stay available instead of a bare error message."
   (when (get-buffer "*dsh-bridge-sessions*")
     (kill-buffer "*dsh-bridge-sessions*"))
   (let ((msg nil)
-        (dsh-bridge-default-session nil))
+        (dsh-bridge-pinned-target nil))
     (cl-letf (((symbol-function 'dsh-bridge--fetch-sessions)
                (lambda () (cons nil nil)))
               ((symbol-function 'message)
@@ -4140,7 +4499,7 @@ already on screen is re-populated (in-buffer `g' stays the other refresh)."
   (let ((fetches 0)
         (roster '(((id . "s1") (live . t) (title . "One")
                    (lastActive . 1000))))
-        (dsh-bridge-default-session nil))
+        (dsh-bridge-pinned-target nil))
     (cl-letf (((symbol-function 'dsh-bridge--fetch-sessions)
                (lambda ()
                  (setq fetches (1+ fetches))
@@ -5053,7 +5412,7 @@ A turn in the same session leaves the recorded answer in place."
         (dsh-bridge--sessions-cache
          '(((id . "s1") (title . "T1") (live . t) (lastActive . 10))
            ((id . "s2") (title . "T2") (live . t) (lastActive . 20))))
-        (dsh-bridge-default-session nil)
+        (dsh-bridge-pinned-target nil)
         (dsh-bridge--session-status nil))
     (cl-letf (((symbol-function 'run-at-time) #'ignore)
               ((symbol-function 'dsh-bridge--status-event-render) #'ignore)
@@ -5066,9 +5425,7 @@ A turn in the same session leaves the recorded answer in place."
       (dsh-bridge--notification-handle-events
        '(((kind . "turn-start") (sessionId . "s2"))))
       (should (null dsh-bridge--last-resolved-active))
-      (with-temp-buffer
-        (should (string-match-p "T2 (last active)"
-                                (dsh-bridge--dispatcher-header)))))))
+      (should (equal (dsh-bridge--advisory-session) "s2")))))
 
 (ert-deftest dsh-bridge-view-position ()
   "The view position is newest-first (k/n) over the session's turns, derived
@@ -5227,7 +5584,7 @@ declining aborts, and edited text sends without asking."
 The send leaves a nil target to the host, so a cached last-active id must not
 decide whether the identical-text confirmation fires."
   (let ((dsh-bridge-prompt-resend-confirm t)
-        (dsh-bridge-default-session nil)
+        (dsh-bridge-pinned-target nil)
         (dsh-bridge--last-resolved-active '("s1" . "T"))
         (dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t))))
         (dsh-bridge--last-sent '(("s1" . ("hello" . 1234567.0))))
@@ -5246,7 +5603,7 @@ decide whether the identical-text confirmation fires."
 (defun dsh-bridge-test--lazy-send (prompt-session default-session sent-id)
   "Send \"hello\" from a fresh prompt buffer and return (SESSION . MESSAGES).
 PROMPT-SESSION is the buffer's binding and DEFAULT-SESSION the global
-default target; the stubbed host reports SENT-ID for the send.  SESSION is
+pinned target; the stubbed host reports SENT-ID for the send.  SESSION is
 the buffer's binding after the send and MESSAGES the list of `message'
 strings it saw."
   (dsh-bridge-test--kill-prompt-buffer)
@@ -5256,7 +5613,7 @@ strings it saw."
         (dsh-bridge--sessions-cache nil)
         (dsh-bridge--session-models nil)
         (dsh-bridge--session-context nil)
-        (dsh-bridge-default-session default-session)
+        (dsh-bridge-pinned-target default-session)
         (messages '())
         session)
     (cl-letf (((symbol-function 'dsh-bridge--http)
@@ -5286,9 +5643,9 @@ every later send from it."
 
 (ert-deftest dsh-bridge-send-and-exit-does-not-pin-explicit-targets ()
   "Only a send with no target at all adopts the host's session.
-A send through the default target carries that target explicitly, and a
+A send through the pinned target carries that target explicitly, and a
 bound buffer carries its own: neither may be frozen to the host's answer."
-  ;; The default target supplied the session: keep following the default.
+  ;; The pinned target supplied the session: keep following the default.
   (let ((result (dsh-bridge-test--lazy-send nil "s2" "s2")))
     (should-not (car result))
     (should-not (seq-some (lambda (m) (string-match-p "bound to session" m))
@@ -5457,7 +5814,7 @@ running status and the next send prompts."
 The pushed text now lives in that session's composer, so a later send from
 the same buffer must not go elsewhere."
   (dsh-bridge-test--kill-prompt-buffer)
-  (let ((dsh-bridge-default-session nil)
+  (let ((dsh-bridge-pinned-target nil)
         (dsh-bridge--last-resolved-active nil)
         (dsh-bridge--sessions-cache '(((id . "s1") (title . "T1") (live . t))))
         (dsh-bridge--session-models nil)
@@ -5480,7 +5837,7 @@ the same buffer must not go elsewhere."
 
 (ert-deftest dsh-bridge-draft-does-not-pin-other-buffers ()
   "Only a prompt buffer adopts a draft's host-resolved session."
-  (let ((dsh-bridge-default-session nil)
+  (let ((dsh-bridge-pinned-target nil)
         (messages '()))
     (cl-letf (((symbol-function 'dsh-bridge--http)
                (lambda (_method _path _payload)
@@ -5795,7 +6152,7 @@ selection moving during the send cannot strand the prompt on screen."
   (let ((config (current-window-configuration))
         (view (get-buffer-create "*dsh-bridge-output*"))
         (prompt (get-buffer-create "*dsh-bridge-prompt*"))
-        (dsh-bridge-default-session nil)
+        (dsh-bridge-pinned-target nil)
         (dsh-bridge--last-resolved-active nil)
         (dsh-bridge--last-sent nil)
         (dsh-bridge-prompt-resend-confirm nil)
@@ -6066,7 +6423,7 @@ when the caches are empty."
   "Model completion annotations are separated from the candidate by a space,
 and a model with no display name gets no annotation."
   (let ((annotation nil)
-        (dsh-bridge-default-session "s1"))
+        (dsh-bridge-pinned-target "s1"))
     (cl-letf (((symbol-function 'dsh-bridge--fetch-models)
                (lambda (&rest _)
                  '((current . ((provider . "p1") (model . "m1")))
@@ -6088,9 +6445,9 @@ and a model with no display name gets no annotation."
 
 (ert-deftest dsh-bridge-select-model-no-session-errors ()
   "Changing state refuses to guess a last-active session.
-With no buffer binding and no default target, the command must error rather
+With no buffer binding and no pinned target, the command must error rather
 than post the change to whatever the advisory caches name."
-  (let ((dsh-bridge-default-session nil)
+  (let ((dsh-bridge-pinned-target nil)
         (dsh-bridge--last-resolved-active '("s1" . "T"))
         (dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t)))))
     (with-temp-buffer
@@ -6157,7 +6514,7 @@ leaves the cached catalog alone: no forced refetch runs."
   "For a reasoning model, the effort prompt preselects the session's current
 effort by name, else the catalog's `defaultEffort'; the chosen name maps back
 to its id for the apply call."
-  (let ((dsh-bridge-default-session "s1")
+  (let ((dsh-bridge-pinned-target "s1")
         (data nil)
         (reads nil)
         (applied nil))
@@ -6552,7 +6909,7 @@ Both commands run in the clicked window's buffer."
                :type 'user-error))
             ;; No session at all: a buffer following last-active only.
             ;; The real resolver signals; no mock needed.
-            (let ((dsh-bridge-default-session nil))
+            (let ((dsh-bridge-pinned-target nil))
               (should-error
                (dsh-bridge--header-goal-at-mouse
                 (list 'mouse-1
@@ -7030,6 +7387,7 @@ arrived (new turns land at the head); landing on the newest resumes following."
 state (\"turn 0\") and announces it."
   (let* ((newest (nth 0 dsh-bridge-test--view-turns))
          (dsh-bridge--turns-cache (dsh-bridge-test--view-cache dsh-bridge-test--view-turns))
+         (dsh-bridge--session-status nil)
          (msg nil))
     (cl-letf (((symbol-function 'dsh-bridge--request)
                (lambda (_method _path _payload)
@@ -7081,6 +7439,7 @@ leaves the buffer and browsing state untouched."
 second-newest turn needs no extra M-n (the pinned `(1/X)' stop is gone)."
   (let* ((dsh-bridge--turns-cache
           (dsh-bridge-test--view-cache dsh-bridge-test--view-turns))
+         (dsh-bridge--session-status nil)
          (dsh-bridge-view-follow-at-newest t))
     (cl-letf (((symbol-function 'dsh-bridge--request)
                (lambda (_m _p _pl)
@@ -7450,7 +7809,7 @@ untouched."
 (ert-deftest dsh-bridge-prompt-binds-effective-session ()
   "`dsh-bridge-prompt' prepares the prompt buffer for the current buffer's
 effective session (the dispatcher's `r' continues the shown conversation)."
-  (let ((dsh-bridge-default-session "target")
+  (let ((dsh-bridge-pinned-target "target")
         (got nil))
     (with-temp-buffer
       (dsh-bridge-view-mode)
@@ -8418,7 +8777,7 @@ selected label; a submit the host does not accept leaves no note behind."
   "An unbound DSH-Prompt buffer refuses rather than guessing a target.
 The command must not guess a last-active session, and a sole pending
 question is not read as an implicit target."
-  (let ((dsh-bridge-default-session nil)
+  (let ((dsh-bridge-pinned-target nil)
         (dsh-bridge--last-resolved-active '("s1" . "T"))
         (dsh-bridge--pending-questions (dsh-bridge-test--pending-ask "s2" "Q?"))
         (answered nil))
@@ -8430,11 +8789,11 @@ question is not read as an implicit target."
         (should-error (dsh-bridge-answer) :type 'user-error))
       (should-not answered))))
 
-(ert-deftest dsh-bridge-answer-default-target-does-not-pin ()
-  "The default target is a mutation target, never an answer target.
-An unrelated buffer refuses even when the default target is itself the
+(ert-deftest dsh-bridge-answer-pinned-target-does-not-pin ()
+  "The pinned target is a mutation target, never an answer target.
+An unrelated buffer refuses even when the pinned target is itself the
 session with a pending question."
-  (let ((dsh-bridge-default-session "s9")
+  (let ((dsh-bridge-pinned-target "s9")
         (dsh-bridge--pending-questions (dsh-bridge-test--pending-ask "s9" "Q?"))
         (answered nil))
     (with-temp-buffer
@@ -8446,7 +8805,7 @@ session with a pending question."
 
 (ert-deftest dsh-bridge-answer-unbound-several-pending-refuses ()
   "An unbound buffer refuses when several sessions have pending questions."
-  (let ((dsh-bridge-default-session nil)
+  (let ((dsh-bridge-pinned-target nil)
         (dsh-bridge--pending-questions
          (append (dsh-bridge-test--pending-ask "s1" "One?")
                  (dsh-bridge-test--pending-ask "s2" "Two?"))))
@@ -8474,7 +8833,7 @@ lack rather than answering s2's question."
 (ert-deftest dsh-bridge-answer-unbound-no-pending ()
   "An unbound prompt buffer refuses, naming no session rather than no query.
 Nothing pending anywhere does not make any session an answer target."
-  (let ((dsh-bridge-default-session nil)
+  (let ((dsh-bridge-pinned-target nil)
         (dsh-bridge--pending-questions nil)
         (msg nil))
     (with-temp-buffer
@@ -9674,7 +10033,7 @@ The host owns the no-goal refusal for pause/resume (404 `GOAL_NOT_FOUND',
 surfaced as a `user-error' rather than acted on from a cache); clear
 refuses earlier because it must name the objective it would clear."
   (with-temp-buffer
-    (let ((dsh-bridge-default-session nil))
+    (let ((dsh-bridge-pinned-target nil))
       (should-error (dsh-bridge-pause-goal) :type 'user-error)))
   (cl-letf (((symbol-function 'dsh-bridge--effective-session) (lambda (&rest _) "s1"))
             ((symbol-function 'dsh-bridge--request)
@@ -9690,11 +10049,11 @@ refuses earlier because it must name the objective it would clear."
       (should-error (dsh-bridge-clear-goal) :type 'user-error)
       (should-not posted))))
 
-(ert-deftest dsh-bridge-toggle-plan-mode-uses-default-target ()
-  "From an unrelated buffer, a mutation verb acts on the default target.
+(ert-deftest dsh-bridge-toggle-plan-mode-uses-pinned-target ()
+  "From an unrelated buffer, a mutation verb acts on the pinned target.
 The dispatcher's state-changing verbs no longer require a bridge buffer:
 the user-pinned default is an explicit target."
-  (let ((dsh-bridge-default-session "s1")
+  (let ((dsh-bridge-pinned-target "s1")
         (dsh-bridge--session-plan '(("s1" . ((active . nil)))))
         (dsh-bridge--session-goal nil)
         (calls nil))
@@ -9730,22 +10089,22 @@ wrong level would silently turn every toggle into a resume."
         (should (equal (nth 1 (car calls)) (nth 2 case)))))))
 
 (ert-deftest dsh-bridge-effective-session-resolution ()
-  "The resolver ladder: the buffer's own binding, then the default target.
+  "The resolver ladder: the buffer's own binding, then the pinned target.
 REQUIRE signals instead of returning nil; NODEFAULT skips the default
 fallback; a DSH-Sessions buffer's binding is the row at point."
-  (let ((dsh-bridge-default-session nil))
+  (let ((dsh-bridge-pinned-target nil))
     (with-temp-buffer
       (dsh-bridge-describe-mode)
       (setq-local dsh-bridge--describe-session "s1")
       (should (equal (dsh-bridge--effective-session) "s1"))))
-  ;; A plain buffer has only the default target; REQUIRE accepts it.
-  (let ((dsh-bridge-default-session "s9"))
+  ;; A plain buffer has only the pinned target; REQUIRE accepts it.
+  (let ((dsh-bridge-pinned-target "s9"))
     (with-temp-buffer
       (should (equal (dsh-bridge--effective-session) "s9"))
       (should (equal (dsh-bridge--effective-session nil nil t) "s9"))
       (should-not (dsh-bridge--effective-session nil t))))
   ;; With no binding and no default, REQUIRE signals.
-  (let ((dsh-bridge-default-session nil))
+  (let ((dsh-bridge-pinned-target nil))
     (with-temp-buffer
       (should-not (dsh-bridge--effective-session))
       (should-error (dsh-bridge--effective-session nil nil t)
@@ -9753,7 +10112,7 @@ fallback; a DSH-Sessions buffer's binding is the row at point."
   ;; A DSH-Sessions buffer's binding is the row at point, not the default.
   (let ((dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t))
                                       ((id . "s2") (title . "U") (live . t))))
-        (dsh-bridge-default-session "s9"))
+        (dsh-bridge-pinned-target "s9"))
     (cl-letf (((symbol-function 'dsh-bridge--fetch-sessions)
                (lambda () (cons 200 dsh-bridge--sessions-cache))))
       (unwind-protect
@@ -9953,7 +10312,10 @@ one must not disturb `l'/`r' navigation."
               #'dsh-bridge-describe-session))
   (should (eq (lookup-key dsh-bridge-sessions-mode-map (kbd "D"))
               #'dsh-bridge-describe-session))
-  (should (eq (cadr (dsh-bridge--layout-verb "D")) #'dsh-bridge-describe-session))
+  ;; The dispatcher's D acts on the displayed focus, so it goes through the
+  ;; focus-bound wrapper rather than the bare command.
+  (should (eq (plist-get (cdr (transient-get-suffix 'dsh-bridge "D")) :command)
+              #'dsh-bridge--dispatcher-describe))
   (should-not (eq (lookup-key dsh-bridge-prompt-mode-map (kbd "D"))
                   #'dsh-bridge-describe-session)))
 
@@ -10255,7 +10617,7 @@ removes them from the kept text."
   (dsh-bridge-test--kill-prompt-buffer)
   (let ((file (dsh-bridge-test--temp-file "draft.txt" "x"))
         (captured nil)
-        (dsh-bridge-default-session "s1"))
+        (dsh-bridge-pinned-target "s1"))
     (unwind-protect
         (with-temp-buffer
           (dsh-bridge-prompt-mode)
@@ -10274,7 +10636,7 @@ removes them from the kept text."
   "`dsh-bridge-send' parses tag lines from its region or buffer."
   (let ((file (dsh-bridge-test--temp-file "send.txt" "x"))
         (captured nil)
-        (dsh-bridge-default-session "s1"))
+        (dsh-bridge-pinned-target "s1"))
     (unwind-protect
         (with-temp-buffer
           (insert "text\n")
@@ -10292,7 +10654,7 @@ removes them from the kept text."
   (let ((inside (dsh-bridge-test--temp-file "inside.txt" "i"))
         (outside (dsh-bridge-test--temp-file "outside.txt" "o"))
         (captured nil)
-        (dsh-bridge-default-session "s1"))
+        (dsh-bridge-pinned-target "s1"))
     (unwind-protect
         (with-temp-buffer
           ;; Batch Emacs has Transient Mark mode off, and `use-region-p'
@@ -10322,7 +10684,7 @@ removes them from the kept text."
 bound to the invoking buffer's effective session, not to the default."
   (dsh-bridge-test--kill-prompt-buffer)
   (let ((file (dsh-bridge-test--temp-file "bind.txt" "x"))
-        (dsh-bridge-default-session nil))
+        (dsh-bridge-pinned-target nil))
     (unwind-protect
         (cl-letf (((symbol-function 'pop-to-buffer) (lambda (&rest _) nil)))
           (with-temp-buffer
@@ -10594,7 +10956,7 @@ status and view, without moving the user's windows."
   "An unbound buffer never prompts for an approval, however many are pending;
 a view's explicit session is respected even when another session has the only
 pending approval."
-  (let ((dsh-bridge-default-session nil))
+  (let ((dsh-bridge-pinned-target nil))
     ;; Exactly one pending approval, but no session at hand: refuse.
     (let ((dsh-bridge--pending-questions nil)
           (dsh-bridge--pending-approvals
@@ -10635,7 +10997,7 @@ pending approval."
 (ert-deftest dsh-bridge-answer-prefers-question-over-approval ()
   "A session with both registries populated answers the query, not the
 approval; an unbound buffer refuses, so the union is never guessed at."
-  (let ((dsh-bridge-default-session nil))
+  (let ((dsh-bridge-pinned-target nil))
     ;; Same session: the query wins.
     (let ((dsh-bridge--pending-questions (dsh-bridge-test--pending-ask "s1" "Q?"))
           (dsh-bridge--pending-approvals

@@ -354,6 +354,16 @@ projections, which can outlast the general `dsh-bridge-timeout'."
   :type 'number
   :group 'dsh-bridge)
 
+(defcustom dsh-bridge-roster-timeout 1.5
+  "Seconds to wait for the dispatcher's roster seed.
+The dispatcher seeds the session roster before its first paint so the
+header can name a session, and a menu must not hang on a stalled host.
+Keep this well below `dsh-bridge-timeout': the seed decides only a
+display guess, and an unreachable host degrades to the header's
+\"host unreachable\" line."
+  :type 'number
+  :group 'dsh-bridge)
+
 (defcustom dsh-bridge-describe-auto-refresh t
   "Whether a visible session report refreshes when its turn completes.
 The refresh re-fetches the report and preserves point; it is deferred so
@@ -425,9 +435,9 @@ the answerer; a request that arrives with no browser open fails closed."
   "Face for the status glyph of an unknown DSH session."
   :group 'dsh-bridge)
 
-(defface dsh-bridge-default-target-face
+(defface dsh-bridge-pinned-target-face
   '((t :inherit font-lock-keyword-face))
-  "Face for the default target session in the DSH-Sessions buffer."
+  "Face for the pinned target session in the DSH-Sessions buffer."
   :group 'dsh-bridge)
 
 (defface dsh-bridge-untitled-face
@@ -558,14 +568,14 @@ option descriptions, and the custom-row hint."
 
 ;;; Session tracking
 
-(defvar dsh-bridge-default-session nil
-  "The DSH bridge's default target session ID, if any.
+(defvar dsh-bridge-pinned-target nil
+  "The DSH bridge's pinned target session ID, if any.
 This session is targeted by context-free DSH commands; if nil or
 invalid, the commands try to target the last-active session instead.
-Set with the command `\\[dsh-bridge-set-default-target].")
+Set with the command `\\[dsh-bridge-pin-target].")
 
 (defvar-local dsh-bridge--prompt-session nil
-  "Session ID for the DSH-Prompt buffer, or nil (default target).")
+  "Session ID for the DSH-Prompt buffer, or nil (pinned target).")
 
 (defvar dsh-bridge--last-resolved-active nil
   "Cons (ID . LABEL) of the session the host last resolved for us, or nil.
@@ -579,6 +589,29 @@ when the session disappears from the roster.  It deliberately outlives a
 newer live session appearing in the roster: naming the host's own
 resolution, including a cold session the local replica cannot see, is
 what it is for.")
+
+(defvar dsh-bridge--focus nil
+  "Focus record of the open `dsh-bridge' dispatcher, or nil.
+The record is a plist (:session ID :provenance SYMBOL); ID is the
+session the menu's verbs act on, and PROVENANCE is `pinned', `buffer',
+`cycled', or `advisory'.
+
+The record is menu-scoped: set when the menu opens and cleared when it
+exits, so it never leaks into a buffer's own session resolution.  A nil
+record means no menu is open, and the dispatcher's suffixes fall back on
+`dsh-bridge--effective-session'.")
+
+(defvar dsh-bridge--focus-cycle nil
+  "Session ids the open dispatcher can cycle through, newest first.
+A snapshot of the non-archived roster taken when the menu opens, so
+positions do not reshuffle under mid-menu SSE traffic.")
+
+(defvar dsh-bridge--dispatcher-roster nil
+  "Outcome of the dispatcher's roster seeding.
+Non-nil once `dsh-bridge--dispatcher-seed' has decided what the header
+may say: `unreachable' when the bridge cannot be reached at all, or
+`empty' when the host answered with no sessions.  A nil value means the
+seed has not run, which the header renders as \"no sessions\".")
 
 (defvar dsh-bridge--view-content-session) ; forward declaration
 
@@ -1527,31 +1560,165 @@ basename, raw cwd, or an empty string."
 
 ;;; Target helpers
 
+(defun dsh-bridge--buffer-session (&optional buffer)
+  "The session id BUFFER is bound to, or nil.
+If BUFFER is nil, it defaults to the current buffer.  A DSH-Prompt
+buffer names its bound session (nil when it follows the pinned target),
+a DSH-View buffer the session whose content it shows, a DSH-Describe
+buffer the session it reports on, and a DSH-Sessions buffer the row at
+point.  This is the buffer's own binding alone; it never consults the
+pinned target."
+  (let ((mode (buffer-local-value 'major-mode
+				  (or buffer (current-buffer)))))
+    (pcase mode
+      ('dsh-bridge-prompt-mode dsh-bridge--prompt-session)
+      ('dsh-bridge-view-mode dsh-bridge--view-content-session)
+      ('dsh-bridge-describe-mode dsh-bridge--describe-session)
+      ('dsh-bridge-sessions-mode
+       (with-current-buffer (or buffer (current-buffer))
+	 (tabulated-list-get-id))))))
+
 (defun dsh-bridge--effective-session (&optional buffer nodefault require)
   "The session id BUFFER acts on, or nil for last-active.
 If BUFFER is nil, it defaults to the current buffer.
 
 If the buffer is bound to a DSH session (DSH-Prompt, DSH-View, or
 DSH-Describe buffer acting on a specific session), return the session
-id (a string).  Otherwise, fall back on `dsh-bridge-default-session'.
+id (a string).  Otherwise, fall back on `dsh-bridge-pinned-target'.
 Return nil if there is no explicit session target; a request may then
 leave the choice to the host, which resolves its last-active session.
 
-If NODEFAULT is non-nil, skip the default-target fallback.
+If NODEFAULT is non-nil, skip the pinned-target fallback.
 
-If REQUIRE is non-nil, signal a `user-error' instead of returning nil."
-  (let* ((mode (buffer-local-value 'major-mode
-				   (or buffer (current-buffer))))
-	 (session (pcase mode
-		    ('dsh-bridge-prompt-mode dsh-bridge--prompt-session)
-		    ('dsh-bridge-view-mode dsh-bridge--view-content-session)
-		    ('dsh-bridge-describe-mode dsh-bridge--describe-session)
-		    ('dsh-bridge-sessions-mode (tabulated-list-get-id)))))
+If REQUIRE is non-nil, signal a `user-error' instead of returning nil.
+
+This is the resolution path for direct, non-menu callers.  The open
+dispatcher resolves through its own focus record instead; see
+`dsh-bridge--focus-session'."
+  (let ((session (dsh-bridge--buffer-session buffer)))
     (unless (or session nodefault)
-      (setq session dsh-bridge-default-session))
+      (setq session dsh-bridge-pinned-target))
     (if (and require (null session))
 	(user-error "dsh-bridge: no session to act on")
       session)))
+
+;;; The dispatcher's focus
+
+;; The focus is the session the open `dsh-bridge' menu acts on.  It is
+;; menu-scoped (see `dsh-bridge--focus') and carries the provenance that
+;; decides whether a session-state mutator may act: an advisory
+;; last-active guess is display-only, never a mutation target.  Direct
+;; callers never see any of this; they keep resolving through
+;; `dsh-bridge--effective-session'.
+
+(defun dsh-bridge--focus-session ()
+  "The session id the open dispatcher acts on, or nil.
+Falls back on the current buffer's effective session when no menu is
+open, so a suffix invoked outside its transient still works."
+  (or (plist-get dsh-bridge--focus :session)
+      (dsh-bridge--effective-session)))
+
+(defun dsh-bridge--focus-advisory-p ()
+  "Whether the open dispatcher's focus is only an advisory guess.
+True only for an `advisory' provenance; such a focus may be displayed
+and read, but never mutated."
+  (eq (plist-get dsh-bridge--focus :provenance) 'advisory))
+
+(defun dsh-bridge--focus-set (session provenance)
+  "Make SESSION the focus of the open dispatcher, with PROVENANCE.
+PROVENANCE is one of `pinned', `buffer', `cycled', or `advisory'.  A nil
+SESSION clears the record, which also happens when the menu exits."
+  (setq dsh-bridge--focus
+	(and session (list :session session :provenance provenance))))
+
+(defun dsh-bridge--advisory-session ()
+  "The session to guess as the dispatcher's advisory focus, or nil.
+Prefer the host's own recorded last-active resolution, then the newest
+last-active live session, then the newest last-active session of any
+kind: DSH applies cold state aggressively, and a roster whose sessions
+are all cold must still name one.  Display-only."
+  (or (car-safe dsh-bridge--last-resolved-active)
+      (dsh-bridge--cache-last-active)
+      (car (dsh-bridge--dispatcher-cycle-init))))
+
+(defun dsh-bridge--dispatcher-focus-init ()
+  "Initialize the open dispatcher's focus, first match wins.
+The pinned target, then the invoking buffer's own binding, then the
+advisory last-active guess.  Stores the record and returns its session
+id, or nil when nothing names one."
+  (let ((buffer (or (bound-and-true-p transient--original-buffer)
+		    (current-buffer)))
+	pinned bound)
+    (cond
+     ((setq pinned dsh-bridge-pinned-target)
+      (dsh-bridge--focus-set pinned 'pinned))
+     ((setq bound (dsh-bridge--buffer-session buffer))
+      (dsh-bridge--focus-set bound 'buffer))
+     (t
+      (dsh-bridge--focus-set (dsh-bridge--advisory-session) 'advisory)))
+    (plist-get dsh-bridge--focus :session)))
+
+(defun dsh-bridge--dispatcher-cycle-init ()
+  "Snapshot the cycle set for the open dispatcher.
+The set is every non-archived roster session, live or cold, newest
+first; it excludes a row with no id.  The activity time is folded here,
+once per session, rather than re-scanned inside the sort predicate.
+Returns the snapshot of session ids."
+  (setq dsh-bridge--focus-cycle
+	(mapcar #'car
+		(sort (delq nil
+			    (mapcar (lambda (session)
+				      (let ((id (alist-get 'id session)))
+					(and (stringp id)
+					     (not (alist-get 'archived session))
+					     (cons id (or (alist-get 'lastActive session)
+							  (alist-get 'createdAt session)
+							  0)))))
+				    dsh-bridge--sessions-cache))
+		      ;; `sort' is not stable in Emacs Lisp; tie on the id so a
+		      ;; repeated init of the same roster cannot reshuffle it.
+		      (lambda (a b)
+			(if (= (cdr a) (cdr b))
+			    (string-lessp (car a) (car b))
+			  (> (cdr a) (cdr b))))))))
+
+(defun dsh-bridge--cycle-index (&optional session)
+  "Return the 0-based position of SESSION in the cycle set, or nil.
+SESSION defaults to the focus's session.  A session outside the
+snapshot (newly created, or pinned from outside the roster) has no
+position."
+  (let ((id (or session (plist-get dsh-bridge--focus :session))))
+    (and id (seq-position dsh-bridge--focus-cycle id #'equal))))
+
+(defun dsh-bridge--dispatcher-seed (&optional force)
+  "Seed the session roster for the open dispatcher, and record the outcome.
+A warm roster cache is taken on faith unless FORCE is non-nil (the
+menu's prefix argument), since SSE keeps it fresh.  The fetch is bounded
+by `dsh-bridge-roster-timeout' and runs before the menu's first paint,
+so it must degrade the header rather than error out.
+
+Sets `dsh-bridge--dispatcher-roster' to `unreachable' when the bridge
+cannot be consulted, `empty' when the host answered with no sessions, or
+`ok' otherwise, and returns it."
+  (setq dsh-bridge--dispatcher-roster
+	(cond
+	 ((and dsh-bridge--sessions-cache (not force)) 'ok)
+	 (t
+	  (condition-case nil
+	      ;; Suppress the plugin's interactive install offer for the whole
+	      ;; seeded fetch: `dsh-bridge--http' probes the plugin itself, and
+	      ;; opening a menu must never prompt.  The inner `let' matters:
+	      ;; an outer one would evaluate the fetch before its own bindings
+	      ;; took effect.
+	      (let ((dsh-bridge--plugin-diagnosed t)
+		    (dsh-bridge-timeout dsh-bridge-roster-timeout))
+		(dsh-bridge--ensure-plugin)
+		(let ((fetch (dsh-bridge--fetch-sessions)))
+		  (if (eq (car fetch) 200)
+		      (if (cdr fetch) 'ok 'empty)
+		    'unreachable)))
+	    (error 'unreachable)))))
+  dsh-bridge--dispatcher-roster)
 
 (defun dsh-bridge--cache-last-active ()
   "Return the cached id of the most recently active live session, or nil.
@@ -1566,34 +1733,41 @@ to creation time, among live sessions).	 Display-only; never blocks."
 	    (setq best (alist-get 'id s))))))))
 
 (defun dsh-bridge--dispatcher-header ()
-  "Header string for the dispatcher: status plus the effective session.
-This has the format \"<status> <label>[<qualifier>]\", where the
-qualifier indicates if the DSH session is the user-specified default, or
-the last-active session (as a fallback)."
-  (let* ((buffer (or (bound-and-true-p transient--original-buffer)
-		     (current-buffer)))
-	 id label)
+  "Header string for the dispatcher: status plus the focus session.
+This has the format \"<status> <label> (i/n)\" while unpinned, where
+(i/n) is the focus's position in the cycle set (suppressed when the set
+has at most one session), or \"<status> <label> [pinned]\" while a pin
+locks the focus.  Provenance is never rendered: a session-state mutator
+explains itself when it refuses (see the dispatcher's suffixes).
+
+A focus that names no session renders a state line instead — \"host
+unreachable\" or \"no sessions\" — never a blank line.  This runs on
+every transient redisplay, so it reads the seeded roster and must not
+fetch anything itself."
+  (let* ((id (plist-get dsh-bridge--focus :session))
+	 (pinned (eq (plist-get dsh-bridge--focus :provenance) 'pinned))
+	 (label (and id (dsh-bridge--session-label id))))
     (cond
-     ((setq id (dsh-bridge--effective-session buffer))
-      (setq label (dsh-bridge--session-label id))
-      ;; If targeting the default session, add a (default) qualifier.
-      (when (equal id dsh-bridge-default-session)
-	(setq label (concat label " (default)"))))
-     ;; Try host-resolved last-active session.
-     ((setq id (car-safe dsh-bridge--last-resolved-active))
-      (setq label (concat (or (cdr dsh-bridge--last-resolved-active)
-			      (dsh-bridge--session-label id))
-			  " (last active)")))
-     ;; Otherwise, try the most recently active session.
-     ((setq id (dsh-bridge--cache-last-active))
-      (setq label (concat (dsh-bridge--session-label id) " (last active)"))))
-    (unless label (setq label ""))
-    (let ((status (and id (dsh-bridge--status-glyph id))))
-      (if (dsh-bridge--normalized-string status)
-	  ;; The transient menu leaves point at point-min; add a space
-	  ;; to avoid overlapping the cursor with the status glyph.
-	  (concat " " status " " label)
-	label))))
+     ((null id)
+      (if (eq dsh-bridge--dispatcher-roster 'unreachable)
+	  "host unreachable"
+	"no sessions"))
+     (t
+      (let ((status (dsh-bridge--status-glyph id)))
+	;; The transient leaves point at point-min; the leading space keeps
+	;; the cursor off the status glyph.  An indicator style with no glyph
+	;; contributes no space at all.
+	(if pinned
+	    (concat (if (string-empty-p status) "" (concat " " status " "))
+		    label
+		    (propertize " [pinned]" 'face 'bold-italic))
+	  (let* ((total (length dsh-bridge--focus-cycle))
+		 (index (dsh-bridge--cycle-index id))
+		 (position (and index (< 1 total)
+				(format " (%d/%d)" (1+ index) total))))
+	    (if (string-empty-p status)
+		(concat label position)
+	      (concat " " status " " label position)))))))))
 
 (defun dsh-bridge--session-annotation (session &optional no-workspace)
   "One-line completion annotation for SESSION: workspace, running, age.
@@ -2290,56 +2464,32 @@ the visited file (not the buffer text) is attached."
 
 ;;; Dispatcher layout
 
-;; `eval-and-compile' because the transient macro expansion reads the
-;; value at compile time.
+;; The menu groups themselves live in the `dsh-bridge' prefix at the end of
+;; this file.  This table lists the same verbs and is the source of truth for
+;; the dispatcher's key set.
 
-(eval-and-compile
-  (defconst dsh-bridge--verb-suffixes
-    '(("s" dsh-bridge-send :description "send region/buffer (prompt)")
-      ("d" dsh-bridge-draft :description "send region/buffer (draft)")
-      ("f" dsh-bridge-fetch :description "fetch latest turn")
-      ("D" dsh-bridge-describe-session :description "describe session")
-      ("t" dsh-bridge-set-default-target :description "set default target")
-      ("u" dsh-bridge-clear-default-target :description "clear default target")
-      ("k" dsh-bridge-stop-session :description "stop running session")
-      ("l" dsh-bridge-list-sessions :description "list sessions")
-      ("+" dsh-bridge-create-titled-session :description "create session")
-      ("p" dsh-bridge-toggle-plan-mode :description "toggle plan mode")
-      ("G" dsh-bridge-set-goal :description "set or edit the goal")
-      ("A" dsh-bridge-toggle-goal :description "pause/resume the goal")
-      ("X" dsh-bridge-clear-goal :description "clear the goal"))
-    "Suffix specs for the `dsh-bridge' dispatcher.
-Each spec is (KEY COMMAND DESCRIPTION).	 The view buffers no longer mirror
-these letters; this table serves the dispatcher's layout alone.")
-
-  (defun dsh-bridge--layout-verb (key)
-    "Return the verb suffix spec with KEY from `dsh-bridge--verb-suffixes'."
-    (assoc key dsh-bridge--verb-suffixes))
-
-  (defconst dsh-bridge--dispatcher-layout
-    (vconcat (list :description '(lambda () (dsh-bridge--dispatcher-header)))
-	     (vconcat (list "Compose"
-			    '("r" dsh-bridge-prompt
-			      :description "reply/open prompt buffer")
-			    (dsh-bridge--layout-verb "s")
-			    (dsh-bridge--layout-verb "d")))
-	     (vconcat (list "Read"
-			    (dsh-bridge--layout-verb "f")
-			    (dsh-bridge--layout-verb "D")))
-	     (vconcat (list "Plan and goal"
-			    (dsh-bridge--layout-verb "p")
-			    (dsh-bridge--layout-verb "G")
-			    (dsh-bridge--layout-verb "A")
-			    (dsh-bridge--layout-verb "X")))
-	     (vconcat (list "Sessions"
-			    (dsh-bridge--layout-verb "t")
-			    (dsh-bridge--layout-verb "u")
-			    (dsh-bridge--layout-verb "k")
-			    (dsh-bridge--layout-verb "l")
-			    (dsh-bridge--layout-verb "+")))
-	     (vconcat (list '("q" transient-quit-one :description "quit"))))
-    "Layout of the `dsh-bridge' dispatcher, grouped by purpose.
-The verbs are defined in `dsh-bridge--verb-suffixes'."))
+(defconst dsh-bridge--verb-suffixes
+  '(("r" dsh-bridge--dispatcher-prompt :description "reply/open prompt buffer")
+    ("s" dsh-bridge--dispatcher-send :description "send region/buffer (prompt)")
+    ("d" dsh-bridge--dispatcher-draft :description "send region/buffer (draft)")
+    ("f" dsh-bridge--dispatcher-fetch :description "fetch latest turn")
+    ("D" dsh-bridge--dispatcher-describe :description "describe session")
+    ("t" dsh-bridge--dispatcher-pin :description "pin this session")
+    ("u" dsh-bridge--dispatcher-unpin :description "unpin")
+    ("T" dsh-bridge--dispatcher-pin-by-title :description "pin by title")
+    ("k" dsh-bridge--dispatcher-stop :description "stop running session")
+    ("l" dsh-bridge-list-sessions :description "list sessions")
+    ("+" dsh-bridge--dispatcher-create :description "create and pin session")
+    ("p" dsh-bridge--dispatcher-plan :description "toggle plan mode")
+    ("G" dsh-bridge--dispatcher-goal :description "set or edit the goal")
+    ("A" dsh-bridge--dispatcher-toggle-goal :description "pause/resume goal")
+    ("X" dsh-bridge--dispatcher-clear-goal :description "clear the goal")
+    ("M-p" dsh-bridge--dispatcher-previous :description "focus older session")
+    ("M-n" dsh-bridge--dispatcher-next :description "focus newer session"))
+  "Suffix specs for the `dsh-bridge' dispatcher.
+Each spec is (KEY COMMAND DESCRIPTION).  The view buffers no longer mirror
+these letters; the `dsh-bridge' prefix is the layout, and this table exists
+so tests can assert the intended key set.")
 
 ;;; The DSH-View buffer
 
@@ -4114,7 +4264,7 @@ attachment is allowed.
 If `dsh-bridge-prompt-resend-confirm' is non-nil and the text exactly
 matches the session's last-sent text, confirm first.
 
-A send with no target at all (no buffer binding, no default target) is
+A send with no target at all (no buffer binding, no pinned target) is
 resolved by the host, which reports the session it chose; on success the
 buffer is bound to that session, so the next send from the same buffer
 cannot land in a different one.
@@ -4134,15 +4284,15 @@ and bury the buffer (see `dsh-bridge--prompt-exit')."
 		  (substring-no-properties (buffer-string))))
 	 (text (car parsed))
 	 (attachments (cdr parsed))
-	 ;; Only an explicit binding (or the default target); a guessed last-active
+	 ;; Only an explicit binding (or the pinned target); a guessed last-active
 	 ;; id must not key the guard.
 	 (guard-session dsh-bridge--prompt-session)
 	 ;; Whether this send leaves the choice of session to the host.	 The
 	 ;; test is "no explicit target was sent", not "the buffer is
-	 ;; unbound": a send through `dsh-bridge-default-session' must keep
+	 ;; unbound": a send through `dsh-bridge-pinned-target' must keep
 	 ;; following the default rather than freeze to one session.
 	 (lazy-p (and (null dsh-bridge--prompt-session)
-		      (null dsh-bridge-default-session))))
+		      (null dsh-bridge-pinned-target))))
     (if (and (string-empty-p text) (null attachments))
 	(user-error "dsh-bridge: no text or attachments to send")
       ;; Guard against an identical re-send to the session.
@@ -4293,11 +4443,11 @@ that session, since its text now lives in that session's composer."
 			     (buffer-name)))))
       (user-error "dsh-bridge: aborted"))
     (let ((parsed (dsh-bridge--parse-attachments (dsh-bridge--region-or-buffer)))
-	  ;; A `dsh-bridge-default-session' push still carries an explicit
+	  ;; A `dsh-bridge-pinned-target' push still carries an explicit
 	  ;; target; only a push with no target at all needs the pin.
 	  (lazy-p (and (eq major-mode 'dsh-bridge-prompt-mode)
 		       (null dsh-bridge--prompt-session)
-		       (null dsh-bridge-default-session))))
+		       (null dsh-bridge-pinned-target))))
       (when (cdr parsed)
 	(message "dsh-bridge: drafts do not carry attachments; pushing text only"))
       (dsh-bridge-send-draft
@@ -5430,7 +5580,7 @@ answer; an already-resolved question is bannered in place."
   "Handle any pending query or approval for the DSH session at hand.
 In a DSH-View, DSH-Prompt, or DSH-Describe buffer, act on the buffer's
 session; in a DSH-Sessions buffer, act on the session at point.  Do not
-use `dsh-bridge-default-session' as a fallback default.
+use `dsh-bridge-pinned-target' as a fallback default.
 
 This command either handles a query or an approval, whichever the
 session is parked on (these are mutually exclusive).  Handling a query
@@ -5439,7 +5589,7 @@ the minibuffer or shows the appproval request, depending on the value of
 `dsh-bridge-approval-answer'.  If there is no active query nor approval
 request, report that nothing is pending."
   (interactive)
-  ;; NODEFAULT plus REQUIRE: the default target is a mutation target,
+  ;; NODEFAULT plus REQUIRE: the pinned target is a mutation target,
   ;; never an answer target.  Workflow via the transient menu is to go
   ;; to the view buffer, then type "a".
   (let* ((session (dsh-bridge--effective-session nil t t))
@@ -5783,7 +5933,7 @@ One request each, only when the session's entry is not already cached.	The
 requests are synchronous loopback (like the other prompt-open requests); a
 failure leaves the header segment empty until the next trigger."
   (let ((session (or dsh-bridge--prompt-session
-		     dsh-bridge-default-session
+		     dsh-bridge-pinned-target
 		     (car-safe dsh-bridge--last-resolved-active)
 		     (dsh-bridge--cache-last-active))))
     (when session
@@ -5825,7 +5975,7 @@ Returns non-nil on success; the header re-renders on the next redisplay."
 
 (defun dsh-bridge-select-model ()
   "Change the model (and reasoning effort) of the prompt buffer's session.
-The buffer must be bound to a session (or `dsh-bridge-default-session' set):
+The buffer must be bound to a session (or `dsh-bridge-pinned-target' set):
 this command changes state, so it refuses to guess the last-active session.
 Picks from the host's live catalog via `completing-read' (`provider/model'
 candidates annotated with the display name), then posts the selection through
@@ -5932,7 +6082,7 @@ Discard it? " (buffer-name))))))
 (defun dsh-bridge-prompt ()
   "Pop to a DSH-Prompt buffer to compose a prompt.
 The buffer is bound to the effective session of the current buffer (its
-binding, else the default target, else last-active), so \\`r' from a
+binding, else the pinned target, else last-active), so \\`r' from a
 DSH-View or DSH-Sessions buffer continues that session's conversation.
 A buffer left unbound to let the host choose is bound to the session the
 host picked the first time a prompt was sent from it (see
@@ -5955,7 +6105,7 @@ compose→read loop."
 
 (defun dsh-bridge-reply ()
   "Reply to the session whose reply is shown in the current DSH-View buffer.
-The prompt buffer is bound to that session (no default-target change) and
+The prompt buffer is bound to that session (no pinned-target change) and
 shown in another window so the output stays visible."
   (interactive)
   (let ((id dsh-bridge--view-content-session))
@@ -6129,7 +6279,7 @@ appended to the request payload.  `set' creates or replaces a goal."
       (message "dsh-bridge: %s" (dsh-bridge--goal-error-message status alist))))))
 
 ;;;###autoload
-(defun dsh-bridge-toggle-plan-mode (&optional arg)
+(defun dsh-bridge-toggle-plan-mode (&optional arg session)
   "Toggle plan mode for the session at hand.
 Without a prefix argument, toggle the effective wanted state, so a second
 press cancels an already-queued change instead of re-queueing it.  A
@@ -6138,7 +6288,7 @@ disables.  The direction is read fresh from `/session', never from the
 advisory cache.	 A session whose preset mounts no plan mode is reported
 and nothing is sent."
   (interactive "P")
-  (let* ((session (dsh-bridge--effective-session nil nil t))
+  (let* ((session (or session (dsh-bridge--effective-session nil nil t)))
 	 (plan (progn (dsh-bridge--plan-goal-refresh session nil t)
 		      (cdr-safe (assoc session dsh-bridge--session-plan)))))
     (when (null plan)
@@ -6176,14 +6326,14 @@ and nothing is sent."
 		 (dsh-bridge--error-message nil status alist)))))))
 
 ;;;###autoload
-(defun dsh-bridge-set-goal (&optional arg)
+(defun dsh-bridge-set-goal (&optional arg session)
   "Create or edit the goal for the session at hand.
 Reads the objective, defaulting to the current one; RET on an unchanged
 objective sends nothing.  With a prefix argument, also read the goal
 round cap, defaulting to the current cap.  A complete goal is replaced
 rather than edited; the host reports which happened."
   (interactive "P")
-  (let* ((session (dsh-bridge--effective-session nil nil t))
+  (let* ((session (or session (dsh-bridge--effective-session nil nil t)))
 	 (snapshot (alist-get 'goal (dsh-bridge--session-goal session)))
 	 (current (dsh-bridge--normalized-string (alist-get 'objective snapshot)))
 	 (objective (dsh-bridge--read-goal-objective current))
@@ -6208,12 +6358,12 @@ rather than edited; the host reports which happened."
   (dsh-bridge--goal-command 'resume))
 
 ;;;###autoload
-(defun dsh-bridge-toggle-goal ()
+(defun dsh-bridge-toggle-goal (&optional session)
   "Pause the session's armed goal, or resume and rearm a stopped one.
 The decision is read fresh from `/session' so the menu checkbox and the
 command agree."
   (interactive)
-  (let* ((session (dsh-bridge--effective-session nil nil t))
+  (let* ((session (or session (dsh-bridge--effective-session nil nil t)))
 	 (section (dsh-bridge--session-goal session))
 	 (snapshot (alist-get 'goal section))
 	 (phase (alist-get 'phase snapshot)))
@@ -6225,10 +6375,10 @@ command agree."
       (dsh-bridge--goal-command 'resume session))))
 
 ;;;###autoload
-(defun dsh-bridge-clear-goal ()
+(defun dsh-bridge-clear-goal (&optional session)
   "Clear the session's current goal after confirmation."
   (interactive)
-  (let* ((session (dsh-bridge--effective-session nil nil t))
+  (let* ((session (or session (dsh-bridge--effective-session nil nil t)))
 	 (snapshot (alist-get 'goal (dsh-bridge--session-goal session))))
     (unless (consp snapshot)
       (user-error "dsh-bridge: this session has no goal"))
@@ -6239,7 +6389,7 @@ command agree."
 (defun dsh-bridge--header-indicator-act (event command)
   "Run COMMAND for the session whose header indicator was clicked in EVENT.
 The clicked window must have a session target (either bound to the
-buffer, or a non-nil `dsh-bridge-default-session') matching the id on
+buffer, or a non-nil `dsh-bridge-pinned-target') matching the id on
 the clicked cell; otherwise, signal an error."
   (let* ((position (event-start event))
 	 (window (and position (posn-window position)))
@@ -6362,7 +6512,7 @@ and workspace label are shortened to fit it.
 The `(last active)' qualifier marks a session the buffer is not bound
 to: the id is only a prediction of what a target-less send would hit,
 because the host resolves the session when the request arrives.	 A
-bound session, and one reached through `dsh-bridge-default-session' (the
+bound session, and one reached through `dsh-bridge-pinned-target' (the
 send does carry that target), are unqualified.
 
 The model and context segments stay empty until their first successful
@@ -6380,7 +6530,7 @@ their tag lines are visible in the buffer itself."
     ;; predicted to hit; remember which arm answered, so the header can
     ;; mark a prediction as one.
     (unless session
-      (cond ((setq session dsh-bridge-default-session)
+      (cond ((setq session dsh-bridge-pinned-target)
 	     ;; The send does carry this target, so the name is honest
 	     ;; as it stands (the dispatcher header qualifies it instead).
 	     nil)
@@ -6562,8 +6712,8 @@ FORCE argument of `dsh-bridge-stop-session'."
      :keys "M-n"
      :help "Move forward through the prompt history"]
     "---"
-    ["Set Default Target…" dsh-bridge-set-default-target
-     :help "Set the bridge-wide default target (completing-read)"]))
+    ["Pin Target…" dsh-bridge-pin-target
+     :help "Set the bridge-wide pinned target (completing-read)"]))
 
 ;; Placed after the menu: `tool-bar-local-item-from-menu' resolves the menu
 ;; bindings at load time.
@@ -6592,7 +6742,7 @@ FORCE argument of `dsh-bridge-stop-session'."
 
 (defun dsh-bridge-set-prompt-session (session-id)
   "Bind the current buffer, which must be a DSH-Prompt buffer, to SESSION-ID.
-If SESSION-ID is nil, the buffer instead follows the default target.
+If SESSION-ID is nil, the buffer instead follows the pinned target.
 Updates the header and the session directory, and resets the
 prompt-history walk when the binding changes."
   (interactive (list (dsh-bridge--read-session-id "Switch to Session: ")))
@@ -6609,25 +6759,25 @@ prompt-history walk when the binding changes."
   (when (called-interactively-p 'any)
     (message "dsh-bridge: prompt buffer %s"
 	     (if (null session-id)
-		 "follows the default target"
+		 "follows the pinned target"
 	       (format "bound to session \"%s\""
 		       (dsh-bridge--session-label session-id))))))
 
 ;;;###autoload
-(defun dsh-bridge-set-default-target (session-id)
-  "Set the DSH bridge's default target session to SESSION-ID.
-SESSION-ID is a session id string, or nil to clear the default target (fall
+(defun dsh-bridge-pin-target (session-id)
+  "Set the DSH bridge's pinned target session to SESSION-ID.
+SESSION-ID is a session id string, or nil to clear the pinned target (fall
 back to last-active); interactively a session is always read, so use
-`dsh-bridge-clear-default-target' to clear.  A saved (cold) id binds
+`dsh-bridge-unpin-target' to clear.  A saved (cold) id binds
 directly; the host resumes it when the next request targets it.
 Emacs-local only: there is no host-side pin to write, and clearing has no
 host round-trip."
   (interactive
-   (list (dsh-bridge--read-session-id "Default target: ")))
-  (setq dsh-bridge-default-session session-id)
+   (list (dsh-bridge--read-session-id "Pinned target: ")))
+  (setq dsh-bridge-pinned-target session-id)
   (force-mode-line-update t)
   (dsh-bridge--refresh-sessions-buffer)
-  ;; Re-point any DSH-Prompt buffer that follows the default target at its
+  ;; Re-point any DSH-Prompt buffer that follows the pinned target at its
   ;; effective session's workspace.
   (dolist (buf (buffer-list))
     (with-current-buffer buf
@@ -6635,15 +6785,15 @@ host round-trip."
 		 (null dsh-bridge--prompt-session))
 	(dsh-bridge--apply-session-directory
 	 (dsh-bridge--effective-session buf) nil buf))))
-  (message "dsh-bridge: default target %s"
+  (message "dsh-bridge: pinned target %s"
 	   (if session-id
 	       (dsh-bridge--session-label session-id)
 	     "last-active")))
 
-(defun dsh-bridge-clear-default-target ()
-  "Clear the default target; the bridge falls back to last-active."
+(defun dsh-bridge-unpin-target ()
+  "Clear the pinned target; the bridge falls back to last-active."
   (interactive)
-  (dsh-bridge-set-default-target nil))
+  (dsh-bridge-pin-target nil))
 
 ;;; Stopping a running session
 
@@ -6690,10 +6840,10 @@ advisory: a read that fails simply drops that part of the text."
 		  (format " (%s)" (string-join clauses "; "))
 		"")))))
 
-(defun dsh-bridge-stop-session (&optional force)
+(defun dsh-bridge-stop-session (&optional force session)
   "Stop the running turn of the session at hand.
 This is the DSH session the buffer is acting on, or the session at point
-in a DSH-Sessions buffer, or a non-nil `dsh-bridge-default-session'.
+in a DSH-Sessions buffer, or a non-nil `dsh-bridge-pinned-target'.
 Raise an error if there is no such session.
 
 A session that is not running is left alone.  Otherwise, this command
@@ -6705,7 +6855,7 @@ With FORCE (a prefix argument), skip the local \"is it running?\" check
 and ask the host anyway.  The confirmation prompt still applies, and the
 host still settles an idle agent as a no-op."
   (interactive "P")
-  (let ((id (dsh-bridge--effective-session nil nil t)))
+  (let ((id (or session (dsh-bridge--effective-session nil nil t))))
     (cond
       ((and (not force) (not (eq (dsh-bridge--status-state id) 'running)))
       (message "dsh-bridge: session \"%s\" is not running"
@@ -6741,11 +6891,11 @@ host still settles an idle agent as a no-op."
 
 ;;; The sessions buffer
 
-(defun dsh-bridge--default-target-marker (session)
+(defun dsh-bridge--pinned-target-marker (session)
   "Return the leftmost marker cell for SESSION: \"*\" when it is the default
 target, else a space."
-  (if (equal (alist-get 'id session) dsh-bridge-default-session)
-      (propertize "*" 'face 'dsh-bridge-default-target-face)
+  (if (equal (alist-get 'id session) dsh-bridge-pinned-target)
+      (propertize "*" 'face 'dsh-bridge-pinned-target-face)
     " "))
 
 (defun dsh-bridge--age-sorter (a b)
@@ -6789,7 +6939,7 @@ Archived sessions are hidden unless `dsh-bridge--sessions-archived-p' (or
     ;; Add help-echo to the workspace cell to show its directory
     (and (stringp cwd) (not (string-empty-p cwd))
 	 (setq workspace (propertize workspace 'help-echo cwd)))
-    (let ((cols (vector (dsh-bridge--default-target-marker session)
+    (let ((cols (vector (dsh-bridge--pinned-target-marker session)
 			(dsh-bridge--status-glyph (alist-get 'id session))
 			title age workspace)))
       (when dsh-bridge-show-session-ids
@@ -6801,8 +6951,8 @@ Archived sessions are hidden unless `dsh-bridge--sessions-archived-p' (or
   :doc "Keymap for `dsh-bridge-sessions-mode'."
   "RET" #'dsh-bridge-visit-session
   "r" #'dsh-bridge-open-session
-  "t" #'dsh-bridge-set-default-target-at-point
-  "u" #'dsh-bridge-clear-default-target
+  "t" #'dsh-bridge-pin-target-at-point
+  "u" #'dsh-bridge-unpin-target
   "f" #'dsh-bridge-peek-session
   "a" #'dsh-bridge-answer
   "k" #'dsh-bridge-stop-session
@@ -6834,10 +6984,10 @@ Archived sessions are hidden unless `dsh-bridge--sessions-archived-p' (or
      :help "Answer the pending question, watch the running turn, or open the view/prompt"]
     ["Open Prompt" dsh-bridge-open-session
      :help "Bind the prompt buffer to the session under point and open it"]
-    ["Set Default Target" dsh-bridge-set-default-target-at-point
-     :help "Set the default target to the session under point"]
-    ["Clear Default Target" dsh-bridge-clear-default-target
-     :help "Clear the default target (use last-active)"]
+    ["Pin Target" dsh-bridge-pin-target-at-point
+     :help "Set the pinned target to the session under point"]
+    ["Unpin Target" dsh-bridge-unpin-target
+     :help "Clear the pinned target (use last-active)"]
     ["View Latest Turn" dsh-bridge-peek-session
      :help "Fetch the session's latest turn without changing anything"]
     ["Show/Hide Archived" dsh-bridge-toggle-archived-sessions
@@ -6861,8 +7011,8 @@ Archived sessions are hidden unless `dsh-bridge--sessions-archived-p' (or
     ["Refresh" revert-buffer
      :help "Re-fetch the session list"]
     "---"
-    ["Set Default Target…" dsh-bridge-set-default-target
-     :help "Choose the default target (completing-read)"]
+    ["Pin Target…" dsh-bridge-pin-target
+     :help "Choose the pinned target (completing-read)"]
     ["DSH Bridge Dispatcher…" dsh-bridge
      :help "Open the dispatcher"]))
 
@@ -6936,7 +7086,7 @@ and then silently dropped.  Use \\[dsh-bridge-unarchive-session] first;
 (defun dsh-bridge-open-session ()
   "In a DSH-Sessions buffer, open a prompt for the session under point.
 If the session is saved (cold), resume it first.  This command does not
-change the default target session."
+change the pinned target session."
   (interactive)
   (let ((id (tabulated-list-get-id)))
     (cond
@@ -6961,7 +7111,7 @@ change the default target session."
   and the DSH-View goes to another window, else below the prompt,
   selecting the prompt.
 
-The session is resumed first when it is saved (cold).  The default target
+The session is resumed first when it is saved (cold).  The pinned target
 is not changed.
 
 An archived session is not runnable: it is not resumed, and this command
@@ -7012,18 +7162,16 @@ to read it."
 	    (with-current-buffer view
 	      (goto-char (point-max)))))))))))
 
-(defun dsh-bridge-set-default-target-at-point ()
-  "Set the default target to the session under point.
-A saved (cold) session is resumed first, so the target is live once bound."
+(defun dsh-bridge-pin-target-at-point ()
+  "Pin the session at point as the bridge's target.
+A saved (cold) session binds directly rather than being resumed: the pin
+is a display-and-target choice, and the host resumes the session when a
+later request actually acts on it."
   (interactive)
   (let ((id (tabulated-list-get-id)))
-    (cond
-     ((null id)
-      (message "dsh-bridge: no session under point"))
-     ((dsh-bridge--ensure-session-live id)
-      (dsh-bridge-set-default-target id))
-     (t
-      (error "dsh-bridge: session \"%s\" is dead" id)))))
+    (if (null id)
+	(message "dsh-bridge: no session under point")
+      (dsh-bridge-pin-target id))))
 
 (defun dsh-bridge-peek-session ()
   "In a DSH-Sesssions buffer, view the session under point in a DSH-View buffer."
@@ -7160,8 +7308,8 @@ new workspace with that name.  Return the id of the new session.
 
 With a prefix argument, or if SET-TITLE is non-nil, read a required title
 before creating the session, rather than leaving the session untitled.
-This does not change the default target; see
-`dsh-bridge-create-titled-session' for the dispatcher's binding command."
+This does not change the pinned target; the dispatcher's `+' key calls
+this command with SET-TITLE and then pins what it created."
   (interactive "P")
   (let* ((workspace (dsh-bridge--read-workspace "Create session in workspace"))
 	 (title (and set-title (dsh-bridge--read-new-session-title)))
@@ -7194,15 +7342,7 @@ This does not change the default target; see
     (message "dsh-bridge: created a new session")
     session-id))
 
-(defun dsh-bridge-create-titled-session ()
-  "Create a new DSH session with an explicit title.
-Unlike `dsh-bridge-create-session', this command reads a title and
-applies it, rather than creating an untitled session.  It also binds the
-new session as the default target."
-  (interactive)
-  (let ((id (dsh-bridge-create-session t)))
-    (when id
-      (dsh-bridge-set-default-target id))))
+
 
 (defun dsh-bridge-rename-workspace ()
   "Rename the workspace of the session at point in the DSH-Sessions buffer.
@@ -8041,19 +8181,251 @@ waiting for it is given an explicit terminal note instead of a blank."
 
 ;;; The dispatcher
 
+;;; The dispatcher's suffixes
+
+;; Every verb of the open menu acts on the displayed focus, never on the
+;; ambient resolution waterfall: the wrappers below pass the focus id to the
+;; underlying command.  The session-state mutators additionally refuse a
+;; focus that was only an advisory last-active guess.
+
+(defvar dsh-bridge--dispatcher-mutated nil
+  "Non-nil when the last dispatcher mutation actually ran.
+Read by `dsh-bridge--dispatcher-stay-p' to decide whether the menu should
+stay open: a refusal is a teaching moment and must stay, while a mutation
+that reached the host closes the menu like every other verb.")
+
+(defun dsh-bridge--dispatcher-may-mutate (verb)
+  "Clear the way for mutating VERB on the dispatcher's focus.
+Returns non-nil when the focus is confirmed and the caller may proceed;
+otherwise reports the refusal inside the menu and returns nil.  Records
+the outcome in `dsh-bridge--dispatcher-mutated'."
+  (setq dsh-bridge--dispatcher-mutated nil)
+  (cond
+   ((null (plist-get dsh-bridge--focus :session))
+    (message "dsh-bridge: no sessions — + creates one")
+    nil)
+   ((dsh-bridge--focus-advisory-p)
+    (message "dsh-bridge: %s needs a confirmed target — \
+M-n/M-p to confirm, or t to pin" verb)
+    nil)
+   (t
+    (setq dsh-bridge--dispatcher-mutated t))))
+
+(defun dsh-bridge--dispatcher-stay-p ()
+  "Pre-command for a mutating suffix: stay after a refusal, else exit.
+Transient resolves a suffix's `transient' slot before the command runs,
+so the decision uses the previous invocation's outcome: only a refusal
+(which leaves `dsh-bridge--dispatcher-mutated' nil) keeps the menu open."
+  (if dsh-bridge--dispatcher-mutated 'transient--do-exit 'transient--do-stay))
+
+(defun dsh-bridge--dispatcher-cycle (&optional backward)
+  "Move the dispatcher's focus one session through its cycle set.
+BACKWARD walks toward older sessions, and otherwise toward newer; the walk
+wraps.  A pinned menu reports that it is locked instead of cycling."
+  (cond
+   ((eq (plist-get dsh-bridge--focus :provenance) 'pinned)
+    (message "dsh-bridge: menu is pinned to \"%s\" (u to unpin)"
+	     (dsh-bridge--session-label (plist-get dsh-bridge--focus :session))))
+   ((< (length dsh-bridge--focus-cycle) 2)
+    ;; There is nowhere to walk, but the keystroke still confirms the
+    ;; displayed guess: the refusal message sends the user here.
+    (when-let* ((only (car dsh-bridge--focus-cycle)))
+      (unless (eq (plist-get dsh-bridge--focus :provenance) 'pinned)
+	(dsh-bridge--focus-set only 'cycled))))
+   (t
+    (let* ((total (length dsh-bridge--focus-cycle))
+	   (index (or (dsh-bridge--cycle-index) 0))
+	   (next (if backward
+		     (if (zerop index) (1- total) (1- index))
+		   (if (= index (1- total)) 0 (1+ index)))))
+      ;; Cycling is what confirms an advisory guess, even when the walk
+      ;; comes back around to the same session.
+      (dsh-bridge--focus-set (nth next dsh-bridge--focus-cycle) 'cycled)
+      (message "dsh-bridge: %s" (dsh-bridge--session-label
+				 (nth next dsh-bridge--focus-cycle)))))))
+
+(defun dsh-bridge--dispatcher-previous ()
+  "Focus the next older session in the dispatcher's cycle set."
+  (interactive)
+  (dsh-bridge--dispatcher-cycle t))
+
+(defun dsh-bridge--dispatcher-next ()
+  "Focus the next newer session in the dispatcher's cycle set."
+  (interactive)
+  (dsh-bridge--dispatcher-cycle))
+
+(defun dsh-bridge--dispatcher-send ()
+  "Send the region or buffer to the dispatcher's focus session."
+  (interactive)
+  (dsh-bridge-send (dsh-bridge--focus-session)))
+
+(defun dsh-bridge--dispatcher-draft ()
+  "Send the region or buffer to the dispatcher's focus session as a draft."
+  (interactive)
+  (dsh-bridge-draft (dsh-bridge--focus-session)))
+
+(defun dsh-bridge--dispatcher-fetch ()
+  "Fetch the latest turn of the dispatcher's focus session."
+  (interactive)
+  (dsh-bridge-fetch (dsh-bridge--focus-session)))
+
+(defun dsh-bridge--dispatcher-describe ()
+  "Describe the dispatcher's focus session."
+  (interactive)
+  (dsh-bridge-describe-session (dsh-bridge--focus-session)))
+
+(defun dsh-bridge--dispatcher-prompt ()
+  "Open a prompt buffer bound to the dispatcher's focus session."
+  (interactive)
+  ;; Opening a prompt buffer is itself a commitment, so even an advisory
+  ;; focus binds it; the buffer then shows a bound header.
+  (pop-to-buffer (dsh-bridge--prompt-buffer (dsh-bridge--focus-session))))
+
+(defun dsh-bridge--dispatcher-stop ()
+  "Stop the dispatcher's focus session, if it is running."
+  (interactive)
+  (when (dsh-bridge--dispatcher-may-mutate "stopping")
+    (dsh-bridge-stop-session nil (dsh-bridge--focus-session))))
+
+(defun dsh-bridge--dispatcher-plan ()
+  "Toggle plan mode for the dispatcher's focus session."
+  (interactive)
+  (when (dsh-bridge--dispatcher-may-mutate "the plan-mode change")
+    (dsh-bridge-toggle-plan-mode nil (dsh-bridge--focus-session))))
+
+(defun dsh-bridge--dispatcher-goal ()
+  "Set or edit the goal of the dispatcher's focus session."
+  (interactive)
+  (when (dsh-bridge--dispatcher-may-mutate "the goal edit")
+    (dsh-bridge-set-goal nil (dsh-bridge--focus-session))))
+
+(defun dsh-bridge--dispatcher-toggle-goal ()
+  "Pause or resume the goal of the dispatcher's focus session."
+  (interactive)
+  (when (dsh-bridge--dispatcher-may-mutate "the goal change")
+    (dsh-bridge-toggle-goal (dsh-bridge--focus-session))))
+
+(defun dsh-bridge--dispatcher-clear-goal ()
+  "Clear the goal of the dispatcher's focus session."
+  (interactive)
+  (when (dsh-bridge--dispatcher-may-mutate "clearing the goal")
+    (dsh-bridge-clear-goal (dsh-bridge--focus-session))))
+
+(defun dsh-bridge--dispatcher-pin ()
+  "Pin the dispatcher's focus session as the target.
+Pinning an unconfirmed advisory guess is intentional: you pin what the
+menu shows.  The focus record is re-pointed so the header shows the pin
+without a re-invocation."
+  (interactive)
+  (let ((session (dsh-bridge--focus-session)))
+    (if (null session)
+	(message "dsh-bridge: no session to pin")
+      (dsh-bridge-pin-target session)
+      (dsh-bridge--focus-set session 'pinned))))
+
+(defun dsh-bridge--dispatcher-unpin ()
+  "Clear the pinned target, leaving the focus on the session it named.
+The tracked session stays the focus with explicit provenance: it was
+user-confirmed, so the mutators may still act on it."
+  (interactive)
+  (let ((session (plist-get dsh-bridge--focus :session)))
+    (dsh-bridge-unpin-target)
+    (when session
+      ;; The user pinned that session, so it is confirmed -- but it is not
+      ;; a buffer binding, and must not claim to be.
+      (unless (dsh-bridge--focus-advisory-p)
+	(dsh-bridge--focus-set session 'cycled)))))
+
+(defun dsh-bridge--dispatcher-pin-by-title ()
+  "Pin a session chosen by title, and re-point the focus at it."
+  (interactive)
+  (let ((session (dsh-bridge--read-session-id "Pin target: ")))
+    (when session
+      (dsh-bridge-pin-target session)
+      (dsh-bridge--focus-set session 'pinned))))
+
+(defun dsh-bridge--dispatcher-create ()
+  "Create a titled session, pin it, and re-point the focus at it."
+  (interactive)
+  (let ((session (dsh-bridge-create-session t)))
+    (when session
+      ;; The cycle set was snapshotted when the menu opened, so the new
+      ;; session is not in it: rebuild and re-point the focus.
+      (dsh-bridge-pin-target session)
+      (dsh-bridge--dispatcher-cycle-init)
+      (dsh-bridge--focus-set session 'pinned))))
+
+
+;; The menu's groups are passed to `transient-define-prefix' as literal data,
+;; BEFORE the interactive body.  Order matters: transient parses the group
+;; vectors while expanding the macro and silently drops any it sees after the
+;; body, which leaves a menu with no keys at all.
+
 ;;;###autoload
-(transient-define-prefix dsh-bridge ()
+(transient-define-prefix dsh-bridge (&optional arg)
   "Dispatch actions for the DeepSeek Harness (DSH) bridge.
 This command opens a transient menu listing a set of actions.
 Type the corresponding key to perform an action: f to fetch the latest
 turn, r to compose a reply, etc.
 
-The first line in the transient menu shows what session the action works
-on: the invoking buffer's own session, else the default target, else the
-last-active session as an advisory display.  If there is no explicit
-session target, some actions work on the last-active session in DSH, but
-actions that change the session state (k, p, G, A, X) signal an error."
-  dsh-bridge--dispatcher-layout)
+The first line in the transient menu is the menu's focus: the session
+every key in it acts on.  It is the pinned target when one is set, else
+the invoking buffer's own session, else the last-active session as an
+advisory guess (shown with its position in the session cycle, which
+M-p/M-n walk).  The session-state mutators (k, p, G, A, X) refuse an
+advisory focus: the guess is not a mutation target until you confirm it
+by cycling or pinning.
+
+With a prefix argument, re-fetch the session roster before painting,
+instead of trusting the cached one."
+  [:description (lambda () (dsh-bridge--dispatcher-header))]
+  ["Compose"
+   ("r" dsh-bridge--dispatcher-prompt :description "reply/open prompt buffer")
+   ("s" dsh-bridge--dispatcher-send :description "send region/buffer (prompt)")
+   ("d" dsh-bridge--dispatcher-draft :description "send region/buffer (draft)")]
+  ["Read"
+   ("f" dsh-bridge--dispatcher-fetch :description "fetch latest turn")
+   ("D" dsh-bridge--dispatcher-describe :description "describe session")]
+  ["Plan and goal"
+   ("p" dsh-bridge--dispatcher-plan :description "toggle plan mode"
+    :transient dsh-bridge--dispatcher-stay-p)
+   ("G" dsh-bridge--dispatcher-goal :description "set or edit the goal"
+    :transient dsh-bridge--dispatcher-stay-p)
+   ("A" dsh-bridge--dispatcher-toggle-goal :description "pause/resume goal"
+    :transient dsh-bridge--dispatcher-stay-p)
+   ("X" dsh-bridge--dispatcher-clear-goal :description "clear the goal"
+    :transient dsh-bridge--dispatcher-stay-p)]
+  ["Sessions"
+   ("t" dsh-bridge--dispatcher-pin :description "pin this session" :transient t)
+   ("u" dsh-bridge--dispatcher-unpin :description "unpin" :transient t)
+   ("T" dsh-bridge--dispatcher-pin-by-title :description "pin by title" :transient t)
+   ("k" dsh-bridge--dispatcher-stop :description "stop running session"
+    :transient dsh-bridge--dispatcher-stay-p)
+   ("l" dsh-bridge-list-sessions :description "list sessions")
+   ("+" dsh-bridge--dispatcher-create :description "create and pin session")]
+  ["Focus"
+   ("M-p" dsh-bridge--dispatcher-previous :description "focus older session"
+    :transient t)
+   ("M-n" dsh-bridge--dispatcher-next :description "focus newer session"
+    :transient t)]
+  ["Quit" ("q" transient-quit-one :description "quit")]
+  (interactive "P")
+  (dsh-bridge--dispatcher-seed arg)
+  (dsh-bridge--dispatcher-focus-init)
+  (dsh-bridge--dispatcher-cycle-init)
+  (transient-setup 'dsh-bridge))
+
+(defun dsh-bridge--dispatcher-exit ()
+  "Clear the menu-scoped dispatcher state.
+Runs from `transient-exit-hook', after an exiting suffix's body has
+already used the focus."
+  (setq dsh-bridge--focus nil
+	dsh-bridge--focus-cycle nil
+	dsh-bridge--dispatcher-roster nil))
+
+;; Registered once, at load time: adding it from the prefix body would stack
+;; a duplicate on every menu open.
+(add-hook 'transient-exit-hook #'dsh-bridge--dispatcher-exit)
 
 ;;; Menu bar (under Tools)
 
@@ -8078,7 +8450,7 @@ actions that change the session state (k, p, G, A, X) signal an error."
       :help "Stop the effective session's running turn"]
      ["Receive Message…" dsh-bridge-receive
       :help "Receive the latest message sent from DSH to Emacs"]
-     ["Set Default Target Session" dsh-bridge-set-default-target
+     ["Pin Target Session" dsh-bridge-pin-target
       :help "Set or clear the default DSH target session"]))
   "DSH Bridge menu, installed under Tools.")
 
