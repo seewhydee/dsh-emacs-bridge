@@ -5872,20 +5872,8 @@ failure leaves the header segment empty until the next trigger."
       (dsh-bridge--fetch-context session)
       (dsh-bridge--plan-goal-refresh session t))))
 
-(defun dsh-bridge--model-catalog (data)
-  "Flatten DATA's model groups into (PROVIDER/MODEL PROVIDER MODEL-ENTRY) triples.
-MODEL-ENTRY is the catalog model alist (id, name, reasoning)."
-  (let ((result '()))
-    (dolist (group (alist-get 'groups data) (nreverse result))
-      (let ((provider (alist-get 'id group)))
-	(dolist (model (alist-get 'models group))
-	  (push (list (format "%s/%s" provider (alist-get 'id model))
-		      provider model)
-		result))))))
-
 (defun dsh-bridge--select-model-apply (session-id provider model effort)
-  "POST /model for SESSION-ID and refresh the model cache on success.
-Returns non-nil on success; the header re-renders on the next redisplay."
+  "POST /model for SESSION-ID and refresh the model cache on success."
   (let* ((payload (append (list (cons 'sessionId session-id)
 				(cons 'provider provider)
 				(cons 'model model))
@@ -5899,63 +5887,82 @@ Returns non-nil on success; the header re-renders on the next redisplay."
 		(assoc-delete-all session-id dsh-bridge--session-models))
 	  (dsh-bridge--fetch-models session-id t)
 	  (message "dsh-bridge: model %s/%s%s"
-		   provider model (if effort (format " (%s)" effort) ""))
-	  t)
-      (message "dsh-bridge: %s" (or (alist-get 'error alist) (format "HTTP %s" status)))
-      nil)))
+		   provider model (if effort (format " (%s)" effort) "")))
+      (message "dsh-bridge: %s" (or (alist-get 'error alist) (format "HTTP %s" status))))))
+
+(defun dsh-bridge--complete-model (catalog)
+  "Return a completion function for reading a model from CATALOG.
+This is a helper function for `dsh-bridge-select-model'."
+  (let ((annotation
+	 (lambda (model)
+	   (let* ((cell (assoc model catalog))
+		  (name (alist-get 'name (nth 2 cell))))
+	     (and (stringp name) (not (string-empty-p name))
+		  (concat " " name)))))
+	(names (mapcar #'car catalog)))
+    (lambda (string pred action)
+      (if (eq action 'metadata)
+	  `(metadata (annotation-function . ,annotation))
+	(complete-with-action action names string pred)))))
 
 (defun dsh-bridge-select-model ()
-  "Change the model (and reasoning effort) of the current DSH session.
+  "Set the model and reasoning effort for the current DSH session.
 The buffer must be bound to a session, or `dsh-bridge-pinned-target' set.
 Models are picked from the host's live catalog via `completing-read'."
   (interactive)
   (let* ((session-id (dsh-bridge--effective-session nil nil t))
-	 (data (dsh-bridge--fetch-models session-id t)))
-    (if (null data)
-	(message "dsh-bridge: model catalog unavailable")
-      (let* ((catalog (dsh-bridge--model-catalog data))
-	     (current (alist-get 'current data))
-	     (current-key (and (alist-get 'provider current) (alist-get 'model current)
-			       (format "%s/%s" (alist-get 'provider current)
-				       (alist-get 'model current))))
-	     (annotation (lambda (cand)
-			   (let ((name (alist-get 'name (caddr (assoc cand catalog)))))
-			     (and (stringp name) (not (string-empty-p name))
-				  (concat " " name))))))
-	(if (null catalog)
-	    (message "dsh-bridge: no models available")
-	  (let ((chosen (completing-read
-			 (format-prompt "Model" current-key)
-			 (lambda (string pred action)
-			   (if (eq action 'metadata)
-			       `(metadata (annotation-function . ,annotation))
-			     (complete-with-action action (mapcar #'car catalog) string pred)))
-			 nil t nil nil current-key)))
-	    (when (and chosen (not (string-empty-p chosen)))
-	      (let* ((entry (assoc chosen catalog))
-		     (provider (cadr entry))
-		     (model-entry (caddr entry))
-		     (reasoning (alist-get 'reasoning model-entry))
-		     (efforts (and reasoning (alist-get 'efforts reasoning)))
-		     (effort nil))
-		(when efforts
-		  (let* ((by-name (mapcar (lambda (e) (cons (alist-get 'name e) (alist-get 'id e)))
-					  efforts))
-			 (current-effort (alist-get 'reasoningEffort current))
-			 (default-name
-			  (or (and current-effort (car (rassoc current-effort by-name)))
-			      (let ((d (alist-get 'defaultEffort reasoning)))
-				(and d (car (rassoc d by-name)))))))
-		    (setq effort
-			  (cdr (assoc (completing-read (format-prompt "Reasoning effort" default-name)
-						       (mapcar #'car by-name)
-						       nil t nil nil default-name)
-				      by-name)))))
-		;; Post the model through the `session.selectModel'
-		;; handler, so the change applies to this session and
-		;; persists as the default.
-		(dsh-bridge--select-model-apply
-		 session-id provider (alist-get 'id model-entry) effort)))))))))
+	 (models-data (dsh-bridge--fetch-models session-id t))
+	 (current (alist-get 'current models-data))
+	 catalog chosen)
+    ;; Flatten model data into (PROVIDER/MODEL PROVIDER ENTRY).
+    ;; ENTRY is the catalog model alist (id, name, reasoning).
+    (dolist (group (alist-get 'groups models-data))
+      (let ((provider (alist-get 'id group)))
+	(when (and provider (not (string-empty-p provider)))
+	  (dolist (model (alist-get 'models group))
+	    (let ((name (alist-get 'id model)))
+	      (when (and name (not (string-empty-p name)))
+		(push (list (format "%s/%s" provider name)
+			    provider model)
+		      catalog)))))))
+    (if (null catalog)
+	(message "dsh-bridge: no models available")
+      (setq catalog (nreverse catalog))
+      ;; Choose a model via `completing-read', requiring a match.
+      (let* ((current-provider (alist-get 'provider current))
+	     (current-model (alist-get 'model current))
+	     (current-key (and current-provider
+			       current-model
+			       (format "%s/%s" current-provider
+				       current-model))))
+	(setq chosen
+	      (completing-read (format-prompt "Model" current-key)
+			       (dsh-bridge--complete-model catalog)
+			       nil t nil nil current-key)))
+      (when (and chosen (not (string-empty-p chosen)))
+	(let* ((model (assoc chosen catalog))
+	       (provider (nth 1 model))
+	       (entry (nth 2 model))
+	       (reasoning (alist-get 'reasoning entry))
+	       (efforts (mapcar (lambda (level)
+				  (cons (alist-get 'id level)
+					(alist-get 'name level)))
+				(alist-get 'efforts reasoning)))
+	       effort)
+	  (unless model
+	    (user-error "dsh-bridge: %s not in model catalog" chosen))
+	  (when efforts
+	    ;; Read the desired reasoning effort level.
+	    (let* ((default-id (alist-get 'defaultEffort reasoning))
+		   (default (cdr-safe (assoc default-id efforts))))
+	      (setq effort
+		    (completing-read (format-prompt "Reasoning effort" default)
+				     (mapcar #'cdr efforts)
+				     nil t nil nil default))
+	      (setq effort (car-safe (rassoc effort efforts)))))
+	  ;; Post the model through the `session.selectModel' handler.
+	  (dsh-bridge--select-model-apply session-id provider
+					  (alist-get 'id entry) effort))))))
 
 ;;;###autoload
 (defun dsh-bridge--prompt-buffer (session-id)

@@ -6286,18 +6286,33 @@ when the caches are empty."
         (should (string-match-p "T (last active) · myproj"
                                 (dsh-bridge--prompt-header-line)))))))
 
-(ert-deftest dsh-bridge-model-catalog ()
-  "The catalog flattens provider groups into provider/model triples."
-  (let ((data '((groups .
-                  (((id . "p1") (name . "P1")
-                    (models . (((id . "m1") (name . "M1"))
-                               ((id . "m2") (name . "M2")))))
-                   ((id . "p2") (name . "P2")
-                    (models . (((id . "m3") (name . "M3"))))))))))
-    (let ((catalog (dsh-bridge--model-catalog data)))
-      (should (equal (mapcar #'car catalog) '("p1/m1" "p1/m2" "p2/m3")))
-      (should (equal (cadr (assoc "p1/m2" catalog)) "p1"))
-      (should (equal (alist-get 'id (caddr (assoc "p2/m3" catalog))) "m3")))))
+(ert-deftest dsh-bridge-select-model-catalog-flattening ()
+  "The catalog offers provider/model candidates in group then catalog order.
+A group or model whose id is missing or empty contributes nothing, rather
+than becoming an unusable candidate."
+  (let ((table nil)
+        (dsh-bridge-pinned-target "s1"))
+    (cl-letf (((symbol-function 'dsh-bridge--fetch-models)
+               (lambda (&rest _)
+                 '((current . ((provider . "p1") (model . "m1")))
+                   (groups . (((id . "p1")
+                               (models . (((id . "m1") (name . "M1"))
+                                          ((name . "No id")))))
+                              ((name . "No provider id")
+                               (models . (((id . "m3")))))
+                              ((id . "")
+                               (models . (((id . "m4")))))
+                              ((id . "p2")
+                               (models . (((id . "m5") (name . "M5"))))))))))
+              ((symbol-function 'completing-read)
+               (lambda (_prompt collection &rest _)
+                 (setq table collection)
+                 "p1/m1"))
+              ((symbol-function 'dsh-bridge--select-model-apply)
+               (lambda (&rest _) nil)))
+      (dsh-bridge-select-model))
+    ;; All candidates, in group then catalog order; the unusable ids are gone.
+    (should (equal (funcall table "" nil t) '("p1/m1" "p2/m5")))))
 
 (ert-deftest dsh-bridge-fetch-models-cache ()
   "fetch-models caches per session and force-refreshes."
@@ -6350,6 +6365,44 @@ than post the change to whatever the advisory caches name."
       (dsh-bridge-prompt-mode)
       (should-error (dsh-bridge-select-model) :type 'user-error))))
 
+(ert-deftest dsh-bridge-select-model-unknown-key-refuses ()
+  "A chosen key with no catalog entry refuses instead of posting an empty
+provider/model pair.  The reachable shape is a session whose current model is
+absent from the catalog (its provider failed to enumerate): pressing RET takes
+the prompt's default, which `completing-read' returns unchecked."
+  (let ((dsh-bridge-pinned-target "s1")
+        (posted nil))
+    (cl-letf (((symbol-function 'dsh-bridge--fetch-models)
+               (lambda (&rest _)
+                 '((current . ((provider . "p1") (model . "m9")))
+                   (groups . (((id . "p1")
+                               (models . (((id . "m1") (name . "M1"))))))))))
+              ;; RET on the prompt's default: returned even though the
+              ;; completion table never offered it.
+              ((symbol-function 'completing-read)
+               (lambda (_prompt _collection &rest args) (nth 4 args)))
+              ((symbol-function 'dsh-bridge--select-model-apply)
+               (lambda (&rest _) (setq posted t))))
+      (should-error (dsh-bridge-select-model) :type 'user-error))
+    (should-not posted)))
+
+(ert-deftest dsh-bridge-select-model-empty-choice-aborts ()
+  "RET on a model prompt with no default selects nothing and posts nothing.
+With no current selection the prompt's DEFAULT is nil, and `completing-read'
+lets the null string exit."
+  (let ((dsh-bridge-pinned-target "s1")
+        (posted nil))
+    (cl-letf (((symbol-function 'dsh-bridge--fetch-models)
+               (lambda (&rest _)
+                 '((current . nil)
+                   (groups . (((id . "p1")
+                               (models . (((id . "m1") (name . "M1"))))))))))
+              ((symbol-function 'completing-read) (lambda (&rest _) ""))
+              ((symbol-function 'dsh-bridge--select-model-apply)
+               (lambda (&rest _) (setq posted t))))
+      (dsh-bridge-select-model))
+    (should-not posted)))
+
 (ert-deftest dsh-bridge-select-model-apply-posts-and-refetches ()
   "A successful switch POSTs provider/model — plus `reasoningEffort' when
 set — drops the session's cached catalog, force-refetches it, and echoes the
@@ -6368,7 +6421,7 @@ selection."
                (lambda (id force) (push (list id force) refetched)))
               ((symbol-function 'message)
                (lambda (&rest args) (setq msg (apply #'format args)))))
-      (should (dsh-bridge--select-model-apply "s1" "p1" "m1" "high"))
+      (dsh-bridge--select-model-apply "s1" "p1" "m1" "high")
       (should (equal posted '((sessionId . "s1") (provider . "p1")
                               (model . "m1") (reasoningEffort . "high"))))
       ;; The stale entry was dropped and a forced refetch was kicked off.
@@ -6377,7 +6430,7 @@ selection."
       (should (string-match-p "model p1/m1 (high)" msg))
       ;; Without an effort, no reasoningEffort key and a plainer echo.
       (setq posted nil msg nil)
-      (should (dsh-bridge--select-model-apply "s1" "p1" "m2" nil))
+      (dsh-bridge--select-model-apply "s1" "p1" "m2" nil)
       (should-not (assq 'reasoningEffort posted))
       (should (equal msg "dsh-bridge: model p1/m2")))))
 
@@ -6393,7 +6446,7 @@ leaves the cached catalog alone: no forced refetch runs."
                (lambda (&rest _) (setq refetched t)))
               ((symbol-function 'message)
                (lambda (&rest args) (setq msg (apply #'format args)))))
-      (should-not (dsh-bridge--select-model-apply "s1" "p1" "m9" nil))
+      (dsh-bridge--select-model-apply "s1" "p1" "m9" nil)
       (should (equal msg "dsh-bridge: no such model"))
       (should-not refetched)
       (should (assoc "s1" dsh-bridge--session-models)))
@@ -6403,13 +6456,14 @@ leaves the cached catalog alone: no forced refetch runs."
                (lambda (&rest _) (cons 500 nil)))
               ((symbol-function 'message)
                (lambda (&rest args) (setq msg (apply #'format args)))))
-      (should-not (dsh-bridge--select-model-apply "s1" "p1" "m9" nil))
+      (dsh-bridge--select-model-apply "s1" "p1" "m9" nil)
       (should (equal msg "dsh-bridge: HTTP 500")))))
 
 (ert-deftest dsh-bridge-select-model-effort-default-preselection ()
-  "For a reasoning model, the effort prompt preselects the session's current
-effort by name, else the catalog's `defaultEffort'; the chosen name maps back
-to its id for the apply call."
+  "For a reasoning model, the effort prompt offers level names and preselects
+the catalog's `defaultEffort' by name — never the session's current effort,
+which belongs to the model in force and does not carry over.  The chosen name
+maps back to its id for the apply call."
   (let ((dsh-bridge-pinned-target "s1")
         (data nil)
         (reads nil)
@@ -6417,14 +6471,14 @@ to its id for the apply call."
     (cl-letf (((symbol-function 'dsh-bridge--fetch-models)
                (lambda (&rest _) data))
               ((symbol-function 'completing-read)
-               (lambda (_prompt _collection &rest args)
-                 (push (nth 4 args) reads) ; the DEF argument
+               (lambda (prompt collection &rest args)
+                 (push (list prompt (nth 4 args) collection) reads)
                  (nth 4 args)))
               ((symbol-function 'dsh-bridge--select-model-apply)
                (lambda (session provider model effort)
                  (setq applied (list session provider model effort))
-                 t)))
-      ;; The session's current effort wins the preselection.
+                 nil)))
+      ;; A session effort of "low" is ignored: the model's default wins.
       (setq data '((current . ((provider . "p1") (model . "m1")
                                (reasoningEffort . "low")))
                    (groups . (((id . "p1")
@@ -6435,9 +6489,13 @@ to its id for the apply call."
                                                            ((id . "medium") (name . "Medium"))
                                                            ((id . "high") (name . "High"))))))))))))))
       (dsh-bridge-select-model)
-      (should (equal (nreverse reads) '("p1/m1" "Low")))
-      (should (equal applied '("s1" "p1" "m1" "low")))
-      ;; No current effort: the catalog's defaultEffort is preselected.
+      (let ((calls (nreverse reads)))
+        ;; Model first (defaulted to the current key), then the effort level.
+        (should (equal (nth 1 (car calls)) "p1/m1"))
+        (should (equal (nth 1 (cadr calls)) "Medium"))
+        (should (equal (nth 2 (cadr calls)) '("Low" "Medium" "High"))))
+      (should (equal applied '("s1" "p1" "m1" "medium")))
+      ;; With no current effort at all, the same catalog default is read.
       (setq reads nil
             applied nil
             data '((current . ((provider . "p1") (model . "m1")))
@@ -6449,7 +6507,7 @@ to its id for the apply call."
                                                            ((id . "medium") (name . "Medium"))
                                                            ((id . "high") (name . "High"))))))))))))))
       (dsh-bridge-select-model)
-      (should (equal (nreverse reads) '("p1/m1" "Medium")))
+      (should (equal (nth 1 (cadr (nreverse reads))) "Medium"))
       (should (equal applied '("s1" "p1" "m1" "medium"))))))
 
 (ert-deftest dsh-bridge-fetch-context ()
