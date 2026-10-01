@@ -1595,23 +1595,20 @@ The set is every non-archived roster session, live or cold, newest
 first; it excludes a row with no id.  The activity time is folded here,
 once per session, rather than re-scanned inside the sort predicate.
 Returns the snapshot of session ids."
-  (setq dsh-bridge--focus-cycle
-	(mapcar #'car
-		(sort (delq nil
-			    (mapcar (lambda (session)
-				      (let ((id (alist-get 'id session)))
-					(and (stringp id)
-					     (not (alist-get 'archived session))
-					     (cons id (or (alist-get 'lastActive session)
-							  (alist-get 'createdAt session)
-							  0)))))
-				    dsh-bridge--sessions-cache))
-		      ;; `sort' is not stable in Emacs Lisp; tie on the id so a
-		      ;; repeated init of the same roster cannot reshuffle it.
-		      (lambda (a b)
-			(if (= (cdr a) (cdr b))
-			    (string-lessp (car a) (car b))
-			  (> (cdr a) (cdr b))))))))
+  (let* ((pair-fun (lambda (session)
+		     ;; Return (id . date) for sorting by date
+		     (unless (alist-get 'archived session)
+		       (let ((id (alist-get 'id session)))
+			 (when (stringp id)
+			   (cons id (or (alist-get 'lastActive session)
+					(alist-get 'createdAt session)
+					0)))))))
+	 (pairs (delq nil (mapcar pair-fun dsh-bridge--sessions-cache)))
+	 (sorter (lambda (a b)
+		   (if (= (cdr a) (cdr b))
+		       (string-lessp (car a) (car b))
+		     (> (cdr a) (cdr b))))))
+    (setq dsh-bridge--focus-cycle (mapcar #'car (sort pairs sorter)))))
 
 (defun dsh-bridge--cycle-index (&optional session)
   "Return the 0-based position of SESSION in the cycle set, or nil.
@@ -1622,7 +1619,7 @@ position."
     (and id (seq-position dsh-bridge--focus-cycle id #'equal))))
 
 (defun dsh-bridge--dispatcher-seed (&optional force)
-  "Seed the session roster for the open dispatcher, and record the outcome.
+  "Seed the session roster for the open dispatcher.
 A warm roster cache is taken on faith unless FORCE is non-nil (the
 menu's prefix argument), since SSE keeps it fresh.  The fetch is bounded
 by `dsh-bridge-roster-timeout' and runs before the menu's first paint,
@@ -1648,8 +1645,7 @@ cannot be consulted, `empty' when the host answered with no sessions, or
 		  (if (eq (car fetch) 200)
 		      (if (cdr fetch) 'ok 'empty)
 		    'unreachable)))
-	    (error 'unreachable)))))
-  dsh-bridge--dispatcher-roster)
+	    (error 'unreachable))))))
 
 ;;; Reading sessions from the minibuffer
 
