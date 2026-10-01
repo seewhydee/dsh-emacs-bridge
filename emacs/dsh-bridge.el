@@ -1488,12 +1488,9 @@ itself."
 	  (or (dsh-bridge--normalized-string session)
 	      (unless no-default "[Untitled Session]"))))))
 
-(defvar dsh-bridge--session-link-map
-  (let ((map (make-sparse-keymap)))
-    (define-key map [header-line mouse-1]
-		#'dsh-bridge-describe-session-at-mouse)
-    map)
-  "Local keymap for clickable session labels in header lines.")
+(defvar-keymap dsh-bridge--session-link-map
+  :doc "Local keymap for clickable session labels in header lines."
+  "<header-line> <mouse-1>" #'dsh-bridge-describe-session-at-mouse)
 
 (defun dsh-bridge--session-link (string session-id)
   "Return STRING propertized as a clickable describe link for SESSION-ID.
@@ -3496,19 +3493,13 @@ space for subsequent flexible cells."
 	  (setq rest (cdr rest))))
       (mapconcat #'identity (nreverse pieces) sep))))
 
-(defvar dsh-bridge--header-plan-map
-  (let ((map (make-sparse-keymap)))
-    (define-key map [header-line mouse-1]
-		#'dsh-bridge--header-plan-at-mouse)
-    map)
-  "Local keymap for the clickable plan cell in header lines.")
+(defvar-keymap dsh-bridge--header-plan-map
+  :doc "Local keymap for the clickable plan cell in header lines."
+  "<header-line> <mouse-1>" #'dsh-bridge--header-plan-at-mouse)
 
-(defvar dsh-bridge--header-goal-map
-  (let ((map (make-sparse-keymap)))
-    (define-key map [header-line mouse-1]
-		#'dsh-bridge--header-goal-at-mouse)
-    map)
-  "Local keymap for the clickable goal cell in header lines.")
+(defvar-keymap dsh-bridge--header-goal-map
+  :doc "Local keymap for the clickable goal cell in header lines."
+  "<header-line> <mouse-1>" #'dsh-bridge--header-goal-at-mouse)
 
 (defun dsh-bridge--header-indicator-string (string face keymap help session-id)
   "Return STRING as a clickable header-line indicator for SESSION-ID.
@@ -4822,9 +4813,12 @@ there is nothing to cache."
       (font-lock-ensure))
     (buffer-substring (point-min) (point-max))))
 
-;; Declared here and populated with its keys below, once the command it binds
-;; (`dsh-bridge--question-toggle-at-point') is defined.
-(defvar dsh-bridge--question-row-map)
+(defvar-keymap dsh-bridge--question-row-map
+  :doc "Local keymap for mouse-clickable option and custom rows.
+Placed as a `keymap' text property by
+`dsh-bridge--question-add-row-affordance'."
+  "<mouse-1>" #'dsh-bridge--question-click
+  "<mouse-2>" #'dsh-bridge--question-click)
 
 (defun dsh-bridge--question-add-row-affordance (start end help)
   "Make the option or custom row from START to END mouse-clickable with HELP.
@@ -5222,14 +5216,6 @@ the marks (the harness's `matchesQuestions' wire rules)."
 	(save-excursion
 	  (goto-char point)
 	  (dsh-bridge--question-toggle-at-point))))))
-
-;; Populated here so the command exists before the keymap references it; the
-;; render function places this map on each option and custom row.
-(setq dsh-bridge--question-row-map
-      (let ((map (make-sparse-keymap)))
-	(define-key map [mouse-1] #'dsh-bridge--question-click)
-	(define-key map [mouse-2] #'dsh-bridge--question-click)
-	map))
 
 (defun dsh-bridge--question-toggle-number ()
   "Toggle the Nth option of the question at point, N from the digit pressed."
