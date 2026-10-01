@@ -312,19 +312,16 @@ last-active guess."
       ;; Pin beats the buffer binding.
       (let ((dsh-bridge-pinned-target "s2"))
         (should (equal (dsh-bridge--dispatcher-focus-init) "s2"))
-        (should (eq (plist-get dsh-bridge--focus :provenance) 'pinned))
-        (should-not (dsh-bridge--focus-advisory-p)))
+        (should (eq (plist-get dsh-bridge--focus :provenance) 'pinned)))
       ;; Buffer binding beats the advisory guess.
       (let ((dsh-bridge-pinned-target nil))
         (should (equal (dsh-bridge--dispatcher-focus-init) "s1"))
-        (should (eq (plist-get dsh-bridge--focus :provenance) 'buffer))
-        (should-not (dsh-bridge--focus-advisory-p)))
+        (should (eq (plist-get dsh-bridge--focus :provenance) 'buffer)))
       ;; With neither, the newest live session is only an advisory guess.
       (setq-local dsh-bridge--prompt-session nil)
       (let ((dsh-bridge-pinned-target nil))
         (should (equal (dsh-bridge--dispatcher-focus-init) "s2"))
-        (should (eq (plist-get dsh-bridge--focus :provenance) 'advisory))
-        (should (dsh-bridge--focus-advisory-p)))
+        (should (eq (plist-get dsh-bridge--focus :provenance) 'advisory)))
       ;; The host's recorded resolution outranks the local cache.
       (let ((dsh-bridge-pinned-target nil)
             (dsh-bridge--last-resolved-active '("s1" . "T1")))
@@ -334,8 +331,7 @@ last-active guess."
             (dsh-bridge--last-resolved-active nil)
             (dsh-bridge--sessions-cache nil))
         (should (null (dsh-bridge--dispatcher-focus-init)))
-        (should (null dsh-bridge--focus))
-        (should-not (dsh-bridge--focus-advisory-p))))))
+        (should (null dsh-bridge--focus))))))
 
 (ert-deftest dsh-bridge-dispatcher-focus-falls-back-outside-menu ()
   "Outside a menu, the focus accessors fall back on the buffer's session.
@@ -346,15 +342,13 @@ on `dsh-bridge--effective-session'."
     (with-temp-buffer
       (dsh-bridge-prompt-mode)
       (setq-local dsh-bridge--prompt-session "s1")
-      (should (equal (dsh-bridge--focus-session) "s1"))
-      (should-not (dsh-bridge--focus-advisory-p)))
+      (should (equal (dsh-bridge--focus-session) "s1")))
     ;; With a menu open, the record answers instead.
     (let ((dsh-bridge--focus '(:session "s2" :provenance advisory)))
       (with-temp-buffer
         (dsh-bridge-prompt-mode)
         (setq-local dsh-bridge--prompt-session "s1")
-        (should (equal (dsh-bridge--focus-session) "s2"))
-        (should (dsh-bridge--focus-advisory-p))))))
+        (should (equal (dsh-bridge--focus-session) "s2"))))))
 
 (ert-deftest dsh-bridge-dispatcher-cycle-snapshot ()
   "The cycle set is the non-archived roster, newest first.
@@ -449,7 +443,6 @@ A pinned menu refuses to cycle and says so."
     (dsh-bridge--dispatcher-next)
     (should (equal (plist-get dsh-bridge--focus :session) "s2"))
     (should (eq (plist-get dsh-bridge--focus :provenance) 'cycled))
-    (should-not (dsh-bridge--focus-advisory-p))
     ;; Swallowing the confirmation is not possible by cycling back.
     (dsh-bridge--dispatcher-prev)
     (should (equal (plist-get dsh-bridge--focus :session) "s1"))
@@ -466,8 +459,7 @@ A pinned menu refuses to cycle and says so."
     (setq dsh-bridge--focus-cycle '("s1"))
     (dsh-bridge--focus-set "s1" 'advisory)
     (dsh-bridge--dispatcher-next)
-    (should (equal (plist-get dsh-bridge--focus :session) "s1"))
-    (should-not (dsh-bridge--focus-advisory-p))))
+    (should (equal (plist-get dsh-bridge--focus :session) "s1"))))
 
 (ert-deftest dsh-bridge-dispatcher-mutators-refuse-advisory ()
   "A session-state mutator refuses an advisory focus and acts otherwise.
@@ -544,8 +536,7 @@ as an explicitly confirmed focus."
     ;; Unpin: the name stays the focus, now explicitly confirmed.
     (dsh-bridge--dispatcher-unpin)
     (should (null dsh-bridge-pinned-target))
-    (should (equal (plist-get dsh-bridge--focus :session) "s2"))
-    (should-not (dsh-bridge--focus-advisory-p))))
+    (should (equal (plist-get dsh-bridge--focus :session) "s2"))))
 
 (ert-deftest dsh-bridge-dispatcher-create-pins-and-focuses ()
   "`+' pins the created session and re-points the focus at it."
@@ -682,7 +673,6 @@ rather than claiming there are no sessions."
         (dsh-bridge--focus nil)
         (dsh-bridge--focus-cycle nil)
         (dsh-bridge--dispatcher-roster 'ok))
-    (should (equal (dsh-bridge--advisory-session) "cold-2"))
     (should (equal (dsh-bridge--dispatcher-focus-init) "cold-2"))
     (should (eq (plist-get dsh-bridge--focus :provenance) 'advisory))
     (should (string-match-p "C2" (dsh-bridge--dispatcher-header)))))
@@ -5372,8 +5362,7 @@ A turn in the same session leaves the recorded answer in place."
       ;; A turn in s2 supersedes it; the computed cache now names s2.
       (dsh-bridge--notification-handle-events
        '(((kind . "turn-start") (sessionId . "s2"))))
-      (should (null dsh-bridge--last-resolved-active))
-      (should (equal (dsh-bridge--advisory-session) "s2")))))
+      (should (null dsh-bridge--last-resolved-active)))))
 
 (ert-deftest dsh-bridge-view-position ()
   "The view position is newest-first (k/n) over the session's turns, derived

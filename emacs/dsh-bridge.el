@@ -676,122 +676,6 @@ Each SESSION-ID is a session id string, and GOAL is the session report's
 goal alist.  An entry whose GOAL is nil is a known-absent section; an
 absent entry means the session has not been seeded.")
 
-;; `dsh-bridge--parse-json-body' maps JSON false to nil, while the SSE
-;; decoder leaves it as `:false`.  Callers that must distinguish a
-;; present false from an absent key test key presence separately.
-(defun dsh-bridge--json-false-p (value)
-  "Whether VALUE is either nil or `:false'."
-  (or (null value) (eq value :false)))
-
-(defun dsh-bridge--goal-replace (session-id new)
-  "Replace SESSION-ID's cached goal data with NEW.
-NEW should be an alist of the type stored in a session report's `goal'
-entry.  If the existing cache entry records the same goal as NEW and has
-an `activation' entry, and NEW does not, copy the `activation' over."
-  ;; SSE decoder's `:null' (a cleared goal) normalizes to nil
-  (when (eq new :null) (setq new nil))
-  (let ((entry (assoc session-id dsh-bridge--session-goal)))
-    (if (null entry)
-	(push (cons session-id new) dsh-bridge--session-goal)
-      ;; Update an existing entry, possibly retaining `activation' if
-      ;; it's absent from NEW.
-      (let ((old (cdr entry))
-	    activation)
-	(when (and (consp new) (consp old)
-		   (null (assq 'activation new))
-		   (equal (alist-get 'id (alist-get 'goal old))
-			  (alist-get 'id (alist-get 'goal new)))
-		   (setq activation (assq 'activation old)))
-	  (push activation new)))
-      (setcdr entry new))))
-
-(defun dsh-bridge--goal-activation-update (session-id activation goal-id revision)
-  "Set SESSION-ID's cached goal ACTIVATION, when GOAL-ID/REVISION match.
-A frame whose GOAL-ID/REVISION do not name the cached goal is stale and
-ignored; a session with no cached goal is left alone."
-  (let ((entry (assoc session-id dsh-bridge--session-goal)))
-    (when (and entry (consp (cdr entry)))
-      (let* ((section (cdr entry))
-	     (snapshot (alist-get 'goal section))
-	     (cached-id (alist-get 'id snapshot))
-	     (cached-rev (alist-get 'revision snapshot)))
-	(when (and (or (null goal-id) (equal goal-id cached-id))
-		   (or (null revision) (equal revision cached-rev)))
-	  (setcdr entry
-		  (cons (cons 'activation activation)
-			(assq-delete-all 'activation section))))))))
-
-(defun dsh-bridge--status-set (session-id state &optional start-ms)
-  "Record SESSION-ID's status as STATE (`running' or `idle').
-START-MS, if non-nil, specifies the ms-epoch turn-start time kept for
-the elapsed ticker; it is dropped when the session goes idle."
-  (setq dsh-bridge--status-generation (1+ dsh-bridge--status-generation))
-  (setq dsh-bridge--session-status
-	(assoc-delete-all session-id dsh-bridge--session-status))
-  (when (and session-id (memq state '(running idle)))
-    (push (cons session-id
-		(cons state (if (and (eq state 'running) (numberp start-ms))
-				start-ms
-			      nil)))
-	  dsh-bridge--session-status)))
-
-(defun dsh-bridge--status-turn-start (session-id)
-  "Return the ms-epoch turn-start time for SESSION-ID, or nil.
-The start time is set while the session's status is `running' and
-cleared when it goes idle.  The value can also be nil if Emacs did not
-see any \"turn-start\" frame for the session."
-  (let ((entry (and session-id
-		    (assoc session-id dsh-bridge--session-status))))
-    (cdr-safe (cdr-safe entry))))
-
-(defun dsh-bridge--status-state (session-id)
-  "Return SESSION-ID's display status: `running', `idle', or `unknown'.
-Saved (cold) sessions are always `unknown'; for others, the result is
-obtained by trying the cache `dsh-bridge--session-status', then the
-cached session data's `running' flag, and finally falling back on
-`unknown'.  No retrieval is done.  See `dsh-bridge--session-status'."
-  (let ((row (and session-id (dsh-bridge--session-for-id session-id))))
-    (or (and row (not (alist-get 'live row)) 'unknown)
-	(and session-id
-	     (let ((entry (cdr (assoc session-id dsh-bridge--session-status))))
-	       (and (consp entry) (car entry))))
-	(and row (if (alist-get 'running row) 'running 'idle))
-	'unknown)))
-
-(defun dsh-bridge--pending-question (session-id)
-  "The (REQUEST-ID . QUESTIONS) entry for SESSION-ID's pending ask, or nil."
-  (let ((entry (and session-id (assoc session-id dsh-bridge--pending-questions))))
-    (and entry (car (cdr entry)))))
-
-(defun dsh-bridge--status-glyph (session-id)
-  "Return a status indicator for SESSION-ID as a propertized string."
-  (if (eq dsh-bridge-status-indicator 'none)
-      ""
-    (let* ((state (cond
-		   ((and session-id
-			 (or (assoc session-id dsh-bridge--pending-questions)
-			     (assoc session-id dsh-bridge--pending-approvals)))
-		    'asking)
-		   (t (dsh-bridge--status-state session-id))))
-	   (char
-	    (pcase dsh-bridge-status-indicator
-	      ('emoji
-	       (pcase state
-		 ('asking "💬") ('idle "🟢") ('running "🟡") (_ "⚪")))
-	      ('geometric
-	       (pcase state
-		 ('asking "◌") ('idle "●")  ('running "■")  (_ "?")))
-	      (_
-	       (pcase state
-		 ('asking "A") ('idle "I")  ('running "R")  (_ "?")))))
-	   (face
-	    (pcase state
-	      ('asking  'dsh-bridge-status-running-face)
-	      ('idle    'dsh-bridge-status-idle-face)
-	      ('running 'dsh-bridge-status-running-face)
-	      (_	    'dsh-bridge-status-unknown-face))))
-      (propertize char 'face face))))
-
 ;;; DSH bridge status and plugin diagnosis
 
 (defvar dsh-bridge--bridge-status-cache nil
@@ -913,6 +797,79 @@ headers (\"\" when no header terminator is present)."
     ;; accepted by `url-http'.  Multibyteness can even be induced by
     ;; the authorization header, so watch out.
     (and token (string-to-unibyte token))))
+
+;;; Session status
+
+(defun dsh-bridge--status-set (session-id state &optional start-ms)
+  "Record SESSION-ID's status as STATE (`running' or `idle').
+START-MS, if non-nil, specifies the ms-epoch turn-start time kept for
+the elapsed ticker; it is dropped when the session goes idle."
+  (setq dsh-bridge--status-generation (1+ dsh-bridge--status-generation))
+  (setq dsh-bridge--session-status
+	(assoc-delete-all session-id dsh-bridge--session-status))
+  (when (and session-id (memq state '(running idle)))
+    (push (cons session-id
+		(cons state (if (and (eq state 'running) (numberp start-ms))
+				start-ms
+			      nil)))
+	  dsh-bridge--session-status)))
+
+(defun dsh-bridge--status-turn-start (session-id)
+  "Return the ms-epoch turn-start time for SESSION-ID, or nil.
+The start time is set while the session's status is `running' and
+cleared when it goes idle.  The value can also be nil if Emacs did not
+see any \"turn-start\" frame for the session."
+  (let ((entry (and session-id
+		    (assoc session-id dsh-bridge--session-status))))
+    (cdr-safe (cdr-safe entry))))
+
+(defun dsh-bridge--status-state (session-id)
+  "Return SESSION-ID's display status: `running', `idle', or `unknown'.
+Saved (cold) sessions are always `unknown'; for others, the result is
+obtained by trying the cache `dsh-bridge--session-status', then the
+cached session data's `running' flag, and finally falling back on
+`unknown'.  No retrieval is done.  See `dsh-bridge--session-status'."
+  (let ((row (and session-id (dsh-bridge--session-for-id session-id))))
+    (or (and row (not (alist-get 'live row)) 'unknown)
+	(and session-id
+	     (let ((entry (cdr (assoc session-id dsh-bridge--session-status))))
+	       (and (consp entry) (car entry))))
+	(and row (if (alist-get 'running row) 'running 'idle))
+	'unknown)))
+
+(defun dsh-bridge--pending-question (session-id)
+  "The (REQUEST-ID . QUESTIONS) entry for SESSION-ID's pending ask, or nil."
+  (let ((entry (and session-id (assoc session-id dsh-bridge--pending-questions))))
+    (and entry (car (cdr entry)))))
+
+(defun dsh-bridge--status-glyph (session-id)
+  "Return a status indicator for SESSION-ID as a propertized string."
+  (if (eq dsh-bridge-status-indicator 'none)
+      ""
+    (let* ((state (cond
+		   ((and session-id
+			 (or (assoc session-id dsh-bridge--pending-questions)
+			     (assoc session-id dsh-bridge--pending-approvals)))
+		    'asking)
+		   (t (dsh-bridge--status-state session-id))))
+	   (char
+	    (pcase dsh-bridge-status-indicator
+	      ('emoji
+	       (pcase state
+		 ('asking "💬") ('idle "🟢") ('running "🟡") (_ "⚪")))
+	      ('geometric
+	       (pcase state
+		 ('asking "◌") ('idle "●")  ('running "■")  (_ "?")))
+	      (_
+	       (pcase state
+		 ('asking "A") ('idle "I")  ('running "R")  (_ "?")))))
+	   (face
+	    (pcase state
+	      ('asking  'dsh-bridge-status-running-face)
+	      ('idle    'dsh-bridge-status-idle-face)
+	      ('running 'dsh-bridge-status-running-face)
+	      (_	    'dsh-bridge-status-unknown-face))))
+      (propertize char 'face face))))
 
 ;;; Push notifications
 
@@ -1312,6 +1269,13 @@ code or nil, and ALIST is the decoded JSON body or nil."
      ((and alist (assq 'error alist)) (alist-get 'error alist))
      (t nil))))
 
+;; `dsh-bridge--parse-json-body' maps JSON false to nil, while the SSE
+;; decoder leaves it as `:false`.  Callers that must distinguish a
+;; present false from an absent key test key presence separately.
+(defun dsh-bridge--json-false-p (value)
+  "Whether VALUE is either nil or `:false'."
+  (or (null value) (eq value :false)))
+
 (defun dsh-bridge--parse-json-body (body)
   "Decode JSON BODY as an alist, or nil when it is not a JSON object.
 Arrays decode as lists, and JSON null/false become nil."
@@ -1404,7 +1368,7 @@ checking STATUS for a failed request."
 	  (setq dsh-bridge--last-resolved-active nil))))
     (cons status sessions)))
 
-;;; Session labels
+;;; Session cache
 
 (defun dsh-bridge--session-for-id (id)
   "Return the session data for session ID, or nil.
@@ -1420,6 +1384,18 @@ step for it, and its web UI refuses to open one.  A nil ID, or an ID with no
 cached row, is not archived."
   (and id (eq t (alist-get 'archived (dsh-bridge--session-for-id id)))))
 
+(defun dsh-bridge--cache-last-active ()
+  "Return the cached id of the most recently active live session, or nil.
+Replicates the host's last-active algorithm (newest event time, falling back
+to creation time, among live sessions).	 Display-only; never blocks."
+  (let ((best nil) (best-time -1.0))
+    (dolist (s dsh-bridge--sessions-cache best)
+      (when (alist-get 'live s)
+	(let ((t0 (or (alist-get 'lastActive s) (alist-get 'createdAt s) 0)))
+	  (when (> t0 best-time)
+	    (setq best-time t0)
+	    (setq best (alist-get 'id s))))))))
+
 (defun dsh-bridge--session-update-last-active (session-id time)
   "Update SESSION-ID's `lastActive' in the sessions cache to TIME (ms-epoch).
 TIME is the turn frame's `time' field; nil leaves the value unchanged (an older
@@ -1429,6 +1405,15 @@ before re-rendering the sessions list so the Age cell and sort order go live."
     (let ((session (dsh-bridge--session-for-id session-id)))
       (when session
 	(setf (alist-get 'lastActive session) time)))))
+
+(defun dsh-bridge--record-last-resolved (alist)
+  "Record the session ALIST the host resolved for a nil-target request.
+Advisory display cache only (see `dsh-bridge--last-resolved-active')."
+  (let ((id (alist-get 'sessionId alist)))
+    (when id
+      (setq dsh-bridge--last-resolved-active
+	    (cons id (or (alist-get 'title alist)
+			 (dsh-bridge--session-label id)))))))
 
 (defun dsh-bridge--apply-session-directory (session-id cwd &optional buffer)
   "Set BUFFER's `default-directory' to SESSION-ID's workspace.
@@ -1443,6 +1428,8 @@ appropriate directory, do nothing."
     (and dir (buffer-live-p (get-buffer buf))
 	 (with-current-buffer buf
 	   (setq default-directory (file-name-as-directory dir))))))
+
+;;; Session labels
 
 (defun dsh-bridge--session-label (session &optional no-default)
   "Return the display label for SESSION.
@@ -1570,14 +1557,11 @@ dispatcher resolves through its own focus record instead; see
 	(user-error "dsh-bridge: no session to act on")
       session)))
 
-;;; The dispatcher's focus
+;;; Dispatcher's focus management
 
 ;; The focus is the session the open `dsh-bridge' menu acts on.  It is
-;; menu-scoped (see `dsh-bridge--focus') and carries the provenance that
-;; decides whether a session-state mutator may act: an advisory
-;; last-active guess is display-only, never a mutation target.  Direct
-;; callers never see any of this; they keep resolving through
-;; `dsh-bridge--effective-session'.
+;; scoped to the transient dispatcher only; non-dispatcher commands
+;; never see it, and resolve through `dsh-bridge--effective-session'.
 
 (defun dsh-bridge--focus-session ()
   "The session id the open dispatcher acts on, or nil.
@@ -1586,28 +1570,12 @@ open, so a suffix invoked outside its transient still works."
   (or (plist-get dsh-bridge--focus :session)
       (dsh-bridge--effective-session)))
 
-(defun dsh-bridge--focus-advisory-p ()
-  "Whether the open dispatcher's focus is only an advisory guess.
-True only for an `advisory' provenance; such a focus may be displayed
-and read, but never mutated."
-  (eq (plist-get dsh-bridge--focus :provenance) 'advisory))
-
 (defun dsh-bridge--focus-set (session provenance)
   "Make SESSION the focus of the open dispatcher, with PROVENANCE.
 PROVENANCE is one of `pinned', `buffer', `cycled', or `advisory'.  A nil
 SESSION clears the record, which also happens when the menu exits."
   (setq dsh-bridge--focus
 	(and session (list :session session :provenance provenance))))
-
-(defun dsh-bridge--advisory-session ()
-  "The session to guess as the dispatcher's advisory focus, or nil.
-Prefer the host's own recorded last-active resolution, then the newest
-last-active live session, then the newest last-active session of any
-kind: DSH applies cold state aggressively, and a roster whose sessions
-are all cold must still name one.  Display-only."
-  (or (car-safe dsh-bridge--last-resolved-active)
-      (dsh-bridge--cache-last-active)
-      (car (dsh-bridge--dispatcher-cycle-init))))
 
 (defun dsh-bridge--dispatcher-focus-init ()
   "Initialize the open dispatcher's focus, first match wins.
@@ -1623,7 +1591,10 @@ id, or nil when nothing names one."
      ((setq bound (dsh-bridge--buffer-session buffer))
       (dsh-bridge--focus-set bound 'buffer))
      (t
-      (dsh-bridge--focus-set (dsh-bridge--advisory-session) 'advisory)))
+      (let ((target (or (car-safe dsh-bridge--last-resolved-active)
+			(dsh-bridge--cache-last-active)
+			(car (dsh-bridge--dispatcher-cycle-init)))))
+	(dsh-bridge--focus-set target 'advisory))))
     (plist-get dsh-bridge--focus :session)))
 
 (defun dsh-bridge--dispatcher-cycle-init ()
@@ -1688,54 +1659,7 @@ cannot be consulted, `empty' when the host answered with no sessions, or
 	    (error 'unreachable)))))
   dsh-bridge--dispatcher-roster)
 
-(defun dsh-bridge--cache-last-active ()
-  "Return the cached id of the most recently active live session, or nil.
-Replicates the host's last-active algorithm (newest event time, falling back
-to creation time, among live sessions).	 Display-only; never blocks."
-  (let ((best nil) (best-time -1.0))
-    (dolist (s dsh-bridge--sessions-cache best)
-      (when (alist-get 'live s)
-	(let ((t0 (or (alist-get 'lastActive s) (alist-get 'createdAt s) 0)))
-	  (when (> t0 best-time)
-	    (setq best-time t0)
-	    (setq best (alist-get 'id s))))))))
-
-(defun dsh-bridge--dispatcher-header ()
-  "Header string for the dispatcher: status plus the focus session.
-This has the format \"<status> <label> (i/n)\" while unpinned, where
-(i/n) is the focus's position in the cycle set (suppressed when the set
-has at most one session), or \"<status> <label> [pinned]\" while a pin
-locks the focus.  Provenance is never rendered: a session-state mutator
-explains itself when it refuses (see the dispatcher's suffixes).
-
-A focus that names no session renders a state line instead — \"host
-unreachable\" or \"no sessions\" — never a blank line.  This runs on
-every transient redisplay, so it reads the seeded roster and must not
-fetch anything itself."
-  (let* ((id (plist-get dsh-bridge--focus :session))
-	 (pinned (eq (plist-get dsh-bridge--focus :provenance) 'pinned))
-	 (label (and id (dsh-bridge--session-label id))))
-    (cond
-     ((null id)
-      (if (eq dsh-bridge--dispatcher-roster 'unreachable)
-	  "host unreachable"
-	"no sessions"))
-     (t
-      (let ((status (dsh-bridge--status-glyph id)))
-	;; The transient leaves point at point-min; the leading space keeps
-	;; the cursor off the status glyph.  An indicator style with no glyph
-	;; contributes no space at all.
-	(if pinned
-	    (concat (if (string-empty-p status) "" (concat " " status " "))
-		    label
-		    (propertize " [pinned]" 'face 'bold-italic))
-	  (let* ((total (length dsh-bridge--focus-cycle))
-		 (index (dsh-bridge--cycle-index id))
-		 (position (and index (< 1 total)
-				(format " (%d/%d)" (1+ index) total))))
-	    (if (string-empty-p status)
-		(concat label position)
-	      (concat " " status " " label position)))))))))
+;;; Reading sessions from the minibuffer
 
 (defun dsh-bridge--session-annotation (session &optional no-workspace)
   "One-line completion annotation for SESSION: workspace, running, age.
@@ -1963,15 +1887,6 @@ matches no workspace names a new one, whose directory is then read."
 	  (user-error "dsh-bridge: %s is not an existing directory"
 		      (or path "no directory given")))
 	(cons path trimmed))))))
-
-(defun dsh-bridge--record-last-resolved (alist)
-  "Record the session ALIST the host resolved for a nil-target request.
-Advisory display cache only (see `dsh-bridge--last-resolved-active')."
-  (let ((id (alist-get 'sessionId alist)))
-    (when id
-      (setq dsh-bridge--last-resolved-active
-	    (cons id (or (alist-get 'title alist)
-			 (dsh-bridge--session-label id)))))))
 
 ;;; Prompt history
 
@@ -6003,6 +5918,44 @@ refused.  Only meaningful in a DSH-View buffer."
 
 ;;; Plan mode and goals
 
+(defun dsh-bridge--goal-replace (session-id new)
+  "Replace SESSION-ID's cached goal data with NEW.
+NEW should be an alist of the type stored in a session report's `goal'
+entry.  If the existing cache entry records the same goal as NEW and has
+an `activation' entry, and NEW does not, copy the `activation' over."
+  ;; SSE decoder's `:null' (a cleared goal) normalizes to nil
+  (when (eq new :null) (setq new nil))
+  (let ((entry (assoc session-id dsh-bridge--session-goal)))
+    (if (null entry)
+	(push (cons session-id new) dsh-bridge--session-goal)
+      ;; Update an existing entry, possibly retaining `activation' if
+      ;; it's absent from NEW.
+      (let ((old (cdr entry))
+	    activation)
+	(when (and (consp new) (consp old)
+		   (null (assq 'activation new))
+		   (equal (alist-get 'id (alist-get 'goal old))
+			  (alist-get 'id (alist-get 'goal new)))
+		   (setq activation (assq 'activation old)))
+	  (push activation new)))
+      (setcdr entry new))))
+
+(defun dsh-bridge--goal-activation-update (session-id activation goal-id revision)
+  "Set SESSION-ID's cached goal ACTIVATION, when GOAL-ID/REVISION match.
+A frame whose GOAL-ID/REVISION do not name the cached goal is stale and
+ignored; a session with no cached goal is left alone."
+  (let ((entry (assoc session-id dsh-bridge--session-goal)))
+    (when (and entry (consp (cdr entry)))
+      (let* ((section (cdr entry))
+	     (snapshot (alist-get 'goal section))
+	     (cached-id (alist-get 'id snapshot))
+	     (cached-rev (alist-get 'revision snapshot)))
+	(when (and (or (null goal-id) (equal goal-id cached-id))
+		   (or (null revision) (equal revision cached-rev)))
+	  (setcdr entry
+		  (cons (cons 'activation activation)
+			(assq-delete-all 'activation section))))))))
+
 (defun dsh-bridge--plan-goal-store (session-id report)
   "Seed the plan/goal cache entries for SESSION-ID from REPORT.
 REPORT is the alist body of a successful \"/session\" response.  This is
@@ -7978,6 +7931,43 @@ Read by `dsh-bridge--dispatcher-stay-p' to decide whether the menu should
 stay open: a refusal is a teaching moment and must stay, while a mutation
 that reached the host closes the menu like every other verb.")
 
+(defun dsh-bridge--dispatcher-header ()
+  "Header string for the dispatcher: status plus the focus session.
+This has the format \"<status> <label> (i/n)\" while unpinned, where
+(i/n) is the focus's position in the cycle set (suppressed when the set
+has at most one session), or \"<status> <label> [pinned]\" while a pin
+locks the focus.  Provenance is never rendered: a session-state mutator
+explains itself when it refuses (see the dispatcher's suffixes).
+
+A focus that names no session renders a state line instead — \"host
+unreachable\" or \"no sessions\" — never a blank line.  This runs on
+every transient redisplay, so it reads the seeded roster and must not
+fetch anything itself."
+  (let* ((id (plist-get dsh-bridge--focus :session))
+	 (pinned (eq (plist-get dsh-bridge--focus :provenance) 'pinned))
+	 (label (and id (dsh-bridge--session-label id))))
+    (cond
+     ((null id)
+      (if (eq dsh-bridge--dispatcher-roster 'unreachable)
+	  "host unreachable"
+	"no sessions"))
+     (t
+      (let ((status (dsh-bridge--status-glyph id)))
+	;; The transient leaves point at point-min; the leading space keeps
+	;; the cursor off the status glyph.  An indicator style with no glyph
+	;; contributes no space at all.
+	(if pinned
+	    (concat (if (string-empty-p status) "" (concat " " status " "))
+		    label
+		    (propertize " [pinned]" 'face 'bold-italic))
+	  (let* ((total (length dsh-bridge--focus-cycle))
+		 (index (dsh-bridge--cycle-index id))
+		 (position (and index (< 1 total)
+				(format " (%d/%d)" (1+ index) total))))
+	    (if (string-empty-p status)
+		(concat label position)
+	      (concat " " status " " label position)))))))))
+
 (defun dsh-bridge--dispatcher-may-mutate (verb)
   "Clear the way for mutating VERB on the dispatcher's focus.
 Returns non-nil when the focus is confirmed and the caller may proceed;
@@ -7988,7 +7978,7 @@ the outcome in `dsh-bridge--dispatcher-mutated'."
    ((null (plist-get dsh-bridge--focus :session))
     (message "dsh-bridge: no sessions — + creates one")
     nil)
-   ((dsh-bridge--focus-advisory-p)
+   ((eq (plist-get dsh-bridge--focus :provenance) 'advisory)
     (message "dsh-bridge: %s needs a confirmed target — \
 M-n/M-p to confirm, or t to pin" verb)
     nil)
@@ -8107,7 +8097,7 @@ user-confirmed, so the mutators may still act on it."
     (when session
       ;; The user pinned that session, so it is confirmed -- but it is not
       ;; a buffer binding, and must not claim to be.
-      (unless (dsh-bridge--focus-advisory-p)
+      (unless (eq (plist-get dsh-bridge--focus :provenance) 'advisory)
 	(dsh-bridge--focus-set session 'cycled)))))
 
 (defun dsh-bridge--dispatcher-pin-by-title ()
