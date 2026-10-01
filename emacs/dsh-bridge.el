@@ -7815,19 +7815,9 @@ would cover the glyph with an ellipsis `display' property."
 	(vconcat format [("Id" 40 t)])
       format)))
 
-(defun dsh-bridge--sessions-entries ()
-  "`tabulated-list-entries' for the current sessions cache.
-Reads `dsh-bridge--sessions-cache' only, without contacting the host, so it is
-safe for a display refresh (e.g. after `dsh-bridge-status-indicator' changes)."
-  (mapcar #'dsh-bridge--session-entry
-	  (seq-filter #'dsh-bridge--session-visible-p dsh-bridge--sessions-cache)))
-
 (defun dsh-bridge--refresh-status-display ()
-  "Re-render status indicators in open bridge buffers.
-The `:set' action of `dsh-bridge-status-indicator': changing the indicator
-style updates an open DSH-Sessions list and the DSH-View header immediately
-(the DSH-Prompt header is `(:eval ...)' and re-renders on redisplay).  Reads
-the sessions cache only; never hits the host."
+  "Re-render the session status indicators in all open DSH Bridge buffers.
+This function reads the sessions cache, without fetching from the host."
   (force-mode-line-update t)
   (let ((buffer (dsh-bridge--sessions-buffer)))
     (when buffer
@@ -7836,22 +7826,22 @@ the sessions cache only; never hits the host."
 	;; format (and its rendered header) must be recomputed too.
 	(setq tabulated-list-format (dsh-bridge--sessions-format))
 	(tabulated-list-init-header)
-	(setq tabulated-list-entries (dsh-bridge--sessions-entries))
+	(setq tabulated-list-entries
+	      (mapcar #'dsh-bridge--session-entry
+		      (seq-filter #'dsh-bridge--session-visible-p
+				  dsh-bridge--sessions-cache)))
 	(tabulated-list-print t)))))
 
 ;;; Turn events and status re-rendering
 
 (defun dsh-bridge--status-event-render (session-id)
-  "Re-render surfaces showing SESSION-ID after a tracker change.
-Each DSH-View buffer showing this session re-renders its header, and
-the sessions list re-prints only the affected row.  The DSH-Prompt
-header is a shared `(:eval)' form that no buffer assignment
-invalidates, so the global `force-mode-line-update' is what lands its
-running/idle flip in the same redisplay as the other surfaces."
+  "Re-render all buffers showing the DSH Bridge session SESSION-ID."
   (dolist (buf (dsh-bridge--session-views session-id))
     (with-current-buffer buf
       (setq header-line-format dsh-bridge--view-header-line-format)))
   (dsh-bridge--view-ticker-ensure)
+  ;; The DSH-Prompt header is a shared `(:eval)' form, so it has to be
+  ;; refreshed via a global `force-mode-line-update'.
   (force-mode-line-update t)
   (let ((buffer (dsh-bridge--sessions-buffer)))
     (when buffer
@@ -7859,14 +7849,8 @@ running/idle flip in the same redisplay as the other surfaces."
 	(dsh-bridge--status-reprint-row session-id)))))
 
 (defun dsh-bridge--status-reprint-row (session-id)
-  "Re-print only the sessions-list row for SESSION-ID from the tracker.
-Updates that row's entry in `tabulated-list-entries' and re-displays without
-re-fetching (the sessions buffer would otherwise stay stale until `g').	 The
-print re-sorts by the active `Age' key (so a just-updated timestamp moves the
-row) and passes REMEMBER-POS so point follows the session id when it does.
-The full (non-UPDATE) print is deliberate: `tabulated-list-print''s UPDATE
-path skips re-rendering a row whose id is already in place, so a changed
-status/age cell on a row that does not move would otherwise never repaint."
+  "Reprint the DSH-Sessions row corresponding to SESSION-ID.
+This update uses local session data, without fetching from the host."
   (let* ((session (dsh-bridge--session-for-id session-id))
 	 (idx (seq-position tabulated-list-entries session-id
 			    (lambda (entry id) (equal (car entry) id)))))
@@ -7876,26 +7860,13 @@ status/age cell on a row that does not move would otherwise never repaint."
       (tabulated-list-print t))))
 
 (defun dsh-bridge--view-browsing-p (&optional buffer)
-  "Whether BUFFER (default: the current buffer) is a DSH-View mid M-p/M-n
-turn browsing."
+  "Whether BUFFER is a DSH-View buffer that is browsing the turn history.
+If BUFFER is omitted or nil, it defaults to the current buffer."
   (let ((buf (or buffer (current-buffer))))
     (and (buffer-live-p buf)
 	 (with-current-buffer buf
 	   (and (derived-mode-p 'dsh-bridge-view-mode)
 		dsh-bridge--view-browsing)))))
-
-(defun dsh-bridge--turn-reason-phrase (session-id reason)
-  "A human phrase for SESSION-ID's completed turn given the REASON kind string."
-  (let ((verb (pcase reason
-		("completed" "finished")
-		("aborted" "interrupted")
-		("error" "failed")
-		("max-tokens" "stopped at the token limit")
-		("blocked" "blocked")
-		(_ "ended"))))
-    (format "session \"%s\" %s"
-	    (dsh-bridge--session-label session-id)
-	    verb)))
 
 (defun dsh-bridge--turn-complete-act (session-id reason &optional turn)
   "Update cache and inform the user after a turn ends.
@@ -7919,8 +7890,15 @@ the cache-only refresh."
     (run-at-time 0 nil #'dsh-bridge--view-turns-cache-refresh session-id))
   (when (and dsh-bridge-turn-boundary-echo
 	     (not (dsh-bridge--view-displayed-p session-id)))
-    (message "dsh-bridge: %s"
-	     (dsh-bridge--turn-reason-phrase session-id reason))))
+    (message "dsh-bridge: session \"%s\" %s"
+	     (dsh-bridge--session-label session-id)
+	     (pcase reason
+	       ("completed" "finished")
+	       ("aborted" "interrupted")
+	       ("error" "failed")
+	       ("max-tokens" "stopped at the token limit")
+	       ("blocked" "blocked")
+	       (_ "ended")))))
 
 (defun dsh-bridge--view-blocked-fill (session-id)
   "Render SESSION-ID's rejected (`blocked') turn as a terminal note.

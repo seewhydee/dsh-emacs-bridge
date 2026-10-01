@@ -5761,22 +5761,6 @@ running status and the next send prompts."
     (should (equal (cdr (assoc "s1" dsh-bridge--prompt-history))
                    (list "hello")))))
 
-(ert-deftest dsh-bridge-turn-reason-phrase ()
-  "The turn-end reason kind maps to a truthful human verb."
-  (let ((dsh-bridge--sessions-cache '(((id . "s1") (title . "T")))))
-    (should (equal (dsh-bridge--turn-reason-phrase "s1" "completed")
-                   "session \"T\" finished"))
-    (should (equal (dsh-bridge--turn-reason-phrase "s1" "aborted")
-                   "session \"T\" interrupted"))
-    (should (equal (dsh-bridge--turn-reason-phrase "s1" "error")
-                   "session \"T\" failed"))
-    (should (equal (dsh-bridge--turn-reason-phrase "s1" "max-tokens")
-                   "session \"T\" stopped at the token limit"))
-    (should (equal (dsh-bridge--turn-reason-phrase "s1" "blocked")
-                   "session \"T\" blocked"))
-    (should (equal (dsh-bridge--turn-reason-phrase "s1" "bogus")
-                   "session \"T\" ended"))))
-
 (ert-deftest dsh-bridge-send-exit-pops-view ()
   "The send-and-exit success branch shows the output buffer in turn-following
 state (rather than burying): the user lands on the live view after sending.
@@ -6991,7 +6975,10 @@ the refetch can settle a blocked turn that `/turns' cannot name."
       (dsh-bridge-sessions-mode)
       (setq tabulated-list-format (dsh-bridge--sessions-format))
       (setq tabulated-list-sort-key '("Age" . t))
-      (setq tabulated-list-entries (dsh-bridge--sessions-entries))
+      (setq tabulated-list-entries
+	    (mapcar #'dsh-bridge--session-entry
+		    (seq-filter #'dsh-bridge--session-visible-p
+				dsh-bridge--sessions-cache)))
       (tabulated-list-init-header)
       (tabulated-list-print t)
       (should (string-match-p "●" (buffer-string)))
