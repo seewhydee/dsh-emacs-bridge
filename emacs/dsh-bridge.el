@@ -7843,14 +7843,16 @@ the sessions cache only; never hits the host."
 
 (defun dsh-bridge--status-event-render (session-id)
   "Re-render surfaces showing SESSION-ID after a tracker change.
-Each DSH-View buffer showing this session re-renders its header; the
-sessions list re-prints only the affected row.	The prompt buffer's
-`(:eval)' header repaints on the next redisplay; `force-mode-line-update'
-ensures that paint lands in the same tick as the other surfaces."
+Each DSH-View buffer showing this session re-renders its header, and
+the sessions list re-prints only the affected row.  The DSH-Prompt
+header is a shared `(:eval)' form that no buffer assignment
+invalidates, so the global `force-mode-line-update' is what lands its
+running/idle flip in the same redisplay as the other surfaces."
   (dolist (buf (dsh-bridge--session-views session-id))
     (with-current-buffer buf
       (setq header-line-format dsh-bridge--view-header-line-format)))
   (dsh-bridge--view-ticker-ensure)
+  (force-mode-line-update t)
   (let ((buffer (dsh-bridge--sessions-buffer)))
     (when buffer
       (with-current-buffer buffer

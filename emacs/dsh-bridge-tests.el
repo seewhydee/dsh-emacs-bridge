@@ -5338,6 +5338,20 @@ reconnect for the listener the user just paused."
      '(((kind . "turn-complete") (sessionId . "s1") (reason . "completed"))))
     (should (eq (dsh-bridge--status-state "s1") 'idle))))
 
+(ert-deftest dsh-bridge-status-event-render-forces-redisplay ()
+  "A tracker change forces the DSH-Prompt header's `(:eval)' repaint.
+The prompt header is a shared `(:eval)' form that no buffer assignment
+invalidates, so without the global `force-mode-line-update' its
+running/idle flip waits for an unrelated redisplay; DSH-View happens to
+be repainted by its own text refresh.  Batch Emacs cannot observe the
+painted glyph, so this pins the repaint request itself."
+  (let ((forced 'unset))
+    (cl-letf (((symbol-function 'force-mode-line-update)
+               (lambda (&optional all) (setq forced all)))
+              ((symbol-function 'dsh-bridge--view-ticker-ensure) #'ignore))
+      (dsh-bridge--status-event-render "s1"))
+    (should (eq forced t))))
+
 (ert-deftest dsh-bridge-notification-turn-start-invalidates-resolved ()
   "A turn-start in a different session drops the recorded resolution, so the
 display waterfall falls through to the freshly computed last-active session.
