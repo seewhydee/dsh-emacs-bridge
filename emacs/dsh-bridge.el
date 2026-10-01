@@ -290,30 +290,24 @@ nothing has no footer."
 
 (defcustom dsh-bridge-view-activity nil
   "Whether DSH-View buffers show turn activity by default.
-When non-nil, a DSH-View buffer interleaves the session's tool calls, their
-results, and one-line thinking summaries with the assistant's replies.  The
-summaries are derived host-side; the full reasoning text never leaves the
-host.  This is the default for new view buffers: each buffer has its own
-value, toggled with \\[dsh-bridge-view-toggle-activity]."
+If non-nil, a DSH-View buffer shows additional activity (tool calls and
+one-line thinking summaries), not just assistant replies, by default.
+To toggle the activity view, call \\[dsh-bridge-view-toggle-activity]."
   :type 'boolean
   :group 'dsh-bridge)
 
 (defcustom dsh-bridge-turn-boundary-echo t
   "Whether turn boundaries are announced in the echo area.
-When non-nil, each \"turn-start\" and \"turn-complete\" event produces a
-brief echo area message — unless a visible window is already showing that
-session's DSH-View (see `dsh-bridge--view-displayed-p'), in which case the
-view itself shows the boundary and the echo is suppressed as redundant."
+If non-nil, each \"turn-start\" and \"turn-complete\" event produces a
+brief echo area message if there is no DSH-View showing that session."
   :type 'boolean
   :group 'dsh-bridge)
 
 (defcustom dsh-bridge-view-answer-echo t
-  "Whether a DSH-View says why a turn is continuing after you answer.
-When non-nil, answering or declining an ask-user question leaves a short
-note in the terminal furniture slot (where \"(continuing...)\" would be)
-naming the answer, so the view records that the continuation follows your
-reply.	The note disappears as soon as the turn commits its next reply
-segment, or when the turn ends."
+  "Whether answering leaves a temporary note in the DSH-View buffer.
+If non-nil, answering or declining an ask-user question leaves a short
+note in the corresponding DSH-View buffer.  This note is overwritten
+when the turn commits its next reply segment, or when the turn ends."
   :type 'boolean
   :group 'dsh-bridge)
 
@@ -345,36 +339,31 @@ option says; if the session is idle, it is an ordinary send either way."
   :group 'dsh-bridge)
 
 (defcustom dsh-bridge-describe-timeout 15
-  "Seconds to wait for the session report request.
-The report reads a cold session's whole persisted log and folds its
-projections, which can outlast the general `dsh-bridge-timeout'."
+  "Timeout for a DSH Bridge session report request.
+Session reports use this instead of `dsh-bridge-timeout' because they
+may take significantly longer (particularly for cold sessions)."
   :type 'number
   :group 'dsh-bridge)
 
 (defcustom dsh-bridge-roster-timeout 1.5
-  "Seconds to wait for the dispatcher's roster seed.
-The dispatcher seeds the session roster before its first paint so the
-header can name a session, and a menu must not hang on a stalled host.
-Keep this well below `dsh-bridge-timeout': the seed decides only a
-display guess, and an unreachable host degrades to the header's
-\"host unreachable\" line."
+  "Timeout for the DSH Bridge dispatcher to fetch the session roster.
+This is used only when the dispatcher seeds the session roster before
+rendering.  It should be well below `dsh-bridge-timeout', since we only
+need a guess for redisplay."
   :type 'number
   :group 'dsh-bridge)
 
 (defcustom dsh-bridge-describe-auto-refresh t
   "Whether a visible session report refreshes when its turn completes.
-The refresh re-fetches the report and preserves point; it is deferred so
-the synchronous request never runs inside the SSE process filter."
+The refresh re-fetches the report and preserves point."
   :type 'boolean
   :group 'dsh-bridge)
 
 (defcustom dsh-bridge-question-markdown t
-  "Whether to fontify an ask-user question's `detail' as Markdown.
-When non-nil and `markdown-mode' is installed, a plan-review question's
-plan is font-locked as GitHub-Flavored Markdown in the question buffer;
-otherwise the block carries only `dsh-bridge-question-detail-face'.
-Unlike `dsh-bridge-view-gfm', this is resolved when the buffer renders, so
-toggling it takes effect at the next render."
+  "Whether to fontify question details in DSH-Question buffers as Markdown.
+If this is non-nil and `markdown-mode' is installed, a plan-review
+question's plan is font-locked as GitHub-Flavored Markdown in the
+question buffer.  See also `dsh-bridge-view-gfm'."
   :type 'boolean
   :group 'dsh-bridge)
 
@@ -402,14 +391,11 @@ change when the stream is re-established.  A paused listener is left alone."
   "How Emacs answers DSH approval requests.
 The value `all' lets `dsh-bridge-answer' submit every outcome the web UI
 offers, including a one-shot `danger-full-access' sandbox escalation: a
-token holder can already mutate sessions and run tools, so this grants no
-authority the web UI did not already have.
+token holder can already mutate sessions and run tools, so this grants
+no authority the web UI did not already have.
 
-The value `notify-only' still displays a request (the echo area, the
-DSH-View marker, and the read-only details shown by `dsh-bridge-answer')
-but never submits a decision.  The notification connection then tells the
-host not to claim the request, so the web UI's own approval panel remains
-the answerer; a request that arrives with no browser open fails closed."
+The value `notify-only' shows the request, but never submits a decision.
+In that case, the approval must be handled via the DSH web interface."
   :type '(choice (const :tag "Answer all requests" all)
 		 (const :tag "Notify only; never submit" notify-only))
   :set #'dsh-bridge--approval-answer-set
@@ -580,35 +566,28 @@ This is an advisory display cache.  ID is the session id the host
 resolved as last-active for a request without an explicit session.
 LABEL is the session display label.
 
-The record goes stale and is dropped when another session starts a turn,
-when an explicitly targeted prompt send or draft push names a different
-session, or when the session disappears from the roster.  It deliberately
-outlives a newer live session appearing in the roster: naming the host's
-own resolution, including a cold session the local replica cannot see, is
-what it is for.")
+This record goes stale and is dropped when another session starts a
+turn, when an explicitly targeted prompt send names a different session,
+or when the session disappears from the roster; however, it deliberately
+outlives a newer live session appearing in the roster.")
 
 (defvar dsh-bridge--focus nil
   "Focus record of the open `dsh-bridge' dispatcher, or nil.
-The record is a plist (:session ID :provenance SYMBOL); ID is the
-session the menu's verbs act on, and PROVENANCE is `pinned', `buffer',
-`cycled', or `advisory'.
-
-The record is menu-scoped: set when the menu opens and cleared when it
-exits, so it never leaks into a buffer's own session resolution.  A nil
-record means no menu is open, and the dispatcher's suffixes fall back on
-`dsh-bridge--effective-session'.")
+This is a plist of (:session ID :provenance SYMBOL), where ID is the
+session the menu should act on, and PROVENANCE is `pinned', `buffer',
+`cycled', or `advisory'.  Its value is set when the dispatcher menu
+opens, and cleared when it exits.")
 
 (defvar dsh-bridge--focus-cycle nil
-  "Session ids the open dispatcher can cycle through, newest first.
-A snapshot of the non-archived roster taken when the menu opens, so
-positions do not reshuffle under mid-menu SSE traffic.")
+  "Session ids the DSH Bridge dispatcher can cycle through, newest first.
+This is set once when the menu opens, so the cycling order does not
+change if the host updates mid-cycle.  Archived sessions are excluded.")
 
 (defvar dsh-bridge--dispatcher-roster nil
-  "Outcome of the dispatcher's roster seeding.
-Non-nil once `dsh-bridge--dispatcher-seed' has decided what the header
-may say: `unreachable' when the bridge cannot be reached at all, or
-`empty' when the host answered with no sessions.  A nil value means the
-seed has not run, which the header renders as \"no sessions\".")
+  "Outcome of the DSH Bridge dispatcher's session roster initialization.
+The value is `ok' if the session data was successfully fetched,
+`unreachable' if the bridge could not be reached, `empty' if the host
+answered with no sessions, or nil if the seeding was not done yet.")
 
 (defvar dsh-bridge--view-content-session) ; forward declaration
 
@@ -623,7 +602,7 @@ This name is used whenever we need to create a new DSH-Prompt buffer;
 see the function `dsh-bridge--prompt-buffer'.")
 
 (defvar dsh-bridge--sessions-cache nil
-  "Cache of DeepSeek Harness session data.
+  "Cache of DSH session data.
 The value is a list where each item corresponds to one DSH session,
 formatted as an alist with these keys:
 
@@ -768,10 +747,9 @@ see any \"turn-start\" frame for the session."
 (defun dsh-bridge--status-state (session-id)
   "Return SESSION-ID's display status: `running', `idle', or `unknown'.
 Saved (cold) sessions are always `unknown'; for others, the result is
-obtained by trying to look up the cached `dsh-bridge--session-status',
-then the cached session data's `running' flag, and finally falling back
-on `unknown'.  No active retrieval is done.  See
-`dsh-bridge--session-status' for the tracker entry shape."
+obtained by trying the cache `dsh-bridge--session-status', then the
+cached session data's `running' flag, and finally falling back on
+`unknown'.  No retrieval is done.  See `dsh-bridge--session-status'."
   (let ((row (and session-id (dsh-bridge--session-for-id session-id))))
     (or (and row (not (alist-get 'live row)) 'unknown)
 	(and session-id
@@ -819,12 +797,12 @@ on `unknown'.  No active retrieval is done.  See
 (defvar dsh-bridge--bridge-status-cache nil
   "Cached DSH bridge interface state, or nil if not yet probed.
 Possible values are nil, `running', `incompatible', `not-running',
-`unreachable', and `forbidden'.	 The cache is set per-session, and reset if a
-real request contradicts it or an install/uninstall runs.")
+`unreachable', and `forbidden'.  The cache is set per-session, and reset
+if a real request contradicts it or an install/uninstall runs.")
 
 (defun dsh-bridge--bridge-status ()
   "Probe the status of the DSH bridge interface.
-Possible values: `running', `not-running', `incompatible',
+Possible values are `running', `not-running', `incompatible',
 `unreachable', and `forbidden'.
 
 This function works by requesting \"GET /dsh-bridge/status\" (which is
@@ -3902,7 +3880,6 @@ already records."
 
 (defun dsh-bridge--turns-cache-store (session-id turns epoch)
   "Replace SESSION-ID's turns cache entry with TURNS at EPOCH.
-
 This function updates `dsh-bridge--turns-cache' using the contents of
 TURNS with EPOCH as the history epoch (or nil for a response with no
 `epoch' field; such an entry can never serve an incremental request).
@@ -4959,12 +4936,7 @@ custom row's trailing newline: a patch deletes exactly what this re-inserts."
     (cons start (point))))
 
 (defun dsh-bridge--question-render ()
-  "Populate the current question buffer from its state variables.
-This is the buffer's initial paint and the patch functions' fallback when a
-block cannot be located.  Because it rebuilds everything, an open buffer's
-`detail', markers, and overlays are kept intact by the patch functions, not by
-this.  A resolved buffer renders its resolution banner in place of the
-\"waiting for your answer\" header."
+  "Populate the current DSH-Question buffer."
   (dsh-bridge--question-edit
    (erase-buffer)
    (let ((start (point)))
@@ -5676,11 +5648,11 @@ leaves the approval pending for a later `dsh-bridge-answer'."
 	   session-id approval-id "cancelled" "You cancelled this request.")))))
 
 (defun dsh-bridge--approval-decide (session-id approval-id decision message)
-  "POST DECISION for APPROVAL-ID of SESSION-ID, reporting MESSAGE on acceptance.
-DECISION is \"allowed-once\", \"rejected\", or \"cancelled\".  Mirrors the
-ask-user submit path: the session's view note is recorded before the POST
-leaves (the host's resolved frame races the response), and the DSH-View is
-selected afterwards so the continuation follows."
+  "Post DECISION for APPROVAL-ID of SESSION-ID, reporting MESSAGE on acceptance.
+DECISION is \"allowed-once\", \"rejected\", or \"cancelled\"."
+  ;; This mirrors the ask-user submit path: the view note is recorded
+  ;; before the POST leaves (the host's resolved frame races the
+  ;; response), and the DSH-View is selected afterwards.
   (unless (eq dsh-bridge-approval-answer 'all)
     (user-error "dsh-bridge: approval answering is disabled (dsh-bridge-approval-answer is notify-only)"))
   (dsh-bridge--view-note-record session-id message)
@@ -5899,18 +5871,13 @@ Models are picked from the host's live catalog via `completing-read'."
 SESSION-ID is a session id string, or nil for the last-active session.
 
 A live buffer in `dsh-bridge-prompt-mode' bound to SESSION-ID is
-preferred; otherwise, use the buffer named
-`dsh-bridge-prompt-buffer-name', creating it if necessary.  The chosen
-buffer is bound to SESSION-ID.
+preferred; otherwise, use `dsh-bridge-prompt-buffer-name', creating the
+buffer if necessary.
 
-Whether the buffer's text carries over depends on whether it has been
-processed.  Unmodified text — kept from a previous send, or a pristine
-history entry — has already been processed and is erased silently, for
-this session as for any other, so a fresh composition starts empty (and
-kept text cannot be resent to the wrong session).  Modified text is an
-unsent draft: it is kept when it belongs to SESSION-ID; for another
-session it is erased only after confirmation, and declining signals an
-error, leaving the buffer untouched."
+If the buffer contains text but is marked unmodified, that content is
+assumed to be from a previously-sent prompt, and is erased silently.
+However, if the buffer is modified, keep it if it belongs to the same
+SESSION-ID; otherwise ask for confirmation between erasing."
   (let* ((pred (lambda (b)
 		 (with-current-buffer b
 		   (and (eq major-mode 'dsh-bridge-prompt-mode)
@@ -5944,25 +5911,19 @@ Discard it? " (buffer-name))))
 ;;;###autoload
 (defun dsh-bridge-prompt ()
   "Pop to a DSH-Prompt buffer to compose a prompt.
-The buffer is bound to the effective session of the current buffer (its
-binding, else the pinned target, else last-active), so \\`r' from a
-DSH-View or DSH-Sessions buffer continues that session's conversation.
-A buffer left unbound to let the host choose is bound to the session the
-host picked the first time a prompt was sent from it (see
-`dsh-bridge-send-and-exit'), so a later send from it continues that
-conversation rather than re-rolling the host's choice.
+The DSH session for the prompt is determined by how this command is
+invoked; for instance, typing r from a DSH-View buffer opens a prompt
+for that buffer's session, to continue the conversation.
 
-A DSH-Prompt buffer already bound to that session is preferred.	 Text
-kept from a previous send (or a pristine history entry) is erased
-silently, so the composition starts fresh; an unsent draft for the
-session is kept.  An unsent draft for another session is erased only
-after confirmation; declining leaves the buffer untouched and aborts
-the command.  Earlier sent prompts stay in the prompt history,
-reachable with \\`M-p' / \\`M-n'.
+If the DSH-Prompt buffer already exists and contains an unsent prompt,
+retain it if it's for the intended session; if the prompt is for another
+session, ask for confirmation before erasing it to start a fresh prompt.
+
 \\<dsh-bridge-prompt-mode-map>\
-\\[dsh-bridge-send-and-exit] sends and buries the buffer,
-\\[dsh-bridge-fetch] fetches the session's latest turn, closing the
-compose→read loop."
+\\[dsh-bridge-send-and-exit] sends and buries the buffer;
+\\[dsh-bridge-fetch] fetches the session's latest turn.
+
+See `dsh-bridge-prompt-mode' for more information."
   (interactive)
   (pop-to-buffer (dsh-bridge--prompt-buffer (dsh-bridge--effective-session))))
 
@@ -6946,14 +6907,9 @@ composition)."
 
 (defun dsh-bridge--ensure-session-live (id)
   "Return non-nil when SESSION ID is live and runnable, resuming a cold one.
-A saved (cold) session known to the session cache is resumed; an id absent
-from the cache returns nil without a resume attempt.
-
-An archived session is refused with a `user-error' rather than resumed: the
-harness's `agent/pre-step' gate admits no model step for an archived session
-(and its web UI refuses to open one), so a prompt would be claimed by the loop
-and then silently dropped.  Use \\[dsh-bridge-unarchive-session] first;
-`dsh-bridge-fetch' still reads one for display."
+A saved (cold) session known to the session cache is resumed; an id
+absent from the cache returns nil without a resume attempt.  An archived
+session is refused with a `user-error'."
   (let ((session (dsh-bridge--session-for-id id)))
     (cond
      ((dsh-bridge--session-archived-p id)
@@ -7672,12 +7628,7 @@ failure reason, never a fake zero."
 (defun dsh-bridge-describe-session (&optional session-id)
   "Show a read-only report for SESSION-ID.
 Interactively, use the DSH-Sessions row at point, else the buffer's
-effective session; with a prefix argument, prompt for any session id.
-The report is a `help-mode' buffer: `g' re-fetches it, `l'/`r' walk the
-describe history, and the session label in a DSH-View/DSH-Prompt header
-line opens it with a mouse click.  A cold session is read from its
-persisted log and is never resumed.  A successful fetch also seeds the
-plan/goal caches (see `dsh-bridge--plan-goal-store')."
+effective session; with a prefix argument, prompt for any session id."
   (interactive
    (list (cond
 	  ((and current-prefix-arg (derived-mode-p 'dsh-bridge-sessions-mode))
@@ -7696,18 +7647,17 @@ plan/goal caches (see `dsh-bridge--plan-goal-store')."
 	 (session (and id (dsh-bridge--session-for-id id)))
 	 (buffer (get-buffer-create dsh-bridge-describe-buffer-name))
 	 (here (eq (current-buffer) buffer)))
-    ;; The report's plan/goal sections are the same ones the header caches
-    ;; fetch through `dsh-bridge--plan-goal-refresh'; seeding them here
-    ;; spares a view or prompt opened next the identical repeat fetch.
+    ;; The report's plan/goal sections are the same ones fetched
+    ;; through `dsh-bridge--plan-goal-refresh', so seed the caches.
     (when (and report id)
       (dsh-bridge--plan-goal-store id report))
     (with-current-buffer buffer
       (unless (derived-mode-p 'help-mode)
 	(dsh-bridge-describe-mode))
-      ;; `help-buffer' returns THIS buffer only when `help-xref-following'
-      ;; is non-nil AND the buffer is already help-mode-derived, and
-      ;; `help-setup-xref' must run before `erase-buffer' because it records
-      ;; point for the [back] button.
+      ;; `help-buffer' returns THIS buffer only when
+      ;; `help-xref-following' is non-nil AND the buffer is already
+      ;; help-mode-derived, and `help-setup-xref' must run before
+      ;; `erase-buffer' as it records point for the [back] button.
       (let ((inhibit-read-only t)
 	    (help-xref-following t))
 	(help-setup-xref (list #'dsh-bridge-describe-session id)
@@ -7719,7 +7669,6 @@ plan/goal caches (see `dsh-bridge--plan-goal-store')."
       (goto-char (point-min)))
     (unless here
       (pop-to-buffer buffer))))
-
 
 (defun dsh-bridge--sessions-goto-id (id)
   "Move point to the DSH-Sessions row for session ID, when it is present.
@@ -7887,11 +7836,7 @@ the cache-only refresh."
 	       (_ "ended")))))
 
 (defun dsh-bridge--view-blocked-fill (session-id)
-  "Render SESSION-ID's rejected (`blocked') turn as a terminal note.
-A `blocked' turn produced no reply and never will, so the view would otherwise
-sit on its `(running...)' placeholder while the status glyph reads idle.  The
-note is archive-aware because the harness's archived-session gate is the usual
-cause."
+  "Render SESSION-ID's rejected (`blocked') turn as a terminal note."
   (dsh-bridge--view-fill session-id nil nil t)
   (setq-local dsh-bridge--view-turn nil)
   (setq-local dsh-bridge--view-waiting nil)
@@ -7910,21 +7855,13 @@ cause."
   (dsh-bridge--view-ticker-ensure))
 
 (defun dsh-bridge--turn-complete-refetch (session-id &optional reason ended-turn)
-  "Refill DSH-View buffers showing SESSION-ID's completed turn, without popping.
-A non-popping fill (the user may be editing elsewhere); drops the session's
-status entry on a 404 (the session died).  Fetches `GET /dsh-bridge/turns'
-once, stores the fresh list, and re-renders each shown view from its newest
-turn — the `(continuing...)' marker disappears now that `endedAt' is known,
-so the completed turn ends cleanly (point is preserved when the content merely
-changed in place).  A mid-browse view is normally left alone, but one parked
-on the turn that just ended has its terminal furniture refreshed in place, so
-a stop cannot leave the view claiming a settled turn is still running.
+  "Refill DSH-View buffers showing SESSION-ID's completed turn.
+This function fetches the turn data from the host and updates any
+DSH-View buffer following the turn, without popping to the buffer.
+REASON and ENDED-TURN are the completed turn's facts from the frame.
 
-REASON and ENDED-TURN are the completed turn's facts from the frame.  A
-`blocked' turn never produced a reply; `/turns' either drops it (when it has
-no activity) or names it through a synthetic activity-only record, which
-renders nothing while the activity toggle is off.  In both cases a view still
-waiting for it is given an explicit terminal note instead of a blank."
+The update clears the DSH-View buffer's \"(continuing...)\" tag,
+preserving point.  A buffer showing an earlier turn is left alone."
   (pcase-let ((`(,status ,body ,http-status)
 	       (dsh-bridge--http "GET"
 				 (dsh-bridge--path "/turns" session-id) nil)))
@@ -7958,13 +7895,12 @@ waiting for it is given an explicit terminal note instead of a blank."
 	  (dolist (buf views)
 	    (with-current-buffer buf
 	      (cond
-	       ;; A browse parked on the turn that just ended still needs
-	       ;; its terminal furniture refreshed: the turn is no longer
-	       ;; running, so `(continuing...)' (or an awaiting note) is
-	       ;; stale.  Refill the *displayed* record, not `newest' — a
-	       ;; queued prompt may already have started a newer turn — and
-	       ;; restore the browse state and point, so only the suffix
-	       ;; changes.	A browse on any other turn is left alone.
+	       ;; For a browse parked on the turn that just ended,
+	       ;; `(continuing...)' (or an awaiting note) is stale.
+	       ;; Refill the displayed record, not `newest' (a queued
+	       ;; prompt may already have started a newer turn), and
+	       ;; restore the browse state and point.  A DSH-View
+	       ;; buffer browsing an earlier turn is left alone.
 	       ((dsh-bridge--view-browsing-p)
 		(let ((record (and dsh-bridge--view-turn
 				   (seq-find (lambda (r)
@@ -7986,12 +7922,10 @@ waiting for it is given an explicit terminal note instead of a blank."
 		  (dsh-bridge--view-fill shown-id newest nil t t)))
 	       ;; If the buffer is being prepped for a fresh turn,
 	       ;; insert the new segment if it's for the awaited turn
-	       ;; (or a later one, should the awaited turn stay textless).
-	       ;; A synthetic activity-only record (empty `segments')
-	       ;; qualifies only while the activity toggle is on: with it
-	       ;; off the record renders nothing, and filling it would
-	       ;; blank the waiting view — fall through to the terminal
-	       ;; branches below instead.
+	       ;; (or a later one).  A synthetic activity-only record
+	       ;; (empty `segments') qualifies only while the activity
+	       ;; toggle is on: if off, the record renders nothing,
+	       ;; and filling it would blank the waiting view.
 	       ((and newest
 		     (numberp turn)
 		     (numberp dsh-bridge--view-turn)
@@ -7999,11 +7933,8 @@ waiting for it is given an explicit terminal note instead of a blank."
 		     (or (alist-get 'segments newest)
 			 dsh-bridge--view-activity))
 		(dsh-bridge--view-fill shown-id newest nil t t))
-	       ;; A `blocked' turn produced no reply and never will:
-	       ;; `/turns' drops it when it carries no activity, and its
-	       ;; synthetic activity-only record renders nothing with the
-	       ;; toggle off (guarded above).  Explain the wait instead of
-	       ;; leaving the placeholder (the status glyph already reads idle).
+	       ;; A `blocked' turn produced no reply and never will.
+	       ;; Explain the wait instead of leaving the placeholder.
 	       ((and dsh-bridge--view-waiting
 		     (equal reason "blocked")
 		     (or (and (numberp ended-turn)
