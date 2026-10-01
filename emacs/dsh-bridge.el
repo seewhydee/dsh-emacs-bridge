@@ -2251,36 +2251,6 @@ that steering was requested."
 	    (when (functionp on-success)
 	      (funcall on-success sent-id)))))))))
 
-(defun dsh-bridge-send-draft (text &optional session-id on-success)
-  "Send TEXT to the DSH composer as a draft (not submitted).
-SESSION-ID overrides the effective session for this call only.
-
-If ON-SUCCESS is a function, it is called with SENT-SESSION-ID in the
-success branch of the push.  The callback runs in the same buffer that
-was current when this function is called."
-  (let* ((target (or session-id (dsh-bridge--effective-session)))
-	 (payload (append (list (cons 'text text))
-			  (and target (list (cons 'sessionId target))))))
-    (pcase-let ((`(,status ,body ,http-status)
-		 (dsh-bridge--http "POST" "/draft" payload)))
-      (let* ((alist (dsh-bridge--parse-json-body body))
-	     (err (dsh-bridge--error-message status http-status alist)))
-	(cond
-	 (err (message "dsh-bridge: %s" err))
-	 ((null alist)
-	  (message "dsh-bridge: unreadable response: %s" body))
-	 (t (message "dsh-bridge: draft pushed")
-	    (if target
-		;; The user's activity moved elsewhere: the recorded
-		;; resolution no longer describes it.
-		(unless (equal target
-			       (car-safe dsh-bridge--last-resolved-active))
-		  (setq dsh-bridge--last-resolved-active nil))
-	      ;; The host resolved last-active itself: record it.
-	      (dsh-bridge--record-last-resolved alist))
-	    (when (functionp on-success)
-	      (funcall on-success (or (alist-get 'sessionId alist) target)))))))))
-
 ;;; Attachments
 
 ;; DSH attachments are placed in the prompt buffer as MML-like tag
@@ -2439,33 +2409,6 @@ the visited file (not the buffer text) is attached."
     (dsh-bridge--remove-attachment-tags)
     (message "dsh-bridge: removed %d attachment%s"
 	     count (if (= count 1) "" "s"))))
-
-;;; Dispatcher layout
-
-;; The menu groups themselves live in the `dsh-bridge' prefix at the end of
-;; this file.  This table lists the same verbs and is the source of truth for
-;; the dispatcher's key set.
-
-(defconst dsh-bridge--verb-suffixes
-  '(("r" dsh-bridge--dispatcher-prompt :description "reply/open prompt buffer")
-    ("f" dsh-bridge--dispatcher-fetch :description "fetch latest turn")
-    ("D" dsh-bridge--dispatcher-describe :description "describe session")
-    ("t" dsh-bridge--dispatcher-pin :description "pin this session")
-    ("u" dsh-bridge--dispatcher-unpin :description "unpin")
-    ("T" dsh-bridge--dispatcher-pin-by-title :description "pin by title")
-    ("k" dsh-bridge--dispatcher-stop :description "stop running session")
-    ("l" dsh-bridge-list-sessions :description "list sessions")
-    ("+" dsh-bridge--dispatcher-create :description "create and pin session")
-    ("p" dsh-bridge--dispatcher-plan :description "toggle plan mode")
-    ("G" dsh-bridge--dispatcher-goal :description "set or edit the goal")
-    ("A" dsh-bridge--dispatcher-toggle-goal :description "pause/resume goal")
-    ("X" dsh-bridge--dispatcher-clear-goal :description "clear the goal")
-    ("M-p" dsh-bridge--dispatcher-previous :description "focus older session")
-    ("M-n" dsh-bridge--dispatcher-next :description "focus newer session"))
-  "Suffix specs for the `dsh-bridge' dispatcher.
-Each spec is (KEY COMMAND DESCRIPTION).  The view buffers no longer mirror
-these letters; the `dsh-bridge' prefix is the layout, and this table exists
-so tests can assert the intended key set.")
 
 ;;; The DSH-View buffer
 
@@ -8188,7 +8131,7 @@ wraps.  A pinned menu reports that it is locked instead of cycling."
       (message "dsh-bridge: %s" (dsh-bridge--session-label
 				 (nth next dsh-bridge--focus-cycle)))))))
 
-(defun dsh-bridge--dispatcher-previous ()
+(defun dsh-bridge--dispatcher-prev ()
   "Focus the next older session in the dispatcher's cycle set."
   (interactive)
   (dsh-bridge--dispatcher-cycle t))
@@ -8289,12 +8232,6 @@ user-confirmed, so the mutators may still act on it."
       (dsh-bridge--dispatcher-cycle-init)
       (dsh-bridge--focus-set session 'pinned))))
 
-
-;; The menu's groups are passed to `transient-define-prefix' as literal data,
-;; BEFORE the interactive body.  Order matters: transient parses the group
-;; vectors while expanding the macro and silently drops any it sees after the
-;; body, which leaves a menu with no keys at all.
-
 ;;;###autoload
 (transient-define-prefix dsh-bridge (&optional arg)
   "Dispatch actions for the DeepSeek Harness (DSH) bridge.
@@ -8312,8 +8249,16 @@ by cycling or pinning.
 
 With a prefix argument, re-fetch the session roster before painting,
 instead of trusting the cached one."
-  [:description (lambda () (dsh-bridge--dispatcher-header))]
-  ["Send and Receive"
+  ;; We draw the focus header by making it the first group's
+  ;; `:description'.  A bare `[:description ...]'  group doesn't work
+  ;; since Transient Menu drops any group whose suffix list is empty.
+  ;; We could also use `:info' and `:info*' rows, but Emacs 29 does
+  ;; not support these; revisit this issue later.
+  [:description (lambda ()
+		  (concat (dsh-bridge--dispatcher-header)
+			  "\n\n"
+			  (propertize "Send and Receive"
+				      'face 'transient-heading)))
    ("r" dsh-bridge--dispatcher-prompt :description "reply/open prompt buffer")
    ("f" dsh-bridge--dispatcher-fetch :description "fetch latest turn")]
   ["Plan and Goal"
@@ -8334,12 +8279,10 @@ instead of trusting the cached one."
     :transient dsh-bridge--dispatcher-stay-p)
    ("l" dsh-bridge-list-sessions :description "list sessions")
    ("+" dsh-bridge--dispatcher-create :description "create and pin session")]
-  ["Focus"
-   ("M-p" dsh-bridge--dispatcher-previous :description "focus older session"
-    :transient t)
-   ("M-n" dsh-bridge--dispatcher-next :description "focus newer session"
-    :transient t)]
-  ["Quit" ("q" transient-quit-one :description "quit")]
+  ["Cycle and Quit"
+   ("M-p" dsh-bridge--dispatcher-prev :description "target older session" :transient t)
+   ("M-n" dsh-bridge--dispatcher-next :description "target newer session" :transient t)
+   ("q" transient-quit-one :description "quit")]
   (interactive "P")
   (dsh-bridge--dispatcher-seed arg)
   (dsh-bridge--dispatcher-focus-init)

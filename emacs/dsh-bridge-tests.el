@@ -451,11 +451,11 @@ A pinned menu refuses to cycle and says so."
     (should (eq (plist-get dsh-bridge--focus :provenance) 'cycled))
     (should-not (dsh-bridge--focus-advisory-p))
     ;; Swallowing the confirmation is not possible by cycling back.
-    (dsh-bridge--dispatcher-previous)
+    (dsh-bridge--dispatcher-prev)
     (should (equal (plist-get dsh-bridge--focus :session) "s1"))
     (should (eq (plist-get dsh-bridge--focus :provenance) 'cycled))
     ;; M-p wraps backward to the oldest.
-    (dsh-bridge--dispatcher-previous)
+    (dsh-bridge--dispatcher-prev)
     (should (equal (plist-get dsh-bridge--focus :session) "s3"))
     ;; A pin locks cycling.
     (dsh-bridge--focus-set "s1" 'pinned)
@@ -616,6 +616,46 @@ because transient picks the pre-command before the command runs."
   (dsh-bridge--focus-set "s1" 'cycled)
   (should (dsh-bridge--dispatcher-may-mutate "stopping"))
   (should (eq (dsh-bridge--dispatcher-stay-p) 'transient--do-exit)))
+
+(ert-deftest dsh-bridge-dispatcher-header-is-first-line ()
+  "The painted menu's first line names the focus.
+This asserts on the rendered transient buffer, not on
+`dsh-bridge--dispatcher-header' alone: transient silently drops a group
+whose suffix list is empty, so a `:description'-only header group never
+paints and only a render-level check catches the line going missing."
+  (let ((dsh-bridge-status-indicator 'none)
+        (dsh-bridge-pinned-target "s1")
+        (dsh-bridge--sessions-cache
+         '(((id . "s1") (title . "T") (live . t))))
+        (dsh-bridge--dispatcher-roster 'ok))
+    (unwind-protect
+        (cl-letf (((symbol-function 'dsh-bridge--dispatcher-seed)
+                   (lambda (&optional _) 'ok))
+                  ((symbol-function 'dsh-bridge--ensure-plugin) #'ignore))
+          (dsh-bridge)
+          (with-current-buffer " *transient*"
+            (should (equal (buffer-substring-no-properties
+                            (point-min) (line-end-position))
+                           "T [pinned]"))
+            ;; A group has one description slot, so the header shares it
+            ;; with the first section's title: the title must survive
+            ;; below the header, not be clobbered by it.  Skip whatever
+            ;; blank spacing the description puts between the two.
+            (save-excursion
+              (goto-char (point-min))
+              (forward-line)
+              (while (and (not (eobp)) (looking-at-p "[ \t]*$"))
+                (forward-line))
+              (should (equal (buffer-substring-no-properties
+                              (line-beginning-position) (line-end-position))
+                             "Send and Receive")))
+            ;; ...and the header does not displace the group's suffixes.
+            (should (string-match-p "reply/open prompt buffer"
+                                    (buffer-string)))))
+      ;; Tear the transient down before the next prefix test; leaving it
+      ;; active makes the next `(dsh-bridge)' re-enter a dead buffer.
+      (ignore-errors (transient--pre-exit))
+      (dsh-bridge--dispatcher-exit))))
 
 (ert-deftest dsh-bridge-dispatcher-empty-roster-message ()
   "A mutator with no session at all names the way to create one.
@@ -877,51 +917,6 @@ suffixes the follow-up prompt will offer."
   (should (equal (dsh-bridge--workspace-label '((id . "i"))) "")))
 
 ;;; Text senders
-
-(ert-deftest dsh-bridge-send-draft-posts-to-draft ()
-  "send-draft POSTs the text (and the effective session) to /draft."
-  (let ((captured nil)
-        (dsh-bridge-pinned-target "s1"))
-    (cl-letf (((symbol-function 'dsh-bridge--http)
-               (lambda (method path payload)
-                 (setq captured (list method path payload)) nil)))
-      (dsh-bridge-send-draft "hello"))
-    (should (equal (car captured) "POST"))
-    (should (equal (cadr captured) "/draft"))
-    (should (equal (cdr (assoc 'text (caddr captured))) "hello"))
-    (should (equal (cdr (assoc 'sessionId (caddr captured))) "s1"))))
-
-(ert-deftest dsh-bridge-send-draft-override-wins-over-default ()
-  "An explicit session override beats the pinned target in the /draft payload."
-  (let ((captured nil)
-        (dsh-bridge-pinned-target "pin"))
-    (cl-letf (((symbol-function 'dsh-bridge--http)
-               (lambda (method path payload)
-                 (setq captured (list method path payload)) nil)))
-      (dsh-bridge-send-draft "hello" "override"))
-    (should (equal (cadr captured) "/draft"))
-    (should (equal (cdr (assoc 'sessionId (caddr captured))) "override"))))
-
-(ert-deftest dsh-bridge-send-draft-keeps-prompt-text ()
-  "A successful draft push leaves the prompt buffer alone; the buffer is
-blanked when a new composition starts, not when a draft is sent."
-  (let ((dsh-bridge-pinned-target "s1"))
-    (cl-letf (((symbol-function 'dsh-bridge--http)
-               (lambda (_m _p _pl) (list nil "{\"sessionId\":\"s1\"}" 200))))
-      (with-current-buffer (get-buffer-create "*dsh-bridge-prompt*")
-        (dsh-bridge-prompt-mode)
-        (insert "prompt text")
-        (dsh-bridge-send-draft "prompt text")
-        (should (equal (buffer-string) "prompt text")))
-      ;; A draft from any other buffer likewise leaves it untouched.
-      (with-current-buffer (get-buffer-create "*dsh-bridge-prompt*")
-        (erase-buffer)
-        (insert "unrelated unsent text"))
-      (with-temp-buffer
-        (dsh-bridge-send-draft "region from elsewhere"))
-      (with-current-buffer "*dsh-bridge-prompt*"
-        (should (equal (buffer-string) "unrelated unsent text")))))
-  (kill-buffer "*dsh-bridge-prompt*"))
 
 (ert-deftest dsh-bridge-send-text-no-target-omits-session ()
   "With neither a buffer session nor a pinned target, no sessionId is sent."
@@ -1579,9 +1574,13 @@ M-p/M-n — and no compose/fetch/targeting verbs."
               #'dsh-bridge-view-previous-reply))
   (should (eq (lookup-key dsh-bridge-view-mode-map (kbd "M-n"))
               #'dsh-bridge-view-next-reply))
-  (dolist (key '("f" "t" "u"))
-    (should-not (eq (lookup-key dsh-bridge-view-mode-map (kbd key))
-                    (cadr (assoc key dsh-bridge--verb-suffixes))))))
+  ;; The view map's own letters must not pick up the dispatcher's same-key
+  ;; verbs.
+  (dolist (spec '(("f" . dsh-bridge--dispatcher-fetch)
+                  ("t" . dsh-bridge--dispatcher-pin)
+                  ("u" . dsh-bridge--dispatcher-unpin)))
+    (should-not (eq (lookup-key dsh-bridge-view-mode-map (kbd (car spec)))
+                    (cdr spec)))))
 (ert-deftest dsh-bridge-view-mode-gfm ()
   "When markdown-mode is loadable, the view mode derives from gfm-view-mode for
 GFM rendering (read-only, native code-block font-locking); the bridge's own
@@ -5007,19 +5006,16 @@ must fall back to the loaded file and never call `file-name-directory' on nil."
 ;;; Dispatcher and menus
 
 (ert-deftest dsh-bridge-dispatcher-suffixes ()
-  "Every verb is a dispatcher suffix; reply/open is `r', the inbox (`i')
-and the `S' mnemonic are gone, and targeting lives on `t'/`u'."
-  (dolist (spec dsh-bridge--verb-suffixes)
-    (should (transient-get-suffix 'dsh-bridge (car spec))))
-  (should (transient-get-suffix 'dsh-bridge "r"))
-  (should (transient-get-suffix 'dsh-bridge "t"))
-  (should (transient-get-suffix 'dsh-bridge "u"))
-  (should (transient-get-suffix 'dsh-bridge "k"))
-  ;; The plan/goal verbs live on the dispatcher.
-  (dolist (key '("p" "G" "A" "X"))
+  "The dispatcher's key set is the intended one.
+The prefix's literal groups are the only source of truth, so the
+expected keys live here: reply/open is `r', targeting lives on `t'/`u',
+and the retired inbox (`i'), select (`S'), and region/buffer send
+(`s'/`d') mnemonics stay gone."
+  (dolist (key '("r" "f" "D" "t" "u" "T" "k" "l" "+"
+                 "p" "G" "A" "X" "M-p" "M-n"))
     (should (transient-get-suffix 'dsh-bridge key)))
   ;; `transient-get-suffix' signals when the key is absent.
-  (dolist (absent '("i" "S"))
+  (dolist (absent '("i" "S" "s" "d"))
     (should-not (condition-case nil
                     (progn (transient-get-suffix 'dsh-bridge absent) t)
                   (error nil)))))
