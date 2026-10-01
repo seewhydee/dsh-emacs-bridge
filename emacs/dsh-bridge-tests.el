@@ -2928,7 +2928,9 @@ untouched."
                        (get-buffer-create "*dsh-bridge-prompt*")))
               ((symbol-function 'pop-to-buffer) (lambda (&rest _) (setq popped t))))
       (with-temp-buffer
-        (insert (propertize "live-1 row" 'tabulated-list-id "live-1"))
+        (dsh-bridge-sessions-mode)
+        (let ((inhibit-read-only t))
+          (insert (propertize "live-1 row" 'tabulated-list-id "live-1")))
         (goto-char (point-min))
         (dsh-bridge-open-session)))
     (should (equal bound "live-1"))
@@ -2946,7 +2948,9 @@ signals an error naming the session."
               ((symbol-function 'dsh-bridge--resume-session)
                (lambda (id) (setq resumed id) nil)))
       (with-temp-buffer
-        (insert (propertize "gone row" 'tabulated-list-id "gone"))
+        (dsh-bridge-sessions-mode)
+        (let ((inhibit-read-only t))
+          (insert (propertize "gone row" 'tabulated-list-id "gone")))
         (goto-char (point-min))
         (setq caught (should-error (dsh-bridge-open-session) :type 'error))))
     (should (null bound))
@@ -2965,7 +2969,9 @@ The host's reason is what the user sees first."
               ((symbol-function 'message)
                (lambda (&rest args) (setq msg (apply #'format args)))))
       (with-temp-buffer
-        (insert (propertize "saved-1 row" 'tabulated-list-id "saved-1"))
+        (dsh-bridge-sessions-mode)
+        (let ((inhibit-read-only t))
+          (insert (propertize "saved-1 row" 'tabulated-list-id "saved-1")))
         (goto-char (point-min))
         (should-error (dsh-bridge-open-session) :type 'error)))
     (should (null bound))
@@ -2982,7 +2988,9 @@ The host's reason is what the user sees first."
                        (get-buffer-create "*dsh-bridge-prompt*")))
               ((symbol-function 'pop-to-buffer) (lambda (&rest _) (setq popped t))))
       (with-temp-buffer
-        (insert (propertize "saved-1 row" 'tabulated-list-id "saved-1"))
+        (dsh-bridge-sessions-mode)
+        (let ((inhibit-read-only t))
+          (insert (propertize "saved-1 row" 'tabulated-list-id "saved-1")))
         (goto-char (point-min))
         (dsh-bridge-open-session)))
     (should (equal resumed "saved-1"))
@@ -2994,7 +3002,9 @@ The host's reason is what the user sees first."
 (defun dsh-bridge-test--visit-session (id)
   "Run `dsh-bridge-visit-session' with point on a fake row for ID."
   (with-temp-buffer
-	(insert (propertize "row" 'tabulated-list-id id))
+	(dsh-bridge-sessions-mode)
+	(let ((inhibit-read-only t))
+	  (insert (propertize "row" 'tabulated-list-id id)))
 	(goto-char (point-min))
 	(dsh-bridge-visit-session)))
 
@@ -3244,7 +3254,9 @@ launcher left behind, so the frame keeps two usable windows."
     (cl-letf (((symbol-function 'dsh-bridge-pin-target)
                (lambda (id) (setq dsh-bridge-pinned-target id))))
       (with-temp-buffer
-        (insert (propertize "live-1 row" 'tabulated-list-id "live-1"))
+        (dsh-bridge-sessions-mode)
+        (let ((inhibit-read-only t))
+          (insert (propertize "live-1 row" 'tabulated-list-id "live-1")))
         (goto-char (point-min))
         (dsh-bridge-pin-target-at-point)))
     (should (equal dsh-bridge-pinned-target "live-1"))))
@@ -3261,7 +3273,9 @@ not a request, so no resume is attempted."
               ((symbol-function 'dsh-bridge--resume-session)
                (lambda (id) (setq resumed id) nil)))
       (with-temp-buffer
-        (insert (propertize "gone row" 'tabulated-list-id "gone"))
+        (dsh-bridge-sessions-mode)
+        (let ((inhibit-read-only t))
+          (insert (propertize "gone row" 'tabulated-list-id "gone")))
         (goto-char (point-min))
         (dsh-bridge-pin-target-at-point)))
     (should (equal set "gone"))
@@ -3604,7 +3618,9 @@ be repeated for the two."
               ((symbol-function 'message)
                (lambda (&rest args) (setq msg (apply #'format args)))))
       (with-temp-buffer
-        (insert (propertize "a1 row" 'tabulated-list-id "a1"))
+        (dsh-bridge-sessions-mode)
+        (let ((inhibit-read-only t))
+          (insert (propertize "a1 row" 'tabulated-list-id "a1")))
         (goto-char (point-min))
         (dsh-bridge-visit-session)))
     (should-not opened)
@@ -4420,6 +4436,29 @@ already on screen is re-populated (in-buffer `g' stays the other refresh)."
   "The populate primitive refuses a buffer that is not a DSH-Sessions buffer."
   (with-temp-buffer
     (should-error (dsh-bridge--list-sessions-in-buffer) :type 'error)))
+
+(ert-deftest dsh-bridge-sessions-buffer-optional-display-lookup ()
+  "The display-surface lookup returns nil instead of signaling.
+Background paths (the notification debounce, the status repaint) must skip
+a same-named buffer in another mode rather than turn event handling into an
+error; only the painter entry points refuse such a buffer."
+  (when (get-buffer "*dsh-bridge-sessions*")
+    (kill-buffer "*dsh-bridge-sessions*"))
+  (should (null (dsh-bridge--sessions-buffer)))
+  (let ((buf (get-buffer-create "*dsh-bridge-sessions*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer buf
+            (fundamental-mode)
+            (insert "user notes"))
+          (should (null (dsh-bridge--sessions-buffer))))
+      (kill-buffer buf)))
+  (let ((buf (get-buffer-create "*dsh-bridge-sessions*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer buf (dsh-bridge-sessions-mode))
+          (should (eq (dsh-bridge--sessions-buffer) buf)))
+      (kill-buffer buf))))
 
 (ert-deftest dsh-bridge-refresh-sessions-buffer-signals-foreign-buffer ()
   "Refresh refuses a same-named buffer that is not a DSH-Sessions buffer.

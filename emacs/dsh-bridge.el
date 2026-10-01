@@ -1189,11 +1189,10 @@ burst of frames (e.g., a rename) into one refresh."
   (when (timerp dsh-bridge--sessions-changed-timer)
     (cancel-timer dsh-bridge--sessions-changed-timer)
     (setq dsh-bridge--sessions-changed-timer nil))
-  (when (and (buffer-live-p (get-buffer "*dsh-bridge-sessions*"))
-	     (with-current-buffer "*dsh-bridge-sessions*"
-	       (eq major-mode 'dsh-bridge-sessions-mode)))
-    (setq dsh-bridge--sessions-changed-timer
-	  (run-at-time 0.5 nil #'dsh-bridge--refresh-sessions-buffer))))
+  (let ((sessions-buffer (dsh-bridge--sessions-buffer)))
+    (when sessions-buffer
+      (setq dsh-bridge--sessions-changed-timer
+	    (run-at-time 0.5 nil #'dsh-bridge--refresh-sessions-buffer)))))
 
 (defun dsh-bridge--notification-receive ()
   "Receive a pending DSH push notification."
@@ -1565,15 +1564,12 @@ a DSH-View buffer the session whose content it shows, a DSH-Describe
 buffer the session it reports on, and a DSH-Sessions buffer the row at
 point.  This is the buffer's own binding alone; it never consults the
 pinned target."
-  (let ((mode (buffer-local-value 'major-mode
-				  (or buffer (current-buffer)))))
-    (pcase mode
-      ('dsh-bridge-prompt-mode dsh-bridge--prompt-session)
-      ('dsh-bridge-view-mode dsh-bridge--view-content-session)
-      ('dsh-bridge-describe-mode dsh-bridge--describe-session)
-      ('dsh-bridge-sessions-mode
-       (with-current-buffer (or buffer (current-buffer))
-	 (tabulated-list-get-id))))))
+  (with-current-buffer (or buffer (current-buffer))
+    (cond
+     ((derived-mode-p 'dsh-bridge-prompt-mode) dsh-bridge--prompt-session)
+     ((derived-mode-p 'dsh-bridge-view-mode) dsh-bridge--view-content-session)
+     ((derived-mode-p 'dsh-bridge-describe-mode) dsh-bridge--describe-session)
+     ((derived-mode-p 'dsh-bridge-sessions-mode) (tabulated-list-get-id)))))
 
 (defun dsh-bridge--effective-session (&optional buffer nodefault require)
   "The session id BUFFER acts on, or nil for last-active.
@@ -2092,7 +2088,7 @@ the current DSH session.  If the buffer has existing non-history
 contents, stash it in `dsh-bridge--prompt-draft', so that a future
 `dsh-bridge-prompt-next-history' can restore it."
   (interactive)
-  (unless (eq major-mode 'dsh-bridge-prompt-mode)
+  (unless (derived-mode-p 'dsh-bridge-prompt-mode)
     (user-error "Not in a DSH-Prompt buffer"))
   ;; Refetch prompt history if we were composing a draft (not just
   ;; walking history).
@@ -2127,7 +2123,7 @@ After crossing the most recent historical prompt, restore the draft
 stashed in `dsh-bridge-prompt-previous-history'."
   (interactive)
   (cond
-   ((not (eq major-mode 'dsh-bridge-prompt-mode))
+   ((not (derived-mode-p 'dsh-bridge-prompt-mode))
     (user-error "Not in a DSH-Prompt buffer"))
    ((null dsh-bridge--prompt-history-index)
     (message "dsh-bridge: no newer prompts"))
@@ -2405,15 +2401,14 @@ prompts are deliberately absent."
 	     (dired-get-marked-files)
 	   (list (read-file-name "Attach file: " nil nil t)))))
   (let* ((paths (dsh-bridge--attach-paths files))
-	 ;; In a DSH-Prompt buffer, attach to that buffer (even one the
-	 ;; user renamed); from anywhere else, use the prompt buffer for
-	 ;; the invoking buffer's effective session.
-	 (prompt (or (and (eq major-mode 'dsh-bridge-prompt-mode)
+	 ;; In a DSH-Prompt buffer, attach to that buffer; otherwise,
+	 ;; use the effective session's prompt buffer.
+	 (prompt (or (and (derived-mode-p 'dsh-bridge-prompt-mode)
 			  (current-buffer))
 		     (dsh-bridge--prompt-buffer
 		      (dsh-bridge--effective-session))))
-	 ;; In the prompt buffer, insert at point (as `mml-attach-file'
-	 ;; does); from anywhere else, append at the end.
+	 ;; In the prompt buffer, insert at point; from anywhere else,
+	 ;; append at the end.
 	 (at-point (eq (current-buffer) prompt)))
     (with-current-buffer prompt
       (unless at-point (goto-char (point-max)))
@@ -2431,25 +2426,14 @@ The DSH analogue of Message mode's attach-buffer: DSH carries files, so
 the visited file (not the buffer text) is attached."
   (interactive)
   (let ((file buffer-file-name))
-    (unless file
-      (user-error "dsh-bridge: buffer %s is not visiting a file" (buffer-name)))
-    (let* ((prompt (or (and (eq major-mode 'dsh-bridge-prompt-mode)
-			    (current-buffer))
-		       (dsh-bridge--prompt-buffer
-			(dsh-bridge--effective-session))))
-	   (at-point (eq (current-buffer) prompt)))
-      (with-current-buffer prompt
-	(unless at-point (goto-char (point-max)))
-	(unless (or (bobp) (bolp)) (insert "\n"))
-	(dsh-bridge--insert-attachment-tag (expand-file-name file)))
-      (pop-to-buffer prompt)
-      (message "dsh-bridge: attached %s" (file-name-nondirectory file)))))
+    (unless file (user-error "dsh-bridge: no file to attach"))
+    (dsh-bridge-attach-file (list file))))
 
 ;;;###autoload
 (defun dsh-bridge-clear-attachments ()
   "Remove every attachment tag line from this DSH-Prompt buffer."
   (interactive)
-  (unless (eq major-mode 'dsh-bridge-prompt-mode)
+  (unless (derived-mode-p 'dsh-bridge-prompt-mode)
     (user-error "dsh-bridge: not a DSH-Prompt buffer"))
   (let ((count (dsh-bridge--attachment-count)))
     (dsh-bridge--remove-attachment-tags)
@@ -3772,6 +3756,8 @@ file at the line its `#Lnnn' fragment names.  Away from a link this keeps
 markdown-mode is not installed."
   (interactive)
   (cond
+   ((not (derived-mode-p 'dsh-bridge-view-mode))
+    (user-error "Not in a DSH-View buffer"))
    ((dsh-bridge--view-link-at-point-p)
     (markdown-follow-thing-at-point nil))
    ((fboundp 'markdown-enter-key)
@@ -4148,6 +4134,8 @@ A view still waiting for its just-sent turn (the `(running...)' placeholder)
 is anchored to a turn the list cannot hold yet, so its first `M-p' shows the
 newest cached turn."
   (interactive)
+  (unless (derived-mode-p 'dsh-bridge-view-mode)
+    (user-error "Not in a DSH-View buffer"))
   (setq-local dsh-bridge--view-follow nil)
   (let ((turns (dsh-bridge--view-turns-refresh
 		(not dsh-bridge--view-browsing))))
@@ -4174,6 +4162,8 @@ newest cached turn."
 (defun dsh-bridge-view-next-reply ()
   "In a DSH-View buffer, show the next (newer) turn of the current session."
   (interactive)
+  (unless (derived-mode-p 'dsh-bridge-view-mode)
+    (user-error "Not in a DSH-View buffer"))
   (if dsh-bridge--view-follow
       (message "dsh-bridge: already following the newest turn")
     (let* ((turn dsh-bridge--view-turn)
@@ -4252,7 +4242,7 @@ normally, and the prefix argument is then silently ignored.
 After a successful send, pop to a DSH-View buffer following the session
 and bury the buffer (see `dsh-bridge--prompt-exit')."
   (interactive "P")
-  (unless (eq major-mode 'dsh-bridge-prompt-mode)
+  (unless (derived-mode-p 'dsh-bridge-prompt-mode)
     (user-error "dsh-bridge: not a DSH-Prompt buffer"))
   (let* ((parsed (dsh-bridge--parse-attachments ; strip attachments
 		  (substring-no-properties (buffer-string))))
@@ -4384,7 +4374,7 @@ turn-following state.  WINDOW, if non-nil, is the window the send was
 invoked from.  SENT-AT, if non-nil, is the ms-epoch the prompt was sent;
 `dsh-bridge--after-prompt-view' uses it to recognize a turn that started
 (or even finished) during the send."
-  (when (eq major-mode 'dsh-bridge-prompt-mode)
+  (when (derived-mode-p 'dsh-bridge-prompt-mode)
     (set-buffer-modified-p nil)
     (if (null sent-session-id)
 	(bury-buffer)
@@ -4533,7 +4523,7 @@ Filling also ends the buffer's post-send waiting state
 (`dsh-bridge--view-waiting') and mid-browse state (`dsh-bridge--view-browsing'),
 so callers that render content need not clear them themselves, and the header
 computed below already carries the settled `(k/n)' position."
-  (unless (eq major-mode 'dsh-bridge-view-mode)
+  (unless (derived-mode-p 'dsh-bridge-view-mode)
     (dsh-bridge-view-mode))
   (add-hook 'kill-buffer-hook #'dsh-bridge--view-ticker-ensure-later nil t)
   (setq-local revert-buffer-function #'dsh-bridge--revert-output)
@@ -5266,6 +5256,8 @@ the marks (the harness's `matchesQuestions' wire rules)."
 (defun dsh-bridge--question-toggle-at-point ()
   "Toggle the option at point; on the custom row, prompt for custom text."
   (interactive)
+  (unless (derived-mode-p 'dsh-bridge-question-mode)
+    (user-error "Not in a DSH-Question buffer"))
   (let ((qid (dsh-bridge--question-at-point)))
     (cond
      ((null qid) (message "dsh-bridge: no question at point"))
@@ -5299,6 +5291,8 @@ the marks (the harness's `matchesQuestions' wire rules)."
 (defun dsh-bridge--question-toggle-number ()
   "Toggle the Nth option of the question at point, N from the digit pressed."
   (interactive)
+  (unless (derived-mode-p 'dsh-bridge-question-mode)
+    (user-error "Not in a DSH-Question buffer"))
   (let* ((qid (dsh-bridge--question-at-point))
 	 (n (string-to-number (this-command-keys)))
 	 (question (and qid (seq-find (lambda (q) (equal (alist-get 'id q) qid))
@@ -5312,6 +5306,8 @@ the marks (the harness's `matchesQuestions' wire rules)."
 (defun dsh-bridge--question-next ()
   "Move point to the next question block, wrapping to the first."
   (interactive)
+  (unless (derived-mode-p 'dsh-bridge-question-mode)
+    (user-error "Not in a DSH-Question buffer"))
   (let ((here (dsh-bridge--question-at-point))
 	(found nil))
     (save-excursion
@@ -5327,6 +5323,8 @@ A skipped question is answered with an empty selection — the web UI's skip
 affordance, valid under the apiproxy's `matchesQuestions'.  Skipping clears
 any marks and custom text for the question."
   (interactive)
+  (unless (derived-mode-p 'dsh-bridge-question-mode)
+    (user-error "Not in a DSH-Question buffer"))
   (let ((qid (dsh-bridge--question-at-point)))
     (if (null qid)
 	(message "dsh-bridge: no question at point")
@@ -5420,7 +5418,7 @@ The answer's text is summarized for the session named by
 On acceptance, the session resumes; clean up the DSH-Question buffer,
 and pop to the session's DSH-View in turn-following state."
   (interactive)
-  (unless (eq major-mode 'dsh-bridge-question-mode)
+  (unless (derived-mode-p 'dsh-bridge-question-mode)
     (user-error "Not in a DSH-Question buffer"))
   (if dsh-bridge--question-resolution
       (message "dsh-bridge: this question was already resolved")
@@ -5471,19 +5469,19 @@ On acceptance the cancelled session resumes, so the session's DSH-View is
 selected in turn-following state at its tail, exactly as for a submitted
 answer; an already-resolved question is bannered in place."
   (interactive)
-  (unless (eq major-mode 'dsh-bridge-question-mode)
+  (unless (derived-mode-p 'dsh-bridge-question-mode)
     (user-error "Not in a DSH-Question buffer"))
   (if dsh-bridge--question-resolution
       (message "dsh-bridge: this question was already resolved")
     (setq dsh-bridge--question-sent 'declined)
     ;; The view explains the continuation exactly as for a submitted answer.
     (dsh-bridge--view-answer-note-record 'none)
-    (let ((window (selected-window)))
+    (let ((window (selected-window))
+	  (payload `((questionId . ,dsh-bridge--question-request-id)
+		     (sessionId . ,dsh-bridge--question-session)
+		     (cancelled . t))))
       (pcase-let ((`(,_status ,body ,_http-status)
-		   (dsh-bridge--http "POST" "/answer"
-				     (list (cons 'questionId dsh-bridge--question-request-id)
-					   (cons 'sessionId dsh-bridge--question-session)
-					   (cons 'cancelled t)))))
+		   (dsh-bridge--http "POST" "/answer" payload)))
 	;; JSON false must decode to nil: the `accepted' cond branch
 	;; below keys on truthiness, which `dsh-bridge--parse-json-body'
 	;; guarantees.
@@ -5907,13 +5905,9 @@ Returns non-nil on success; the header re-renders on the next redisplay."
       nil)))
 
 (defun dsh-bridge-select-model ()
-  "Change the model (and reasoning effort) of the prompt buffer's session.
-The buffer must be bound to a session (or `dsh-bridge-pinned-target' set):
-this command changes state, so it refuses to guess the last-active session.
-Picks from the host's live catalog via `completing-read' (`provider/model'
-candidates annotated with the display name), then posts the selection through
-the genuine `session.selectModel' handler — so the change applies to this
-session and persists as the default, exactly as the web UI does."
+  "Change the model (and reasoning effort) of the current DSH session.
+The buffer must be bound to a session, or `dsh-bridge-pinned-target' set.
+Models are picked from the host's live catalog via `completing-read'."
   (interactive)
   (let* ((session-id (dsh-bridge--effective-session nil nil t))
 	 (data (dsh-bridge--fetch-models session-id t)))
@@ -5957,6 +5951,9 @@ session and persists as the default, exactly as the web UI does."
 						       (mapcar #'car by-name)
 						       nil t nil nil default-name)
 				      by-name)))))
+		;; Post the model through the `session.selectModel'
+		;; handler, so the change applies to this session and
+		;; persists as the default.
 		(dsh-bridge--select-model-apply
 		 session-id provider (alist-get 'id model-entry) effort)))))))))
 
@@ -5979,10 +5976,9 @@ unsent draft: it is kept when it belongs to SESSION-ID; for another
 session it is erased only after confirmation, and declining signals an
 error, leaving the buffer untouched."
   (let* ((pred (lambda (b)
-		 (and (eq (buffer-local-value 'major-mode b)
-			  'dsh-bridge-prompt-mode)
-		      (equal (buffer-local-value 'dsh-bridge--prompt-session b)
-			     session-id))))
+		 (with-current-buffer b
+		   (and (eq major-mode 'dsh-bridge-prompt-mode)
+			(equal dsh-bridge--prompt-session session-id)))))
 	 (buffer (or (and session-id (seq-find pred (buffer-list)))
 		     (get-buffer-create dsh-bridge-prompt-buffer-name))))
     (with-current-buffer buffer
@@ -5991,18 +5987,16 @@ error, leaving the buffer untouched."
       (when (and (not (= (buffer-size) 0))
 		 (or (not (buffer-modified-p))
 		     (not (equal dsh-bridge--prompt-session session-id))))
-	;; The text does not carry over to the new composition.
 	;; Unmodified text has already been processed (sent, or a
 	;; pristine history entry) and is erased silently.  Modified
-	;; text is an unsent draft, and we are only here when it
-	;; belongs to another session: ask before discarding it.
-	(when (and (buffer-modified-p)
-		   (not (save-window-excursion
-			  (display-buffer-same-window buffer nil)
-			  (y-or-n-p
-			   (format "Buffer %s has an unsent prompt for another session.	 \
-Discard it? " (buffer-name))))))
-	  (user-error "dsh-bridge: prompt buffer has an unsent prompt"))
+	;; text is an unsent draft: ask before discarding it.
+	(when (buffer-modified-p)
+	  (unless (save-window-excursion
+		    (display-buffer-same-window buffer nil)
+		    (y-or-n-p
+		     (format "Buffer %s has an unsent prompt for another session.  \
+Discard it? " (buffer-name))))
+	    (user-error "dsh-bridge: prompt buffer has an unsent prompt")))
 	(let ((inhibit-read-only t))
 	  (erase-buffer))
 	(setq-local dsh-bridge--prompt-history-index nil)
@@ -6089,7 +6083,7 @@ preset, but starts on the default model and is not auto-titled.	 A turn
 that has not completed cannot be a fork anchor, so an open turn is
 refused.  Only meaningful in a DSH-View buffer."
   (interactive)
-  (unless (eq major-mode 'dsh-bridge-view-mode)
+  (unless (derived-mode-p 'dsh-bridge-view-mode)
     (user-error "dsh-bridge: not a DSH-View buffer"))
   (let ((id dsh-bridge--view-content-session))
     (unless id
@@ -6575,6 +6569,8 @@ The history walk is reset: the erased entry is no longer being shown, so
 the header drops its position, and a draft stashed behind the walk is
 discarded rather than restored by `dsh-bridge-prompt-next-history'."
   (interactive)
+  (unless (derived-mode-p 'dsh-bridge-prompt-mode)
+    (user-error "Not in a DSH-Prompt buffer"))
   (when (or (= (buffer-size) 0)
 	    (not (buffer-modified-p))
 	    (yes-or-no-p "Prompt modified; erase anyway? "))
@@ -6599,6 +6595,8 @@ status says, for when Emacs has not heard that the session is busy; an
 actually idle session settles host-side as a no-op.  This mirrors the
 FORCE argument of `dsh-bridge-stop-session'."
   (interactive "P")
+  (unless (derived-mode-p 'dsh-bridge-prompt-mode)
+    (user-error "Not in a DSH-Prompt buffer"))
   (if (or force
 	  (eq (dsh-bridge--status-state (dsh-bridge--effective-session))
 	      'running))
@@ -6674,7 +6672,7 @@ If SESSION-ID is nil, the buffer instead follows the pinned target.
 Updates the header and the session directory, and resets the
 prompt-history walk when the binding changes."
   (interactive (list (dsh-bridge--read-session-id "Switch to Session: ")))
-  (unless (eq major-mode 'dsh-bridge-prompt-mode)
+  (unless (derived-mode-p 'dsh-bridge-prompt-mode)
     (user-error "dsh-bridge: not a DSH-Prompt buffer"))
   (unless (equal session-id dsh-bridge--prompt-session)
     ;; The history walk refers to the old session; reset it.
@@ -6709,7 +6707,7 @@ host round-trip."
   ;; effective session's workspace.
   (dolist (buf (buffer-list))
     (with-current-buffer buf
-      (when (and (eq major-mode 'dsh-bridge-prompt-mode)
+      (when (and (derived-mode-p 'dsh-bridge-prompt-mode)
 		 (null dsh-bridge--prompt-session))
 	(dsh-bridge--apply-session-directory
 	 (dsh-bridge--effective-session buf) nil buf))))
@@ -6818,6 +6816,24 @@ host still settles an idle agent as a no-op."
 		   (dsh-bridge--error-message nil status alist)))))))))
 
 ;;; The sessions buffer
+
+(defun dsh-bridge--session-at-point ()
+  "In a DSH-Sessions buffer, return the id of the session at point.
+Return nil if there is no session at point (list empty or on last row).
+Signal a `user-error' if not in a DSH-Sessions buffer."
+  (unless (derived-mode-p 'dsh-bridge-sessions-mode)
+    (user-error "Not in a DSH-Sessions buffer"))
+  (tabulated-list-get-id))
+
+(defun dsh-bridge--sessions-buffer ()
+  "Return a usable *dsh-bridge-sessions* buffer.
+Return nil if there is no such live buffer (do not create it), or if
+that buffer is not in `dsh-bridge-sessions-mode'."
+  (let ((buffer (get-buffer "*dsh-bridge-sessions*")))
+    (when (buffer-live-p buffer)
+      (with-current-buffer buffer
+	(when (eq major-mode 'dsh-bridge-sessions-mode)
+	  buffer)))))
 
 (defun dsh-bridge--pinned-target-marker (session)
   "Return the leftmost marker cell for SESSION: \"*\" when it is the default
@@ -7016,7 +7032,7 @@ and then silently dropped.  Use \\[dsh-bridge-unarchive-session] first;
 If the session is saved (cold), resume it first.  This command does not
 change the pinned target session."
   (interactive)
-  (let ((id (tabulated-list-get-id)))
+  (let ((id (dsh-bridge--session-at-point)))
     (cond
      ((null id)
       (message "dsh-bridge: no session under point"))
@@ -7047,7 +7063,7 @@ says so instead of opening a prompt or view.  Use
 \\[dsh-bridge-unarchive-session] to restore it, or \\[dsh-bridge-peek-session]
 to read it."
   (interactive)
-  (let ((id (tabulated-list-get-id)))
+  (let ((id (dsh-bridge--session-at-point)))
     (cond
      ((null id)
       (message "dsh-bridge: no session under point"))
@@ -7096,7 +7112,7 @@ A saved (cold) session binds directly rather than being resumed: the pin
 is a display-and-target choice, and the host resumes the session when a
 later request actually acts on it."
   (interactive)
-  (let ((id (tabulated-list-get-id)))
+  (let ((id (dsh-bridge--session-at-point)))
     (if (null id)
 	(message "dsh-bridge: no session under point")
       (dsh-bridge-pin-target id))))
@@ -7104,7 +7120,7 @@ later request actually acts on it."
 (defun dsh-bridge-peek-session ()
   "In a DSH-Sesssions buffer, view the session under point in a DSH-View buffer."
   (interactive)
-  (let ((id (tabulated-list-get-id)))
+  (let ((id (dsh-bridge--session-at-point)))
     (if id
 	(dsh-bridge-fetch id t)
       (message "dsh-bridge: no session under point"))))
@@ -7114,22 +7130,21 @@ later request actually acts on it."
 Archived sessions are hidden by default (the web UI's behavior); this shows or
 hides them for the current buffer only."
   (interactive)
-  (unless (eq major-mode 'dsh-bridge-sessions-mode)
+  (unless (derived-mode-p 'dsh-bridge-sessions-mode)
     (user-error "Not in a DSH-Sessions buffer"))
   (setq dsh-bridge--sessions-archived-p (not dsh-bridge--sessions-archived-p))
   (dsh-bridge--list-sessions-in-buffer)
   (message "dsh-bridge: %s archived sessions"
 	   (if dsh-bridge--sessions-archived-p "showing" "hiding")))
 
+;; FIXME: this could be turned into a general-purpose command.
 (defun dsh-bridge-rename-session ()
   "Rename the session at point in a DSH-Sessions buffer.
 Prompt for the new title (defaulting to the current title), and post a
 request to the DSH bridge to rename the session.  A cold session is
 resumed first."
   (interactive)
-  (unless (eq major-mode 'dsh-bridge-sessions-mode)
-    (user-error "Not in a DSH-Sessions buffer"))
-  (let ((id (tabulated-list-get-id)))
+  (let ((id (dsh-bridge--session-at-point)))
     (if (null id)
 	(message "dsh-bridge: no session under point")
       (let* ((session (dsh-bridge--session-for-id id))
@@ -7164,9 +7179,7 @@ Archiving works for both live and cold sessions.  A session whose work
 is live is refused by the host; in that case, offer to stop the work and
 archive.  Archiving is reversible with \\[dsh-bridge-unarchive-session]."
   (interactive)
-  (unless (eq major-mode 'dsh-bridge-sessions-mode)
-    (user-error "Not in a DSH-Sessions buffer"))
-  (let ((id (tabulated-list-get-id)))
+  (let ((id (dsh-bridge--session-at-point)))
     (cond
      ((null id)
       (message "dsh-bridge: no session under point"))
@@ -7198,9 +7211,7 @@ archive.  Archiving is reversible with \\[dsh-bridge-unarchive-session]."
 (defun dsh-bridge-unarchive-session ()
   "Unarchive the session at point in the DSH-Sessions buffer."
   (interactive)
-  (unless (eq major-mode 'dsh-bridge-sessions-mode)
-    (user-error "Not in a DSH-Sessions buffer"))
-  (let ((id (tabulated-list-get-id)))
+  (let ((id (dsh-bridge--session-at-point)))
     (if (null id)
 	(message "dsh-bridge: no session under point")
       (let* ((result (dsh-bridge--request "POST" "/sessions/unarchive"
@@ -7270,16 +7281,12 @@ this command with SET-TITLE and then pins what it created."
     (message "dsh-bridge: created a new session")
     session-id))
 
-
-
 (defun dsh-bridge-rename-workspace ()
   "Rename the workspace of the session at point in the DSH-Sessions buffer.
 The row's workspace id comes from the cached session; prompt for the new
 title, defaulting to the current workspace title."
   (interactive)
-  (unless (eq major-mode 'dsh-bridge-sessions-mode)
-    (user-error "Not in a DSH-Sessions buffer"))
-  (let* ((id (tabulated-list-get-id))
+  (let* ((id (dsh-bridge--session-at-point))
 	 (session (and id (dsh-bridge--session-for-id id)))
 	 (workspaceId (and session (alist-get 'workspaceId session))))
     (if (null id)
@@ -7737,7 +7744,7 @@ persisted log and is never resumed.  A successful fetch also seeds the
 plan/goal caches (see `dsh-bridge--plan-goal-store')."
   (interactive
    (list (cond
-	  ((and current-prefix-arg (eq major-mode 'dsh-bridge-sessions-mode))
+	  ((and current-prefix-arg (derived-mode-p 'dsh-bridge-sessions-mode))
 	   (or (tabulated-list-get-id)
 	       (dsh-bridge--read-session-id "Describe session: ")))
 	  (current-prefix-arg
@@ -7795,16 +7802,14 @@ printed."
 Signal an error when the current buffer is not a DSH-Sessions buffer."
   ;; `tabulated-list-print' writes into any buffer whatever its major mode,
   ;; so without this check a same-named buffer would be overwritten.
-  (unless (eq major-mode 'dsh-bridge-sessions-mode)
-    (error "dsh-bridge: not a DSH-Sessions buffer"))
-  (setq tabulated-list-format (dsh-bridge--sessions-format))
-  (setq tabulated-list-sort-key '("Age" . t))
-  (setq tabulated-list-entries
-	(mapcar #'dsh-bridge--session-entry
-		(seq-filter #'dsh-bridge--session-visible-p sessions)))
-  (tabulated-list-init-header)
-  (let* ((id (tabulated-list-get-id))
+  (let* ((id (dsh-bridge--session-at-point))
 	 (oldpoint (and id (point))))
+    (setq tabulated-list-format (dsh-bridge--sessions-format))
+    (setq tabulated-list-sort-key '("Age" . t))
+    (setq tabulated-list-entries
+	  (mapcar #'dsh-bridge--session-entry
+		  (seq-filter #'dsh-bridge--session-visible-p sessions)))
+    (tabulated-list-init-header)
     ;; The REMEMBER-POS arg for `tabulated-list-print' keeps point on
     ;; the same session across the reprint, but this fails if the
     ;; session is no longer listed (e.g., archived while archived
@@ -7818,6 +7823,8 @@ Signal an error when the current buffer is not a DSH-Sessions buffer."
 Return the buffer if it was filled, else nil; the fetch happens either way."
   (let ((fetch (dsh-bridge--fetch-sessions)))
     (when (eq (car fetch) 200)
+      ;; Don't use `dsh-bridge--sessions-buffer' here, since the mode
+      ;; guard is handled by `dsh-bridge--sessions-fill'.
       (let ((buffer (get-buffer "*dsh-bridge-sessions*")))
 	(when (buffer-live-p buffer)
 	  (with-current-buffer buffer
@@ -7828,7 +7835,7 @@ Return the buffer if it was filled, else nil; the fetch happens either way."
   "Populate the current DSH-Sessions buffer from a fresh roster fetch.
 Signal an error when the current buffer is not a DSH-Sessions buffer.  If
 the fetch fails, leave the buffer untouched."
-  (unless (eq major-mode 'dsh-bridge-sessions-mode)
+  (unless (derived-mode-p 'dsh-bridge-sessions-mode)
     (error "dsh-bridge: not a DSH-Sessions buffer"))
   (let ((fetch (dsh-bridge--fetch-sessions)))
     (when (eq (car fetch) 200)
@@ -7837,6 +7844,8 @@ the fetch fails, leave the buffer untouched."
 (defun dsh-bridge--refresh-sessions-buffer ()
   "Re-render `*dsh-bridge-sessions*' if it is a live DSH-Sessions buffer.
 Do nothing when there is no such buffer."
+  ;; As in `dsh-bridge--sessions-fill-live', the mode guard belongs to
+  ;; `dsh-bridge--list-sessions-in-buffer', which refuses a foreign buffer.
   (let ((buffer (get-buffer "*dsh-bridge-sessions*")))
     (when (buffer-live-p buffer)
       (with-current-buffer buffer
@@ -7870,9 +7879,9 @@ style updates an open DSH-Sessions list and the DSH-View header immediately
 (the DSH-Prompt header is `(:eval ...)' and re-renders on redisplay).  Reads
 the sessions cache only; never hits the host."
   (force-mode-line-update t)
-  (when (buffer-live-p (get-buffer "*dsh-bridge-sessions*"))
-    (with-current-buffer "*dsh-bridge-sessions*"
-      (when (eq major-mode 'dsh-bridge-sessions-mode)
+  (let ((buffer (dsh-bridge--sessions-buffer)))
+    (when buffer
+      (with-current-buffer buffer
 	;; The status column's width depends on the indicator style, so the
 	;; format (and its rendered header) must be recomputed too.
 	(setq tabulated-list-format (dsh-bridge--sessions-format))
@@ -7892,9 +7901,9 @@ ensures that paint lands in the same tick as the other surfaces."
     (with-current-buffer buf
       (setq header-line-format dsh-bridge--view-header-line-format)))
   (dsh-bridge--view-ticker-ensure)
-  (when (buffer-live-p (get-buffer "*dsh-bridge-sessions*"))
-    (with-current-buffer "*dsh-bridge-sessions*"
-      (when (eq major-mode 'dsh-bridge-sessions-mode)
+  (let ((buffer (dsh-bridge--sessions-buffer)))
+    (when buffer
+      (with-current-buffer buffer
 	(dsh-bridge--status-reprint-row session-id)))))
 
 (defun dsh-bridge--status-reprint-row (session-id)
@@ -7920,7 +7929,7 @@ turn browsing."
   (let ((buf (or buffer (current-buffer))))
     (and (buffer-live-p buf)
 	 (with-current-buffer buf
-	   (and (eq major-mode 'dsh-bridge-view-mode)
+	   (and (derived-mode-p 'dsh-bridge-view-mode)
 		dsh-bridge--view-browsing)))))
 
 (defun dsh-bridge--turn-reason-phrase (session-id reason)
@@ -8102,7 +8111,7 @@ waiting for it is given an explicit terminal note instead of a blank."
 	(message "dsh-bridge: failed to fetch sessions")
       (let ((buffer (get-buffer-create "*dsh-bridge-sessions*")))
 	(with-current-buffer buffer
-	  (unless (eq major-mode 'dsh-bridge-sessions-mode)
+	  (unless (derived-mode-p 'dsh-bridge-sessions-mode)
 	    (dsh-bridge-sessions-mode))
 	  (dsh-bridge--sessions-fill (cdr fetch)))
 	(pop-to-buffer buffer)))))
@@ -8297,10 +8306,10 @@ by cycling or pinning.
 With a prefix argument, re-fetch the session roster before painting,
 instead of trusting the cached one."
   [:description (lambda () (dsh-bridge--dispatcher-header))]
-  ["Send/Receive"
+  ["Send and Receive"
    ("r" dsh-bridge--dispatcher-prompt :description "reply/open prompt buffer")
    ("f" dsh-bridge--dispatcher-fetch :description "fetch latest turn")]
-  ["Plan and goal"
+  ["Plan and Goal"
    ("p" dsh-bridge--dispatcher-plan :description "toggle plan mode"
     :transient dsh-bridge--dispatcher-stay-p)
    ("G" dsh-bridge--dispatcher-goal :description "set or edit the goal"
