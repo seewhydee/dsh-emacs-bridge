@@ -459,24 +459,33 @@ fetched, host answered with nothing, host unreachable -- are recorded in
         (should (eq dsh-bridge--dispatcher-roster 'unreachable))))))
 
 (ert-deftest dsh-bridge-dispatcher-cycling ()
-  "Cycling walks the snapshot, wraps, and confirms an advisory focus.
-A pinned menu refuses to cycle and says so."
+  "Cycling walks the snapshot toward older (M-p) or newer (M-n), wraps,
+and confirms an advisory focus.  A pinned menu refuses to cycle and says so.
+The snapshot is newest-first, so \"s1\" is the newest and \"s3\" the oldest."
   (let ((dsh-bridge--focus-cycle '("s1" "s2" "s3"))
         (dsh-bridge--sessions-cache
          '(((id . "s1") (title . "T1") (live . t))
            ((id . "s2") (title . "T2") (live . t))
            ((id . "s3") (title . "T3") (live . t))))
         (dsh-bridge--focus '("s1" . advisory)))
-    ;; M-n walks toward newer sessions and confirms the guess.
-    (dsh-bridge--dispatcher-next)
+    ;; M-p steps one older and confirms the advisory guess in passing.
+    (dsh-bridge--dispatcher-prev)
     (should (equal (car dsh-bridge--focus) "s2"))
     (should (eq (cdr dsh-bridge--focus) 'cycled))
-    ;; Swallowing the confirmation is not possible by cycling back.
-    (dsh-bridge--dispatcher-prev)
+    ;; M-n steps back one newer.
+    (dsh-bridge--dispatcher-next)
     (should (equal (car dsh-bridge--focus) "s1"))
     (should (eq (cdr dsh-bridge--focus) 'cycled))
-    ;; M-p wraps backward to the oldest.
+    ;; M-p from the newest walks down the list, not around it.
     (dsh-bridge--dispatcher-prev)
+    (should (equal (car dsh-bridge--focus) "s2"))
+    (dsh-bridge--dispatcher-prev)
+    (should (equal (car dsh-bridge--focus) "s3"))
+    ;; ... and wraps to the newest from the oldest.
+    (dsh-bridge--dispatcher-prev)
+    (should (equal (car dsh-bridge--focus) "s1"))
+    ;; M-n wraps to the oldest from the newest.
+    (dsh-bridge--dispatcher-next)
     (should (equal (car dsh-bridge--focus) "s3"))
     ;; A pin locks cycling.
     (setq dsh-bridge--focus (cons "s1" 'pinned))
@@ -488,6 +497,33 @@ A pinned menu refuses to cycle and says so."
     (setq dsh-bridge--focus (cons "s1" 'advisory))
     (dsh-bridge--dispatcher-next)
     (should (equal (car dsh-bridge--focus) "s1"))))
+
+(ert-deftest dsh-bridge-dispatcher-cycle-follows-age-order ()
+  "M-p steps to the next-older session of the newest-first snapshot.
+This ties the walk to the real snapshot ordering rather than a hardcoded
+list: opening on the newest session, one M-p move lands on the
+second-newest, never on the oldest."
+  (let ((dsh-bridge--sessions-cache
+         '(((id . "new") (title . "NEW") (live . t) (lastActive . 3000))
+           ((id . "mid") (title . "MID") (live . t) (lastActive . 2000))
+           ((id . "old") (title . "OLD") (live . t) (lastActive . 1000))))
+        (dsh-bridge--last-resolved-active nil)
+        (dsh-bridge--focus nil)
+        (dsh-bridge--focus-cycle nil)
+        (dsh-bridge-pinned-target nil))
+    (dsh-bridge--dispatcher-init nil)
+    ;; The advisory guess is the newest session, at position (1/3).
+    (should (equal (car dsh-bridge--focus) "new"))
+    (should (equal dsh-bridge--focus-cycle '("new" "mid" "old")))
+    ;; One M-p move is the *next* older session, not the oldest.
+    (dsh-bridge--dispatcher-prev)
+    (should (equal (car dsh-bridge--focus) "mid"))
+    (dsh-bridge--dispatcher-prev)
+    (should (equal (car dsh-bridge--focus) "old"))
+    (dsh-bridge--dispatcher-prev)
+    (should (equal (car dsh-bridge--focus) "new"))
+    (dsh-bridge--dispatcher-next)
+    (should (equal (car dsh-bridge--focus) "old"))))
 
 (ert-deftest dsh-bridge-dispatcher-mutators-refuse-advisory ()
   "A session-state mutator refuses an advisory focus and acts otherwise.

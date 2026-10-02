@@ -8013,9 +8013,11 @@ wraps.  A pinned menu reports that it is locked instead of cycling."
    (t
     (let* ((total (length dsh-bridge--focus-cycle))
 	   (index (or (dsh-bridge--cycle-index) 0))
+	   ;; The snapshot is newest-first, so an older session sits one
+	   ;; index further along, and a newer one one index back.
 	   (next (if backward
-		     (if (zerop index) (1- total) (1- index))
-		   (if (= index (1- total)) 0 (1+ index))))
+		     (if (= index (1- total)) 0 (1+ index))
+		   (if (zerop index) (1- total) (1- index))))
 	   (to-session (nth next dsh-bridge--focus-cycle)))
       ;; Cycling is what confirms an advisory guess, even when the
       ;; walk comes back around to the same session.
