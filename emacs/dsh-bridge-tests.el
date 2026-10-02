@@ -802,7 +802,8 @@ neither, the send is still reported but no session state is touched."
 (ert-deftest dsh-bridge-session-label-precedence ()
   "The label is the title, else \"[Untitled Session]\"; a bare id with no
 cached row still labels as that id, and NO-DEFAULT drops the untitled
-placeholder so completion can skip such sessions."
+placeholder so completion can skip such sessions.  ADD-FACE tags the
+result with the session's display role."
   (let ((dsh-bridge--sessions-cache
          '(((id . "s1") (title . "T") (cwd . "/x"))
            ((id . "s2") (cwd . "/x/y")))))
@@ -826,7 +827,28 @@ placeholder so completion can skip such sessions."
     (should (equal (dsh-bridge--session-label "missing" t) "missing"))
     (should (equal (dsh-bridge--session-label '((id . "s7") (title . "T7")) t) "T7"))
     (should (null (dsh-bridge--session-label '((cwd . "/x")) t)))
-    (should (null (dsh-bridge--session-label nil t)))))
+    (should (null (dsh-bridge--session-label nil t))))
+  ;; ADD-FACE names the display role of the label: the pinned target, an
+  ;; ordinary title, or the untitled placeholder.  Without it no face is added.
+  (let ((dsh-bridge--sessions-cache
+         '(((id . "s1") (title . "T") (cwd . "/x"))
+           ((id . "s2") (cwd . "/x/y"))))
+        (dsh-bridge-pinned-target "s1"))
+    (should-not (get-text-property 0 'face (dsh-bridge--session-label "s1")))
+    (should (eq (get-text-property 0 'face (dsh-bridge--session-label "s1" nil t))
+                'dsh-bridge-session-pinned-face))
+    (should (eq (get-text-property 0 'face
+                                   (dsh-bridge--session-label '((id . "s5")
+                                                                (title . "T5"))
+                                                              nil t))
+                'dsh-bridge-session-default-face))
+    (should (eq (get-text-property 0 'face (dsh-bridge--session-label "s2" nil t))
+                'dsh-bridge-session-untitled-face))
+    ;; A bare id with no cached row is a label too, so it takes the default
+    ;; face; NO-DEFAULT still suppresses the untitled placeholder entirely.
+    (should (eq (get-text-property 0 'face (dsh-bridge--session-label "missing" nil t))
+                'dsh-bridge-session-default-face))
+    (should (null (dsh-bridge--session-label "s2" t t)))))
 
 (ert-deftest dsh-bridge-read-session-id-skips-untitled ()
   "Untitled sessions are not completion candidates; a titled one still is.
@@ -3329,18 +3351,23 @@ not a request, so no resume is attempted."
              (saved-cells (cadr saved)))
         (should live)
         (should saved)
-        ;; Pinned-target marker (index 0): "*" + face for the pinned target.
+        ;; Pinned-target marker (index 0): a bare "*"; the pinned session's
+        ;; title carries the pinned face instead (see index 2).
         (should (equal (aref live-cells 0) "*"))
-        (should (eq (get-text-property 0 'face (aref live-cells 0))
-                    'dsh-bridge-pinned-target-face))
+        (should-not (get-text-property 0 'face (aref live-cells 0)))
         (should (equal (aref saved-cells 0) " "))
         ;; Status cell (index 1): the state glyph — filled square for running
         ;; (amber), `?' for saved (no live agent).
         (should (equal (aref live-cells 1) "■"))
         (should (equal (aref saved-cells 1) "?"))
-        ;; Session name (index 2): unaltered name; cold rows have no face now.
+        ;; Session name (index 2): the pinned session's title is bold-faced,
+        ;; an ordinary title takes the default session face.
         (should (equal (aref live-cells 2) "First live"))
+        (should (eq (get-text-property 0 'face (aref live-cells 2))
+                    'dsh-bridge-session-pinned-face))
         (should (equal (aref saved-cells 2) "A saved one"))
+        (should (eq (get-text-property 0 'face (aref saved-cells 2))
+                    'dsh-bridge-session-default-face))
         ;; Age (index 3) carries the raw activity timestamp.
         (should (equal (get-text-property 0 'dsh-bridge-age-ts
                                           (aref live-cells 3))
@@ -3382,8 +3409,9 @@ Emoji glyphs are double-width; in a one-column cell
 
 (ert-deftest dsh-bridge-session-cell-untitled ()
   "The session cell shows the title, or \"[Untitled Session]\" (untitled face).
-The cell falls back on the placeholder with `dsh-bridge-untitled-face'; the
-raw id is not used, so an untitled row reads as untitled."
+An untitled row falls back on the placeholder with
+`dsh-bridge-session-untitled-face' rather than its raw id; a titled row takes
+`dsh-bridge-session-default-face'."
   (let ((dsh-bridge--session-status nil)
         (a '((id . "aaaaaa") (live . t) (cwd . "/x")))
         (b '((id . "bbbbbb") (live . t) (title . "B"))))
@@ -3392,9 +3420,10 @@ raw id is not used, so an untitled row reads as untitled."
           (b-cell (aref (cadr (dsh-bridge--session-entry b)) 2)))
       (should (string= a-cell "[Untitled Session]"))
       (should (eq (get-text-property 0 'face a-cell)
-                  'dsh-bridge-untitled-face))
+                  'dsh-bridge-session-untitled-face))
       (should (string= b-cell "B"))
-      (should-not (get-text-property 0 'face b-cell)))))
+      (should (eq (get-text-property 0 'face b-cell)
+                  'dsh-bridge-session-default-face)))))
 
 (ert-deftest dsh-bridge-list-sessions-shows-ids-when-enabled ()
   "With `dsh-bridge-show-session-ids' non-nil, an Id column appears."
@@ -3617,12 +3646,23 @@ be repeated for the two."
           (kill-buffer "*dsh-bridge-sessions*"))))))
 
 (ert-deftest dsh-bridge-session-entry-marks-archived ()
-  "An archived row's session cell carries the [archived] marker and face."
-  (let* ((session '((id . "a1") (live . nil) (archived . t) (title . "Arch")))
-         (cell (aref (cadr (dsh-bridge--session-entry session)) 2))
-         (at (string-match "\\[archived\\]" cell)))
-    (should at)
-    (should (eq (get-text-property at 'face cell) 'dsh-bridge-archived-face))))
+  "An archived row is greyed and its status cell shows the archived glyph.
+The title carries no \"[archived]\" suffix; the glyph names the state."
+  (let* ((dsh-bridge-status-indicator 'geometric)
+         (session '((id . "a1") (live . nil) (archived . t) (title . "Arch")))
+         ;; The status glyph reads the archived flag from the roster cache,
+         ;; which is the source the entries themselves come from.
+         (dsh-bridge--sessions-cache (list session))
+         (cells (cadr (dsh-bridge--session-entry session)))
+         (status (aref cells 1))
+         (title (aref cells 2))
+         (age (aref cells 3)))
+    (should (string= title "Arch"))
+    (should-not (string-match-p "archived" title))
+    (should (eq (get-text-property 0 'face title) 'dsh-bridge-archived-face))
+    (should (eq (get-text-property 0 'face age) 'dsh-bridge-archived-face))
+    (should (string= status "◎"))
+    (should (eq (get-text-property 0 'face status) 'dsh-bridge-archived-face))))
 
 (ert-deftest dsh-bridge-visit-session-archived-refuses ()
   "RET on an archived row says so and opens nothing."
@@ -4278,17 +4318,38 @@ other; the directory must come from the prompt."
 (ert-deftest dsh-bridge-status-glyph-session-states ()
   "The status glyph reflects the session state under the geometric indicator:
 a filled circle for an idle live session, a filled square for a running one,
-`?' for saved (cold) sessions and for unknown ids."
+`?' for saved (cold) sessions and for unknown ids, `◎' for an archived one."
   (let ((dsh-bridge--session-status nil)
         (dsh-bridge--sessions-cache
          '(((id . "s-run") (live . t) (running . t))
            ((id . "s-idle") (live . t) (running . nil))
-           ((id . "s-cold") (live . nil))))
+           ((id . "s-cold") (live . nil))
+           ((id . "s-arch") (live . nil) (archived . t))))
         (dsh-bridge-status-indicator 'geometric))
     (should (string= (dsh-bridge--status-glyph "s-run") "■"))
     (should (string= (dsh-bridge--status-glyph "s-idle") "●"))
     (should (string= (dsh-bridge--status-glyph "s-cold") "?"))
+    (should (string= (dsh-bridge--status-glyph "s-arch") "◎"))
     (should (string= (dsh-bridge--status-glyph "s-unknown") "?"))))
+
+(ert-deftest dsh-bridge-status-glyph-archived-styles ()
+  "An archived session reads as archived under every indicator style.
+A pending ask still outranks it: the question needs an answer."
+  (let ((dsh-bridge--session-status nil)
+        (dsh-bridge--sessions-cache '(((id . "s1") (live . nil) (archived . t))))
+        (dsh-bridge--pending-questions nil)
+        (dsh-bridge--pending-approvals nil))
+    (let ((dsh-bridge-status-indicator 'emoji))
+      (should (string= (dsh-bridge--status-glyph "s1") "⭕")))
+    (let ((dsh-bridge-status-indicator 'geometric))
+      (should (string= (dsh-bridge--status-glyph "s1") "◎")))
+    (let ((dsh-bridge-status-indicator 'text))
+      (should (string= (dsh-bridge--status-glyph "s1") "Z")))
+    (let ((dsh-bridge-status-indicator 'none))
+      (should (string= (dsh-bridge--status-glyph "s1") "")))
+    (let ((dsh-bridge-status-indicator 'geometric)
+          (dsh-bridge--pending-questions '(("s1" . "q1"))))
+      (should (string= (dsh-bridge--status-glyph "s1") "▲")))))
 
 (ert-deftest dsh-bridge-relative-age ()
   "Ages match DSH's buckets (now/min/h/d/mo/y)."
@@ -5474,6 +5535,27 @@ end clock; an open turn shows its elapsed run."
       (dsh-bridge-view-mode)
       (setq-local dsh-bridge--view-content-session "s1")
       (should-not (string-match-p " · " (dsh-bridge--view-header-line))))))
+
+(ert-deftest dsh-bridge-view-header-session-title-face ()
+  "The view header's session title carries the session's display face:
+the pinned face when the shown session is `dsh-bridge-pinned-target', and
+the default session face otherwise."
+  (let ((dsh-bridge--session-status nil)
+        (dsh-bridge-status-indicator 'none)
+        (dsh-bridge--sessions-cache
+         '(((id . "s1") (title . "T1") (live . t))
+           ((id . "s2") (title . "T2") (live . t)))))
+    (with-temp-buffer
+      (dsh-bridge-view-mode)
+      (setq-local dsh-bridge--view-content-session "s1")
+      (let* ((dsh-bridge-pinned-target "s1")
+             (header (dsh-bridge--view-header-line)))
+        (should (eq (get-text-property (string-match "T1" header) 'face header)
+                    'dsh-bridge-session-pinned-face)))
+      (let* ((dsh-bridge-pinned-target "s2")
+             (header (dsh-bridge--view-header-line)))
+        (should (eq (get-text-property (string-match "T1" header) 'face header)
+                    'dsh-bridge-session-default-face))))))
 
 (ert-deftest dsh-bridge-view-header-truncation ()
   "A width-constrained header protects the tail and shortens the labels."

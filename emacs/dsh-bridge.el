@@ -235,9 +235,9 @@ See Info node `(elisp)Window Choice' for the action form."
   "How the session status appears in header lines and the sessions list.
 The value should be one of the following:
 
-- `emoji': 💬/🟢/🟡/⚪ for asking/idle/running/unknown.
-- `geometric': ◌/●/■/? for asking/idle/running/unknown.
-- `text': A/I/R/? for asking/idle/running/unknown.
+- `emoji': 💬/🟢/🟡/?/⭕ for asking/idle/running/unknown/archived.
+- `geometric': ▲/●/■/?/◎ for asking/idle/running/unknown/archived.
+- `text': A/I/R/?/Z for asking/idle/running/unknown/archived.
 - `none': hide the indicator entirely."
   :type '(choice (const :tag "Emojis" emoji)
 		 (const :tag "Geometric glyphs" geometric)
@@ -418,19 +418,24 @@ In that case, the approval must be handled via the DSH web interface."
   "Face for the status glyph of an unknown DSH session."
   :group 'dsh-bridge)
 
-(defface dsh-bridge-pinned-target-face
-  '((t :inherit font-lock-keyword-face))
-  "Face for the pinned target session in the DSH-Sessions buffer."
+(defface dsh-bridge-session-default-face
+  '((t :inherit font-lock-function-name-face))
+  "Default face for a session title."
   :group 'dsh-bridge)
 
-(defface dsh-bridge-untitled-face
+(defface dsh-bridge-session-pinned-face
+  '((t :inherit (bold font-lock-function-name-face)))
+  "Face for the pinned session title."
+  :group 'dsh-bridge)
+
+(defface dsh-bridge-session-untitled-face
   '((t :inherit font-lock-comment-face))
-  "Face for an untitled session in the DSH-Sessions buffer."
+  "Face for an untitled session's placeholder title."
   :group 'dsh-bridge)
 
 (defface dsh-bridge-archived-face
   '((t :inherit shadow))
-  "Face for an archived session's row in the DSH-Sessions buffer."
+  "Face for an archived session's row and status glyph."
   :group 'dsh-bridge)
 
 (defface dsh-bridge-describe-heading-face
@@ -843,7 +848,9 @@ cached session data's `running' flag, and finally falling back on
     (and entry (car (cdr entry)))))
 
 (defun dsh-bridge--status-glyph (session-id)
-  "Return a status indicator for SESSION-ID as a propertized string."
+  "Return a status indicator for SESSION-ID as a propertized string.
+An archived session shows the archived glyph; a pending ask or approval
+for it still shows the asking glyph, which outranks it."
   (if (eq dsh-bridge-status-indicator 'none)
       ""
     (let* ((state (cond
@@ -851,23 +858,28 @@ cached session data's `running' flag, and finally falling back on
 			 (or (assoc session-id dsh-bridge--pending-questions)
 			     (assoc session-id dsh-bridge--pending-approvals)))
 		    'asking)
+		   ((dsh-bridge--session-archived-p session-id) 'archived)
 		   (t (dsh-bridge--status-state session-id))))
 	   (char
 	    (pcase dsh-bridge-status-indicator
 	      ('emoji
 	       (pcase state
-		 ('asking "💬") ('idle "🟢") ('running "🟡") (_ "⚪")))
+		 ('asking "💬") ('idle "🟢") ('running "🟡")
+		 ('archived "⭕") (_ "?")))
 	      ('geometric
 	       (pcase state
-		 ('asking "◌") ('idle "●")  ('running "■")  (_ "?")))
+		 ('asking "▲") ('idle "●")  ('running "■")
+		 ('archived "◎") (_ "?")))
 	      (_
 	       (pcase state
-		 ('asking "A") ('idle "I")  ('running "R")  (_ "?")))))
+		 ('asking "A") ('idle "I")  ('running "R")
+		 ('archived "Z") (_ "?")))))
 	   (face
 	    (pcase state
 	      ('asking  'dsh-bridge-status-running-face)
 	      ('idle    'dsh-bridge-status-idle-face)
 	      ('running 'dsh-bridge-status-running-face)
+	      ('archived 'dsh-bridge-archived-face)
 	      (_	    'dsh-bridge-status-unknown-face))))
       (propertize char 'face face))))
 
@@ -1431,27 +1443,43 @@ appropriate directory, do nothing."
 
 ;;; Session labels
 
-(defun dsh-bridge--session-label (session &optional no-default)
+(defun dsh-bridge--session-label (session &optional no-default add-face)
   "Return the display label for SESSION.
 SESSION should be a string (a session ID), or a session data alist in
 the format described in `dsh-bridge--sessions-cache'.
 
-The label is the session's title, else \"[Untitled Session]\".  A bare id
-with no cached row labels as the id itself, since that is the only name
-there is.  With NO-DEFAULT, an untitled session labels as nil instead of
-the placeholder, so a caller can skip it; a bare id still labels as
-itself."
-  (let* ((alist (if (stringp session)
-		    (dsh-bridge--session-for-id session)
-		  session))
-	 (title (dsh-bridge--normalized-string (alist-get 'title alist))))
-    (or title
-	;; No title.  A known row (ALIST) is an untitled session; with no
-	;; row at all, the id string is the only name available.
-	(if alist
-	    (unless no-default "[Untitled Session]")
-	  (or (dsh-bridge--normalized-string session)
-	      (unless no-default "[Untitled Session]"))))))
+The label is the session's title, else \"[Untitled Session]\".  A bare
+id with no cached row labels as the id itself, since that is the only
+name there is.  If NO-DEFAULT is non-nil, an untitled session labels as
+nil instead of the placeholder.
+
+With ADD-FACE, the label carries a `face' text property naming the
+session's display role: `dsh-bridge-session-untitled-face' for the
+placeholder (which a pin does not override: there is no title to
+emphasize), `dsh-bridge-session-pinned-face' when it is the title of
+`dsh-bridge-pinned-target', and `dsh-bridge-session-default-face'
+otherwise."
+  (let (alist id title)
+    (if (stringp session)
+	(setq alist (dsh-bridge--session-for-id session) id session)
+      (setq alist session id (alist-get 'id session)))
+    (setq title (dsh-bridge--normalized-string (alist-get 'title alist)))
+    ;; With no cached row at all, the id string is the only name there is.
+    (unless (or title alist)
+      (setq title (dsh-bridge--normalized-string id)))
+    (cond
+     (title
+      (if add-face
+	  (propertize title 'face
+		      (if (and id (equal id dsh-bridge-pinned-target))
+			  'dsh-bridge-session-pinned-face
+			'dsh-bridge-session-default-face))
+	title))
+     (no-default nil)
+     (add-face
+      (propertize "[Untitled Session]"
+		  'face 'dsh-bridge-session-untitled-face))
+     (t "[Untitled Session]"))))
 
 (defvar-keymap dsh-bridge--session-link-map
   :doc "Local keymap for clickable session labels in header lines."
@@ -3473,7 +3501,9 @@ clickable (see `dsh-bridge--header-plan-at-mouse' and
 	 (status (dsh-bridge--status-glyph id))
 	 (pos (string-trim (or (dsh-bridge--view-turn-position) "")))
 	 (label (dsh-bridge--session-link
-		 (dsh-bridge--header-text (dsh-bridge--session-label id)) id))
+		 (dsh-bridge--header-text
+		  (dsh-bridge--session-label id nil t))
+		 id))
 	 (workspace (dsh-bridge--header-text
 		     (dsh-bridge--workspace-label-for id)))
 	 (archived (and id (dsh-bridge--session-archived-p id) "archived"))
@@ -6304,7 +6334,8 @@ their tag lines are visible in the buffer itself."
     ;; space, so they ride along as the name's untruncated suffix.
     (setq label (if session
 		    (dsh-bridge--session-link
-		     (dsh-bridge--header-text (dsh-bridge--session-label session))
+		     (dsh-bridge--header-text
+		      (dsh-bridge--session-label session nil t))
 		     session)
 		  ""))
     (let* ((model (dsh-bridge--prompt-model-label session))
@@ -6669,13 +6700,6 @@ that buffer is not in `dsh-bridge-sessions-mode'."
 	(when (eq major-mode 'dsh-bridge-sessions-mode)
 	  buffer)))))
 
-(defun dsh-bridge--pinned-target-marker (session)
-  "Return the leftmost marker cell for SESSION: \"*\" when it is the default
-target, else a space."
-  (if (equal (alist-get 'id session) dsh-bridge-pinned-target)
-      (propertize "*" 'face 'dsh-bridge-pinned-target-face)
-    " "))
-
 (defun dsh-bridge--age-sorter (a b)
   "Sort predicate for the Age column: ascending by activity timestamp.
 A and B are `tabulated-list' entries (ID COLS); the Age cell is a string
@@ -6703,21 +6727,17 @@ Archived sessions are hidden unless `dsh-bridge--sessions-archived-p' (or
 	 (workspace (dsh-bridge--workspace-label session))
 	 (cwd (alist-get 'cwd session))
 	 (archived (alist-get 'archived session))
-	 (title (or (dsh-bridge--session-label session t)
-		    (propertize "[Untitled Session]"
-				'face 'dsh-bridge-untitled-face))))
-    ;; Grey out an archived session's row, and name the state in the label.
-    ;; Greying the label replaces the untitled fallback's face.
+	 (title (dsh-bridge--session-label session nil t)))
+    ;; Grey out an archived session's row; the status glyph names the state.
+    ;; The archived face replaces whatever face the title cell carried.
     (when archived
-      (setq title (concat (propertize title 'face 'dsh-bridge-archived-face)
-			  (propertize "\t [archived]"
-				      'face 'dsh-bridge-archived-face))
+      (setq title (propertize title 'face 'dsh-bridge-archived-face)
 	    age (propertize age 'face 'dsh-bridge-archived-face)
 	    workspace (propertize workspace 'face 'dsh-bridge-archived-face)))
     ;; Add help-echo to the workspace cell to show its directory
     (and (stringp cwd) (not (string-empty-p cwd))
 	 (setq workspace (propertize workspace 'help-echo cwd)))
-    (let ((cols (vector (dsh-bridge--pinned-target-marker session)
+    (let ((cols (vector (if (equal id dsh-bridge-pinned-target) "*" " ")
 			(dsh-bridge--status-glyph (alist-get 'id session))
 			title age workspace)))
       (when dsh-bridge-show-session-ids
@@ -7929,7 +7949,7 @@ every transient redisplay, so it reads the seeded roster and must not
 fetch anything itself."
   (let* ((id (car dsh-bridge--focus))
 	 (pinned (eq (cdr dsh-bridge--focus) 'pinned))
-	 (label (and id (dsh-bridge--session-label id))))
+	 (label (and id (dsh-bridge--session-label id nil t))))
     (cond
      ((null id)
       (if (eq dsh-bridge--dispatcher-roster 'unreachable)
