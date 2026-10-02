@@ -305,33 +305,52 @@ last-active guess."
          '(((id . "s1") (title . "T1") (live . t) (lastActive . 10))
            ((id . "s2") (title . "T2") (live . t) (lastActive . 20))))
         (dsh-bridge--last-resolved-active nil)
+        (dsh-bridge--dispatcher-roster nil)
         (dsh-bridge--focus nil))
     (with-temp-buffer
       (dsh-bridge-prompt-mode)
       (setq-local dsh-bridge--prompt-session "s1")
       ;; Pin beats the buffer binding.
       (let ((dsh-bridge-pinned-target "s2"))
-        (should (equal (dsh-bridge--dispatcher-focus-init) "s2"))
+        (dsh-bridge--dispatcher-init nil)
+        (should (equal (car dsh-bridge--focus) "s2"))
         (should (eq (cdr dsh-bridge--focus) 'pinned)))
       ;; Buffer binding beats the advisory guess.
       (let ((dsh-bridge-pinned-target nil))
-        (should (equal (dsh-bridge--dispatcher-focus-init) "s1"))
+        (dsh-bridge--dispatcher-init nil)
+        (should (equal (car dsh-bridge--focus) "s1"))
         (should (eq (cdr dsh-bridge--focus) 'buffer)))
       ;; With neither, the newest live session is only an advisory guess.
       (setq-local dsh-bridge--prompt-session nil)
       (let ((dsh-bridge-pinned-target nil))
-        (should (equal (dsh-bridge--dispatcher-focus-init) "s2"))
+        (dsh-bridge--dispatcher-init nil)
+        (should (equal (car dsh-bridge--focus) "s2"))
         (should (eq (cdr dsh-bridge--focus) 'advisory)))
       ;; The host's recorded resolution outranks the local cache.
       (let ((dsh-bridge-pinned-target nil)
             (dsh-bridge--last-resolved-active '("s1" . "T1")))
-        (should (equal (dsh-bridge--dispatcher-focus-init) "s1")))
+        (dsh-bridge--dispatcher-init nil)
+        (should (equal (car dsh-bridge--focus) "s1")))
       ;; Nothing names a session: no focus, so the header explains itself.
       (let ((dsh-bridge-pinned-target nil)
             (dsh-bridge--last-resolved-active nil)
             (dsh-bridge--sessions-cache nil))
-        (should (null (dsh-bridge--dispatcher-focus-init)))
-        (should (null dsh-bridge--focus))))))
+        ;; The empty cache makes the init fetch; stub the host out.
+        (cl-letf (((symbol-function 'dsh-bridge--ensure-plugin) #'ignore)
+                  ((symbol-function 'dsh-bridge--fetch-sessions)
+                   (lambda () (cons 200 nil))))
+          (dsh-bridge--dispatcher-init nil)
+          (should (null dsh-bridge--focus))))
+      ;; A pin does not depend on the roster: an unreachable host must
+      ;; not drop the focus the user explicitly set.
+      (let ((dsh-bridge-pinned-target "s2")
+            (dsh-bridge--sessions-cache nil))
+        (cl-letf (((symbol-function 'dsh-bridge--ensure-plugin) #'ignore)
+                  ((symbol-function 'dsh-bridge--fetch-sessions)
+                   (lambda () (cons nil nil))))
+          (dsh-bridge--dispatcher-init nil)
+          (should (equal (car dsh-bridge--focus) "s2"))
+          (should (eq (cdr dsh-bridge--focus) 'pinned)))))))
 
 (ert-deftest dsh-bridge-dispatcher-focus-falls-back-outside-menu ()
   "Outside a menu, the focus accessors fall back on the buffer's session.
@@ -371,13 +390,16 @@ so mid-menu SSE traffic cannot reshuffle the positions."
           '(((id . "s1") (title . "T1") (live . t) (lastActive . 99))))
     (should (equal dsh-bridge--focus-cycle '("s2" "s4" "s1")))))
 
-(ert-deftest dsh-bridge-dispatcher-seed ()
+(ert-deftest dsh-bridge-dispatcher-init-seeds-roster ()
   "The roster seed fetches only when the cache is cold, or when forced.
 The fetch is bounded by `dsh-bridge-roster-timeout', and the outcomes --
-fetched, host answered with nothing, host unreachable -- are recorded for
-the header."
+fetched, host answered with nothing, host unreachable -- are recorded in
+`dsh-bridge--dispatcher-roster' for the header."
   (let ((dsh-bridge--sessions-cache nil)
         (dsh-bridge--dispatcher-roster nil)
+        (dsh-bridge--focus nil)
+        (dsh-bridge--focus-cycle nil)
+        (dsh-bridge-pinned-target nil)
         (dsh-bridge--plugin-diagnosed nil)
         (dsh-bridge--bridge-status-cache 'running)
         (dsh-bridge-timeout 8)
@@ -393,7 +415,8 @@ the header."
                    (setq dsh-bridge--sessions-cache
                          '(((id . "s1") (title . "T1") (live . t))))
                    (cons 200 dsh-bridge--sessions-cache))))
-        (should (eq (dsh-bridge--dispatcher-seed) 'ok))
+        (dsh-bridge--dispatcher-init nil)
+        (should (eq dsh-bridge--dispatcher-roster 'ok))
         (should (= calls 1))
         (should (= seen-timeout 1.5)))
       ;; A warm cache is taken on faith: no fetch, and no plugin probe.
@@ -402,25 +425,29 @@ the header."
                  (lambda () (setq calls (1+ calls)) (cons 200 nil)))
                 ((symbol-function 'dsh-bridge--ensure-plugin)
                  (lambda () (error "should not probe on a warm cache"))))
-        (should (eq (dsh-bridge--dispatcher-seed) 'ok))
+        (dsh-bridge--dispatcher-init nil)
+        (should (eq dsh-bridge--dispatcher-roster 'ok))
         (should (= calls 0)))
       ;; The prefix argument forces a refresh even with a warm cache.
       (cl-letf (((symbol-function 'dsh-bridge--fetch-sessions)
                  (lambda ()
                    (setq calls (1+ calls))
                    (cons 200 '(((id . "s1") (title . "T1") (live . t)))))))
-        (should (eq (dsh-bridge--dispatcher-seed t) 'ok))
+        (dsh-bridge--dispatcher-init t)
+        (should (eq dsh-bridge--dispatcher-roster 'ok))
         (should (= calls 1)))
       ;; The host answered, and the roster is empty.
       (setq dsh-bridge--sessions-cache nil)
       (cl-letf (((symbol-function 'dsh-bridge--fetch-sessions)
                  (lambda () (cons 200 nil))))
-        (should (eq (dsh-bridge--dispatcher-seed) 'empty)))
+        (dsh-bridge--dispatcher-init nil)
+        (should (eq dsh-bridge--dispatcher-roster 'empty)))
       ;; A transport failure is the unreachable story.
       (setq dsh-bridge--sessions-cache nil)
       (cl-letf (((symbol-function 'dsh-bridge--fetch-sessions)
                  (lambda () (cons nil nil))))
-        (should (eq (dsh-bridge--dispatcher-seed) 'unreachable)))
+        (dsh-bridge--dispatcher-init nil)
+        (should (eq dsh-bridge--dispatcher-roster 'unreachable)))
       ;; So is a plugin probe that signals before any fetch happens.
       (setq dsh-bridge--sessions-cache nil
             dsh-bridge--bridge-status-cache nil)
@@ -428,7 +455,8 @@ the header."
                  (lambda () (error "dsh-bridge: no bridge")))
                 ((symbol-function 'dsh-bridge--fetch-sessions)
                  (lambda () (cons 200 nil))))
-        (should (eq (dsh-bridge--dispatcher-seed) 'unreachable))))))
+        (dsh-bridge--dispatcher-init nil)
+        (should (eq dsh-bridge--dispatcher-roster 'unreachable))))))
 
 (ert-deftest dsh-bridge-dispatcher-cycling ()
   "Cycling walks the snapshot, wraps, and confirms an advisory focus.
@@ -582,7 +610,7 @@ because transient picks the pre-command before the command runs."
                              :transient)
                   'dsh-bridge--dispatcher-stay-p)))
     ;; ...and transient resolves it to the intended pre-command.
-    (cl-letf (((symbol-function 'dsh-bridge--dispatcher-seed)
+    (cl-letf (((symbol-function 'dsh-bridge--dispatcher-init)
                (lambda (&optional _) 'ok))
               ((symbol-function 'dsh-bridge--ensure-plugin) #'ignore))
       (dsh-bridge)
@@ -620,9 +648,9 @@ paints and only a render-level check catches the line going missing."
          '(((id . "s1") (title . "T") (live . t))))
         (dsh-bridge--dispatcher-roster 'ok))
     (unwind-protect
-        (cl-letf (((symbol-function 'dsh-bridge--dispatcher-seed)
-                   (lambda (&optional _) 'ok))
-                  ((symbol-function 'dsh-bridge--ensure-plugin) #'ignore))
+        ;; The warm cache keeps the real init off the network, so the
+        ;; focus resolution under test actually runs.
+        (cl-letf (((symbol-function 'dsh-bridge--ensure-plugin) #'ignore))
           (dsh-bridge)
           (with-current-buffer " *transient*"
             (should (equal (buffer-substring-no-properties
@@ -673,7 +701,8 @@ rather than claiming there are no sessions."
         (dsh-bridge--focus nil)
         (dsh-bridge--focus-cycle nil)
         (dsh-bridge--dispatcher-roster 'ok))
-    (should (equal (dsh-bridge--dispatcher-focus-init) "cold-2"))
+    (dsh-bridge--dispatcher-init nil)
+    (should (equal (car dsh-bridge--focus) "cold-2"))
     (should (eq (cdr dsh-bridge--focus) 'advisory))
     (should (string-match-p "C2" (dsh-bridge--dispatcher-header)))))
 

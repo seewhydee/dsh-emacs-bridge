@@ -1569,11 +1569,35 @@ Falls back on the current buffer's effective session if no menu is open."
   (or (car dsh-bridge--focus)
       (dsh-bridge--effective-session)))
 
-(defun dsh-bridge--dispatcher-focus-init ()
-  "Initialize the open dispatcher's focus, first match wins.
-The pinned target, then the invoking buffer's own binding, then the
-advisory last-active guess.  Stores the record and returns its session
-id, or nil when nothing names one."
+(defun dsh-bridge--dispatcher-init (force-fetch)
+  "Initialize the state for the DSH bridge transient dispatcher.
+Seed the session roster first; a warm `dsh-bridge--sessions-cache' is
+taken on faith unless FORCE-FETCH is non-nil.  Otherwise fetch it.
+Update `dsh-bridge--dispatcher-roster' with `ok', `empty', or
+`unreachable'.
+
+Next, snapshot the cycling order and set `dsh-bridge--focus' to the
+pinned target, the invoking buffer's own binding, or the advisory
+last-active guess, in that order of precedence."
+  ;; Try to ensure the sessions cache is seeded:
+  (if (and dsh-bridge--sessions-cache (not force-fetch))
+      (setq dsh-bridge--dispatcher-roster 'ok)
+    ;; Sessions cache is empty, so fetching.  Suppress the plugin
+    ;; install offer: a menu open should not prompt or raise an error.
+    (let ((dsh-bridge--plugin-diagnosed t)
+	  (dsh-bridge-timeout dsh-bridge-roster-timeout))
+      (setq dsh-bridge--dispatcher-roster
+	    (condition-case nil
+		(progn
+		  (dsh-bridge--ensure-plugin)
+		  (let ((fetch (dsh-bridge--fetch-sessions)))
+		    (if (eq (car fetch) 200)
+			(if (cdr fetch) 'ok 'empty)
+		      'unreachable)))
+	      (error 'unreachable)))))
+  ;; Snapshot the cycle order before resolving the focus: the advisory
+  ;; guess is the newest session of that snapshot.
+  (dsh-bridge--dispatcher-cycle-init)
   (let ((buffer (or (bound-and-true-p transient--original-buffer)
 		    (current-buffer)))
 	session)
@@ -1585,9 +1609,10 @@ id, or nil when nothing names one."
      (t
       (setq session (or (car-safe dsh-bridge--last-resolved-active)
 			(dsh-bridge--cache-last-active)
-			(car (dsh-bridge--dispatcher-cycle-init))))
-      (setq dsh-bridge--focus (and session (cons session 'advisory))))))
-  (car dsh-bridge--focus))
+			(car dsh-bridge--focus-cycle)))
+      ;; A nil guess must still store: otherwise an init that names no
+      ;; session would leave the previous init's focus in place.
+      (setq dsh-bridge--focus (and session (cons session 'advisory)))))))
 
 (defun dsh-bridge--dispatcher-cycle-init ()
   "Snapshot the cycle set for the open dispatcher.
@@ -1617,35 +1642,6 @@ snapshot (newly created, or pinned from outside the roster) has no
 position."
   (let ((id (or session (car dsh-bridge--focus))))
     (and id (seq-position dsh-bridge--focus-cycle id #'equal))))
-
-(defun dsh-bridge--dispatcher-seed (&optional force)
-  "Seed the session roster for the open dispatcher.
-A warm roster cache is taken on faith unless FORCE is non-nil (the
-menu's prefix argument), since SSE keeps it fresh.  The fetch is bounded
-by `dsh-bridge-roster-timeout' and runs before the menu's first paint,
-so it must degrade the header rather than error out.
-
-Sets `dsh-bridge--dispatcher-roster' to `unreachable' when the bridge
-cannot be consulted, `empty' when the host answered with no sessions, or
-`ok' otherwise, and returns it."
-  (setq dsh-bridge--dispatcher-roster
-	(cond
-	 ((and dsh-bridge--sessions-cache (not force)) 'ok)
-	 (t
-	  (condition-case nil
-	      ;; Suppress the plugin's interactive install offer for the whole
-	      ;; seeded fetch: `dsh-bridge--http' probes the plugin itself, and
-	      ;; opening a menu must never prompt.  The inner `let' matters:
-	      ;; an outer one would evaluate the fetch before its own bindings
-	      ;; took effect.
-	      (let ((dsh-bridge--plugin-diagnosed t)
-		    (dsh-bridge-timeout dsh-bridge-roster-timeout))
-		(dsh-bridge--ensure-plugin)
-		(let ((fetch (dsh-bridge--fetch-sessions)))
-		  (if (eq (car fetch) 200)
-		      (if (cdr fetch) 'ok 'empty)
-		    'unreachable)))
-	    (error 'unreachable))))))
 
 ;;; Reading sessions from the minibuffer
 
@@ -8161,9 +8157,7 @@ instead of trusting the cached one."
    ("M-n" dsh-bridge--dispatcher-next :description "target newer session" :transient t)
    ("q" transient-quit-one :description "quit")]
   (interactive "P")
-  (dsh-bridge--dispatcher-seed arg)
-  (dsh-bridge--dispatcher-focus-init)
-  (dsh-bridge--dispatcher-cycle-init)
+  (dsh-bridge--dispatcher-init arg)
   (transient-setup 'dsh-bridge))
 
 (defun dsh-bridge--dispatcher-exit ()
