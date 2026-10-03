@@ -1705,7 +1705,7 @@ session and never touches the pinned target."
 (ert-deftest dsh-bridge-reply-not-live-errors ()
   "Reply to an unknown session refuses without a resume attempt.
 The id is absent from the cache, so no resume is tried and the command
-signals an error naming the dead session."
+signals a user-error."
   (let ((dsh-bridge--sessions-cache nil)
         (bound nil) (resumed nil) (caught nil))
     (with-temp-buffer
@@ -1715,10 +1715,10 @@ signals an error naming the dead session."
                  (lambda (id) (setq bound id)))
                 ((symbol-function 'dsh-bridge--resume-session)
                  (lambda (id) (setq resumed id) nil)))
-        (setq caught (should-error (dsh-bridge-reply) :type 'error)))
+        (setq caught (should-error (dsh-bridge-reply) :type 'user-error)))
       (should (null bound))
       (should (null resumed))
-      (should (string-match-p "\"gone\" is dead"
+      (should (string-match-p "unknown session"
                               (error-message-string caught))))))
 
 (ert-deftest dsh-bridge-reply-resume-failure-keeps-host-message ()
@@ -3016,7 +3016,7 @@ untouched."
 (ert-deftest dsh-bridge-open-session-not-live-errors ()
   "RET on an unknown id refuses without a resume attempt.
 The id is absent from the cache, so no resume is tried and the command
-signals an error naming the session."
+signals a user-error."
   (let ((dsh-bridge--sessions-cache nil)
         (bound nil) (resumed nil) (caught nil))
     (cl-letf (((symbol-function 'dsh-bridge--prompt-buffer)
@@ -3028,10 +3028,12 @@ signals an error naming the session."
         (let ((inhibit-read-only t))
           (insert (propertize "gone row" 'tabulated-list-id "gone")))
         (goto-char (point-min))
-        (setq caught (should-error (dsh-bridge-open-session) :type 'error))))
+        (setq caught (should-error (dsh-bridge-open-session)
+                                   :type 'user-error))))
     (should (null bound))
     (should (null resumed))
-    (should (string-match-p "\"gone\"" (error-message-string caught)))))
+    (should (string-match-p "unknown session"
+                            (error-message-string caught)))))
 
 (ert-deftest dsh-bridge-open-session-resume-failure-keeps-host-message ()
   "RET on a saved row whose resume fails echoes the host's error, then signals.
@@ -3273,15 +3275,17 @@ launcher left behind, so the frame keeps two usable windows."
 	(should-not shown)))
 
 (ert-deftest dsh-bridge-visit-session-not-live-errors ()
-  "An unknown (or unresumable) id refuses without a fetch."
-  (let ((caught nil))
+  "An unknown (or unresumable) id refuses without a fetch.
+`dsh-bridge--ensure-session-live' signals before the /turns fetch, so a
+dead session never reaches the network."
+  (let ((dsh-bridge--sessions-cache nil)
+        (caught nil))
 	(cl-letf (((symbol-function 'dsh-bridge--pending-question) (lambda (_id) nil))
-			  ((symbol-function 'dsh-bridge--ensure-session-live) (lambda (_id) nil))
 			  ((symbol-function 'dsh-bridge--session-turns)
 			   (lambda (_id) (ert-fail "must not fetch for a dead session"))))
 	  (setq caught (should-error (dsh-bridge-test--visit-session "gone")
-								 :type 'error)))
-	(should (string-match-p "\"gone\"" (error-message-string caught)))))
+								 :type 'user-error)))
+	(should (string-match-p "unknown session" (error-message-string caught)))))
 
 (ert-deftest dsh-bridge-visit-session-fetch-failure-stops ()
   "A failed /turns fetch opens nothing (the request already echoed the error)."
@@ -3629,27 +3633,42 @@ stopActivity."
       (should (equal (cdr (assoc 'sessionId (caddr unarchive))) "s1"))
       (should (string-match-p "unarchived session" msg)))))
 
-(ert-deftest dsh-bridge-session-archived-p ()
-  "Only a cached row flagged archived reads as archived."
-  (let ((dsh-bridge--sessions-cache
-         '(((id . "a1") (live . t) (archived . t))
-           ((id . "b1") (live . t)))))
-    (should (dsh-bridge--session-archived-p "a1"))
-    (should-not (dsh-bridge--session-archived-p "b1"))
-    (should-not (dsh-bridge--session-archived-p "missing"))
-    (should-not (dsh-bridge--session-archived-p nil))))
-
 (ert-deftest dsh-bridge-ensure-session-live-refuses-archived ()
   "An archived session is refused, never resumed."
-  (let ((dsh-bridge--sessions-cache
-         '(((id . "a1") (live . nil) (archived . t) (title . "Arch"))))
+  (let ((session '((id . "a1") (live . nil) (archived . t) (title . "Arch")))
         (resumed nil))
     (cl-letf (((symbol-function 'dsh-bridge--resume-session)
                (lambda (&rest _) (setq resumed t) t)))
-      (let ((caught (should-error (dsh-bridge--ensure-session-live "a1")
+      (let ((caught (should-error (dsh-bridge--ensure-session-live session)
                                   :type 'user-error)))
         (should (string-match-p "archived" (error-message-string caught)))))
     (should-not resumed)))
+
+(ert-deftest dsh-bridge-ensure-session-live-signals ()
+  "A live session passes; a cold one is resumed as a side effect.
+An unknown descriptor, or a cold one whose resume fails, signals a
+`user-error' instead of returning a value."
+  ;; Live: no signal, and no resume attempt.
+  (let ((resumed nil))
+    (cl-letf (((symbol-function 'dsh-bridge--resume-session)
+               (lambda (&rest _) (setq resumed t) t)))
+      (dsh-bridge--ensure-session-live '((id . "s1") (live . t)))
+      (should-not resumed)))
+  ;; Cold: resumed, and the resume's outcome decides.
+  (let ((resumed-id nil))
+    (cl-letf (((symbol-function 'dsh-bridge--resume-session)
+               (lambda (id) (setq resumed-id id) t)))
+      (dsh-bridge--ensure-session-live '((id . "s1") (live . nil)))
+      (should (equal resumed-id "s1"))))
+  ;; An unknown descriptor, a cold row with no id, and a failed resume all
+  ;; signal the same way their callers previously mapped to their own errors.
+  (should-error (dsh-bridge--ensure-session-live nil) :type 'user-error)
+  (cl-letf (((symbol-function 'dsh-bridge--resume-session)
+             (lambda (&rest _) nil)))
+    (should-error (dsh-bridge--ensure-session-live '((id . "s1") (live . nil)))
+                  :type 'user-error)
+    (should-error (dsh-bridge--ensure-session-live '((live . nil)))
+                  :type 'user-error)))
 
 (ert-deftest dsh-bridge-resume-session-single-fetch-fills-list ()
   "Resuming fetches the roster once and re-fills an open sessions list.
@@ -5615,6 +5634,38 @@ the default session face otherwise."
         (should (<= (string-width narrow) 60)))
       ;; A nil width never truncates.
       (should-not (string-match-p "…" (dsh-bridge--view-header-line))))))
+
+(ert-deftest dsh-bridge-header-truncate-keeps-percent-pair ()
+  "Truncation never splits a `%%' escape into a lone `%'.
+A bare `%' in a `header-line-format' result is a construct; the display
+engine would consume the character after it (here the ellipsis)."
+  ;; The cut lands between the two `%' of the escaped title "ab%cd".
+  (let ((cut (dsh-bridge--truncate-to-width "ab%%cd" 4)))
+    (should (equal cut "ab%%…"))
+    (should-not (string-match-p "%" (string-replace "%%" "" cut))))
+  ;; A string that fits is returned with its escaping intact.
+  (should (equal (dsh-bridge--truncate-to-width "ab%%cd" 5) "ab%%cd"))
+  (should (equal (dsh-bridge--truncate-to-width "plain" 99) "plain"))
+  (should (equal (dsh-bridge--truncate-to-width "ab%%cd" 0) ""))
+  ;; Measurement counts the escape as the one column it displays, so a
+  ;; title whose display width fits is not cut just because its escaped
+  ;; form is longer.
+  (should (= (dsh-bridge--header-text-width "50%% done") 8))
+  (should (equal (dsh-bridge--header-line-join (list (list "50%% done" t)) 8)
+                 "50%% done")))
+
+(ert-deftest dsh-bridge-view-header-archived-segment ()
+  "An archived session's view header names the state and renders.
+The segment is a cell like any other; passing it as a bare string made
+`dsh-bridge--header-line-join' call `car' on a string."
+  (let ((dsh-bridge--session-status nil)
+        (dsh-bridge-status-indicator 'none)
+        (dsh-bridge--sessions-cache
+         '(((id . "s1") (title . "T") (live . t) (archived . t)))))
+    (with-temp-buffer
+      (dsh-bridge-view-mode)
+      (setq-local dsh-bridge--view-content-session "s1")
+      (should (string-match-p "archived" (dsh-bridge--view-header-line))))))
 
 (ert-deftest dsh-bridge-view-header-format-eval ()
   "DSH-View installs a `:eval' header so each window sizes to its own width."
@@ -8494,7 +8545,7 @@ copy silently instead of duplicating the registry entry."
     (with-current-buffer (get-buffer-create "*dsh-bridge-output*")
       (dsh-bridge-view-mode)
       (setq-local dsh-bridge--view-content-session "s1")
-      (should (string-match-p "waiting for answer" (dsh-bridge--view-header-line))))
+      (should (string-match-p "awaiting answer" (dsh-bridge--view-header-line))))
     ;; The user opened the question buffer (the `a' path) and then the turn
     ;; ended without a resolved frame: the defensive clear banners the live
     ;; buffer it finds, and only that one.
