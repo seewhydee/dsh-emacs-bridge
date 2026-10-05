@@ -11450,5 +11450,381 @@ cache — the footer's attribution source."
       (funcall mode)
       (should-not (local-variable-p 'tool-bar-map)))))
 
+;;; Compaction
+
+(ert-deftest dsh-bridge-compact-marshals-args ()
+  "Compact confirms, then POSTs the view's shown session to /sessions/compact."
+  (let ((calls nil) (msg nil)
+        (dsh-bridge--session-context nil)
+        (dsh-bridge--session-status nil)
+        (dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t)))))
+    (cl-letf (((symbol-function 'y-or-n-p) (lambda (_prompt) t))
+              ((symbol-function 'dsh-bridge--request)
+               (lambda (method path payload)
+                 (push (list method path payload) calls)
+                 (if (equal method "GET")
+                     (cons 200 '((queued . 0) (steering . 0)))
+                   (cons 200 (list (cons 'ok t)
+				   (cons 'text "Compacted 2 history items (~9k tokens)."))))))
+              ((symbol-function 'message)
+               (lambda (&rest args) (setq msg (apply #'format args)))))
+      (with-temp-buffer
+        (dsh-bridge-view-mode)
+        (setq-local dsh-bridge--view-content-session "s1")
+        (dsh-bridge-compact-session)))
+    (let ((compact (cadr (assoc "/sessions/compact"
+                                (mapcar (lambda (c) (list (cadr c) c)) calls)))))
+      (should compact)
+      (should (equal (car compact) "POST"))
+      (should (equal (cdr (assoc 'sessionId (caddr compact))) "s1")))
+    (should (string-match-p "Compacted 2 history items" msg))))
+
+(ert-deftest dsh-bridge-compact-running-refuses ()
+  "A running session is refused locally without contacting the host."
+  (let ((called nil)
+        (dsh-bridge--session-status '(("s1" running . 1000)))
+        (dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t)))))
+    (cl-letf (((symbol-function 'dsh-bridge--request)
+               (lambda (&rest _) (setq called t) (cons 200 nil))))
+      (with-temp-buffer
+        (dsh-bridge-view-mode)
+        (setq-local dsh-bridge--view-content-session "s1")
+        (should-error (dsh-bridge-compact-session) :type 'user-error)))
+    (should-not called)))
+
+(ert-deftest dsh-bridge-compact-pending-ask-refuses ()
+  "A session waiting on an ask-user answer is refused locally."
+  (let ((called nil)
+        (dsh-bridge--session-status nil)
+        (dsh-bridge--pending-questions '(("s1" ("q1" . ((id . "q1"))))))
+        (dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t)))))
+    (cl-letf (((symbol-function 'dsh-bridge--request)
+               (lambda (&rest _) (setq called t) (cons 200 nil))))
+      (with-temp-buffer
+        (dsh-bridge-view-mode)
+        (setq-local dsh-bridge--view-content-session "s1")
+        (should-error (dsh-bridge-compact-session) :type 'user-error)))
+    (should-not called)))
+
+(ert-deftest dsh-bridge-compact-pending-approval-refuses ()
+  "A session waiting on an approval is refused locally."
+  (let ((called nil)
+        (dsh-bridge--session-status nil)
+        (dsh-bridge--pending-approvals '(("s1" ("a1" . nil))))
+        (dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t)))))
+    (cl-letf (((symbol-function 'dsh-bridge--request)
+               (lambda (&rest _) (setq called t) (cons 200 nil))))
+      (with-temp-buffer
+        (dsh-bridge-view-mode)
+        (setq-local dsh-bridge--view-content-session "s1")
+        (should-error (dsh-bridge-compact-session) :type 'user-error)))
+    (should-not called)))
+
+(ert-deftest dsh-bridge-compact-waking-queue-refuses ()
+  "Input queued to start a new turn blocks compaction locally."
+  (let ((called nil)
+        (dsh-bridge--session-status nil)
+        (dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t)))))
+    (cl-letf (((symbol-function 'dsh-bridge--request)
+               (lambda (method _path _payload)
+                 (if (equal method "GET")
+                     (cons 200 '((queued . 2) (steering . 0)))
+                   (setq called t) (cons 200 nil)))))
+      (with-temp-buffer
+        (dsh-bridge-view-mode)
+        (setq-local dsh-bridge--view-content-session "s1")
+        (should-error (dsh-bridge-compact-session) :type 'user-error)))
+    (should-not called)))
+
+(ert-deftest dsh-bridge-compact-aborts-on-no ()
+  "Declining the confirmation sends no compact request."
+  (let ((calls nil) (msg nil)
+        (dsh-bridge--session-status nil)
+        (dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t)))))
+    (cl-letf (((symbol-function 'y-or-n-p) (lambda (_prompt) nil))
+              ((symbol-function 'dsh-bridge--request)
+               (lambda (method path payload)
+                 (push (list method path payload) calls)
+                 (if (equal method "GET")
+                     (cons 200 '((queued . 0) (steering . 0)))
+                   (cons 200 nil))))
+              ((symbol-function 'message)
+               (lambda (&rest args) (setq msg (apply #'format args)))))
+      (with-temp-buffer
+        (dsh-bridge-view-mode)
+        (setq-local dsh-bridge--view-content-session "s1")
+        (dsh-bridge-compact-session)))
+    (should-not (assoc "/sessions/compact"
+                       (mapcar (lambda (c) (cadr c)) calls)))
+    (should (string-match-p "aborted" msg))))
+
+(ert-deftest dsh-bridge-compact-noop-echo ()
+  "A 200 no-op is final feedback, not an error."
+  (let ((msg nil)
+        (dsh-bridge--session-status nil)
+        (dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t)))))
+    (cl-letf (((symbol-function 'y-or-n-p) (lambda (_prompt) t))
+              ((symbol-function 'dsh-bridge--request)
+               (lambda (method _path _payload)
+                 (if (equal method "GET")
+                     (cons 200 '((queued . 0) (steering . 0)))
+                   (cons 200 (list (cons 'ok t) (cons 'text "No compactable history yet."))))))
+              ((symbol-function 'message)
+               (lambda (&rest args) (setq msg (apply #'format args)))))
+      (with-temp-buffer
+        (dsh-bridge-view-mode)
+        (setq-local dsh-bridge--view-content-session "s1")
+        (dsh-bridge-compact-session)))
+    (should (string-match-p "No compactable history yet" msg))))
+
+(ert-deftest dsh-bridge-compact-route-errors ()
+  "Route failures surface the matching message, including version skew."
+  ;; A 409 carries the harness's own busy/cancelled text.
+  (let ((msg nil)
+        (dsh-bridge--session-status nil)
+        (dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t)))))
+    (cl-letf (((symbol-function 'y-or-n-p) (lambda (_prompt) t))
+              ((symbol-function 'dsh-bridge--request)
+               (lambda (method _path _payload)
+                 (if (equal method "GET")
+                     (cons 200 '((queued . 0) (steering . 0)))
+                   (cons 409 (list (cons 'error "a compaction is already in progress"))))))
+              ((symbol-function 'message)
+               (lambda (&rest args) (setq msg (apply #'format args)))))
+      (with-temp-buffer
+        (dsh-bridge-view-mode)
+        (setq-local dsh-bridge--view-content-session "s1")
+        (dsh-bridge-compact-session)))
+    (should (string-match-p "already in progress" msg)))
+  ;; 404 while live means the installed plugin predates the route.
+  (let ((msg nil)
+        (dsh-bridge--session-status '(("s1" idle . 1000)))
+        (dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t)))))
+    (cl-letf (((symbol-function 'y-or-n-p) (lambda (_prompt) t))
+              ((symbol-function 'dsh-bridge--request)
+               (lambda (method _path _payload)
+                 (if (equal method "GET")
+                     (cons 200 '((queued . 0) (steering . 0)))
+                   (cons 404 (list (cons 'error "unknown"))))))
+              ((symbol-function 'message)
+               (lambda (&rest args) (setq msg (apply #'format args)))))
+      (with-temp-buffer
+        (dsh-bridge-view-mode)
+        (setq-local dsh-bridge--view-content-session "s1")
+        (dsh-bridge-compact-session)))
+    (should (string-match-p "does not support compaction" msg)))
+  ;; 501 means this profile has no compaction command.
+  (let ((msg nil)
+        (dsh-bridge--session-status nil)
+        (dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t)))))
+    (cl-letf (((symbol-function 'y-or-n-p) (lambda (_prompt) t))
+              ((symbol-function 'dsh-bridge--request)
+               (lambda (method _path _payload)
+                 (if (equal method "GET")
+                     (cons 200 '((queued . 0) (steering . 0)))
+                   (cons 501 (list (cons 'error "no compaction command"))))))
+              ((symbol-function 'message)
+               (lambda (&rest args) (setq msg (apply #'format args)))))
+      (with-temp-buffer
+        (dsh-bridge-view-mode)
+        (setq-local dsh-bridge--view-content-session "s1")
+        (dsh-bridge-compact-session)))
+    (should (string-match-p "no compaction command" msg))))
+
+(ert-deftest dsh-bridge-compact-confirmation-names-context ()
+  "The confirmation folds in the cached context occupancy when known."
+  (let ((prompt nil)
+        (dsh-bridge--session-context '(("s1" . (45000 . 100000))))
+        (dsh-bridge--session-status nil)
+        (dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t)))))
+    (cl-letf (((symbol-function 'y-or-n-p) (lambda (p) (setq prompt p) t))
+              ((symbol-function 'dsh-bridge--request)
+               (lambda (method _path _payload)
+                 (if (equal method "GET")
+                     (cons 200 '((queued . 0) (steering . 0)))
+                   (cons 200 (list (cons 'ok t) (cons 'text "done"))))))
+              ((symbol-function 'message) #'ignore))
+      (with-temp-buffer
+        (dsh-bridge-view-mode)
+        (setq-local dsh-bridge--view-content-session "s1")
+        (dsh-bridge-compact-session)))
+    (should (string-match-p "45%" prompt))))
+
+(ert-deftest dsh-bridge-compact-confirmation-bare ()
+  "The confirmation omits the context clause when occupancy is unknown."
+  (let ((dsh-bridge--session-context nil)
+        (dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t)))))
+    (should (equal (dsh-bridge--compact-confirmation "s1")
+                   "Compact session T?"))))
+
+(ert-deftest dsh-bridge-compact-sessions-row-target ()
+  "In DSH-Sessions the compact targets the row under point."
+  (let ((calls nil)
+        (dsh-bridge--session-status nil)
+        (dsh-bridge--sessions-cache
+         '(((id . "s1") (title . "T") (live . t) (lastActive . 1000)))))
+    (cl-letf (((symbol-function 'y-or-n-p) (lambda (_prompt) t))
+              ((symbol-function 'dsh-bridge--fetch-sessions)
+               (lambda () (cons 200 dsh-bridge--sessions-cache)))
+              ((symbol-function 'dsh-bridge--request)
+               (lambda (method path payload)
+                 (push (list method path payload) calls)
+                 (if (equal method "GET")
+                     (cons 200 '((queued . 0) (steering . 0)))
+                   (cons 200 (list (cons 'ok t)
+                                   (cons 'text "Compacted 1 history items (~9 tokens)."))))))
+              ((symbol-function 'message) #'ignore))
+      (unwind-protect
+          (with-current-buffer (get-buffer-create "*dsh-bridge-sessions*")
+            (dsh-bridge-sessions-mode)
+            (dsh-bridge--list-sessions-in-buffer)
+            (should (dsh-bridge--sessions-goto-id "s1"))
+            (dsh-bridge-compact-session))
+        (when (buffer-live-p (get-buffer "*dsh-bridge-sessions*"))
+          (kill-buffer "*dsh-bridge-sessions*"))))
+    (let ((compact (cadr (assoc "/sessions/compact"
+                                (mapcar (lambda (c) (list (cadr c) c)) calls)))))
+      (should compact)
+      (should (equal (car compact) "POST"))
+      (should (equal (cdr (assoc 'sessionId (caddr compact))) "s1")))))
+
+(ert-deftest dsh-bridge-compact-prompt-target ()
+  "In DSH-Prompt the compact targets the buffer's bound session."
+  (let ((calls nil)
+        (dsh-bridge--session-status nil)
+        (dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t)))))
+    (cl-letf (((symbol-function 'y-or-n-p) (lambda (_prompt) t))
+              ((symbol-function 'dsh-bridge--request)
+               (lambda (method path payload)
+                 (push (list method path payload) calls)
+                 (if (equal method "GET")
+                     (cons 200 '((queued . 0) (steering . 0)))
+                   (cons 200 (list (cons 'ok t) (cons 'text "done"))))))
+              ((symbol-function 'message) #'ignore))
+      (with-temp-buffer
+        (dsh-bridge-prompt-mode)
+        (setq-local dsh-bridge--prompt-session "s1")
+        (dsh-bridge-compact-session)))
+    (let ((compact (cadr (assoc "/sessions/compact"
+                                (mapcar (lambda (c) (list (cadr c) c)) calls)))))
+      (should compact)
+      (should (equal (car compact) "POST"))
+      (should (equal (cdr (assoc 'sessionId (caddr compact))) "s1")))))
+
+(ert-deftest dsh-bridge-compact-pinned-target ()
+  "A buffer naming no session compacts the pinned target instead."
+  (let ((calls nil)
+        (dsh-bridge-pinned-target "s1")
+        (dsh-bridge--session-status nil)
+        (dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t)))))
+    (cl-letf (((symbol-function 'y-or-n-p) (lambda (_prompt) t))
+              ((symbol-function 'dsh-bridge--request)
+               (lambda (method path payload)
+                 (push (list method path payload) calls)
+                 (if (equal method "GET")
+                     (cons 200 '((queued . 0) (steering . 0)))
+                   (cons 200 (list (cons 'ok t) (cons 'text "done"))))))
+              ((symbol-function 'message) #'ignore))
+      (with-temp-buffer
+        (dsh-bridge-view-mode)
+        (dsh-bridge-compact-session)))
+    (let ((compact (cadr (assoc "/sessions/compact"
+                                (mapcar (lambda (c) (list (cadr c) c)) calls)))))
+      (should compact)
+      (should (equal (cdr (assoc 'sessionId (caddr compact))) "s1")))))
+
+(ert-deftest dsh-bridge-compact-no-target-refuses ()
+  "With no session at hand the command refuses and sends nothing."
+  (let ((called nil) (dsh-bridge-pinned-target nil))
+    (cl-letf (((symbol-function 'dsh-bridge--request)
+               (lambda (&rest args) (setq called args) (cons 200 nil))))
+      (with-temp-buffer
+        (dsh-bridge-view-mode)
+        (should-error (dsh-bridge-compact-session) :type 'user-error)))
+    (should-not called)))
+
+;;; Compaction SSE frames
+
+(defun dsh-bridge-test--frame-feedback (frame &optional turn-boundary-echo displayed)
+  "Run compaction FRAME through the notification dispatch, capturing the
+message and the deferred `/turns' refetch count.  TURN-BOUNDARY-ECHO is the
+echo gate to bind, and DISPLAYED is what `dsh-bridge--view-displayed-p'
+reports.  Returns (MSG . REFETCHES); a nil MSG means nothing was echoed."
+  (let ((msg nil) (refetches 0)
+        (dsh-bridge-turn-boundary-echo turn-boundary-echo)
+        (dsh-bridge--session-status nil)
+        (dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t)))))
+    (cl-letf (((symbol-function 'message)
+               (lambda (&rest args) (setq msg (apply #'format args))))
+              ((symbol-function 'run-at-time)
+               (lambda (_secs _rep fn &rest _args)
+                 (when (eq fn #'dsh-bridge--turns-changed)
+                   (setq refetches (1+ refetches)))))
+              ((symbol-function 'dsh-bridge--view-displayed-p) (lambda (_id) displayed)))
+      (dsh-bridge--notification-handle-events (list frame)))
+    (cons msg refetches)))
+
+(ert-deftest dsh-bridge-compaction-manual-start-ungated ()
+  "A manual compaction's start frame messages even when the automatic gate is off."
+  (let ((out (dsh-bridge-test--frame-feedback
+              '((kind . "compaction") (sessionId . "s1") (phase . "start")
+                (sourceCommandId . "cmd-1")) nil)))
+    (should (string-match-p "is compacting" (car out)))
+    (should (= (cdr out) 0))))
+
+(ert-deftest dsh-bridge-compaction-manual-end-suppressed ()
+  "A manual compaction's end frame shows no message but still schedules refetch."
+  (let ((out (dsh-bridge-test--frame-feedback
+              '((kind . "compaction") (sessionId . "s1") (phase . "end")
+                (sourceCommandId . "cmd-1") (tokensReclaimed . 42)) t)))
+    (should (null (car out)))
+    (should (= (cdr out) 1))))
+
+(ert-deftest dsh-bridge-compaction-auto-end-messages ()
+  "An automatic compaction's end frame messages the reclaimed count and refetches."
+  (let ((out (dsh-bridge-test--frame-feedback
+              '((kind . "compaction") (sessionId . "s1") (phase . "end")
+                (tokensReclaimed . 42)) t)))
+    (should (string-match-p "compacted" (car out)))
+    (should (string-match-p "42" (car out)))
+    (should (= (cdr out) 1))))
+
+(ert-deftest dsh-bridge-compaction-auto-end-gated ()
+  "An automatic compaction's message is gated by the turn-boundary echo."
+  (let ((out (dsh-bridge-test--frame-feedback
+              '((kind . "compaction") (sessionId . "s1") (phase . "end")
+                (tokensReclaimed . 42)) nil)))
+    ;; The refetch still runs; only the echo is gated.
+    (should (null (car out)))
+    (should (= (cdr out) 1))))
+
+(ert-deftest dsh-bridge-compaction-auto-start-gated ()
+  "An automatic compaction's start frame is gated like its end frame."
+  (let ((out (dsh-bridge-test--frame-feedback
+              '((kind . "compaction") (sessionId . "s1") (phase . "start")) nil)))
+    (should (null (car out)))
+    ;; A start edge has nothing to refetch: the end edge will carry that.
+    (should (= (cdr out) 0)))
+  (let ((out (dsh-bridge-test--frame-feedback
+              '((kind . "compaction") (sessionId . "s1") (phase . "start")) t)))
+    (should (string-match-p "is compacting" (car out)))
+    (should (= (cdr out) 0))))
+
+(ert-deftest dsh-bridge-compaction-auto-start-view-gated ()
+  "An automatic start frame echoes nothing while a visible view shows the session."
+  (let ((out (dsh-bridge-test--frame-feedback
+              '((kind . "compaction") (sessionId . "s1") (phase . "start")) t t)))
+    (should (null (car out)))
+    (should (= (cdr out) 0))))
+
+(ert-deftest dsh-bridge-compaction-error-beats-tokens ()
+  "An error end frame renders the error, never a token count."
+  (let ((out (dsh-bridge-test--frame-feedback
+              '((kind . "compaction") (sessionId . "s1") (phase . "end")
+                (error . "persistence failed") (tokensReclaimed . 0)) t)))
+    (should (string-match-p "persistence failed" (car out)))
+    (should-not (string-match-p "0 tokens" (car out)))
+    (should (= (cdr out) 1))))
+
 (provide 'dsh-bridge-tests)
 ;;; dsh-bridge-tests.el ends here

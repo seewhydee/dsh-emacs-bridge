@@ -1626,6 +1626,35 @@ export function goalActivationChangedMessage(
 }
 
 /**
+ * One SSE `data:` frame reporting a compaction lifecycle edge for a session.
+ * PHASE is `start` or `end`. SOURCE-COMMAND-ID is present exactly when the
+ * compaction was manual (a `/compact` invocation through the command
+ * registry) and absent for an automatic one; Emacs uses it to pick its
+ * feedback channel — the manual 200/409 echo is the completion message, so it
+ * suppresses this frame's end message. ERROR is present only on an `end` for
+ * a failed/cancelled transaction; TOKENS-RECLAIMED is the summary's
+ * `shadowedTokenCount`, present only when a `compaction/summary` preceded the
+ * end — so an end may carry an error with no count, or a count with no error.
+ */
+export function compactionFrame(args: {
+  sessionId: string
+  phase: 'start' | 'end'
+  sourceCommandId?: string
+  error?: string
+  tokensReclaimed?: number
+}): string {
+  const { sessionId, phase, sourceCommandId, error, tokensReclaimed } = args
+  return `data: ${JSON.stringify({
+    kind: 'compaction',
+    sessionId,
+    phase,
+    ...(sourceCommandId === undefined ? {} : { sourceCommandId }),
+    ...(error === undefined ? {} : { error }),
+    ...(tokensReclaimed === undefined ? {} : { tokensReclaimed }),
+  })}\n\n`
+}
+
+/**
  * Minimal structural face of one `ask_user_question` item, enough to rebroadcast
  * it to Emacs. Mirrors `@deepseek-ai/dsh-user-questions`'s wire type, which the
  * `user-questions/request` waterfall carries verbatim; `intent` is only present
@@ -2617,6 +2646,70 @@ export function attachmentErrorHttpStatus(code: string): 400 | 413 | 500 | 501 {
   if (ATTACHMENT_CALLER_CODES.has(code)) return 400
   if (code === 'ATTACHMENT_FILES_UNSUPPORTED') return 501
   return 500
+}
+
+// ---- Compaction ----
+
+/**
+ * The settled `result` member of a `CommandExecution`, restricted to the two
+ * kinds `/compact` can produce. `error` covers the `ManualCompactionError`
+ * codes (busy/cancelled/changed/summary/commit/persistence), already mapped
+ * to human text by the command handler; the no-op case ("No compactable
+ * history yet.") is a `success` carrying that text, not an error.
+ */
+export type CompactCommandResultLike =
+  | { kind: 'success'; text?: string }
+  | { kind: 'error'; text: string }
+
+/**
+ * The raw settle of `commands.execute(agent, '/compact', ...)`, before the
+ * route maps it to a status. `unknown-command` is `execute` resolving to
+ * `undefined` (this preset mounts no compaction command); `command` is the
+ * resolved `CommandExecution` wrapper; `rejected` is the promise rejecting
+ * (a thrown handler or an aborted signal).
+ */
+export type CompactExecutionOutcome =
+  | { kind: 'unknown-command' }
+  | { kind: 'command'; result: CompactCommandResultLike }
+  | { kind: 'rejected'; error: unknown }
+
+/** The settled compact outcome: an `ok` success carries the completion text, a failure carries its status and text. */
+export type CompactSettled =
+  | { ok: true; text: string | undefined }
+  | { ok: false; status: 501 | 409 | 500; text: string }
+
+/** A human-worthy message from an arbitrary rejection, or '' when none is recoverable. */
+function compactionRejectedText(error: unknown): string {
+  if (typeof error === 'object' && error !== null) {
+    const message = (error as { message?: unknown }).message
+    if (typeof message === 'string' && message !== '') return message
+  }
+  return typeof error === 'string' ? error : ''
+}
+
+/**
+ * Map the raw settle of `/compact` to an HTTP-ready outcome. An unknown
+ * command is 501 (this preset mounts no compaction), a handled error result
+ * is 409 carrying the harness's own text, and a rejected execution is 409
+ * (500 only when no message is recoverable); a success passes its text
+ * through for the 200 body.
+ */
+export function compactExecutionSettled(outcome: CompactExecutionOutcome): CompactSettled {
+  switch (outcome.kind) {
+    case 'unknown-command':
+      return { ok: false, status: 501, text: 'this DSH preset mounts no compaction command' }
+    case 'rejected': {
+      const text = compactionRejectedText(outcome.error)
+      return text === ''
+        ? { ok: false, status: 500, text: 'compaction request was rejected' }
+        : { ok: false, status: 409, text }
+    }
+    case 'command':
+      if (outcome.result.kind === 'error') {
+        return { ok: false, status: 409, text: outcome.result.text }
+      }
+      return { ok: true, text: outcome.result.text }
+  }
 }
 
 /**

@@ -22,9 +22,9 @@
 //   GET  /dsh-bridge/status                         -> { name, version } (loopback-fenced)
 //   GET  /dsh-bridge/events?token=                  -> EventSource (composer-draft push)
 //        (also carries turn lifecycle, context, plan, goal, goal-activation,
-//        outbox, sessions-changed, replies-changed, and activity-changed
-//        frames; the payloads are documented on their constructors in
-//        logic.ts)
+//        outbox, sessions-changed, replies-changed, activity-changed, and
+//        compaction frames; the payloads are documented on their
+//        constructors in logic.ts)
 //        (?purpose=draft marks the browser's own draft stream; an unmarked
 //        connection is Emacs and is eligible to answer ask-user questions and
 //        approvals, both of which coexist with the web UI's own panels.  &answer=0
@@ -111,6 +111,18 @@
 //        survives for a later turn).  A live but idle agent settles as a no-op
 //        and is reported as { accepted: true, running: false }; 404 unknown or
 //        not-attached, 409 subagent-owned, 501 without a session controller.
+//   POST /dsh-bridge/sessions/compact { sessionId? }
+//        -> user-triggered context compaction through the slash-command
+//        registry (`ctx.commands.execute(agent, '/compact', [], signal)`).
+//        Resolves last-active by default and resumes cold sessions on demand
+//        (the mutating-route fences apply: 404 unknown, 409 subagent-owned or
+//        archived). 200 { ok, sessionId, text } wraps the harness's own
+//        completion text (including the "No compactable history yet." no-op,
+//        a success); 409 carries the busy/cancelled/changed/summary/commit/
+//        persistence text; 501 when this profile mounts no commands service
+//        or /compact resolves to no command.  The SSE `compaction` frames
+//        report the lifecycle and arrive before the 200, because execute
+//        awaits the whole transaction.
 //   GET  /dsh-bridge/sessions/queue?sessionId= -> { queued, steering }
 //        -> the live agent's pending user-prompt counts by placement (steering
 //        is the `nextStep` messages with a user source; injected context is
@@ -176,6 +188,8 @@ import {
   catalogModelName,
   changedFiles,
   classifySessionId,
+  compactExecutionSettled,
+  compactionFrame,
   contextMessage,
   contextUsedTokens,
   currentModelSelection,
@@ -234,6 +248,8 @@ import {
   type ApprovalResolution,
   type ApprovalToolCallDetail,
   type BridgeImageMediaType,
+  type CompactCommandResultLike,
+  type CompactExecutionOutcome,
   type LiveSessionLike,
   type AskUserAnswerItemLike,
   type AskUserQuestionItemLike,
@@ -270,6 +286,24 @@ interface WebServerService {
 /** Minimal face of the `sessions` service: enumerate live sessions. */
 interface SessionService {
   list(): Session[]
+}
+
+/**
+ * Minimal face of the `commands` service (the slash-command registry), the
+ * only host-plane seam for user-triggered compaction. `execute` mirrors the
+ * Remote's signature: the settled result is `CommandExecution | undefined`
+ * (`undefined` when the line resolves to no command), and it rejects when the
+ * handler throws or the signal is aborted. `submittedAttachments` is always
+ * `[]` for `/compact`, which declares no input attachments (a non-empty array
+ * is rejected before the handler runs).
+ */
+interface CommandsServiceLike {
+  execute(
+    agent: Agent,
+    line: string,
+    submittedAttachments: readonly unknown[],
+    signal: AbortSignal,
+  ): Promise<unknown>
 }
 
 /**
@@ -1553,6 +1587,53 @@ export function apply(ctx: Context): void {
     activityTimers.clear()
   }, 'dsh-bridge: activity debounce')
 
+  // Compaction lifecycle observation. `compaction/start`/`summary`/`end` all
+  // carry `compactionId`, and `sourceCommandId` is present exactly for a
+  // manual `/compact` compaction (an automatic one has none) — the flag Emacs
+  // uses to pick its feedback channel. The summary's `shadowedTokenCount` is
+  // held per (session, compactionId) so the matching end frame can fill
+  // `tokensReclaimed`. `compaction/prune` also carries `shadowedTokenCount`
+  // but no `compactionId`, so dispatch is on the exact type and a prune is
+  // never mistaken for a summary. A held entry leaks only when the
+  // `compaction/end` append itself fails (the harness's orphan-start case) —
+  // one number per rare event, accepted rather than cleaned up.
+  const compactionTokens = new Map<string, number>()
+
+  function handleCompactionEvent(sessionId: string, event: SessionEventLike): void {
+    const data = event.data as {
+      compactionId?: unknown
+      sourceCommandId?: unknown
+      shadowedTokenCount?: unknown
+      error?: unknown
+    } | undefined
+    const compactionId = typeof data?.compactionId === 'string' ? data.compactionId : undefined
+    if (compactionId === undefined) return
+    const sourceCommandId = typeof data?.sourceCommandId === 'string' ? data.sourceCommandId : undefined
+    if (event.type === 'compaction/start') {
+      broadcast(compactionFrame({ sessionId, phase: 'start', sourceCommandId }))
+      return
+    }
+    if (event.type === 'compaction/summary') {
+      const count = data?.shadowedTokenCount
+      if (typeof count === 'number' && Number.isFinite(count)) {
+        compactionTokens.set(`${sessionId}\u0000${compactionId}`, count)
+      }
+      return
+    }
+    // compaction/end — the bounded set the listener subscribes to.
+    const key = `${sessionId}\u0000${compactionId}`
+    const tokensReclaimed = compactionTokens.get(key)
+    compactionTokens.delete(key)
+    const error = typeof data?.error === 'string' ? data.error : undefined
+    broadcast(compactionFrame({
+      sessionId,
+      phase: 'end',
+      sourceCommandId,
+      ...(error === undefined ? {} : { error }),
+      ...(tokensReclaimed === undefined ? {} : { tokensReclaimed }),
+    }))
+  }
+
   // Push turn lifecycle and title changes onto the SSE stream for the Emacs
   // status tracker and sessions-list auto-refresh. Emitted only for targetable
   // (non-subagent) sessions; the browser ignores any kind it does not
@@ -1567,6 +1648,12 @@ export function apply(ctx: Context): void {
     // exactly the mid-turn activity the view streams.
     if (activityRelevantEvent(event as SessionEventLike)) {
       scheduleActivityFrame(id, turnNumberOf(event.data))
+    }
+    if (event.type === 'compaction/start'
+      || event.type === 'compaction/summary'
+      || event.type === 'compaction/end') {
+      handleCompactionEvent(id, event as SessionEventLike)
+      return
     }
     if (event.type === 'turn/start') {
       broadcast(turnStartMessage(id, event.time, turnNumberOf(event.data)))
@@ -2924,6 +3011,59 @@ export function apply(ctx: Context): void {
           sendJson(res, 200, { accepted: true, running: wasRunning })
         } catch (error: unknown) {
           sendJson(res, stopErrorStatus(error), {
+            error: error instanceof Error ? error.message : String(error),
+          })
+        }
+        return
+      }
+
+      // User-triggered context compaction. The only host-plane seam is the
+      // slash-command registry (`/compact`), not a Remote or a session
+      // controller method. Target resolution and the archived/subagent fences
+      // follow the mutating-route pattern; the error mapping is pure
+      // (`compactExecutionSettled`). The signal is a per-request AbortController
+      // — `execute` dereferences `signal.aborted` unconditionally, and aborting
+      // a mid-flight compaction because the HTTP client dropped would be new
+      // behaviour (every bridge route runs to completion on a dead socket), so
+      // it is deliberately not wired to client disconnect.
+      if (req.method === 'POST' && pathname === '/dsh-bridge/sessions/compact') {
+        try {
+          const body = (await readJson(req)) as { sessionId?: unknown } | undefined
+          let explicitId: string | undefined
+          if (body?.sessionId !== undefined && body.sessionId !== null) {
+            if (typeof body.sessionId !== 'string' || body.sessionId === '') {
+              sendJson(res, 400, { error: 'sessionId must be a non-empty string' })
+              return
+            }
+            explicitId = body.sessionId
+          }
+          const commands = ctx.get('commands') as CommandsServiceLike | undefined
+          if (commands === undefined) {
+            sendJson(res, 501, { error: 'profile lacks a commands service (no compaction)' })
+            return
+          }
+          if (explicitId !== undefined) assertNotArchived(explicitId)
+          const target = await resolveTarget(explicitId)
+          assertNotArchived(String(target.session.id))
+          const sessionId = String(target.session.id)
+          const signal = new AbortController().signal
+          let outcome: CompactExecutionOutcome
+          try {
+            const settled = await commands.execute(target.agent, '/compact', [], signal)
+            outcome = settled === undefined
+              ? { kind: 'unknown-command' }
+              : { kind: 'command', result: (settled as { result: CompactCommandResultLike }).result }
+          } catch (error: unknown) {
+            outcome = { kind: 'rejected', error }
+          }
+          const settledOutcome = compactExecutionSettled(outcome)
+          if (settledOutcome.ok) {
+            sendJson(res, 200, { ok: true, sessionId, text: settledOutcome.text })
+          } else {
+            sendJson(res, settledOutcome.status, { error: settledOutcome.text })
+          }
+        } catch (error: unknown) {
+          sendJson(res, bridgeErrorStatus(error), {
             error: error instanceof Error ? error.message : String(error),
           })
         }

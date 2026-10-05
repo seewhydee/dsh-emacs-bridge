@@ -29,6 +29,8 @@ import {
   cachedTitleValue,
   changedFiles,
   classifySessionId,
+  compactExecutionSettled,
+  compactionFrame,
   contextMessage,
   contextUsedTokens,
   currentModelSelection,
@@ -1767,5 +1769,97 @@ describe('changedFiles', () => {
     const total = changedFiles(many, '/w')
     expect(total.files).toHaveLength(MAX_CHANGED_FILES)
     expect(total.truncated).toBe(true)
+  })
+})
+
+describe('compactionFrame', () => {
+  it('emits a start frame carrying the manual sourceCommandId', () => {
+    expect(compactionFrame({ sessionId: 'session-1', phase: 'start', sourceCommandId: 'cmd-1' })).toBe(
+      'data: {"kind":"compaction","sessionId":"session-1","phase":"start","sourceCommandId":"cmd-1"}\n\n',
+    )
+  })
+
+  it('omits sourceCommandId for an automatic compaction', () => {
+    expect(compactionFrame({ sessionId: 'session-1', phase: 'start' })).toBe(
+      'data: {"kind":"compaction","sessionId":"session-1","phase":"start"}\n\n',
+    )
+  })
+
+  it('carries tokensReclaimed and the sourceCommandId on an end after a summary', () => {
+    expect(compactionFrame({ sessionId: 'session-1', phase: 'end', sourceCommandId: 'cmd-1', tokensReclaimed: 42 })).toBe(
+      'data: {"kind":"compaction","sessionId":"session-1","phase":"end","sourceCommandId":"cmd-1","tokensReclaimed":42}\n\n',
+    )
+  })
+
+  it('carries an error without tokensReclaimed when no summary preceded the end', () => {
+    expect(compactionFrame({ sessionId: 'session-1', phase: 'end', error: 'compaction failed' })).toBe(
+      'data: {"kind":"compaction","sessionId":"session-1","phase":"end","error":"compaction failed"}\n\n',
+    )
+  })
+
+  it('carries an automatic end with tokens and no error', () => {
+    expect(compactionFrame({ sessionId: 'session-1', phase: 'end', tokensReclaimed: 7 })).toBe(
+      'data: {"kind":"compaction","sessionId":"session-1","phase":"end","tokensReclaimed":7}\n\n',
+    )
+  })
+})
+
+describe('compactExecutionSettled', () => {
+  it('maps an unknown command to 501', () => {
+    expect(compactExecutionSettled({ kind: 'unknown-command' })).toEqual({
+      ok: false,
+      status: 501,
+      text: 'this DSH preset mounts no compaction command',
+    })
+  })
+
+  it('maps a handled error result to 409 carrying the harness text', () => {
+    expect(compactExecutionSettled({ kind: 'command', result: { kind: 'error', text: 'compaction is busy' } })).toEqual({
+      ok: false,
+      status: 409,
+      text: 'compaction is busy',
+    })
+  })
+
+  it('maps a success result through to the 200 body text', () => {
+    expect(compactExecutionSettled({ kind: 'command', result: { kind: 'success', text: 'Compacted 3 history items (~12k tokens).' } })).toEqual({
+      ok: true,
+      text: 'Compacted 3 history items (~12k tokens).',
+    })
+  })
+
+  it('maps a no-op success (no compactable history) through as a success', () => {
+    expect(compactExecutionSettled({ kind: 'command', result: { kind: 'success', text: 'No compactable history yet.' } })).toEqual({
+      ok: true,
+      text: 'No compactable history yet.',
+    })
+  })
+
+  it('maps a success with no text to a 200 with undefined text', () => {
+    expect(compactExecutionSettled({ kind: 'command', result: { kind: 'success' } })).toEqual({
+      ok: true,
+      text: undefined,
+    })
+  })
+
+  it('maps a rejection with a message to 409', () => {
+    expect(compactExecutionSettled({ kind: 'rejected', error: new Error('aborted') })).toEqual({
+      ok: false,
+      status: 409,
+      text: 'aborted',
+    })
+  })
+
+  it('maps a rejection with no recoverable message to 500', () => {
+    expect(compactExecutionSettled({ kind: 'rejected', error: new Error('') })).toEqual({
+      ok: false,
+      status: 500,
+      text: 'compaction request was rejected',
+    })
+    expect(compactExecutionSettled({ kind: 'rejected', error: undefined })).toEqual({
+      ok: false,
+      status: 500,
+      text: 'compaction request was rejected',
+    })
   })
 })

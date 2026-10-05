@@ -1020,6 +1020,11 @@ Currently supported events are:
 - `approval': record a pending approval request and surface it.
 - `approval-resolved': retire a pending approval (allowed, rejected, or
   cancelled).
+- `compaction': observe a compaction lifecycle edge.  The frame's
+  `sourceCommandId' is present exactly for a manual `/compact' compaction;
+  the feedback channel is picked from it (automatic compactions report via
+  these messages, manual ones via the POST echo).  The frame also schedules
+  the deferred `/turns' refetch on every end edge.
 - `sessions-changed': update existing DSH-Sessions buffers."
   (when (seq-some (lambda (e) (equal (alist-get 'kind e) "sessions-changed"))
 		  events)
@@ -1073,6 +1078,8 @@ Currently supported events are:
 	;; rather than paying for a fetch whose result nothing displays.
 	(when (dsh-bridge--session-activity-shown-p id)
 	  (run-at-time 0 nil #'dsh-bridge--turns-changed id)))
+       ((equal kind "compaction")
+	(dsh-bridge--compaction-notify id event))
        ((equal kind "context")
 	(let ((used (alist-get 'usedTokens event))
 	      (window (alist-get 'contextWindow event)))
@@ -1128,6 +1135,59 @@ Currently supported events are:
 	(when (alist-get 'approvalId event)
 	  (dsh-bridge--approval-resolved id (alist-get 'approvalId event)
 					 (alist-get 'outcome event))))))))
+
+(defun dsh-bridge--compaction-message (id manual phase error tokens)
+  "The `compaction' feedback message for session ID, or nil to show none.
+MANUAL is non-nil when the compaction was user-triggered (a `/compact'
+invocation); PHASE is `start' or `end'; ERROR and TOKENS are the frame's
+optional error text and reclaimed-token count.  The caller applies the echo
+gate; this function only decides the message text (nil means nothing to
+say).  An error text always wins over the token count, so a failed
+compaction never renders as \"0 tokens reclaimed\"."
+  (if (equal phase "start")
+      (format "session \"%s\" is compacting..." (dsh-bridge--session-label id))
+    (when (and (equal phase "end") (null manual))
+      (cond
+       (error (format "session \"%s\" compaction failed: %s"
+		      (dsh-bridge--session-label id) error))
+       ((numberp tokens)
+	(format "session \"%s\" compacted (%s tokens reclaimed)"
+		(dsh-bridge--session-label id) tokens))
+       (t (format "session \"%s\" compacted"
+		  (dsh-bridge--session-label id)))))))
+
+(defun dsh-bridge--compaction-notify (id event)
+  "Handle a `compaction' SSE frame for session ID.
+EVENT is the decoded frame, carrying `phase' (`start' or `end'),
+`sourceCommandId' (present exactly for a manual `/compact' compaction), and
+optionally `error' and `tokensReclaimed'.
+
+The frame picks the feedback channel from `sourceCommandId'.  An automatic
+compaction (no `sourceCommandId') reports through these messages, gated
+like the turn-boundary echo so background sessions do not chatter.  A
+manual compaction's `start' message is the only in-flight feedback and is
+never gated (the user just confirmed it), while its `end' message is
+suppressed entirely — the POST 200/409 echo already carried the outcome,
+and an unsuppressed one would double-report.
+
+For every `end' frame, schedule the deferred `/turns' refetch regardless of
+whether a message is shown: even a `persistence' failure replaces the
+surface in memory, so the refetch must still run."
+  (let* ((phase (alist-get 'phase event))
+	 (manual (alist-get 'sourceCommandId event))
+	 (error (alist-get 'error event))
+	 (tokens (alist-get 'tokensReclaimed event)))
+    (when (equal phase "end")
+      (run-at-time 0 nil #'dsh-bridge--turns-changed id))
+    ;; A manual `start' is the in-flight feedback the user asked for, so it is
+    ;; never gated; an automatic compaction's message is gated like the
+    ;; turn-boundary echo.  A manual `end' returns nil above and shows nothing.
+    (let ((text (dsh-bridge--compaction-message id manual phase error tokens)))
+      (when text
+	(when (or manual
+		  (and dsh-bridge-turn-boundary-echo
+		       (not (dsh-bridge--view-displayed-p id))))
+	  (message "dsh-bridge: %s" text))))))
 
 (defvar dsh-bridge--sessions-changed-timer nil
   "Timer for debounced sessions-list refetch after a `sessions-changed' frame.")
@@ -3189,9 +3249,9 @@ Point is left at BUFFER's end for tail-following."
 (defun dsh-bridge--view-follow-refill (session-id)
   "Refill every DSH-View buffer following SESSION-ID with its newest turn.
 This function is called (via `dsh-bridge--turns-changed') right after a
-`replies-changed' or `activity-changed' notification event arrives.  It
-updates using the cached turn data only, without performing any further
-network request."
+`replies-changed', `activity-changed', or compaction-end notification
+event arrives.  It updates using the cached turn data only, without
+performing any further network request."
   (let* ((turns (dsh-bridge--turns-cache-turns session-id))
 	 (newest (car-safe turns))
 	 (turn (alist-get 'turn newest)))
@@ -3211,10 +3271,10 @@ network request."
 	     (dsh-bridge--view-fill session-id newest nil t t))))))
 
 (defun dsh-bridge--turns-changed (session-id)
-  "Handle one `replies-changed' or `activity-changed' frame for SESSION-ID.
-This is called, deferred, from the notifications handler.
-Refresh the turn list (updating turn indicators in the header line),
-then refill every turn-following view."
+  "Handle one `replies-changed', `activity-changed', or compaction-end
+frame for SESSION-ID.  This is called, deferred, from the notifications
+handler.  Refresh the turn list (updating turn indicators in the header
+line), then refill every turn-following view."
   (dsh-bridge--view-turns-cache-refresh session-id)
   (dsh-bridge--view-follow-refill session-id))
 
@@ -3669,6 +3729,7 @@ away from a link it keeps its usual behavior.
   "i" #'dsh-bridge-receive
   "a" #'dsh-bridge-answer
   "k" #'dsh-bridge-stop-session
+  "o" #'dsh-bridge-compact-session
   "B" #'dsh-bridge-fork-turn
   "D" #'dsh-bridge-describe-session
   "v" #'dsh-bridge-view-toggle-activity
@@ -3712,6 +3773,8 @@ away from a link it keeps its usual behavior.
      :help "Branch the shown turn into a new session"]
     ["Stop Session" dsh-bridge-stop-session
      :help "Stop the shown session's running turn"]
+    ["Compact Context" dsh-bridge-compact-session
+     :help "Ask the host to compact the shown session's context history"]
     ["Receive Message…" dsh-bridge-receive
      :help "Receive the latest message DSH sent to Emacs"]
     ["Describe Session" dsh-bridge-describe-session
@@ -6407,6 +6470,7 @@ session, attaching a file, selecting a model, etc.
   "C-c C-m" #'dsh-bridge-select-model
   "C-c C-s" #'dsh-bridge-set-prompt-session
   "C-c C-l" #'dsh-bridge-list-sessions
+  "C-c C-o" #'dsh-bridge-compact-session
   "M-p" #'dsh-bridge-prompt-previous-history
   "M-n" #'dsh-bridge-prompt-next-history)
 
@@ -6486,6 +6550,8 @@ FORCE argument of `dsh-bridge-stop-session'."
      :help "Show the effective session's read-only report"]
     ["Stop Session" dsh-bridge-stop-session
      :help "Stop the effective session's running turn"]
+    ["Compact Context" dsh-bridge-compact-session
+     :help "Ask the host to compact the effective session's context history"]
     ["Select Model…" dsh-bridge-select-model
      :help "Change the session's model and reasoning effort"]
     ,@dsh-bridge--plan-goal-menu
@@ -6676,6 +6742,83 @@ host still settles an idle agent as a no-op."
 	  (message "dsh-bridge: %s"
 		   (dsh-bridge--error-message nil status alist)))))))))
 
+(defun dsh-bridge--compact-confirmation (session-id)
+  "Return the confirmation text for compacting SESSION-ID.
+Folds in the session title and, when known, the cached context occupancy
+(so the user can judge whether a compaction is worth asking for)."
+  (let ((context (dsh-bridge--prompt-context-label session-id)))
+    (format "Compact session %s%s?"
+	    (dsh-bridge--session-label session-id)
+	    (if context (format " (%s of context used)" context) ""))))
+
+(defun dsh-bridge-compact-session (&optional session)
+  "Compact the context of the session at hand.
+This is the DSH session the buffer is acting on, or the session at point
+in a DSH-Sessions buffer, or a non-nil `dsh-bridge-pinned-target'.  Raise
+an error if there is no such session.
+
+Ask the host to compact the session's context history (the slash-command
+registry's `/compact').  Sessions in a state the host would busy-reject
+anyway are refused locally with a `user-error': a running turn, a pending
+ask-user/approval answer, or input already queued to start a new turn
+(steering-only queues stay compactable, with the host 409 as the race
+backstop).  A cold session is resumed on demand by the host.
+
+This asks for confirmation before POSTing.  The host is the authority on
+whether compaction actually applies: a no-op (nothing compactable) is a
+success, and a busy session (another compaction already in flight, or an
+open-turn residue) is reported with the host's own text."
+  (interactive)
+  (let ((id (or session (dsh-bridge--effective-session nil nil t))))
+    (cond
+     ((eq (dsh-bridge--status-state id) 'running)
+      (user-error "dsh-bridge: session \"%s\" is running; stop it before compacting"
+		  (dsh-bridge--session-label id)))
+     ((dsh-bridge--pending-question id)
+      (user-error "dsh-bridge: session \"%s\" is waiting for your answer"
+		  (dsh-bridge--session-label id)))
+     ((dsh-bridge--pending-approval-entry id)
+      (user-error "dsh-bridge: session \"%s\" is waiting for your approval"
+		  (dsh-bridge--session-label id)))
+     ((let ((counts (dsh-bridge--pending-prompt-counts id)))
+	(and (consp counts) (> (car counts) 0)))
+      (user-error "dsh-bridge: session \"%s\" has input queued to start a turn; stop or send it first"
+		  (dsh-bridge--session-label id)))
+     ((not (y-or-n-p (dsh-bridge--compact-confirmation id)))
+      (message "dsh-bridge: aborted"))
+     (t
+      (let* ((result (dsh-bridge--request
+		      "POST" "/sessions/compact"
+		      (list (cons 'sessionId id))))
+	     (status (car result))
+	     (alist (cdr result)))
+	(cond
+	 ;; A 200 is a success (including the "No compactable history yet."
+	 ;; no-op).  `commands.execute' awaits the whole transaction, so the
+	 ;; SSE `compaction/end` frame has already arrived; the manual end
+	 ;; message is suppressed there, making this the single completion
+	 ;; message for a manual compact.
+	 ((eq status 200)
+	  (message "dsh-bridge: %s"
+		   (or (alist-get 'text alist)
+		       (format "session \"%s\" compacted"
+			       (dsh-bridge--session-label id)))))
+	 ;; A 409 with host text is the sole failure channel for a manual
+	 ;; compact (busy/cancelled/changed/summary/commit/persistence).  Echo
+	 ;; it.
+	 ((and (eq status 409) (alist-get 'error alist))
+	  (message "dsh-bridge: %s" (alist-get 'error alist)))
+	 ;; A 404 while the session still has a known live state means the
+	 ;; route itself is missing: the installed plugin predates it.
+	 ((and (eq status 404)
+	       (memq (dsh-bridge--status-state id) '(running idle)))
+	  (message "dsh-bridge: the installed DSH plugin does not support compaction; re-run M-x dsh-bridge-install-plugin"))
+	 ((eq status 501)
+	  (message "dsh-bridge: this DSH profile has no compaction command"))
+	 (t
+	  (message "dsh-bridge: %s"
+		   (dsh-bridge--error-message nil status alist)))))))))
+
 ;;; The sessions buffer
 
 (defun dsh-bridge--session-at-point ()
@@ -6750,6 +6893,7 @@ Archived sessions are hidden unless `dsh-bridge--sessions-archived-p' (or
   "f" #'dsh-bridge-peek-session
   "a" #'dsh-bridge-answer
   "k" #'dsh-bridge-stop-session
+  "o" #'dsh-bridge-compact-session
   "v" #'dsh-bridge-toggle-archived-sessions
   "R" #'dsh-bridge-rename-session
   "d" #'dsh-bridge-archive-session
@@ -6790,6 +6934,8 @@ Archived sessions are hidden unless `dsh-bridge--sessions-archived-p' (or
      :help "Rename the session under point"]
     ["Stop Session" dsh-bridge-stop-session
      :help "Stop the session under point if it is running"]
+    ["Compact Context" dsh-bridge-compact-session
+     :help "Ask the host to compact the session under point's context history"]
     ["Archive Session" dsh-bridge-archive-session
      :help "Archive the session under point (reversible with Unarchive)"]
     ["Unarchive Session" dsh-bridge-unarchive-session
@@ -8057,6 +8203,12 @@ wraps.  A pinned menu reports that it is locked instead of cycling."
   (when (dsh-bridge--dispatcher-may-mutate "stopping")
     (dsh-bridge-stop-session nil (dsh-bridge--focus-session))))
 
+(defun dsh-bridge--dispatcher-compact ()
+  "Compact the dispatcher's focus session's context."
+  (interactive)
+  (when (dsh-bridge--dispatcher-may-mutate "compacting")
+    (dsh-bridge-compact-session (dsh-bridge--focus-session))))
+
 (defun dsh-bridge--dispatcher-plan ()
   "Toggle plan mode for the dispatcher's focus session."
   (interactive)
@@ -8136,7 +8288,7 @@ The first line in the transient menu is the menu's focus: the session
 every key in it acts on.  It is the pinned target when one is set, else
 the invoking buffer's own session, else the last-active session as an
 advisory guess (shown with its position in the session cycle, which
-M-p/M-n walk).  The session-state mutators (k, p, G, A, X) refuse an
+M-p/M-n walk).  The session-state mutators (k, o, p, G, A, X) refuse an
 advisory focus: the guess is not a mutation target until you confirm it
 by cycling or pinning.
 
@@ -8169,6 +8321,8 @@ instead of trusting the cached one."
    ("u" dsh-bridge--dispatcher-unpin :description "unpin" :transient t)
    ("T" dsh-bridge--dispatcher-pin-by-title :description "pin by title" :transient t)
    ("k" dsh-bridge--dispatcher-stop :description "stop running session"
+    :transient dsh-bridge--dispatcher-stay-p)
+   ("o" dsh-bridge--dispatcher-compact :description "compact context"
     :transient dsh-bridge--dispatcher-stay-p)
    ("l" dsh-bridge-list-sessions :description "list sessions")
    ("+" dsh-bridge--dispatcher-create :description "create and pin session")]
@@ -8211,6 +8365,8 @@ already used the focus."
       :help "Show a read-only report for a session"]
      ["Stop Running Session" dsh-bridge-stop-session
       :help "Stop the effective session's running turn"]
+     ["Compact Context" dsh-bridge-compact-session
+      :help "Ask the host to compact the effective session's context history"]
      ["Receive Message…" dsh-bridge-receive
       :help "Receive the latest message sent from DSH to Emacs"]
      ["Pin Target Session" dsh-bridge-pin-target

@@ -127,6 +127,15 @@ class MockAdapter {
     }
   }
 
+  // The harness's LLM runtime resolves request image pricing through this
+  // adapter method for the token meter (compaction summarization measures the
+  // replayed route).  The base LlmAdapter defaults it to undefined; this
+  // plain-object adapter must do the same so the compaction measurement path
+  // does not throw "imageRequestPricing is not a function".
+  imageRequestPricing(_provider, _model) {
+    return undefined
+  }
+
   async prepareCall(provider, model, signal) {
     const modelInfo = await this.resolveModel(provider, model, signal)
     return { model: modelInfo, stream: (options) => this.stream(options) }

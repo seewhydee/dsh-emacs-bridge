@@ -131,6 +131,7 @@ available from here:
 * `T` — prompt for a session by title, and pin it.
 * `u` — unpin the currently-pinned session.
 * `k` — stop the running session.
+* `o` — compact the session's context history.
 * `l` — open the DSH-Sessions buffer.
 * `+` — create a new session, prompting for its workspace and title;
         the new session is pinned.
@@ -154,6 +155,7 @@ live status.  The following commands are available from here:
 * `f` — fetch and display the output from the session at point.
 * `a` — answer a pending user query for the session at point.
 * `k` — stop the session at point if it is running.
+* `o` — compact the context history of the session at point.
 * `t` — pin the session at point as the target.  A cold session binds
         without being resumed; the host resumes it when a later request
         acts on it.
@@ -184,6 +186,7 @@ The following commands are available in a DSH-View buffer:
 * `r` — open a DSH-Prompt buffer for the current session.
 * `B` — branch the shown turn into a new session.
 * `k` — stop the shown session's running turn.
+* `o` — compact the shown session's context history.
 * `i` — receive the latest "Send to Emacs" message (see below).
 * `v` — show or hide the turn's tool calls and thinking summaries.
 * `D` — describe the current session.
@@ -246,6 +249,7 @@ The following commands are available from the DSH-Prompt buffer:
 * `C-c C-m` — set the model and reasoning effort.
 * `C-c C-s` — rebind the buffer to another session.
 * `C-c C-k` — stop the session if it is running, or erase the prompt otherwise.
+* `C-c C-o` — compact the session's context history.
 * `C-c C-f` — open the DSH-View buffer for this session.
 * `C-c C-l` — open the DSH-Sessions buffer.
 * `M-p`/`M-n` — walk the session's prompt history.
