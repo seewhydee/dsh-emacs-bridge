@@ -24,22 +24,39 @@ re-verification checklist.
 
 Ordered by recommended sequence, but out-of-sequence implementation is
 acceptable based on user needs. Harness seams were verified against
-DSH 0.2.0-rc.2 (the candidate published as `next`). rc.2 moved nothing
-the bridge folds: every package it compiles against changed only its
-version field and internal pins, except `dsh-user-questions` and
-`dsh-tool-ask-user`, which gained an *opt-in* timed ask — a foreground
-wait that continues the turn with `{pending: true}` at its deadline,
-plus a `userQuestions` projection and a `user-question-reply` message
-source. The web bundle mounts `tool-ask-user` with no config, so `mode`
-stays the `legacy` blocking tool the bridge answers; and the bridge
-already settles its wait from the request signal, so even the timed path
-releases the turn at the deadline. The peer floor stays `^0.2.0-rc.1`,
-which rc.2 satisfies: an installed 0.15.1 loads on rc.2 with no
-reinstall, and narrowing the floor to rc.2 would refuse a runtime the
-identical code serves. The dev dependencies do move to `^0.2.0-rc.2`
-(what the build compiles and type-checks against), so the two ranges are
-deliberately not in lockstep — the peers are the compatibility floor,
-the dev dependencies the verified build target.
+DSH 0.2.1-alpha.1. This release moved nothing the bridge folds. Its
+headline change is the removal of the invariants system: every package
+dropped its `src/invariant.ts` companion and the `@deepseek-ai/dsh-invariants`
+package is gone, none of which the bridge ever imported. Beyond that:
+`dsh-session-controller` gained a `listWorkSliceMs` yield budget inside
+`list`, and the plugin manager gained `BundleInfo.source` /
+`ChangeResult.version`; `dsh-agent-preset-registry` renamed its internal
+`serviceForAgent` to `serviceForMount` and stopped exporting
+`livePresetMounts` / `standingMountFor`, while the `serviceFor(agent,
+name)` accessor the plan-mode toggle calls keeps its signature and its
+scope-parent lookup (generation records now unregister through
+`context.effect` on disposal); and the client's `ui-conversation` grew a
+semantic draft document (`DraftSnapshot`, `restoreDraft`,
+`bindDraftPersistence`, `requestDraftInitialization`) without changing
+`SessionInput.setDraft(text)` or `SessionInputResolver.for(actx)`, the
+seam the browser half pushes drafts through. The client's other
+collaborator, the pending-interaction registry the resolution frames read,
+is `uiSession.sessionStatus` from 0.1.6-alpha.2 on: 0.2.1 keeps its
+per-session `pendingInteraction` and the approval `abort()`, but the
+question's close operation is spelled `dismiss()` rather than `cancel()`
+(the client feature-detects, since the supported floor spans both). The
+`assistant-actions` slot contract, the ui-primitives exports the action
+uses, and the client tsdown preset's artifact contract (module table,
+externals, purity gate, define substitutions) are likewise unchanged — the
+last only in a docstring — so `tsdown.client.config.ts` stays in sync. The
+peer floor stays `^0.2.0-rc.1`, which alpha.1 satisfies:
+`evaluatePluginCompatibility` evaluates peers with
+`includePrerelease: true`, so the caret admits every 0.2 prerelease
+(`>=0.2.0-rc.1 <0.3.0`), and narrowing it to alpha.1 would refuse a
+runtime the identical code serves. The dev dependencies do move to
+`^0.2.1-alpha.1` (what the build compiles and type-checks against), so the
+two ranges are deliberately not in lockstep — the peers are the
+compatibility floor, the dev dependencies the verified build target.
 
 The floor is a caret deliberately: on 0.x a caret locks the minor, so
 `^0.2.0-rc.1` is `>=0.2.0-rc.1 <0.3.0` and admits every 0.2 prerelease

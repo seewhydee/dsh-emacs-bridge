@@ -80,3 +80,27 @@ export function matchDismissRecord(
   }
   return -1
 }
+
+/**
+ * One pending question's panel-closing operation, or undefined when it exposes
+ * none.
+ *
+ * The Session-provider refactor renamed the operation from `cancel()` to
+ * `dismiss()`; the peer floor spans both spellings, so the caller cannot name
+ * one. Either ends the composer panel the way its own close control does — a
+ * tool-call-keyed card only withdraws, a card the Host never named ends the
+ * request. The returned thunk keeps the receiver, which these prototype
+ * methods need.
+ * @param pending - one pending question's identity and closing operations.
+ * @returns a bound closing operation, or undefined for neither spelling.
+ */
+export function questionDismissalOf(pending: {
+  dismiss?(): Promise<void>
+  cancel?(): Promise<void>
+}): (() => Promise<void>) | undefined {
+  const dismiss = pending.dismiss
+  if (typeof dismiss === 'function') return () => dismiss.call(pending)
+  const cancel = pending.cancel
+  if (typeof cancel === 'function') return () => cancel.call(pending)
+  return undefined
+}

@@ -26,7 +26,7 @@ import type {} from '@deepseek-ai/dsh-client-locale/client'
 import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 import { en, zh } from './locales.ts'
 import { matchApprovalDismissRecord, type ApprovalDismissRecord } from './approval-dismiss.ts'
-import { matchDismissRecord, type DismissRecord } from './question-dismiss.ts'
+import { matchDismissRecord, questionDismissalOf, type DismissRecord } from './question-dismiss.ts'
 import { SendToEmacs } from './SendToEmacs.tsx'
 
 /** Locale namespace owned by this plugin (its `t` seat on the assistant-actions entry). */
@@ -122,8 +122,9 @@ function applyDraft(ctx: ClientContext, sessionId: string, text: string): void {
 
 /**
  * Minimal face of one pending interaction, enough to dismiss a resolution the
- * host reported. Questions expose `questions` + `cancel()`; approvals expose
- * `toolName`/`callId` + `abort()`.
+ * host reported. Questions expose `dismiss()` (`cancel()` on harnesses before
+ * the Session-provider refactor) and a question batch; approvals expose
+ * `toolName`/`callId` and `abort()`.
  */
 interface PendingInteractionLike {
   readonly kind: string
@@ -131,14 +132,24 @@ interface PendingInteractionLike {
   readonly questions?: readonly { readonly id?: unknown }[]
   readonly toolName?: unknown
   readonly callId?: unknown
+  dismiss?(): Promise<void>
   cancel?(): Promise<void>
   abort?(reason: unknown): void
 }
 
-/** Minimal face of the client UI-session service: the pending-interaction registry. */
+/** One session's UI status row; this client reads only its pending interaction. */
+interface UiSessionStatusLike {
+  readonly pendingInteraction?: PendingInteractionLike
+}
+
+/**
+ * Minimal face of the client UI-session service: the per-session status
+ * registry. One status carries the session's highest-precedence pending
+ * interaction, which is the only fact this plugin consumes.
+ */
 interface UiSessionService {
-  readonly pendingInteractions: {
-    getSnapshot(): ReadonlyMap<string, PendingInteractionLike>
+  readonly sessionStatus: {
+    getSnapshot(): ReadonlyMap<string, UiSessionStatusLike>
     subscribe(listener: () => void): () => void
   }
 }
@@ -148,7 +159,7 @@ interface UiSessionService {
  * whose web panel this client has not dismissed yet. The panel may not exist
  * at broadcast time — the forwarded waterfall and this SSE stream are
  * different transports — so each record is retried whenever the
- * pending-interaction registry changes.
+ * session-status registry changes.
  */
 const dismissRecords: DismissRecord[] = []
 
@@ -179,7 +190,9 @@ function dismissResolvedInteractions(ctx: ClientContext): void {
   }
   const uiSession = ctx.get('uiSession') as UiSessionService | undefined
   if (uiSession === undefined) return
-  for (const pending of uiSession.pendingInteractions.getSnapshot().values()) {
+  for (const status of uiSession.sessionStatus.getSnapshot().values()) {
+    const pending = status.pendingInteraction
+    if (pending === undefined) continue
     if (pending.kind === 'approval') {
       const index = matchApprovalDismissRecord(approvalDismissRecords, pending)
       if (index < 0) continue
@@ -197,9 +210,10 @@ function dismissResolvedInteractions(ctx: ClientContext): void {
     })
     if (index < 0) continue
     dismissRecords.splice(index, 1)
-    // `cancel()` rejects when the panel already settled (the browser answered
+    // Closing rejects when the panel already settled (the browser answered
     // first); nothing is left to do then.
-    if (pending.cancel !== undefined) void pending.cancel().catch(() => {})
+    const dismissal = questionDismissalOf(pending)
+    if (dismissal !== undefined) void dismissal().catch(() => {})
   }
 }
 
@@ -287,13 +301,13 @@ export function apply(ctx: ClientContext): void {
   ctx.effect(() => ctx.locale.register(LOCALE_NS, { zh, en }))
   // Retry pending dismissals whenever an interaction panel appears: the host's
   // resolution frame can reach this SSE stream before the forwarded waterfall
-  // reaches the browser's pending-interaction registry. `uiSession` is an
+  // reaches the browser's session-status registry. `uiSession` is an
   // optional collaborator here — without it, the web panel simply is not
   // dismissed by Emacs (the user can still close it).
   ctx.inject(['uiSession'], (scope: ClientContext) => {
     const uiSession = scope.get('uiSession') as UiSessionService | undefined
     if (uiSession === undefined) return
-    scope.effect(() => uiSession.pendingInteractions.subscribe(() => {
+    scope.effect(() => uiSession.sessionStatus.subscribe(() => {
       dismissResolvedInteractions(scope)
     }))
   })

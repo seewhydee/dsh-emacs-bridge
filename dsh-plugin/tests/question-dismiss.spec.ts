@@ -17,6 +17,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   matchDismissRecord,
+  questionDismissalOf,
   questionIdsOf,
   sameQuestionIds,
 } from '../src/client/question-dismiss.ts'
@@ -74,5 +75,41 @@ describe('question-panel dismissal matching', () => {
     expect(matchDismissRecord(records, {
       kind: 'question', sessionId: 's2', questions: [{ id: 'q3' }],
     })).toBe(2)
+  })
+})
+
+describe('question-panel dismissal action', () => {
+  it('questionDismissalOf prefers dismiss(), the current spelling', async () => {
+    const calls: string[] = []
+    const pending = {
+      dismiss() { calls.push('dismiss'); return Promise.resolve() },
+      cancel() { calls.push('cancel'); return Promise.resolve() },
+    }
+    const dismissal = questionDismissalOf(pending)
+    expect(dismissal).toBeDefined()
+    await dismissal?.()
+    expect(calls).toEqual(['dismiss'])
+  })
+
+  it('questionDismissalOf falls back to cancel() on older harnesses', async () => {
+    const calls: string[] = []
+    const pending = {
+      cancel() { calls.push('cancel'); return Promise.resolve() },
+    }
+    const dismissal = questionDismissalOf(pending)
+    expect(dismissal).toBeDefined()
+    await dismissal?.()
+    expect(calls).toEqual(['cancel'])
+  })
+
+  it('questionDismissalOf keeps the receiver, and reports no operation', async () => {
+    const seen: unknown[] = []
+    const pending = {
+      kind: 'question',
+      dismiss() { seen.push(this.kind); return Promise.resolve() },
+    }
+    await questionDismissalOf(pending)?.()
+    expect(seen).toEqual(['question'])
+    expect(questionDismissalOf({})).toBeUndefined()
   })
 })
