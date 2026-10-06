@@ -347,9 +347,9 @@ may take significantly longer (particularly for cold sessions)."
 
 (defcustom dsh-bridge-compact-timeout 180
   "Timeout for a manual context compaction request.
-A `/compact' runs synchronously and may summarise history through the
-LLM, so it can comfortably exceed `dsh-bridge-timeout'; a premature
-client-side timeout only kills the echo, not the host's compaction."
+Compaction can take a long time, far exceeding `dsh-bridge-timeout'.
+Note that triggering the timeout only kills the reporting on the Emacs
+side, not the compaction on the host."
   :type 'number
   :group 'dsh-bridge)
 
@@ -517,8 +517,8 @@ the Objective row of the DSH-Describe report's Goal section."
 (defface dsh-bridge-compacting-face
   '((t :inherit warning))
   "Face for the context-compaction indicator.
-Used by the compacting cell in DSH-View and DSH-Prompt header lines while
-a session's context is being compacted."
+Used in DSH-View and DSH-Prompt header lines to indicate that a
+session's context is being compacted."
   :group 'dsh-bridge)
 
 (defface dsh-bridge-question-heading-face
@@ -683,21 +683,8 @@ what the user answered.	 PLIST is keyed by:
   "Alist storing the token and context window usage in DSH sessions.
 Each entry has the form (SESSION-ID . (USED-TOKENS . CONTEXT-WINDOW)).")
 
-(defvar dsh-bridge--session-compacting nil
-  "List of session ids with a context compaction in flight.
-An id is added when a `compaction/start' frame arrives and removed when the
-matching `compaction/end' frame does.")
-
-(defun dsh-bridge--session-compacting-p (session-id)
-  "Whether SESSION-ID currently has a context compaction in flight."
-  (and session-id (assoc session-id dsh-bridge--session-compacting)))
-
-(defun dsh-bridge--compacting-set (session-id flag)
-  "Record SESSION-ID's compaction-in-flight state as FLAG (boolean)."
-  (setq dsh-bridge--session-compacting
-	(assoc-delete-all session-id dsh-bridge--session-compacting))
-  (when (and session-id flag)
-    (push (list session-id) dsh-bridge--session-compacting)))
+(defvar dsh-bridge--sessions-compacting nil
+  "List of session ids currently being compacted.")
 
 (defvar dsh-bridge--session-plan nil
   "Alist of (SESSION-ID . PLAN) entries caching session plans.
@@ -1051,11 +1038,7 @@ Currently supported events are:
 - `approval': record a pending approval request and surface it.
 - `approval-resolved': retire a pending approval (allowed, rejected, or
   cancelled).
-- `compaction': observe a compaction lifecycle edge.  The frame's
-  `sourceCommandId' is present exactly for a manual `/compact' compaction;
-  the feedback channel is picked from it (automatic compactions report via
-  these messages, manual ones via the POST echo).  The frame also schedules
-  the deferred `/turns' refetch on every end edge.
+- `compaction': observe a compaction lifecycle edge.
 - `sessions-changed': update existing DSH-Sessions buffers."
   (when (seq-some (lambda (e) (equal (alist-get 'kind e) "sessions-changed"))
 		  events)
@@ -1167,39 +1150,19 @@ Currently supported events are:
 	  (dsh-bridge--approval-resolved id (alist-get 'approvalId event)
 					 (alist-get 'outcome event))))))))
 
-(defun dsh-bridge--compaction-message (id manual phase error tokens)
-  "The `compaction' feedback message for session ID, or nil to show none.
-MANUAL is non-nil when the compaction was user-triggered (a `/compact'
-invocation); PHASE is `start' or `end'; ERROR and TOKENS are the frame's
-optional error text and reclaimed-token count.  The caller applies the echo
-gate; this function only decides the message text (nil means nothing to
-say).  An error text always wins over the token count, so a failed
-compaction never renders as \"0 tokens reclaimed\"."
-  (if (equal phase "start")
-      (format "session \"%s\" is compacting..." (dsh-bridge--session-label id))
-    (when (and (equal phase "end") (null manual))
-      (cond
-       (error (format "session \"%s\" compaction failed: %s"
-		      (dsh-bridge--session-label id) error))
-       ((numberp tokens)
-	(format "session \"%s\" compacted (%s tokens reclaimed)"
-		(dsh-bridge--session-label id) tokens))
-       (t (format "session \"%s\" compacted"
-		  (dsh-bridge--session-label id)))))))
-
 (defun dsh-bridge--compaction-notify (id event)
   "Handle a `compaction' SSE frame for session ID.
 EVENT is the decoded frame, carrying `phase' (`start' or `end'),
 `sourceCommandId' (present exactly for a manual `/compact' compaction), and
 optionally `error' and `tokensReclaimed'.
 
-The frame picks the feedback channel from `sourceCommandId'.  An automatic
-compaction (no `sourceCommandId') reports through these messages, gated
-like the turn-boundary echo so background sessions do not chatter.  A
-manual compaction's `start' message is the only in-flight feedback and is
-never gated (the user just confirmed it), while its `end' message is
+The frame picks the feedback channel from `sourceCommandId'.  A manual
+compaction's `start' message is the in-flight feedback the user asked for,
+and always appears (the user just confirmed it); its `end' message is
 suppressed entirely — the POST 200/409 echo already carried the outcome,
-and an unsuppressed one would double-report.
+and an unsuppressed one would double-report.  An automatic compaction's
+`start' is silent, and its `end' reports only while a view shows the
+session.
 
 For every `end' frame, schedule the deferred `/turns' refetch regardless of
 whether a message is shown: even a `persistence' failure replaces the
@@ -1214,29 +1177,35 @@ context-occupancy cell, so the percentage reflects the reclaimed tokens
 without the prompt buffer needing to be reopened."
   (let* ((phase (alist-get 'phase event))
 	 (manual (alist-get 'sourceCommandId event))
-	 (error (alist-get 'error event))
+	 (err (alist-get 'error event))
 	 (tokens (alist-get 'tokensReclaimed event)))
     (cond
+     ((null id))
      ((equal phase "start")
-      (dsh-bridge--compacting-set id t)
+      (unless (member id dsh-bridge--sessions-compacting)
+	(push id dsh-bridge--sessions-compacting))
       (dsh-bridge--header-refresh))
      ((equal phase "end")
-      (dsh-bridge--compacting-set id nil)
+      (setq dsh-bridge--sessions-compacting
+	    (delete id dsh-bridge--sessions-compacting))
       (run-at-time 0 nil #'dsh-bridge--turns-changed id)
       (run-at-time 0 nil
 	(lambda (sid)
 	  (dsh-bridge--fetch-context sid t)
 	  (dsh-bridge--header-refresh))
 	id)))
-    ;; A manual `start' is the in-flight feedback the user asked for, so it is
-    ;; never gated; an automatic compaction's message is gated like the
-    ;; turn-boundary echo.  A manual `end' returns nil above and shows nothing.
-    (let ((text (dsh-bridge--compaction-message id manual phase error tokens)))
-      (when text
-	(when (or manual
-		  (and dsh-bridge-turn-boundary-echo
-		       (not (dsh-bridge--view-displayed-p id))))
-	  (message "dsh-bridge: %s" text))))))
+    (cond
+     ((equal phase "start")
+      (and manual (message "dsh-bridge: compacting session context...")))
+     ((or (not (equal phase "end"))
+	  manual
+	  (not (dsh-bridge--view-displayed-p id))))
+     (err
+      (message "dsh-bridge: session compaction failed: %s" err))
+     ((numberp tokens)
+      (message "dsh-bridge: session compacted (%s tokens reclaimed)" tokens))
+     (t
+      (message "dsh-bridge: session compacted")))))
 
 (defvar dsh-bridge--sessions-changed-timer nil
   "Timer for debounced sessions-list refetch after a `sessions-changed' frame.")
@@ -3320,10 +3289,11 @@ performing any further network request."
 	     (dsh-bridge--view-fill session-id newest nil t t))))))
 
 (defun dsh-bridge--turns-changed (session-id)
-  "Handle one `replies-changed', `activity-changed', or compaction-end
-frame for SESSION-ID.  This is called, deferred, from the notifications
-handler.  Refresh the turn list (updating turn indicators in the header
-line), then refill every turn-following view."
+  "Handle a turn change for SESSION-ID.
+This is called, deferred, from the notifications handler when it
+receives `replies-changed', `activity-changed', or a compaction-end
+frame.  Refresh the turn list, updating turn indicators in the header
+line, then refill every turn-following view."
   (dsh-bridge--view-turns-cache-refresh session-id)
   (dsh-bridge--view-follow-refill session-id))
 
@@ -3532,8 +3502,9 @@ handler checks the id against the clicked window's session."
 Shows `compacting…' in `dsh-bridge-compacting-face' while SESSION-ID has a
 context compaction in flight, so a manual or automatic compaction is
 visible in the header line rather than only in the echo area."
-  (when (dsh-bridge--session-compacting-p session-id)
-    (list (propertize "compacting…" 'face 'dsh-bridge-compacting-face))))
+  (and session-id
+       (member session-id dsh-bridge--sessions-compacting)
+       (list (propertize "compacting…" 'face 'dsh-bridge-compacting-face))))
 
 (defun dsh-bridge--header-refresh ()
   "Force the DSH bridge header lines to recompute.

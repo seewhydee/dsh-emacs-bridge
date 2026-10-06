@@ -11794,15 +11794,14 @@ always acts on the session at hand."
 
 ;;; Compaction SSE frames
 
-(defun dsh-bridge-test--frame-feedback (frame &optional turn-boundary-echo displayed)
+(defun dsh-bridge-test--frame-feedback (frame &optional displayed)
   "Run compaction FRAME through the notification dispatch, capturing the
-message and the deferred `/turns' refetch count.  TURN-BOUNDARY-ECHO is the
-echo gate to bind, and DISPLAYED is what `dsh-bridge--view-displayed-p'
-reports.  Returns (MSG . REFETCHES); a nil MSG means nothing was echoed."
+message and the deferred `/turns' refetch count.  DISPLAYED is what
+`dsh-bridge--view-displayed-p' reports.  Returns (MSG . REFETCHES); a nil
+MSG means nothing was echoed."
   (let ((msg nil) (refetches 0)
-        (dsh-bridge-turn-boundary-echo turn-boundary-echo)
         (dsh-bridge--session-status nil)
-        (dsh-bridge--session-compacting nil)
+        (dsh-bridge--sessions-compacting nil)
         (dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t)))))
     (cl-letf (((symbol-function 'message)
                (lambda (&rest args) (setq msg (apply #'format args))))
@@ -11814,16 +11813,19 @@ reports.  Returns (MSG . REFETCHES); a nil MSG means nothing was echoed."
       (dsh-bridge--notification-handle-events (list frame)))
     (cons msg refetches)))
 
-(ert-deftest dsh-bridge-compaction-manual-start-ungated ()
-  "A manual compaction's start frame messages even when the automatic gate is off."
+(ert-deftest dsh-bridge-compaction-manual-start-messages ()
+  "A manual compaction's start frame messages in flight, even with no view
+showing the session: this is the feedback the user asked for."
   (let ((out (dsh-bridge-test--frame-feedback
               '((kind . "compaction") (sessionId . "s1") (phase . "start")
-                (sourceCommandId . "cmd-1")) nil)))
-    (should (string-match-p "is compacting" (car out)))
+                (sourceCommandId . "cmd-1")))))
+    (should (equal (car out) "dsh-bridge: compacting session context..."))
     (should (= (cdr out) 0))))
 
 (ert-deftest dsh-bridge-compaction-manual-end-suppressed ()
-  "A manual compaction's end frame shows no message but still schedules refetch."
+  "A manual compaction's end frame shows no message even with a view showing
+the session — the POST echo already carried the outcome — but still
+schedules the refetch."
   (let ((out (dsh-bridge-test--frame-feedback
               '((kind . "compaction") (sessionId . "s1") (phase . "end")
                 (sourceCommandId . "cmd-1") (tokensReclaimed . 42)) t)))
@@ -11831,41 +11833,43 @@ reports.  Returns (MSG . REFETCHES); a nil MSG means nothing was echoed."
     (should (= (cdr out) 1))))
 
 (ert-deftest dsh-bridge-compaction-auto-end-messages ()
-  "An automatic compaction's end frame messages the reclaimed count and refetches."
+  "An automatic compaction's end frame messages the reclaimed count while a
+view shows the session it is about."
   (let ((out (dsh-bridge-test--frame-feedback
               '((kind . "compaction") (sessionId . "s1") (phase . "end")
                 (tokensReclaimed . 42)) t)))
-    (should (string-match-p "compacted" (car out)))
-    (should (string-match-p "42" (car out)))
+    (should (equal (car out)
+                   "dsh-bridge: session compacted (42 tokens reclaimed)"))
     (should (= (cdr out) 1))))
 
-(ert-deftest dsh-bridge-compaction-auto-end-gated ()
-  "An automatic compaction's message is gated by the turn-boundary echo."
+(ert-deftest dsh-bridge-compaction-auto-end-plain ()
+  "An end frame with neither an error nor a token count still reports, with
+the package's usual prefix."
+  (let ((out (dsh-bridge-test--frame-feedback
+              '((kind . "compaction") (sessionId . "s1") (phase . "end")) t)))
+    (should (equal (car out) "dsh-bridge: session compacted"))
+    (should (= (cdr out) 1))))
+
+(ert-deftest dsh-bridge-compaction-auto-end-unseen-silent ()
+  "An automatic end frame for a session no view is showing stays silent —
+the message names no session, so it would not say which one finished — but
+still refetches."
   (let ((out (dsh-bridge-test--frame-feedback
               '((kind . "compaction") (sessionId . "s1") (phase . "end")
-                (tokensReclaimed . 42)) nil)))
-    ;; The refetch still runs; only the echo is gated.
+                (tokensReclaimed . 42)))))
     (should (null (car out)))
     (should (= (cdr out) 1))))
 
-(ert-deftest dsh-bridge-compaction-auto-start-gated ()
-  "An automatic compaction's start frame is gated like its end frame."
-  (let ((out (dsh-bridge-test--frame-feedback
-              '((kind . "compaction") (sessionId . "s1") (phase . "start")) nil)))
-    (should (null (car out)))
-    ;; A start edge has nothing to refetch: the end edge will carry that.
-    (should (= (cdr out) 0)))
-  (let ((out (dsh-bridge-test--frame-feedback
-              '((kind . "compaction") (sessionId . "s1") (phase . "start")) t)))
-    (should (string-match-p "is compacting" (car out)))
-    (should (= (cdr out) 0))))
-
-(ert-deftest dsh-bridge-compaction-auto-start-view-gated ()
-  "An automatic start frame echoes nothing while a visible view shows the session."
-  (let ((out (dsh-bridge-test--frame-feedback
-              '((kind . "compaction") (sessionId . "s1") (phase . "start")) t t)))
-    (should (null (car out)))
-    (should (= (cdr out) 0))))
+(ert-deftest dsh-bridge-compaction-auto-start-silent ()
+  "An automatic start frame echoes nothing, whether or not a view shows the
+session: the header line's `compacting…' cell is the in-flight feedback."
+  (dolist (displayed '(nil t))
+    (let ((out (dsh-bridge-test--frame-feedback
+                '((kind . "compaction") (sessionId . "s1") (phase . "start"))
+                displayed)))
+      (should (null (car out)))
+      ;; A start edge has nothing to refetch: the end edge will carry that.
+      (should (= (cdr out) 0)))))
 
 (ert-deftest dsh-bridge-compaction-error-beats-tokens ()
   "An error end frame renders the error, never a token count."
@@ -11878,9 +11882,10 @@ reports.  Returns (MSG . REFETCHES); a nil MSG means nothing was echoed."
 
 (ert-deftest dsh-bridge-compaction-toggles-inflight ()
   "A compaction start frame marks the session in flight; its end clears it.
+A repeated start, or a start for a second session, adds no duplicate entry.
 State is captured directly (not via `dsh-bridge-test--frame-feedback', whose
 own binding would shadow the surrounding let)."
-  (let ((dsh-bridge--session-compacting nil)
+  (let ((dsh-bridge--sessions-compacting nil)
         (dsh-bridge--session-status nil)
         (dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t)))))
     (cl-letf (((symbol-function 'message) (lambda (&rest _args) nil))
@@ -11889,24 +11894,39 @@ own binding would shadow the surrounding let)."
       (dsh-bridge--notification-handle-events
        (list '((kind . "compaction") (sessionId . "s1") (phase . "start")
                (sourceCommandId . "c"))))
-      (should (dsh-bridge--session-compacting-p "s1"))
+      (should (equal dsh-bridge--sessions-compacting '("s1")))
       (should (dsh-bridge--header-compacting-cell "s1"))
+      (dsh-bridge--notification-handle-events
+       (list '((kind . "compaction") (sessionId . "s1") (phase . "start")
+               (sourceCommandId . "c"))
+             '((kind . "compaction") (sessionId . "s2") (phase . "start")
+               (sourceCommandId . "c"))))
+      (should (= (length dsh-bridge--sessions-compacting) 2))
+      (should (member "s1" dsh-bridge--sessions-compacting))
+      (should (member "s2" dsh-bridge--sessions-compacting))
       (dsh-bridge--notification-handle-events
        (list '((kind . "compaction") (sessionId . "s1") (phase . "end")
                (sourceCommandId . "c") (tokensReclaimed . 9))))
-      (should-not (dsh-bridge--session-compacting-p "s1"))
-      (should (null (dsh-bridge--header-compacting-cell "s1"))))))
+      (should (equal dsh-bridge--sessions-compacting '("s2")))
+      (should-not (dsh-bridge--header-compacting-cell "s1"))
+      (dsh-bridge--notification-handle-events
+       (list '((kind . "compaction") (sessionId . "s2") (phase . "end")
+               (sourceCommandId . "c") (tokensReclaimed . 9))))
+      (should (null dsh-bridge--sessions-compacting))
+      (should (null (dsh-bridge--header-compacting-cell "s2"))))))
 
 (ert-deftest dsh-bridge-compaction-header-cell ()
-  "The header compaction cell renders only while the session is compacting."
-  (let ((dsh-bridge--session-compacting nil))
+  "The header compaction cell renders only while the session is compacting,
+and never for a frame that names no session."
+  (let ((dsh-bridge--sessions-compacting nil))
     (should (null (dsh-bridge--header-compacting-cell "s1")))
-    (dsh-bridge--compacting-set "s1" t)
+    (should (null (dsh-bridge--header-compacting-cell nil)))
+    (push "s1" dsh-bridge--sessions-compacting)
     (let ((cell (dsh-bridge--header-compacting-cell "s1")))
       (should (consp cell))
       (should (string-match-p "compacting" (car cell)))
       (should (get-text-property 0 'face (car cell))))
-    (dsh-bridge--compacting-set "s1" nil)
+    (setq dsh-bridge--sessions-compacting nil)
     (should (null (dsh-bridge--header-compacting-cell "s1")))))
 
 (provide 'dsh-bridge-tests)
