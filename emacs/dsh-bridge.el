@@ -4241,9 +4241,7 @@ and bury the buffer (see `dsh-bridge--prompt-exit')."
 		 (equal text (car-safe
 			      (cdr-safe
 			       (assoc guard-session dsh-bridge--last-sent))))
-		 (not (y-or-n-p
-		       (format "Resend same prompt to session \"%s\"? "
-			       (dsh-bridge--session-label guard-session)))))
+		 (not (y-or-n-p "Prompt was previously sent.  Resend it? ")))
 	(user-error "dsh-bridge: aborted"))
       ;; Capture the invoking window for `dsh-bridge--prompt-exit', and the
       ;; instant the prompt leaves: `--after-prompt-view' uses the latter to
@@ -5965,9 +5963,8 @@ SESSION-ID; otherwise ask for confirmation between erasing."
 	(when (buffer-modified-p)
 	  (unless (save-window-excursion
 		    (display-buffer-same-window buffer nil)
-		    (y-or-n-p
-		     (format "Buffer %s has an unsent prompt for another session.  \
-Discard it? " (buffer-name))))
+		    (y-or-n-p "Prompt buffer contains an unsent prompt.  \
+Discard it? "))
 	    (user-error "dsh-bridge: prompt buffer has an unsent prompt")))
 	(let ((inhibit-read-only t))
 	  (erase-buffer))
@@ -6311,8 +6308,7 @@ command agree."
 	 (snapshot (alist-get 'goal (dsh-bridge--session-goal session))))
     (unless (consp snapshot)
       (user-error "dsh-bridge: this session has no goal"))
-    (when (y-or-n-p (format "Clear the goal \"%s\"? "
-			    (alist-get 'objective snapshot)))
+    (when (y-or-n-p "Clear the session goal? ")
       (dsh-bridge--goal-command 'clear session))))
 
 (defun dsh-bridge--header-indicator-act (event command)
@@ -6748,7 +6744,10 @@ Name a pending ask-user question or approval, and any prompts already
 pending for the session.  A stop keeps the session's queued prompts, so
 without that note a queued prompt starting a new turn right afterwards
 could make the stop look ineffective.  The pending-prompt counts are
-advisory: a read that fails simply drops that part of the text."
+advisory: a read that fails simply drops that part of the text.  SESSION-ID
+is read only for that pending state: the text names no session label, which
+can be arbitrarily long, because the stop always acts on the session at
+hand."
   (let* ((counts (dsh-bridge--pending-prompt-counts session-id))
 	 (queued (car-safe counts))
 	 (steering (cdr-safe counts))
@@ -6758,7 +6757,7 @@ advisory: a read that fails simply drops that part of the text."
 			 "waiting for your approval")))
 	 (notes nil))
     (when (and queued (> queued 0))
-      (push (format "%d queued prompt%s will start a new turn right after the stop"
+      (push (format "%d prompt%s queued to run afterward"
 		    queued (if (= queued 1) "" "s"))
 	    notes))
     (when (and steering (> steering 0))
@@ -6767,8 +6766,7 @@ advisory: a read that fails simply drops that part of the text."
 	    notes))
     (let ((clauses (if waiting (cons waiting (nreverse notes))
 		     (nreverse notes))))
-      (format "Stop running session %s%s?"
-	      (dsh-bridge--session-label session-id)
+      (format "Stop running session%s?"
 	      (if clauses
 		  (format " (%s)" (string-join clauses "; "))
 		"")))))
@@ -6822,15 +6820,6 @@ host still settles an idle agent as a no-op."
 	  (message "dsh-bridge: %s"
 		   (dsh-bridge--error-message nil status alist)))))))))
 
-(defun dsh-bridge--compact-confirmation (session-id)
-  "Return the confirmation text for compacting SESSION-ID.
-Folds in the session title and, when known, the cached context occupancy
-(so the user can judge whether a compaction is worth asking for)."
-  (let ((context (dsh-bridge--prompt-context-label session-id)))
-    (format "Compact session %s%s?"
-	    (dsh-bridge--session-label session-id)
-	    (if context (format " (%s of context used)" context) ""))))
-
 (defun dsh-bridge-compact-session (&optional session)
   "Compact the context of the session at hand.
 This is the DSH session the buffer is acting on, or the session at point
@@ -6864,7 +6853,11 @@ open-turn residue) is reported with the host's own text."
 	(and (consp counts) (> (car counts) 0)))
       (user-error "dsh-bridge: session \"%s\" has input queued to start a turn; stop or send it first"
 		  (dsh-bridge--session-label id)))
-     ((not (y-or-n-p (dsh-bridge--compact-confirmation id)))
+     ((let ((context (dsh-bridge--prompt-context-label id)))
+	(not (y-or-n-p
+	      (concat "Compact session"
+		      (if context (format " (%s of context used)" context) "")
+		      "?"))))
       (message "dsh-bridge: aborted"))
      (t
       (let* ((dsh-bridge-timeout dsh-bridge-compact-timeout)
@@ -7262,8 +7255,7 @@ archive.  Archiving is reversible with \\[dsh-bridge-unarchive-session]."
     (cond
      ((null id)
       (message "dsh-bridge: no session under point"))
-     ((not (y-or-n-p (format "Archive session %s? "
-			     (dsh-bridge--session-label id))))
+     ((not (y-or-n-p "Archive session? "))
       (message "dsh-bridge: aborted"))
      (t
       (let* ((result (dsh-bridge--request-archive id nil))
@@ -7273,9 +7265,7 @@ archive.  Archiving is reversible with \\[dsh-bridge-unarchive-session]."
 	;; work and archive, as the web UI does.
 	(and (eq status 409)
 	     (equal (alist-get 'reason alist) "WORKSPACE_ACTIVE_SESSION")
-	     (y-or-n-p
-	      (format "Session %s is running.  Stop it and archive? "
-		      (dsh-bridge--session-label id)))
+	     (y-or-n-p "Session is running.  Stop it and archive? ")
 	     (setq result (dsh-bridge--request-archive id t)
 		   status (car result)
 		   alist (cdr result)))

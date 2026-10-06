@@ -3955,22 +3955,27 @@ read still happens, since it words the confirmation."
 
 (ert-deftest dsh-bridge-stop-confirmation-names-queued-prompts ()
   "Queued and steering counts are folded into the one confirmation, and a
-zero count for either is omitted."
-  (let ((dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t))))
+zero count for either is omitted.  The wording names no session label: a
+title can be arbitrarily long, and the stop always acts on the session at
+hand."
+  (let ((dsh-bridge--sessions-cache
+         '(((id . "s1") (title . "A very long session title") (live . t))))
         (dsh-bridge--pending-questions nil)
         (dsh-bridge--pending-approvals nil))
     (cl-letf (((symbol-function 'dsh-bridge--request)
                (lambda (&rest _)
                  (cons 200 (list (cons 'queued 2) (cons 'steering 1))))))
       (let ((text (dsh-bridge--stop-confirmation "s1")))
-        (should (string-match-p "2 queued prompts will start a new turn" text))
-        (should (string-match-p "1 steering prompt may linger or be discarded"
-                                text))))
+        (should (equal text
+                       (concat "Stop running session"
+                               " (2 prompts queued to run afterward;"
+                               " 1 steering prompt may linger or be discarded)?")))
+        (should-not (string-match-p "A very long session title" text))))
     (cl-letf (((symbol-function 'dsh-bridge--request)
                (lambda (&rest _)
                  (cons 200 (list (cons 'queued 1) (cons 'steering 0))))))
       (let ((text (dsh-bridge--stop-confirmation "s1")))
-        (should (string-match-p "1 queued prompt will start a new turn" text))
+        (should (string-match-p "1 prompt queued to run afterward" text))
         (should-not (string-match-p "steering" text))))
     (cl-letf (((symbol-function 'dsh-bridge--request)
                (lambda (&rest _)
@@ -3990,13 +3995,16 @@ old plugin, or an empty body must never block the stop."
       (cl-letf (((symbol-function 'dsh-bridge--request)
                  (lambda (&rest _) result)))
         (let ((text (dsh-bridge--stop-confirmation "s1")))
-          (should (string-match-p "Stop running session T" text))
+          (should (equal text "Stop running session?"))
           (should-not (string-match-p "queued\\|steering" text)))))))
 
 (ert-deftest dsh-bridge-stop-session-prompt-names-queued ()
-  "The command's own confirmation carries the helper's queue note."
+  "The command's own confirmation carries the helper's queue note, and no
+session label."
   (let ((prompt nil)
         (dsh-bridge--session-status '(("s1" running . 1000)))
+        (dsh-bridge--pending-questions nil)
+        (dsh-bridge--pending-approvals nil)
         (dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t)))))
     (cl-letf (((symbol-function 'y-or-n-p) (lambda (p) (setq prompt p) t))
               ((symbol-function 'dsh-bridge--request)
@@ -4009,7 +4017,8 @@ old plugin, or an empty body must never block the stop."
         (dsh-bridge-view-mode)
         (setq-local dsh-bridge--view-content-session "s1")
         (dsh-bridge-stop-session)))
-    (should (string-match-p "2 queued prompts" prompt))))
+    (should (equal prompt
+                   "Stop running session (2 prompts queued to run afterward)?"))))
 
 (ert-deftest dsh-bridge-rename-workspace-marshals-args ()
   "Rename-workspace POSTs the row's workspace id and new title."
@@ -10147,8 +10156,8 @@ rows; one with stats alone renders the Stats section and no other."
 
 (ert-deftest dsh-bridge-goal-command-marshals ()
   "pause, resume, and clear POST their operation for the target session.
-The command never pre-checks a cached goal, so only clear (which names the
-objective in its confirmation) reads one."
+The command never pre-checks a cached goal, so only clear reads one, and
+only to refuse when the session has no goal at all."
   (dolist (case '(("pause" . dsh-bridge-pause-goal)
                   ("resume" . dsh-bridge-resume-goal)
                   ("clear" . dsh-bridge-clear-goal)))
@@ -10170,7 +10179,7 @@ objective in its confirmation) reads one."
   "A goal command refuses without a session, and without a current goal.
 The host owns the no-goal refusal for pause/resume (404 `GOAL_NOT_FOUND',
 surfaced as a `user-error' rather than acted on from a cache); clear
-refuses earlier because it must name the objective it would clear."
+refuses earlier, since it will not offer to clear a goal that is not there."
   (with-temp-buffer
     (let ((dsh-bridge-pinned-target nil))
       (should-error (dsh-bridge-pause-goal) :type 'user-error)))
@@ -11652,10 +11661,37 @@ cache — the footer's attribution source."
     (should-not (string-match-p "dsh-bridge: nil\\b" msg))))
 
 (ert-deftest dsh-bridge-compact-confirmation-names-context ()
-  "The confirmation folds in the cached context occupancy when known."
+  "The confirmation folds in the cached context occupancy when known, and
+names no session label: a title can be arbitrarily long, and the command
+always acts on the session at hand."
   (let ((prompt nil)
         (dsh-bridge--session-context '(("s1" . (45000 . 100000))))
         (dsh-bridge--session-status nil)
+        (dsh-bridge--pending-questions nil)
+        (dsh-bridge--pending-approvals nil)
+        (dsh-bridge--sessions-cache
+         '(((id . "s1") (title . "A very long session title") (live . t)))))
+    (cl-letf (((symbol-function 'y-or-n-p) (lambda (p) (setq prompt p) t))
+              ((symbol-function 'dsh-bridge--request)
+               (lambda (method _path _payload)
+                 (if (equal method "GET")
+                     (cons 200 '((queued . 0) (steering . 0)))
+                   (cons 200 (list (cons 'ok t) (cons 'text "done"))))))
+              ((symbol-function 'message) #'ignore))
+      (with-temp-buffer
+        (dsh-bridge-view-mode)
+        (setq-local dsh-bridge--view-content-session "s1")
+        (dsh-bridge-compact-session)))
+    (should (equal prompt "Compact session (45% of context used)?"))
+    (should-not (string-match-p "A very long session title" prompt))))
+
+(ert-deftest dsh-bridge-compact-confirmation-bare ()
+  "The confirmation omits the context clause when occupancy is unknown."
+  (let ((prompt nil)
+        (dsh-bridge--session-context nil)
+        (dsh-bridge--session-status nil)
+        (dsh-bridge--pending-questions nil)
+        (dsh-bridge--pending-approvals nil)
         (dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t)))))
     (cl-letf (((symbol-function 'y-or-n-p) (lambda (p) (setq prompt p) t))
               ((symbol-function 'dsh-bridge--request)
@@ -11668,14 +11704,7 @@ cache — the footer's attribution source."
         (dsh-bridge-view-mode)
         (setq-local dsh-bridge--view-content-session "s1")
         (dsh-bridge-compact-session)))
-    (should (string-match-p "45%" prompt))))
-
-(ert-deftest dsh-bridge-compact-confirmation-bare ()
-  "The confirmation omits the context clause when occupancy is unknown."
-  (let ((dsh-bridge--session-context nil)
-        (dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t)))))
-    (should (equal (dsh-bridge--compact-confirmation "s1")
-                   "Compact session T?"))))
+    (should (equal prompt "Compact session?"))))
 
 (ert-deftest dsh-bridge-compact-sessions-row-target ()
   "In DSH-Sessions the compact targets the row under point."
