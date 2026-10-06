@@ -573,9 +573,9 @@ option descriptions, and the custom-row hint."
 
 (defvar dsh-bridge-pinned-target nil
   "The DSH bridge's pinned target session ID, if any.
-This session is targeted by context-free DSH commands; if nil or
-invalid, the commands try to target the last-active session instead.
-Set with the command `\\[dsh-bridge-pin-target].")
+This session is targeted by context-free DSH commands; if nil, those
+commands try to target the last-active session instead.
+Set with the command `\\[dsh-bridge-pin-target]'.")
 
 (defvar-local dsh-bridge--prompt-session nil
   "Session ID for the DSH-Prompt buffer, or nil (pinned target).")
@@ -1458,7 +1458,14 @@ checking STATUS for a failed request."
 	;; session, so the record must not keep shadowing the replica.
 	;; A merely older one stays: the record is the host's own answer.
 	(unless (member (car-safe dsh-bridge--last-resolved-active) seen)
-	  (setq dsh-bridge--last-resolved-active nil))))
+	  (setq dsh-bridge--last-resolved-active nil))
+	;; Drop the pinned target when the roster reports it archived.
+	(and dsh-bridge-pinned-target
+	     (eq t (alist-get 'archived (dsh-bridge--session-for-id
+					 dsh-bridge-pinned-target)))
+	     (progn
+	       (dsh-bridge--set-pinned-target nil)
+	       (message "dsh-bridge: unpinning archived session")))))
     (cons status sessions)))
 
 ;;; Session cache
@@ -6663,37 +6670,47 @@ prompt-history walk when the binding changes."
 	       (format "bound to session \"%s\""
 		       (dsh-bridge--session-label session-id))))))
 
-;;;###autoload
-(defun dsh-bridge-pin-target (session-id)
-  "Set the DSH bridge's pinned target session to SESSION-ID.
-SESSION-ID is a session id string, or nil to clear the pinned target (fall
-back to last-active); interactively a session is always read, so use
-`dsh-bridge-unpin-target' to clear.  A saved (cold) id binds
-directly; the host resumes it when the next request targets it.
-Emacs-local only: there is no host-side pin to write, and clearing has no
-host round-trip."
-  (interactive
-   (list (dsh-bridge--read-session-id "Pinned target: ")))
+(defun dsh-bridge--set-pinned-target (session-id)
+  "Make SESSION-ID the pinned target, and follow it in the displays.
+If SESSION-ID is nil, unset the pin.
+
+Update the mode line and reset the cwd of any DSH-Prompt buffer that
+follows the pin.  This function does not fetch or refresh the roster."
   (setq dsh-bridge-pinned-target session-id)
   (force-mode-line-update t)
-  (dsh-bridge--refresh-sessions-buffer)
-  ;; Re-point any DSH-Prompt buffer that follows the pinned target at its
-  ;; effective session's workspace.
   (dolist (buf (buffer-list))
     (with-current-buffer buf
       (when (and (derived-mode-p 'dsh-bridge-prompt-mode)
 		 (null dsh-bridge--prompt-session))
 	(dsh-bridge--apply-session-directory
-	 (dsh-bridge--effective-session buf) nil buf))))
-  (message "dsh-bridge: pinned target %s"
-	   (if session-id
-	       (dsh-bridge--session-label session-id)
-	     "last-active")))
+	 (dsh-bridge--effective-session buf) nil buf)))))
+
+;;;###autoload
+(defun dsh-bridge-pin-target (session-id)
+  "Set the DSH bridge's pinned target session to SESSION-ID.
+SESSION-ID must be a session id string.  If called interactively, prompt
+for a session and use its id.  A saved (cold) session is resumed
+automatically.  Use `dsh-bridge-unpin-target' to clear the pin."
+  (interactive
+   (list (dsh-bridge--read-session-id "Pinned target: ")))
+  (cond
+   ((null session-id)
+    (user-error "dsh-bridge: invalid session"))
+   ((eq t (alist-get 'archived
+		     (dsh-bridge--session-for-id session-id)))
+    (user-error "dsh-bridge: session is archived; unarchive it first"))
+   (t
+    (dsh-bridge--set-pinned-target session-id)
+    (dsh-bridge--refresh-sessions-buffer)
+    (message "dsh-bridge: pinned target %s"
+	     (dsh-bridge--session-label session-id)))))
 
 (defun dsh-bridge-unpin-target ()
   "Clear the pinned target; the bridge falls back to last-active."
   (interactive)
-  (dsh-bridge-pin-target nil))
+  (dsh-bridge--set-pinned-target nil)
+  (dsh-bridge--refresh-sessions-buffer)
+  (message "dsh-bridge: unpinned target"))
 
 ;;; Stopping a running session
 

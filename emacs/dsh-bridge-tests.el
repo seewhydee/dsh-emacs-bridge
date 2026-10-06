@@ -235,6 +235,39 @@ round-trip."
       (call-interactively #'dsh-bridge-pin-target))
     (should (equal (all-completions "" table-seen) '("A" "B")))))
 
+(ert-deftest dsh-bridge-pin-target-refuses-archived ()
+  "An archived session cannot become the pinned target.
+The pin names the session the context-free commands act on, and every
+run-oriented command refuses an archived session."
+  (let ((dsh-bridge-pinned-target nil)
+        (dsh-bridge--sessions-cache
+         '(((id . "a1") (title . "Arch") (archived . t)))))
+    (cl-letf (((symbol-function 'dsh-bridge--refresh-sessions-buffer)
+               (lambda () nil)))
+      (let ((caught (should-error (dsh-bridge-pin-target "a1")
+                                  :type 'user-error)))
+        (should (string-match-p "is archived; unarchive it first"
+                                (error-message-string caught)))))
+    (should (null dsh-bridge-pinned-target))))
+
+(ert-deftest dsh-bridge-pin-target-refuses-nil ()
+  "A pin must name a session: nil is refused, never silently cleared.
+Clearing is `dsh-bridge-unpin-target'."
+  (let ((dsh-bridge-pinned-target "s1"))
+    (should-error (dsh-bridge-pin-target nil) :type 'user-error)
+    (should (equal dsh-bridge-pinned-target "s1"))))
+
+(ert-deftest dsh-bridge-pin-target-allows-uncached-session ()
+  "A pin whose session has no cached row binds: absence proves nothing.
+A failed persistence listing drops every cold row, and a cold session is
+a legal pin."
+  (let ((dsh-bridge-pinned-target nil)
+        (dsh-bridge--sessions-cache '(((id . "s1") (title . "Other")))))
+    (cl-letf (((symbol-function 'dsh-bridge--refresh-sessions-buffer)
+               (lambda () nil)))
+      (dsh-bridge-pin-target "gone-1"))
+    (should (equal dsh-bridge-pinned-target "gone-1"))))
+
 (ert-deftest dsh-bridge-dispatcher-header-labels ()
   "The dispatcher header renders the focus from the record alone.
 A leading space (protecting the status glyph from the menu cursor) is
@@ -3564,6 +3597,36 @@ An untitled row falls back on the placeholder with
       (should (equal (cdr (assoc 'sessionId (caddr archive))) "s1"))
       (should (string-match-p "archived session" msg)))))
 
+(ert-deftest dsh-bridge-archive-session-unpins-the-target ()
+  "Archiving the pinned session drops the pin along with the roster refetch.
+The archive command itself has no pin logic: the refetched roster reports
+the session archived, and that observation retires the pin."
+  (let ((dsh-bridge-pinned-target "s1")
+        (dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t))))
+        (dsh-bridge--session-status nil)
+        (msgs nil))
+    (cl-letf (((symbol-function 'y-or-n-p) (lambda (_prompt) t))
+              ((symbol-function 'dsh-bridge--request)
+               (lambda (_method path _payload)
+                 (if (equal path "/sessions/archive")
+                     (cons 200 (list (cons 'ok t)))
+                   (cons 200
+                         (list (cons 'sessions
+                                     (list (list (cons 'id "s1")
+                                                 (cons 'title "T")
+                                                 (cons 'archived t)))))))))
+              ((symbol-function 'message)
+               (lambda (&rest args) (push (apply #'format args) msgs))))
+      (with-temp-buffer
+        (dsh-bridge-sessions-mode)
+        (let ((inhibit-read-only t))
+          (insert (propertize "s1 row" 'tabulated-list-id "s1")))
+        (goto-char (point-min))
+        (dsh-bridge-archive-session)))
+    (should (null dsh-bridge-pinned-target))
+    (should (member "dsh-bridge: unpinning archived session" msgs))
+    (should (member "dsh-bridge: archived session T" msgs))))
+
 (ert-deftest dsh-bridge-archive-session-aborts-on-no ()
   "Archive declines without a request when the user answers no."
   (let ((called nil))
@@ -4480,6 +4543,48 @@ naming the host's own resolution is its purpose."
                                              (list (cons 'id "s2") (cons 'live t)))))))))
       (dsh-bridge--fetch-sessions))
     (should (equal dsh-bridge--last-resolved-active '("s1" . "Older")))))
+
+(ert-deftest dsh-bridge-fetch-sessions-drops-archived-pin ()
+  "A roster reporting the pinned session archived drops the pin, loudly.
+Pinning and archival are mutually exclusive: an archived session is not a
+run target, so it cannot stay the pin.  The roster is the one funnel every
+archive is observed through, so the prune covers an archive made anywhere;
+unarchiving does not restore the pin."
+  (let ((dsh-bridge-pinned-target "s1")
+        (dsh-bridge--sessions-cache nil)
+        (dsh-bridge--session-status nil)
+        (msg nil))
+    (cl-letf (((symbol-function 'dsh-bridge--request)
+               (lambda (&rest _)
+                 (cons 200
+                       (list (cons 'sessions
+                                   (list (list (cons 'id "s1")
+                                               (cons 'title "Arch")
+                                               (cons 'archived t))))))))
+              ((symbol-function 'message)
+               (lambda (&rest args) (setq msg (apply #'format args)))))
+      (dsh-bridge--fetch-sessions))
+    (should (null dsh-bridge-pinned-target))
+    (should (equal msg "dsh-bridge: unpinning archived session"))))
+
+(ert-deftest dsh-bridge-fetch-sessions-keeps-unarchived-pin ()
+  "A roster that does not report the pinned session archived keeps the pin.
+An absent row is not evidence of archival: a failed persistence listing
+drops every cold row, and a cold session is a legal pin."
+  (dolist (sessions (list (list (list (cons 'id "s1") (cons 'live nil)))
+                          (list (list (cons 'id "s2") (cons 'live t)))))
+    (let ((dsh-bridge-pinned-target "s1")
+          (dsh-bridge--sessions-cache nil)
+          (dsh-bridge--session-status nil)
+          (messages 0))
+      (cl-letf (((symbol-function 'dsh-bridge--request)
+                 (lambda (&rest _)
+                   (cons 200 (list (cons 'sessions sessions)))))
+                ((symbol-function 'message)
+                 (lambda (&rest _) (setq messages (1+ messages)))))
+        (dsh-bridge--fetch-sessions))
+      (should (equal dsh-bridge-pinned-target "s1"))
+      (should (zerop messages)))))
 
 (ert-deftest dsh-bridge-fetch-sessions-seeds-cache-and-status ()
   "A 200 with sessions returns them and reseeds the cache and status tracker."
