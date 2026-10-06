@@ -3,10 +3,9 @@
 This is a two-way bridge between
 [GNU Emacs](https://www.gnu.org/software/emacs/) and the
 [Deepseek Harness](https://github.com/deepseek-ai/deepseek-harness)
-(DSH).  It lets you control DSH from entirely within Emacs, including
-submitting prompts, reading replies, and controlling sessions and
-their properties.  The Emacs-side user interface is designed to
-closely follow existing Emacs conventions and standards.
+(DSH).  It lets you control DSH from Emacs, including submitting
+prompts, reading replies, and controlling sessions.  The Emacs-side
+user interface is designed to closely follow Emacs conventions.
 
 The bridge consists of two components:
 
@@ -36,8 +35,8 @@ make package
 Then, in Emacs:
 
 1. `M-x package-install-file RET /path/to/dsh-bridge-<version>.tar RET`
-2. (*optional*) If you run DSH from a source checkout, meaning that
-   `dsh` is *not* on the executable path or run via `npx`, customize
+2. (*optional*) If you run DSH from a source checkout, so that `dsh`
+   is *not* on the executable path or run via `npx`, customize
    `dsh-bridge-dsh-command` (e.g., `M-x customize-variable RET
    dsh-bridge-dsh-command RET`) to specify how to run DSH (see below).
 3. `M-x dsh-bridge-install-plugin`
@@ -64,14 +63,14 @@ DSH plugin and Emacs library manually.
 From this repository's root directory:
 
 ```sh
-make build   # emits dsh-plugin/lib/index.js + lib/client.js
+make build
 ```
 
 If you have `dsh` installed on the executable path, run the following
 commands:
 
 ```sh
-# global install, from this repo root:
+# from this repo root:
 dsh plugin --profile web add link:./dsh-plugin
 dsh web
 ```
@@ -82,7 +81,7 @@ directory instead, replacing the `link:` path with the appropriate
 path into this repo:
 
 ```sh
-# source checkout, from deepseek-harness root:
+# from deepseek-harness root:
 pnpm dsh plugin --profile web add link:/absolute/path/to/dsh-emacs-bridge/dsh-plugin
 pnpm dsh web
 ```
@@ -97,7 +96,7 @@ replacing the path with the actual path to `dsh-bridge.el`:
 ```
 
 Optionally, you can also load `dsh-bridge-install.el`, which supplies
-the `M-x dsh-bridge-install-plugin` command (see above).  But if you
+the `M-x dsh-bridge-install-plugin` command (see above).  If you
 installed the DSH plugin directly by following the steps in the
 preceding section, you can skip this.
 
@@ -133,8 +132,7 @@ available from here:
 * `k` — stop the running session.
 * `o` — compact the session's context history.
 * `l` — open the DSH-Sessions buffer.
-* `+` — create a new session, prompting for its workspace and title;
-        the new session is pinned.
+* `+` — create a new session and pin it.
 * `p` — toggle plan mode.
 * `G` — set or edit the goal objective (with `C-u`, also the round cap).
 * `A` — pause an armed goal, or resume and rearm a stopped one.
@@ -190,7 +188,7 @@ The following commands are available in a DSH-View buffer:
 * `i` — receive the latest "Send to Emacs" message (see below).
 * `v` — show or hide the turn's tool calls and thinking summaries.
 * `D` — describe the current session.
-* `M-p`/`M-n` — cycle the current session's turns (older / newer).
+* `M-p`/`M-n` — cycle the current session's turns.
 * `l` — open the DSH-Sessions buffer.
 * `q` — quit the window and bury the buffer.
 
@@ -269,23 +267,23 @@ you must send the prompt first, or revert with `M-x revert-buffer`.
 
 #### Attachments
 
-The `C-c C-a` command attaches a file to send along with the prompt.
-Like the analogous Message mode command, this prompts for a file in
-the minibuffer, and inserts a tag line into the prompt buffer:
+From the DSH-Prompt buffer, type `C-c C-a` to attache a file to send
+along with the prompt.  This prompts for a file in the minibuffer, and
+inserts a tag line into the prompt buffer:
 ```
 <#attachment filename="/home/you/screenshot.png">
 ```
 If you change your mind and no longer want to attach the file, just
 delete the tag line before sending.
 
-From elsewhere in Emacs, you can also run this command (`M-x
-dsh-bridge-attach-file`) directly to open a DSH-Prompt buffer with the
-specified attachment, or `M-x dsh-bridge-attach-buffer-file` to open a
-prompt with the current buffer's file as the attachment.
+From elsewhere in Emacs, you can also run `M-x dsh-bridge-attach-file`
+directly to open a DSH-Prompt buffer with the specified attachment, or
+`M-x dsh-bridge-attach-buffer-file` to open a prompt with the current
+buffer's file as the attachment.
 
 ### Plan mode and goals
 
-Plan mode and the session goal are provided by the following commands:
+You can toggle plan mode, or set a session goal, with these commands:
 
 * `M-x dsh-bridge-toggle-plan-mode` — toggle plan mode.  With a
   numeric prefix argument, enable it if positive, disable otherwise.
