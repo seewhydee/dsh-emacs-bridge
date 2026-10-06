@@ -345,6 +345,14 @@ may take significantly longer (particularly for cold sessions)."
   :type 'number
   :group 'dsh-bridge)
 
+(defcustom dsh-bridge-compact-timeout 180
+  "Timeout for a manual context compaction request.
+A `/compact' runs synchronously and may summarise history through the
+LLM, so it can comfortably exceed `dsh-bridge-timeout'; a premature
+client-side timeout only kills the echo, not the host's compaction."
+  :type 'number
+  :group 'dsh-bridge)
+
 (defcustom dsh-bridge-roster-timeout 1.5
   "Timeout for the DSH Bridge dispatcher to fetch the session roster.
 This is used only when the dispatcher seeds the session roster before
@@ -504,6 +512,13 @@ the `Plan mode' row of the DSH-Describe report."
   "Face for goal indicators.
 Used by the goal cell in DSH-View and DSH-Prompt header lines and by
 the Objective row of the DSH-Describe report's Goal section."
+  :group 'dsh-bridge)
+
+(defface dsh-bridge-compacting-face
+  '((t :inherit warning))
+  "Face for the context-compaction indicator.
+Used by the compacting cell in DSH-View and DSH-Prompt header lines while
+a session's context is being compacted."
   :group 'dsh-bridge)
 
 (defface dsh-bridge-question-heading-face
@@ -667,6 +682,22 @@ what the user answered.	 PLIST is keyed by:
 (defvar dsh-bridge--session-context nil
   "Alist storing the token and context window usage in DSH sessions.
 Each entry has the form (SESSION-ID . (USED-TOKENS . CONTEXT-WINDOW)).")
+
+(defvar dsh-bridge--session-compacting nil
+  "List of session ids with a context compaction in flight.
+An id is added when a `compaction/start' frame arrives and removed when the
+matching `compaction/end' frame does.")
+
+(defun dsh-bridge--session-compacting-p (session-id)
+  "Whether SESSION-ID currently has a context compaction in flight."
+  (and session-id (assoc session-id dsh-bridge--session-compacting)))
+
+(defun dsh-bridge--compacting-set (session-id flag)
+  "Record SESSION-ID's compaction-in-flight state as FLAG (boolean)."
+  (setq dsh-bridge--session-compacting
+	(assoc-delete-all session-id dsh-bridge--session-compacting))
+  (when (and session-id flag)
+    (push (list session-id) dsh-bridge--session-compacting)))
 
 (defvar dsh-bridge--session-plan nil
   "Alist of (SESSION-ID . PLAN) entries caching session plans.
@@ -1172,13 +1203,31 @@ and an unsuppressed one would double-report.
 
 For every `end' frame, schedule the deferred `/turns' refetch regardless of
 whether a message is shown: even a `persistence' failure replaces the
-surface in memory, so the refetch must still run."
+surface in memory, so the refetch must still run.
+
+The frame also drives the header-line compaction indicator: `start' marks
+the session as compacting and rebuilds the header lines (so a `compacting…'
+cell appears), and `end' clears that mark, rebuilds the header lines again,
+and re-seeds the context cache.  The context re-seed is a forced refetch
+(a `context' SSE frame is not emitted on every host) and feeds the header's
+context-occupancy cell, so the percentage reflects the reclaimed tokens
+without the prompt buffer needing to be reopened."
   (let* ((phase (alist-get 'phase event))
 	 (manual (alist-get 'sourceCommandId event))
 	 (error (alist-get 'error event))
 	 (tokens (alist-get 'tokensReclaimed event)))
-    (when (equal phase "end")
-      (run-at-time 0 nil #'dsh-bridge--turns-changed id))
+    (cond
+     ((equal phase "start")
+      (dsh-bridge--compacting-set id t)
+      (dsh-bridge--header-refresh))
+     ((equal phase "end")
+      (dsh-bridge--compacting-set id nil)
+      (run-at-time 0 nil #'dsh-bridge--turns-changed id)
+      (run-at-time 0 nil
+	(lambda (sid)
+	  (dsh-bridge--fetch-context sid t)
+	  (dsh-bridge--header-refresh))
+	id)))
     ;; A manual `start' is the in-flight feedback the user asked for, so it is
     ;; never gated; an automatic compaction's message is gated like the
     ;; turn-boundary echo.  A manual `end' returns nil above and shows nothing.
@@ -3478,6 +3527,30 @@ handler checks the id against the clicked window's session."
 	      'keymap keymap
 	      'dsh-bridge-session-id session-id))
 
+(defun dsh-bridge--header-compacting-cell (session-id)
+  "The header compaction cell for SESSION-ID, or nil.
+Shows `compacting…' in `dsh-bridge-compacting-face' while SESSION-ID has a
+context compaction in flight, so a manual or automatic compaction is
+visible in the header line rather than only in the echo area."
+  (when (dsh-bridge--session-compacting-p session-id)
+    (list (propertize "compacting…" 'face 'dsh-bridge-compacting-face))))
+
+(defun dsh-bridge--header-refresh ()
+  "Force the DSH bridge header lines to recompute.
+The prompt and view header lines are shared `(:eval)' forms; a bare
+`force-mode-line-update' does not always rebuild them, so also re-set
+`header-line-format' on every live DSH-Prompt and DSH-View buffer (this
+is how `dsh-bridge--status-event-render' refreshes the view headers)."
+  (dolist (buf (buffer-list))
+    (when (buffer-live-p buf)
+      (with-current-buffer buf
+	(cond
+	 ((derived-mode-p 'dsh-bridge-prompt-mode)
+	  (setq header-line-format dsh-bridge--prompt-header-line-format))
+	 ((derived-mode-p 'dsh-bridge-view-mode)
+	  (setq header-line-format dsh-bridge--view-header-line-format))))))
+  (force-mode-line-update t))
+
 (defun dsh-bridge--header-plan-cell (session-id)
   "The header plan-mode cell for SESSION-ID, or nil.
 Renders `plan' when active; `plan (queued on)'/`plan (queued off)'
@@ -3570,6 +3643,7 @@ clickable (see `dsh-bridge--header-plan-at-mouse' and
 	 (time (and id (dsh-bridge--view-turn-time-label id)))
 	 (plan (and id (dsh-bridge--header-plan-cell id)))
 	 (goal (and id (dsh-bridge--header-goal-cell id)))
+	 (compacting (and id (dsh-bridge--header-compacting-cell id)))
 	 (await (and id
 		     (cond ((assoc id dsh-bridge--pending-questions)
 			    "awaiting answer")
@@ -3585,6 +3659,7 @@ clickable (see `dsh-bridge--header-plan-at-mouse' and
 		   (list archived)
 		   plan
 		   goal
+		   compacting
 		   (list time nil)
 		   (list await nil))
 	     (and width (max 1 (- width (string-width prefix))))))))
@@ -5700,10 +5775,13 @@ Deferred with `run-at-time' to keep the SSE process filter non-blocking."
   (when (assoc session-id dsh-bridge--session-models)
     (run-at-time 0 nil #'dsh-bridge--fetch-models session-id t)))
 
-(defun dsh-bridge--fetch-context (session-id)
+(defun dsh-bridge--fetch-context (session-id &optional force)
   "Seed the context cache for SESSION-ID from GET /context, when uncached.
-Returns the (USED-TOKENS . CONTEXT-WINDOW) entry, or nil when unknown."
-  (when (and session-id (null (assoc session-id dsh-bridge--session-context)))
+With FORCE non-nil, discard any cached entry and refetch (used after a
+compaction, whose reclaimed tokens change the occupancy without a `context'
+frame on every host).  Returns the (USED-TOKENS . CONTEXT-WINDOW) entry, or
+nil when unknown."
+  (when (and session-id (or force (null (assoc session-id dsh-bridge--session-context))))
     (let* ((result (dsh-bridge--request "GET" (dsh-bridge--path "/context" session-id) nil))
 	   (status (car result))
 	   (alist (cdr result)))
@@ -6406,6 +6484,7 @@ their tag lines are visible in the buffer itself."
 		     (dsh-bridge--prompt-context-label session)))
 	   (plan (and session (dsh-bridge--header-plan-cell session)))
 	   (goal (and session (dsh-bridge--header-goal-cell session)))
+	   (compacting (and session (dsh-bridge--header-compacting-cell session)))
 	   (sent (dsh-bridge--prompt-sent-marker session))
 	   (hist (dsh-bridge--prompt-history-position))
 	   (suffix (concat qualifier hist))
@@ -6420,6 +6499,7 @@ their tag lines are visible in the buffer itself."
 		     (list workspace t)
 		     plan
 		     goal
+		     compacting
 		     (list model)
 		     (list context))
 	       (and width
@@ -6787,7 +6867,8 @@ open-turn residue) is reported with the host's own text."
      ((not (y-or-n-p (dsh-bridge--compact-confirmation id)))
       (message "dsh-bridge: aborted"))
      (t
-      (let* ((result (dsh-bridge--request
+      (let* ((dsh-bridge-timeout dsh-bridge-compact-timeout)
+	     (result (dsh-bridge--request
 		      "POST" "/sessions/compact"
 		      (list (cons 'sessionId id))))
 	     (status (car result))
@@ -6815,6 +6896,12 @@ open-turn residue) is reported with the host's own text."
 	  (message "dsh-bridge: the installed DSH plugin does not support compaction; re-run M-x dsh-bridge-install-plugin"))
 	 ((eq status 501)
 	  (message "dsh-bridge: this DSH profile has no compaction command"))
+	 ;; Nil STATUS is a transport failure (notably a client-side timeout
+	 ;; while the host keeps compacting); report it plainly rather than
+	 ;; reaching `dsh-bridge--error-message' below, which returns nil and
+	 ;; would echo "dsh-bridge: nil".
+	 ((null status)
+	  (message "dsh-bridge: request failed (is `dsh web' running?)"))
 	 (t
 	  (message "dsh-bridge: %s"
 		   (dsh-bridge--error-message nil status alist)))))))))

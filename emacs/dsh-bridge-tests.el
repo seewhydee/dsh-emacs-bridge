@@ -11631,6 +11631,26 @@ cache — the footer's attribution source."
         (dsh-bridge-compact-session)))
     (should (string-match-p "no compaction command" msg))))
 
+(ert-deftest dsh-bridge-compact-transport-failure ()
+  "A transport failure (nil status) reports plainly, never as \"dsh-bridge: nil\"."
+  (let ((msg nil)
+        (dsh-bridge--session-status nil)
+        (dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t)))))
+    (cl-letf (((symbol-function 'y-or-n-p) (lambda (_prompt) t))
+              ((symbol-function 'dsh-bridge--request)
+               (lambda (method _path _payload)
+                 (if (equal method "GET")
+                     (cons 200 '((queued . 0) (steering . 0)))
+                   (cons nil nil))))
+              ((symbol-function 'message)
+               (lambda (&rest args) (setq msg (apply #'format args)))))
+      (with-temp-buffer
+        (dsh-bridge-view-mode)
+        (setq-local dsh-bridge--view-content-session "s1")
+        (dsh-bridge-compact-session)))
+    (should (string-match-p "request failed" msg))
+    (should-not (string-match-p "dsh-bridge: nil\\b" msg))))
+
 (ert-deftest dsh-bridge-compact-confirmation-names-context ()
   "The confirmation folds in the cached context occupancy when known."
   (let ((prompt nil)
@@ -11753,6 +11773,7 @@ reports.  Returns (MSG . REFETCHES); a nil MSG means nothing was echoed."
   (let ((msg nil) (refetches 0)
         (dsh-bridge-turn-boundary-echo turn-boundary-echo)
         (dsh-bridge--session-status nil)
+        (dsh-bridge--session-compacting nil)
         (dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t)))))
     (cl-letf (((symbol-function 'message)
                (lambda (&rest args) (setq msg (apply #'format args))))
@@ -11825,6 +11846,39 @@ reports.  Returns (MSG . REFETCHES); a nil MSG means nothing was echoed."
     (should (string-match-p "persistence failed" (car out)))
     (should-not (string-match-p "0 tokens" (car out)))
     (should (= (cdr out) 1))))
+
+(ert-deftest dsh-bridge-compaction-toggles-inflight ()
+  "A compaction start frame marks the session in flight; its end clears it.
+State is captured directly (not via `dsh-bridge-test--frame-feedback', whose
+own binding would shadow the surrounding let)."
+  (let ((dsh-bridge--session-compacting nil)
+        (dsh-bridge--session-status nil)
+        (dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t)))))
+    (cl-letf (((symbol-function 'message) (lambda (&rest _args) nil))
+              ((symbol-function 'run-at-time) (lambda (&rest _args) nil))
+              ((symbol-function 'dsh-bridge--view-displayed-p) (lambda (_id) nil)))
+      (dsh-bridge--notification-handle-events
+       (list '((kind . "compaction") (sessionId . "s1") (phase . "start")
+               (sourceCommandId . "c"))))
+      (should (dsh-bridge--session-compacting-p "s1"))
+      (should (dsh-bridge--header-compacting-cell "s1"))
+      (dsh-bridge--notification-handle-events
+       (list '((kind . "compaction") (sessionId . "s1") (phase . "end")
+               (sourceCommandId . "c") (tokensReclaimed . 9))))
+      (should-not (dsh-bridge--session-compacting-p "s1"))
+      (should (null (dsh-bridge--header-compacting-cell "s1"))))))
+
+(ert-deftest dsh-bridge-compaction-header-cell ()
+  "The header compaction cell renders only while the session is compacting."
+  (let ((dsh-bridge--session-compacting nil))
+    (should (null (dsh-bridge--header-compacting-cell "s1")))
+    (dsh-bridge--compacting-set "s1" t)
+    (let ((cell (dsh-bridge--header-compacting-cell "s1")))
+      (should (consp cell))
+      (should (string-match-p "compacting" (car cell)))
+      (should (get-text-property 0 'face (car cell))))
+    (dsh-bridge--compacting-set "s1" nil)
+    (should (null (dsh-bridge--header-compacting-cell "s1")))))
 
 (provide 'dsh-bridge-tests)
 ;;; dsh-bridge-tests.el ends here
