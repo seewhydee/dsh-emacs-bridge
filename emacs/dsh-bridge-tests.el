@@ -662,11 +662,12 @@ as an explicitly confirmed focus."
 
 (ert-deftest dsh-bridge-dispatcher-stay-verbs ()
   "The in-menu verbs are declared transient, so their keys do not close it.
-A plain suffix exits on Emacs 31.1's transient; cycling, pinning, and the
-mutators that refuse inside the menu must stay.  The conditional mutators
-resolve through a trampoline that reads the previous invocation's outcome,
-because transient picks the pre-command before the command runs."
-  (let ((simple '("M-p" "M-n" "t" "u" "T"))
+A plain suffix exits on Emacs 31.1's transient; cycling, pinning, and
+creating must stay, so the session they just made the focus can take the
+next operation.  The conditional mutators resolve through a trampoline
+that reads the previous invocation's outcome, because transient picks the
+pre-command before the command runs."
+  (let ((simple '("M-p" "M-n" "t" "u" "T" "+"))
         (conditional '("k" "p" "G" "A" "X")))
     ;; The layout carries the declaration: `t' for the verbs that just
     ;; return to the menu, the trampoline for the ones that can refuse.

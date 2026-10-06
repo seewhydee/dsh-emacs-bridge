@@ -8390,7 +8390,8 @@ instead of trusting the cached one."
    ("o" dsh-bridge--dispatcher-compact :description "compact context"
     :transient dsh-bridge--dispatcher-stay-p)
    ("l" dsh-bridge-list-sessions :description "list sessions")
-   ("+" dsh-bridge--dispatcher-create :description "create and pin session")]
+   ("+" dsh-bridge--dispatcher-create :description "create and pin session"
+    :transient t)]
   ["Cycle and Quit"
    ("M-p" dsh-bridge--dispatcher-prev :description "target older session" :transient t)
    ("M-n" dsh-bridge--dispatcher-next :description "target newer session" :transient t)
