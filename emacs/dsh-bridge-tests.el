@@ -8581,9 +8581,12 @@ the placeholder when the cache holds none."
       (kill-buffer "*dsh-bridge-output*"))))
 
 (ert-deftest dsh-bridge-view-ticker-survives-view-kill ()
-  "Killing one ticking DSH-View keeps the shared elapsed ticker running for
-the surviving views (the kill hook re-evaluates the ticker after the dying
-buffer is gone); killing the last ticking view cancels the timer."
+  "Killing one ticking DSH-View keeps the shared elapsed ticker for the
+survivors; killing the last one leaves the timer to its next tick.
+The kill hook runs while the dying buffer is still live and visible, so
+its scan can only keep the timer, never cancel it: the last ticking
+view's timer survives the kill and the tick that finds nothing ticking
+cancels it."
   (let* ((record (dsh-bridge-test--view-turn
                   1 1000 (list (dsh-bridge-test--view-segment "tick" 1000 1))))
          (dsh-bridge--turns-cache (dsh-bridge-test--view-cache (list record)))
@@ -8606,23 +8609,18 @@ buffer is gone); killing the last ticking view cancels the timer."
         (progn
           (dsh-bridge--view-ticker-ensure)
           (should (timerp dsh-bridge--view-ticker-timer))
-          ;; Kill one view; the deferred re-evaluation (simulated by
-          ;; draining the queue only after the buffer is dead) must keep
-          ;; the ticker for the survivor.
-          (let ((pending nil))
-            (cl-letf (((symbol-function 'run-at-time)
-                       (lambda (_t _r fn &rest args)
-                         (push (lambda () (apply fn args)) pending))))
-              (kill-buffer "*dsh-bridge-output-2*")
-              (dolist (fn (nreverse pending)) (funcall fn))))
+          ;; Kill one view: the hook's scan still sees the dying buffer, so
+          ;; the survivor's ticker is kept, and the next tick re-arms it.
+          (kill-buffer "*dsh-bridge-output-2*")
           (should (timerp dsh-bridge--view-ticker-timer))
-          ;; Kill the last view; the deferred re-evaluation cancels.
-          (let ((pending nil))
-            (cl-letf (((symbol-function 'run-at-time)
-                       (lambda (_t _r fn &rest args)
-                         (push (lambda () (apply fn args)) pending))))
-              (kill-buffer "*dsh-bridge-output*")
-              (dolist (fn (nreverse pending)) (funcall fn))))
+          (dsh-bridge--view-ticker-tick)
+          (should (timerp dsh-bridge--view-ticker-timer))
+          ;; Kill the last ticking view: the hook's scan sees only the dying
+          ;; buffer, so the timer outlives the kill until the next tick
+          ;; finds nothing ticking and cancels it.
+          (kill-buffer "*dsh-bridge-output*")
+          (should (timerp dsh-bridge--view-ticker-timer))
+          (dsh-bridge--view-ticker-tick)
           (should-not (timerp dsh-bridge--view-ticker-timer)))
       (when (timerp dsh-bridge--view-ticker-timer)
         (cancel-timer dsh-bridge--view-ticker-timer))

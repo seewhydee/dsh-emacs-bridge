@@ -3362,17 +3362,6 @@ redisplay of the line; the form recomputes the elapsed time itself."
       (setq dsh-bridge--view-ticker-timer
 	    (run-at-time 1 nil #'dsh-bridge--view-ticker-tick)))))
 
-(defun dsh-bridge--view-ticker-ensure-later ()
-  "Re-evaluate the shared view ticker after the current buffer is killed.
-Installed on each view buffer's local `kill-buffer-hook' by
-`dsh-bridge--view-fill'.  The dying buffer is still live while the hook
-runs, so an immediate `dsh-bridge--view-ticker-ensure' would keep (or
-cancel) the timer on the dying buffer's account alone; deferring one
-event-loop turn lets the scan see only the surviving views, so killing
-one view never freezes another view's elapsed clock — and killing the
-last ticking view still cancels the timer."
-  (run-at-time 0 nil #'dsh-bridge--view-ticker-ensure))
-
 (defun dsh-bridge--header-window-width ()
   "The display columns available to the header line being drawn, or nil.
 Called from a `header-line-format' `:eval' form, `selected-window' is the
@@ -4478,7 +4467,7 @@ so callers that render content need not clear them themselves, and the header
 computed below already carries the settled `(k/n)' position."
   (unless (derived-mode-p 'dsh-bridge-view-mode)
     (dsh-bridge-view-mode))
-  (add-hook 'kill-buffer-hook #'dsh-bridge--view-ticker-ensure-later nil t)
+  (add-hook 'kill-buffer-hook #'dsh-bridge--view-ticker-ensure nil t)
   (setq-local revert-buffer-function #'dsh-bridge--revert-output)
   (let ((old dsh-bridge--view-content-session))
     (setq-local dsh-bridge--view-content-session session-id)
