@@ -345,14 +345,6 @@ may take significantly longer (particularly for cold sessions)."
   :type 'number
   :group 'dsh-bridge)
 
-(defcustom dsh-bridge-compact-timeout 180
-  "Timeout for a manual context compaction request.
-Compaction can take a long time, far exceeding `dsh-bridge-timeout'.
-Note that triggering the timeout only kills the reporting on the Emacs
-side, not the compaction on the host."
-  :type 'number
-  :group 'dsh-bridge)
-
 (defcustom dsh-bridge-roster-timeout 1.5
   "Timeout for the DSH Bridge dispatcher to fetch the session roster.
 This is used only when the dispatcher seeds the session roster before
@@ -1154,31 +1146,15 @@ Currently supported events are:
   "Handle a `compaction' SSE frame for session ID.
 EVENT is the decoded frame, carrying `phase' (`start' or `end'),
 `sourceCommandId' (present exactly for a manual `/compact' compaction), and
-optionally `error' and `tokensReclaimed'.
-
-The frame picks the feedback channel from `sourceCommandId'.  A manual
-compaction's `start' message is the in-flight feedback the user asked for,
-and always appears (the user just confirmed it); its `end' message is
-suppressed entirely — the POST 200/409 echo already carried the outcome,
-and an unsuppressed one would double-report.  An automatic compaction's
-`start' is silent, and its `end' reports only while a view shows the
-session.
-
-For every `end' frame, schedule the deferred `/turns' refetch regardless of
-whether a message is shown: even a `persistence' failure replaces the
-surface in memory, so the refetch must still run.
-
-The frame also drives the header-line compaction indicator: `start' marks
-the session as compacting and rebuilds the header lines (so a `compacting…'
-cell appears), and `end' clears that mark, rebuilds the header lines again,
-and re-seeds the context cache.  The context re-seed is a forced refetch
-(a `context' SSE frame is not emitted on every host) and feeds the header's
-context-occupancy cell, so the percentage reflects the reclaimed tokens
-without the prompt buffer needing to be reopened."
+optionally `error' and `tokensReclaimed'.  Report the frame on the fitting
+feedback channel, drive the header-line compaction indicator, and schedule
+the refetches an `end' frame implies."
   (let* ((phase (alist-get 'phase event))
 	 (manual (alist-get 'sourceCommandId event))
 	 (err (alist-get 'error event))
 	 (tokens (alist-get 'tokensReclaimed event)))
+    ;; Header-line indicator: `start' marks the session as compacting (a
+    ;; `compacting…' cell appears), `end' clears the mark.
     (cond
      ((null id))
      ((equal phase "start")
@@ -1188,12 +1164,22 @@ without the prompt buffer needing to be reopened."
      ((equal phase "end")
       (setq dsh-bridge--sessions-compacting
 	    (delete id dsh-bridge--sessions-compacting))
+      ;; The deferred `/turns' refetch runs for every `end' frame,
+      ;; even a `persistence' failure.
       (run-at-time 0 nil #'dsh-bridge--turns-changed id)
+      ;; Context re-seed is a forced refetch (a `context' SSE frame is
+      ;; not emitted on every host), and feeds the header line.
       (run-at-time 0 nil
 	(lambda (sid)
 	  (dsh-bridge--fetch-context sid t)
 	  (dsh-bridge--header-refresh))
 	id)))
+    ;; A manual compaction's `start' message is the in-flight feedback
+    ;; the user asked for, and always appears; its `end' message is
+    ;; suppressed (the POST 200/409 echo is the outcome channel, and
+    ;; an unsuppressed end would double-report).  For automatic
+    ;; compaction, `start' is silent, and `end' reports only while a
+    ;; view shows the session.
     (cond
      ((equal phase "start")
       (and manual (message "dsh-bridge: compacting session context...")))
@@ -1426,6 +1412,64 @@ transport failure is reported as (nil . nil)."
     (if url-status
 	(cons nil nil)
       (cons http-status (dsh-bridge--parse-json-body body)))))
+
+(defun dsh-bridge--http-async (method path payload callback)
+  "Send a METHOD request to PATH via asynchronous HTTP.
+PAYLOAD is an alist encoded as JSON (for POST) or nil (for GET).
+
+CALLBACK is called with (URL-STATUS BODY HTTP-STATUS), the same triple
+`dsh-bridge--http' returns, once the response has been read; this
+function returns as soon as the request is on the wire.  The callback
+runs with the response buffer current, and that buffer is killed
+afterwards.  A request that draws no response at all leaves CALLBACK
+uncalled; there is no client-side deadline."
+  (dsh-bridge-notifications-start t)
+  (dsh-bridge--ensure-plugin)
+  (let ((url-request-method method)
+	(url-request-data
+	 (and payload (encode-coding-string (json-encode payload) 'utf-8)))
+	(url-request-extra-headers (dsh-bridge--extra-headers payload)))
+    (let ((started
+	   (condition-case e
+	       (url-retrieve
+		(concat dsh-bridge-url path)
+		;; Decide the outcome from the response buffer, not the
+		;; callback's status plist, exactly as on the synchronous
+		;; path: an HTTP error such as a 409 arrives with an
+		;; `:error' plist yet a perfectly readable body.
+		(lambda (_status)
+		  (let ((buffer (current-buffer)))
+		    (unwind-protect
+			(let* ((response (dsh-bridge--parse-response buffer))
+			       (http-status (car response))
+			       (body (cdr response)))
+			  (when (memq http-status '(401 404))
+			    (dsh-bridge--note-request-failure))
+			  (funcall callback nil body http-status))
+		      (kill-buffer buffer))))
+		nil t)
+	     (error
+	      ;; A synchronous failure to even start the request, most often
+	      ;; a refused connection.
+	      (dsh-bridge--note-request-failure)
+	      (funcall callback `(:error ,(error-message-string e)) nil nil)
+	      'reported))))
+      ;; `url-retrieve' answers nil for a URL no loader handles; the
+      ;; callback would otherwise never run and the failure go unsaid.
+      (when (null started)
+	(dsh-bridge--note-request-failure)
+	(funcall callback '(:error "request not handled") nil nil)))))
+
+(defun dsh-bridge--request-async (method path payload callback)
+  "Send an asynchronous METHOD request to PATH, reporting to CALLBACK.
+CALLBACK is called with (STATUS . ALIST), matching `dsh-bridge--request',
+once the response has been read; this function returns first.  Any
+transport failure is reported as (nil . nil)."
+  (dsh-bridge--http-async
+   method path payload
+   (lambda (_url-status body http-status)
+     (funcall callback
+	      (cons http-status (dsh-bridge--parse-json-body body))))))
 
 (defun dsh-bridge--fetch-sessions ()
   "Fetch the DSH session roster and return (STATUS . SESSIONS).
@@ -6836,10 +6880,11 @@ ask-user/approval answer, or input already queued to start a new turn
 (steering-only queues stay compactable, with the host 409 as the race
 backstop).  A cold session is resumed on demand by the host.
 
-This asks for confirmation before POSTing.  The host is the authority on
-whether compaction actually applies: a no-op (nothing compactable) is a
-success, and a busy session (another compaction already in flight, or an
-open-turn residue) is reported with the host's own text."
+This asks for confirmation before posting.  The post is asynchronous;
+updates arrive as `compaction' SSE frames and are handled on arrival.
+The host decides whether to actually do the compaction; a no-op (nothing
+compactable) is reported as a success, and a busy session (e.g., another
+compaction in progress) is reported with the host-supplied text."
   (interactive)
   (let ((id (or session (dsh-bridge--confirmed-session))))
     (cond
@@ -6863,44 +6908,43 @@ open-turn residue) is reported with the host's own text."
 		      "?"))))
       (message "dsh-bridge: aborted"))
      (t
-      (let* ((dsh-bridge-timeout dsh-bridge-compact-timeout)
-	     (result (dsh-bridge--request
-		      "POST" "/sessions/compact"
-		      (list (cons 'sessionId id))))
-	     (status (car result))
-	     (alist (cdr result)))
-	(cond
-	 ;; A 200 is a success (including the "No compactable history yet."
-	 ;; no-op).  `commands.execute' awaits the whole transaction, so the
-	 ;; SSE `compaction/end` frame has already arrived; the manual end
-	 ;; message is suppressed there, making this the single completion
-	 ;; message for a manual compact.
-	 ((eq status 200)
-	  (message "dsh-bridge: %s"
-		   (or (alist-get 'text alist)
-		       (format "session \"%s\" compacted"
-			       (dsh-bridge--session-label id)))))
-	 ;; A 409 with host text is the sole failure channel for a manual
-	 ;; compact (busy/cancelled/changed/summary/commit/persistence).  Echo
-	 ;; it.
-	 ((and (eq status 409) (alist-get 'error alist))
-	  (message "dsh-bridge: %s" (alist-get 'error alist)))
-	 ;; A 404 while the session still has a known live state means the
-	 ;; route itself is missing: the installed plugin predates it.
-	 ((and (eq status 404)
-	       (memq (dsh-bridge--status-state id) '(running idle)))
-	  (message "dsh-bridge: the installed DSH plugin does not support compaction; re-run M-x dsh-bridge-install-plugin"))
-	 ((eq status 501)
-	  (message "dsh-bridge: this DSH profile has no compaction command"))
-	 ;; Nil STATUS is a transport failure (notably a client-side timeout
-	 ;; while the host keeps compacting); report it plainly rather than
-	 ;; reaching `dsh-bridge--error-message' below, which returns nil and
-	 ;; would echo "dsh-bridge: nil".
-	 ((null status)
-	  (message "dsh-bridge: request failed (is `dsh web' running?)"))
-	 (t
-	  (message "dsh-bridge: %s"
-		   (dsh-bridge--error-message nil status alist)))))))))
+      (dsh-bridge--request-async
+       "POST" "/sessions/compact"
+       (list (cons 'sessionId id))
+       (lambda (result)
+	 (let ((status (car result))
+	       (alist (cdr result)))
+	   (cond
+	    ;; A 200 is a success (including the "No compactable history yet."
+	    ;; no-op).  The host's `commands.execute' awaits the whole
+	    ;; transaction, so this response is the settle; the same settle's
+	    ;; SSE `compaction/end' frame is suppressed for a manual
+	    ;; compaction, making this the single completion message.
+	    ((eq status 200)
+	     (message "dsh-bridge: %s"
+		      (or (alist-get 'text alist)
+			  (format "session \"%s\" compacted"
+				  (dsh-bridge--session-label id)))))
+	    ;; A 409 with host text is the sole failure channel for a manual
+	    ;; compact (busy/cancelled/changed/summary/commit/persistence).
+	    ;; Echo it.
+	    ((and (eq status 409) (alist-get 'error alist))
+	     (message "dsh-bridge: %s" (alist-get 'error alist)))
+	    ;; A 404 while the session still has a known live state means the
+	    ;; route itself is missing: the installed plugin predates it.
+	    ((and (eq status 404)
+		  (memq (dsh-bridge--status-state id) '(running idle)))
+	     (message "dsh-bridge: the installed DSH plugin does not support compaction; re-run M-x dsh-bridge-install-plugin"))
+	    ((eq status 501)
+	     (message "dsh-bridge: this DSH profile has no compaction command"))
+	    ;; Nil STATUS is a transport failure; report it plainly rather
+	    ;; than reaching `dsh-bridge--error-message' below, which returns
+	    ;; nil and would echo "dsh-bridge: nil".
+	    ((null status)
+	     (message "dsh-bridge: request failed (is `dsh web' running?)"))
+	    (t
+	     (message "dsh-bridge: %s"
+		      (dsh-bridge--error-message nil status alist)))))))))))
 ;;; The sessions buffer
 
 (defun dsh-bridge--session-at-point ()

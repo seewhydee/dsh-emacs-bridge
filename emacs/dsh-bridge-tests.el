@@ -128,6 +128,27 @@ SSE listener are disabled."
       (set (make-local-variable 'url-http-response-status) status))
     buf))
 
+(defmacro dsh-bridge-test--with-http-async (retrieve &rest body)
+  "Run BODY with the asynchronous HTTP plumbing stubbed.
+RETRIEVE replaces `url-retrieve'; the plugin check and the SSE listener
+are disabled."
+  (declare (indent 1))
+  `(cl-letf (((symbol-function 'url-retrieve) ,retrieve)
+             ((symbol-function 'dsh-bridge--ensure-plugin) #'ignore)
+             ((symbol-function 'dsh-bridge-notifications-start) #'ignore))
+     ,@body))
+
+(defun dsh-bridge-test--mock-async-response (status body &optional plist)
+  "Return a `url-retrieve' stub answering with a STATUS/BODY response.
+The callback runs with the response buffer current and receives PLIST as
+its status argument, emulating the `:error' tagging `url-http' adds to an
+HTTP error such as a 409."
+  (lambda (_url callback &rest _)
+    (let ((buffer (dsh-bridge-test--mock-response status body)))
+      (with-current-buffer buffer
+        (funcall callback plist))
+      buffer)))
+
 (ert-deftest dsh-bridge-http-success ()
   "`--http' returns (nil BODY STATUS), and `--request' parses the body
 into the (STATUS . ALIST) pair — through the real `--parse-response'."
@@ -168,6 +189,77 @@ reports (nil . nil) instead of letting the signal escape."
               ((symbol-function 'dsh-bridge-notifications-start) #'ignore))
       (should (equal (dsh-bridge--request "GET" "/x" nil) (cons 401 nil)))
       (should (null dsh-bridge--bridge-status-cache)))))
+
+(ert-deftest dsh-bridge-http-async-success ()
+  "`--http-async' reports the response triple, and `--request-async' folds
+it into the same (STATUS . ALIST) pair as the synchronous wrappers."
+  (dsh-bridge-test--with-http-async
+      (dsh-bridge-test--mock-async-response 200 "{\"ok\":true}")
+    (let (seen)
+      (dsh-bridge--http-async
+       "GET" "/x" nil
+       (lambda (url-status body status)
+         (setq seen (list url-status body status))))
+      (should (equal seen (list nil "{\"ok\":true}" 200))))
+    (let (seen)
+      (dsh-bridge--request-async
+       "GET" "/x" nil (lambda (result) (setq seen result)))
+      (should (equal seen (cons 200 '((ok . t))))))))
+
+(ert-deftest dsh-bridge-http-async-http-error-is-a-response ()
+  "A 409's `:error' status plist must not shadow its readable body.
+The sync path's callback ignores the plist for the same reason."
+  (dsh-bridge-test--with-http-async
+      (dsh-bridge-test--mock-async-response
+       409 "{\"error\":\"busy\"}" '(:error (error http 409)))
+    (let (seen)
+      (dsh-bridge--request-async
+       "GET" "/x" nil (lambda (result) (setq seen result)))
+      (should (equal seen (cons 409 '((error . "busy"))))))))
+
+(ert-deftest dsh-bridge-http-async-signaled-error ()
+  "A failure to even start the request becomes an `:error' plist, and
+`--request-async' reports (nil . nil) instead of letting the signal escape."
+  (dsh-bridge-test--with-http-async (lambda (&rest _) (error "boom"))
+    (let (seen)
+      (dsh-bridge--http-async
+       "GET" "/x" nil
+       (lambda (url-status body status)
+         (setq seen (list url-status body status))))
+      (should (equal seen (list '(:error "boom") nil nil))))
+    (let (seen)
+      (dsh-bridge--request-async
+       "GET" "/x" nil (lambda (result) (setq seen result)))
+      (should (equal seen (cons nil nil))))))
+
+(ert-deftest dsh-bridge-http-async-unhandled-url ()
+  "A nil `url-retrieve' (no loader for the URL) reports an `:error'
+instead of leaving the callback to never run."
+  (dsh-bridge-test--with-http-async (lambda (&rest _) nil)
+    (let (seen)
+      (dsh-bridge--http-async
+       "GET" "/x" nil
+       (lambda (url-status body status)
+         (setq seen (list url-status body status))))
+      (should (equal seen (list '(:error "request not handled") nil nil))))))
+
+(ert-deftest dsh-bridge-http-async-401-clears-status-cache ()
+  "A 401/404 response clears the cached bridge status on the async path too."
+  (let ((dsh-bridge--bridge-status-cache 'running) (seen nil))
+    (cl-letf (((symbol-function 'url-retrieve)
+               (lambda (_url callback &rest _)
+                 (let ((buffer (generate-new-buffer " *dsh-bridge-test-http*")))
+                   (with-current-buffer buffer
+                     (funcall callback nil))
+                   buffer)))
+              ((symbol-function 'dsh-bridge--parse-response)
+               (lambda (_buffer) (cons 401 "")))
+              ((symbol-function 'dsh-bridge--ensure-plugin) #'ignore)
+              ((symbol-function 'dsh-bridge-notifications-start) #'ignore))
+      (dsh-bridge--request-async
+       "GET" "/x" nil (lambda (result) (setq seen result))))
+    (should (equal seen (cons 401 nil)))
+    (should (null dsh-bridge--bridge-status-cache))))
 
 ;;; Targeting: the effective-session rule and the pinned target
 
@@ -11782,8 +11874,10 @@ cache — the footer's attribution source."
 ;;; Compaction
 
 (ert-deftest dsh-bridge-compact-marshals-args ()
-  "Compact confirms, then POSTs the view's shown session to /sessions/compact."
-  (let ((calls nil) (msg nil)
+  "Compact confirms, then POSTs the view's shown session to /sessions/compact.
+The POST is asynchronous: the command reports nothing until the callback
+carries the host's settle."
+  (let ((calls nil) (callback nil) (msg nil)
         (dsh-bridge--session-context nil)
         (dsh-bridge--session-status nil)
         (dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t)))))
@@ -11791,16 +11885,21 @@ cache — the footer's attribution source."
               ((symbol-function 'dsh-bridge--request)
                (lambda (method path payload)
                  (push (list method path payload) calls)
-                 (if (equal method "GET")
-                     (cons 200 '((queued . 0) (steering . 0)))
-                   (cons 200 (list (cons 'ok t)
-				   (cons 'text "Compacted 2 history items (~9k tokens)."))))))
+                 (cons 200 '((queued . 0) (steering . 0)))))
+              ((symbol-function 'dsh-bridge--request-async)
+               (lambda (method path payload cb)
+                 (push (list method path payload) calls)
+                 (setq callback cb)))
               ((symbol-function 'message)
                (lambda (&rest args) (setq msg (apply #'format args)))))
       (with-temp-buffer
         (dsh-bridge-view-mode)
         (setq-local dsh-bridge--view-content-session "s1")
-        (dsh-bridge-compact-session)))
+        (dsh-bridge-compact-session))
+      (should-not msg)
+      (funcall callback
+               (cons 200 (list (cons 'ok t)
+			       (cons 'text "Compacted 2 history items (~9k tokens).")))))
     (let ((compact (cadr (assoc "/sessions/compact"
                                 (mapcar (lambda (c) (list (cadr c) c)) calls)))))
       (should compact)
@@ -11814,7 +11913,9 @@ cache — the footer's attribution source."
         (dsh-bridge--session-status '(("s1" running . 1000)))
         (dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t)))))
     (cl-letf (((symbol-function 'dsh-bridge--request)
-               (lambda (&rest _) (setq called t) (cons 200 nil))))
+               (lambda (&rest _) (setq called t) (cons 200 nil)))
+              ((symbol-function 'dsh-bridge--request-async)
+               (lambda (&rest _) (setq called t))))
       (with-temp-buffer
         (dsh-bridge-view-mode)
         (setq-local dsh-bridge--view-content-session "s1")
@@ -11828,7 +11929,9 @@ cache — the footer's attribution source."
         (dsh-bridge--pending-questions '(("s1" ("q1" . ((id . "q1"))))))
         (dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t)))))
     (cl-letf (((symbol-function 'dsh-bridge--request)
-               (lambda (&rest _) (setq called t) (cons 200 nil))))
+               (lambda (&rest _) (setq called t) (cons 200 nil)))
+              ((symbol-function 'dsh-bridge--request-async)
+               (lambda (&rest _) (setq called t))))
       (with-temp-buffer
         (dsh-bridge-view-mode)
         (setq-local dsh-bridge--view-content-session "s1")
@@ -11842,7 +11945,9 @@ cache — the footer's attribution source."
         (dsh-bridge--pending-approvals '(("s1" ("a1" . nil))))
         (dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t)))))
     (cl-letf (((symbol-function 'dsh-bridge--request)
-               (lambda (&rest _) (setq called t) (cons 200 nil))))
+               (lambda (&rest _) (setq called t) (cons 200 nil)))
+              ((symbol-function 'dsh-bridge--request-async)
+               (lambda (&rest _) (setq called t))))
       (with-temp-buffer
         (dsh-bridge-view-mode)
         (setq-local dsh-bridge--view-content-session "s1")
@@ -11858,7 +11963,9 @@ cache — the footer's attribution source."
                (lambda (method _path _payload)
                  (if (equal method "GET")
                      (cons 200 '((queued . 2) (steering . 0)))
-                   (setq called t) (cons 200 nil)))))
+                   (setq called t) (cons 200 nil))))
+              ((symbol-function 'dsh-bridge--request-async)
+               (lambda (&rest _) (setq called t))))
       (with-temp-buffer
         (dsh-bridge-view-mode)
         (setq-local dsh-bridge--view-content-session "s1")
@@ -11874,9 +11981,10 @@ cache — the footer's attribution source."
               ((symbol-function 'dsh-bridge--request)
                (lambda (method path payload)
                  (push (list method path payload) calls)
-                 (if (equal method "GET")
-                     (cons 200 '((queued . 0) (steering . 0)))
-                   (cons 200 nil))))
+                 (cons 200 '((queued . 0) (steering . 0)))))
+              ((symbol-function 'dsh-bridge--request-async)
+               (lambda (method path payload _callback)
+                 (push (list method path payload) calls)))
               ((symbol-function 'message)
                (lambda (&rest args) (setq msg (apply #'format args)))))
       (with-temp-buffer
@@ -11889,94 +11997,96 @@ cache — the footer's attribution source."
 
 (ert-deftest dsh-bridge-compact-noop-echo ()
   "A 200 no-op is final feedback, not an error."
-  (let ((msg nil)
+  (let ((callback nil) (msg nil)
         (dsh-bridge--session-status nil)
         (dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t)))))
     (cl-letf (((symbol-function 'y-or-n-p) (lambda (_prompt) t))
               ((symbol-function 'dsh-bridge--request)
-               (lambda (method _path _payload)
-                 (if (equal method "GET")
-                     (cons 200 '((queued . 0) (steering . 0)))
-                   (cons 200 (list (cons 'ok t) (cons 'text "No compactable history yet."))))))
+               (lambda (&rest _) (cons 200 '((queued . 0) (steering . 0)))))
+              ((symbol-function 'dsh-bridge--request-async)
+               (lambda (_method _path _payload cb) (setq callback cb)))
               ((symbol-function 'message)
                (lambda (&rest args) (setq msg (apply #'format args)))))
       (with-temp-buffer
         (dsh-bridge-view-mode)
         (setq-local dsh-bridge--view-content-session "s1")
-        (dsh-bridge-compact-session)))
+        (dsh-bridge-compact-session))
+      (funcall callback
+               (cons 200 (list (cons 'ok t) (cons 'text "No compactable history yet.")))))
     (should (string-match-p "No compactable history yet" msg))))
 
 (ert-deftest dsh-bridge-compact-route-errors ()
   "Route failures surface the matching message, including version skew."
   ;; A 409 carries the harness's own busy/cancelled text.
-  (let ((msg nil)
+  (let ((callback nil) (msg nil)
         (dsh-bridge--session-status nil)
         (dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t)))))
     (cl-letf (((symbol-function 'y-or-n-p) (lambda (_prompt) t))
               ((symbol-function 'dsh-bridge--request)
-               (lambda (method _path _payload)
-                 (if (equal method "GET")
-                     (cons 200 '((queued . 0) (steering . 0)))
-                   (cons 409 (list (cons 'error "a compaction is already in progress"))))))
+               (lambda (&rest _) (cons 200 '((queued . 0) (steering . 0)))))
+              ((symbol-function 'dsh-bridge--request-async)
+               (lambda (_method _path _payload cb) (setq callback cb)))
               ((symbol-function 'message)
                (lambda (&rest args) (setq msg (apply #'format args)))))
       (with-temp-buffer
         (dsh-bridge-view-mode)
         (setq-local dsh-bridge--view-content-session "s1")
-        (dsh-bridge-compact-session)))
+        (dsh-bridge-compact-session))
+      (funcall callback
+               (cons 409 (list (cons 'error "a compaction is already in progress")))))
     (should (string-match-p "already in progress" msg)))
   ;; 404 while live means the installed plugin predates the route.
-  (let ((msg nil)
+  (let ((callback nil) (msg nil)
         (dsh-bridge--session-status '(("s1" idle . 1000)))
         (dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t)))))
     (cl-letf (((symbol-function 'y-or-n-p) (lambda (_prompt) t))
               ((symbol-function 'dsh-bridge--request)
-               (lambda (method _path _payload)
-                 (if (equal method "GET")
-                     (cons 200 '((queued . 0) (steering . 0)))
-                   (cons 404 (list (cons 'error "unknown"))))))
+               (lambda (&rest _) (cons 200 '((queued . 0) (steering . 0)))))
+              ((symbol-function 'dsh-bridge--request-async)
+               (lambda (_method _path _payload cb) (setq callback cb)))
               ((symbol-function 'message)
                (lambda (&rest args) (setq msg (apply #'format args)))))
       (with-temp-buffer
         (dsh-bridge-view-mode)
         (setq-local dsh-bridge--view-content-session "s1")
-        (dsh-bridge-compact-session)))
+        (dsh-bridge-compact-session))
+      (funcall callback (cons 404 (list (cons 'error "unknown")))))
     (should (string-match-p "does not support compaction" msg)))
   ;; 501 means this profile has no compaction command.
-  (let ((msg nil)
+  (let ((callback nil) (msg nil)
         (dsh-bridge--session-status nil)
         (dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t)))))
     (cl-letf (((symbol-function 'y-or-n-p) (lambda (_prompt) t))
               ((symbol-function 'dsh-bridge--request)
-               (lambda (method _path _payload)
-                 (if (equal method "GET")
-                     (cons 200 '((queued . 0) (steering . 0)))
-                   (cons 501 (list (cons 'error "no compaction command"))))))
+               (lambda (&rest _) (cons 200 '((queued . 0) (steering . 0)))))
+              ((symbol-function 'dsh-bridge--request-async)
+               (lambda (_method _path _payload cb) (setq callback cb)))
               ((symbol-function 'message)
                (lambda (&rest args) (setq msg (apply #'format args)))))
       (with-temp-buffer
         (dsh-bridge-view-mode)
         (setq-local dsh-bridge--view-content-session "s1")
-        (dsh-bridge-compact-session)))
+        (dsh-bridge-compact-session))
+      (funcall callback (cons 501 (list (cons 'error "no compaction command")))))
     (should (string-match-p "no compaction command" msg))))
 
 (ert-deftest dsh-bridge-compact-transport-failure ()
   "A transport failure (nil status) reports plainly, never as \"dsh-bridge: nil\"."
-  (let ((msg nil)
+  (let ((callback nil) (msg nil)
         (dsh-bridge--session-status nil)
         (dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t)))))
     (cl-letf (((symbol-function 'y-or-n-p) (lambda (_prompt) t))
               ((symbol-function 'dsh-bridge--request)
-               (lambda (method _path _payload)
-                 (if (equal method "GET")
-                     (cons 200 '((queued . 0) (steering . 0)))
-                   (cons nil nil))))
+               (lambda (&rest _) (cons 200 '((queued . 0) (steering . 0)))))
+              ((symbol-function 'dsh-bridge--request-async)
+               (lambda (_method _path _payload cb) (setq callback cb)))
               ((symbol-function 'message)
                (lambda (&rest args) (setq msg (apply #'format args)))))
       (with-temp-buffer
         (dsh-bridge-view-mode)
         (setq-local dsh-bridge--view-content-session "s1")
-        (dsh-bridge-compact-session)))
+        (dsh-bridge-compact-session))
+      (funcall callback (cons nil nil)))
     (should (string-match-p "request failed" msg))
     (should-not (string-match-p "dsh-bridge: nil\\b" msg))))
 
@@ -11993,10 +12103,9 @@ always acts on the session at hand."
          '(((id . "s1") (title . "A very long session title") (live . t)))))
     (cl-letf (((symbol-function 'y-or-n-p) (lambda (p) (setq prompt p) t))
               ((symbol-function 'dsh-bridge--request)
-               (lambda (method _path _payload)
-                 (if (equal method "GET")
-                     (cons 200 '((queued . 0) (steering . 0)))
-                   (cons 200 (list (cons 'ok t) (cons 'text "done"))))))
+               (lambda (&rest _) (cons 200 '((queued . 0) (steering . 0)))))
+              ((symbol-function 'dsh-bridge--request-async)
+               (lambda (_method _path _payload _callback) nil))
               ((symbol-function 'message) #'ignore))
       (with-temp-buffer
         (dsh-bridge-view-mode)
@@ -12015,10 +12124,9 @@ always acts on the session at hand."
         (dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t)))))
     (cl-letf (((symbol-function 'y-or-n-p) (lambda (p) (setq prompt p) t))
               ((symbol-function 'dsh-bridge--request)
-               (lambda (method _path _payload)
-                 (if (equal method "GET")
-                     (cons 200 '((queued . 0) (steering . 0)))
-                   (cons 200 (list (cons 'ok t) (cons 'text "done"))))))
+               (lambda (&rest _) (cons 200 '((queued . 0) (steering . 0)))))
+              ((symbol-function 'dsh-bridge--request-async)
+               (lambda (_method _path _payload _callback) nil))
               ((symbol-function 'message) #'ignore))
       (with-temp-buffer
         (dsh-bridge-view-mode)
@@ -12038,10 +12146,10 @@ always acts on the session at hand."
               ((symbol-function 'dsh-bridge--request)
                (lambda (method path payload)
                  (push (list method path payload) calls)
-                 (if (equal method "GET")
-                     (cons 200 '((queued . 0) (steering . 0)))
-                   (cons 200 (list (cons 'ok t)
-                                   (cons 'text "Compacted 1 history items (~9 tokens)."))))))
+                 (cons 200 '((queued . 0) (steering . 0)))))
+              ((symbol-function 'dsh-bridge--request-async)
+               (lambda (method path payload _callback)
+                 (push (list method path payload) calls)))
               ((symbol-function 'message) #'ignore))
       (unwind-protect
           (with-current-buffer (get-buffer-create "*dsh-bridge-sessions*")
@@ -12066,9 +12174,10 @@ always acts on the session at hand."
               ((symbol-function 'dsh-bridge--request)
                (lambda (method path payload)
                  (push (list method path payload) calls)
-                 (if (equal method "GET")
-                     (cons 200 '((queued . 0) (steering . 0)))
-                   (cons 200 (list (cons 'ok t) (cons 'text "done"))))))
+                 (cons 200 '((queued . 0) (steering . 0)))))
+              ((symbol-function 'dsh-bridge--request-async)
+               (lambda (method path payload _callback)
+                 (push (list method path payload) calls)))
               ((symbol-function 'message) #'ignore))
       (with-temp-buffer
         (dsh-bridge-prompt-mode)
@@ -12090,9 +12199,10 @@ always acts on the session at hand."
               ((symbol-function 'dsh-bridge--request)
                (lambda (method path payload)
                  (push (list method path payload) calls)
-                 (if (equal method "GET")
-                     (cons 200 '((queued . 0) (steering . 0)))
-                   (cons 200 (list (cons 'ok t) (cons 'text "done"))))))
+                 (cons 200 '((queued . 0) (steering . 0)))))
+              ((symbol-function 'dsh-bridge--request-async)
+               (lambda (method path payload _callback)
+                 (push (list method path payload) calls)))
               ((symbol-function 'message) #'ignore))
       (with-temp-buffer
         (dsh-bridge-view-mode)
@@ -12108,7 +12218,9 @@ always acts on the session at hand."
         (dsh-bridge--focus nil)
         (dsh-bridge--dispatcher-roster nil))
     (cl-letf (((symbol-function 'dsh-bridge--request)
-               (lambda (&rest args) (setq called args) (cons 200 nil))))
+               (lambda (&rest args) (setq called args) (cons 200 nil)))
+              ((symbol-function 'dsh-bridge--request-async)
+               (lambda (&rest args) (setq called args))))
       (with-temp-buffer
         (dsh-bridge-view-mode)
         (should-error (dsh-bridge-compact-session) :type 'user-error)))
