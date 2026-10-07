@@ -661,50 +661,34 @@ as an explicitly confirmed focus."
     (should (equal dsh-bridge-pinned-target "s1"))))
 
 (ert-deftest dsh-bridge-dispatcher-stay-verbs ()
-  "The in-menu verbs are declared transient, so their keys do not close it.
-A plain suffix exits on Emacs 31.1's transient; cycling, pinning, and
-creating must stay, so the session they just made the focus can take the
-next operation.  The conditional mutators resolve through a trampoline
-that reads the previous invocation's outcome, because transient picks the
-pre-command before the command runs."
-  (let ((simple '("M-p" "M-n" "t" "u" "T" "+"))
-        (conditional '("k" "p" "G" "A" "X")))
-    ;; The layout carries the declaration: `t' for the verbs that just
-    ;; return to the menu, the trampoline for the ones that can refuse.
-    (dolist (key simple)
+  "Every in-menu verb that acts on a session is declared transient.
+A plain suffix exits on Emacs 31.1's transient, so no key that acts on
+the shown session may be left plain: the header has to show the result
+and the next key has to act on it again.  Only the keys that open
+another buffer keep the default, which exits."
+  (let ((stays '("M-p" "M-n" "t" "u" "T" "+" "k" "o" "p" "G" "A" "X"))
+        (leaves '("r" "f" "D" "l")))
+    ;; The layout carries the declaration.
+    (dolist (key stays)
       (should (eq (plist-get (cdr (transient-get-suffix 'dsh-bridge key))
                              :transient)
                   t)))
-    (dolist (key conditional)
-      (should (eq (plist-get (cdr (transient-get-suffix 'dsh-bridge key))
-                             :transient)
-                  'dsh-bridge--dispatcher-stay-p)))
-    ;; ...and transient resolves it to the intended pre-command.
+    (dolist (key leaves)
+      (should-not (plist-get (cdr (transient-get-suffix 'dsh-bridge key))
+                             :transient)))
+    ;; ...and transient resolves each stay to the stay pre-command.
     (cl-letf (((symbol-function 'dsh-bridge--dispatcher-init)
                (lambda (&optional _) 'ok))
               ((symbol-function 'dsh-bridge--ensure-plugin) #'ignore))
       (dsh-bridge)
       (let ((map (transient--make-predicate-map)))
-        (dolist (key simple)
+        (dolist (key stays)
           (should (eq (lookup-key map (vector (plist-get
                                                (cdr (transient-get-suffix
                                                      'dsh-bridge key))
                                                :command)))
-                      'transient--do-call)))
-        (dolist (key conditional)
-          (should (eq (lookup-key map (vector (plist-get
-                                               (cdr (transient-get-suffix
-                                                     'dsh-bridge key))
-                                               :command)))
-                      'dsh-bridge--dispatcher-stay-p)))))
-    (dsh-bridge--dispatcher-exit))
-  ;; The trampoline stays after a refusal and exits after a real mutation.
-  (setq dsh-bridge--focus (cons "s1" 'advisory))
-  (should-not (dsh-bridge--dispatcher-may-mutate "stopping"))
-  (should (eq (dsh-bridge--dispatcher-stay-p) 'transient--do-stay))
-  (setq dsh-bridge--focus (cons "s1" 'cycled))
-  (should (dsh-bridge--dispatcher-may-mutate "stopping"))
-  (should (eq (dsh-bridge--dispatcher-stay-p) 'transient--do-exit)))
+                      'transient--do-call)))))
+    (dsh-bridge--dispatcher-exit)))
 
 (ert-deftest dsh-bridge-dispatcher-header-is-first-line ()
   "The painted menu's first line names the focus.

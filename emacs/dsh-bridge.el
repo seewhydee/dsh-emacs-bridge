@@ -8127,12 +8127,6 @@ preserving point.  A buffer showing an earlier turn is left alone."
 ;; underlying command.  The session-state mutators additionally refuse a
 ;; focus that was only an advisory last-active guess.
 
-(defvar dsh-bridge--dispatcher-mutated nil
-  "Non-nil when the last dispatcher mutation actually ran.
-Read by `dsh-bridge--dispatcher-stay-p' to decide whether the menu should
-stay open: a refusal is a teaching moment and must stay, while a mutation
-that reached the host closes the menu like every other verb.")
-
 (defun dsh-bridge--dispatcher-header ()
   "Header string for the dispatcher: status plus the focus session.
 This has the format \"<status> <label> (i/n)\" while unpinned, where
@@ -8171,11 +8165,9 @@ fetch anything itself."
 	      (concat " " status " " label position)))))))))
 
 (defun dsh-bridge--dispatcher-may-mutate (verb)
-  "Clear the way for mutating VERB on the dispatcher's focus.
-Returns non-nil when the focus is confirmed and the caller may proceed;
-otherwise reports the refusal inside the menu and returns nil.  Records
-the outcome in `dsh-bridge--dispatcher-mutated'."
-  (setq dsh-bridge--dispatcher-mutated nil)
+  "Whether the dispatcher's focus is available for VERB to mutate.
+If the focus lacks a focus, or the focus is only a last-active guess,
+emit a message and return nil.  Otherwise, return t."
   (cond
    ((null (car dsh-bridge--focus))
     (message "dsh-bridge: no sessions — + creates one")
@@ -8184,15 +8176,7 @@ the outcome in `dsh-bridge--dispatcher-mutated'."
     (message "dsh-bridge: %s needs a confirmed target — \
 M-n/M-p to confirm, or t to pin" verb)
     nil)
-   (t
-    (setq dsh-bridge--dispatcher-mutated t))))
-
-(defun dsh-bridge--dispatcher-stay-p ()
-  "Pre-command for a mutating suffix: stay after a refusal, else exit.
-Transient resolves a suffix's `transient' slot before the command runs,
-so the decision uses the previous invocation's outcome: only a refusal
-(which leaves `dsh-bridge--dispatcher-mutated' nil) keeps the menu open."
-  (if dsh-bridge--dispatcher-mutated 'transient--do-exit 'transient--do-stay))
+   (t t)))
 
 (defun dsh-bridge--dispatcher-cycle (&optional backward)
   "Move the dispatcher's focus one session through its cycle set.
@@ -8346,6 +8330,9 @@ M-p/M-n walk).  The session-state mutators (k, o, p, G, A, X) refuse an
 advisory focus: the guess is not a mutation target until you confirm it
 by cycling or pinning.
 
+The menu stays open after keys that operate on the shown session.  Only
+keys that open another buffer (r, f, D, l), and q, leave the menu.
+
 With a prefix argument, re-fetch the session roster before painting,
 instead of trusting the cached one."
   ;; We draw the focus header by making it the first group's
@@ -8358,32 +8345,41 @@ instead of trusting the cached one."
 			  "\n\n"
 			  (propertize "Send and Receive"
 				      'face 'transient-heading)))
-   ("r" dsh-bridge--dispatcher-prompt :description "reply/open prompt buffer")
-   ("f" dsh-bridge--dispatcher-fetch :description "fetch latest turn")]
+   ("r" dsh-bridge--dispatcher-prompt
+    :description "reply/open prompt buffer")
+   ("f" dsh-bridge--dispatcher-fetch
+    :description "fetch latest turn")]
   ["Plan and Goal"
-   ("p" dsh-bridge--dispatcher-plan :description "toggle plan mode"
-    :transient dsh-bridge--dispatcher-stay-p)
-   ("G" dsh-bridge--dispatcher-goal :description "set or edit the goal"
-    :transient dsh-bridge--dispatcher-stay-p)
-   ("A" dsh-bridge--dispatcher-toggle-goal :description "pause/resume goal"
-    :transient dsh-bridge--dispatcher-stay-p)
-   ("X" dsh-bridge--dispatcher-clear-goal :description "clear the goal"
-    :transient dsh-bridge--dispatcher-stay-p)]
+   ("p" dsh-bridge--dispatcher-plan
+    :description "toggle plan mode" :transient t)
+   ("G" dsh-bridge--dispatcher-goal
+    :description "set or edit the goal" :transient t)
+   ("A" dsh-bridge--dispatcher-toggle-goal
+    :description "pause/resume goal" :transient t)
+   ("X" dsh-bridge--dispatcher-clear-goal
+    :description "clear the goal" :transient t)]
   ["Sessions"
-   ("D" dsh-bridge--dispatcher-describe :description "describe session")
-   ("t" dsh-bridge--dispatcher-pin :description "pin this session" :transient t)
-   ("u" dsh-bridge--dispatcher-unpin :description "unpin" :transient t)
-   ("T" dsh-bridge--dispatcher-pin-by-title :description "pin by title" :transient t)
-   ("k" dsh-bridge--dispatcher-stop :description "stop running session"
-    :transient dsh-bridge--dispatcher-stay-p)
-   ("o" dsh-bridge--dispatcher-compact :description "compact context"
-    :transient dsh-bridge--dispatcher-stay-p)
-   ("l" dsh-bridge-list-sessions :description "list sessions")
-   ("+" dsh-bridge--dispatcher-create :description "create and pin session"
-    :transient t)]
+   ("D" dsh-bridge--dispatcher-describe
+    :description "describe session")
+   ("t" dsh-bridge--dispatcher-pin
+    :description "pin this session" :transient t)
+   ("u" dsh-bridge--dispatcher-unpin
+    :description "unpin" :transient t)
+   ("T" dsh-bridge--dispatcher-pin-by-title
+    :description "pin by title" :transient t)
+   ("k" dsh-bridge--dispatcher-stop
+    :description "stop running session" :transient t)
+   ("o" dsh-bridge--dispatcher-compact
+    :description "compact context" :transient t)
+   ("l" dsh-bridge-list-sessions
+    :description "list sessions")
+   ("+" dsh-bridge--dispatcher-create
+    :description "create and pin session" :transient t)]
   ["Cycle and Quit"
-   ("M-p" dsh-bridge--dispatcher-prev :description "target older session" :transient t)
-   ("M-n" dsh-bridge--dispatcher-next :description "target newer session" :transient t)
+   ("M-p" dsh-bridge--dispatcher-prev
+    :description "target older session" :transient t)
+   ("M-n" dsh-bridge--dispatcher-next
+    :description "target newer session" :transient t)
    ("q" transient-quit-one :description "quit")]
   (interactive "P")
   (dsh-bridge--dispatcher-init arg)
