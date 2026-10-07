@@ -2858,10 +2858,16 @@ KEY is the entry's `(activity SEQ ORD)' identity."
 	(dsh-bridge--view-activity-line entry)))
 
 (defun dsh-bridge--view-segment-item (segment)
-  "The render item of reply SEGMENT: (KEY STEP TEXT)."
-  (list (dsh-bridge--view-segment-key segment)
-	(alist-get 'step segment)
-	(or (alist-get 'text segment) "")))
+  "The render item of reply SEGMENT: (KEY STEP TEXT).
+TEXT drops any surrounding padding produced by the model.  The host
+serves the text verbatim, and it can end with one or two newlines
+depending on the model; this function normalizes it."
+  (let ((text (string-trim-right (or (alist-get 'text segment) ""))))
+    (when (string-match "\\`\\(?:[ \t\r]*\n\\)+" text)
+      (setq text (substring text (match-end 0))))
+    (list (dsh-bridge--view-segment-key segment)
+	  (alist-get 'step segment)
+	  text)))
 
 (defun dsh-bridge--view-segment-item-p (item)
   "Whether render ITEM is a reply segment.

@@ -2859,6 +2859,65 @@ either: dropping one would vanish reply text."
     (should (equal (dsh-bridge--view-item-separator act-a act-b) "\n\n"))
     (should (equal (dsh-bridge--view-item-separator nil seg-a) ""))))
 
+(ert-deftest dsh-bridge-view-segment-padding-normalized ()
+  "Model padding never opens extra blank lines around a segment.
+The host serves committed reply text verbatim, and a real model commonly
+ends a step with a newline or a whole blank line; joined as-is, that
+padding would stack on the separator's own newlines.  Exactly the
+separator's spacing must survive regardless, while the first content
+line's indentation stays."
+  (dolist (pad '("\n" "\n\n" "\n\n\n" "  \n\n" "\r\n\r\n"))
+    (let ((turn (dsh-bridge-test--view-turn
+                 1 1000000
+                 (list (dsh-bridge-test--view-segment (concat "head" pad) 1000100 1)
+                       (dsh-bridge-test--view-segment (concat pad "tail") 1000200 2))
+                 1000300)))
+      (with-temp-buffer
+        (dsh-bridge-view-mode)
+        (should (equal (dsh-bridge-test--view-turn-body turn)
+                       "head\n\n---\ntail")))))
+  ;; Indentation of the first content line is content, not padding.
+  (with-temp-buffer
+    (dsh-bridge-view-mode)
+    (should (equal (dsh-bridge-test--view-turn-body
+                    (dsh-bridge-test--view-turn
+                     1 1000000
+                     (list (dsh-bridge-test--view-segment "    code\n" 1000100 1))
+                     1000300))
+                   "    code")))
+  ;; A trailing blank line no longer widens the gap before an open turn's
+  ;; terminal marker either.
+  (with-temp-buffer
+    (dsh-bridge-view-mode)
+    (should (equal (dsh-bridge-test--view-turn-render
+                    (dsh-bridge-test--view-turn
+                     1 1000000
+                     (list (dsh-bridge-test--view-segment "growing\n\n" 1000100 1))))
+                   (concat "growing\n\n" dsh-bridge--view-running-marker)))))
+
+(ert-deftest dsh-bridge-view-fill-splices-padded-segments ()
+  "A padded appended segment splices to exactly the full render.
+The recorded body length must stay in lockstep with the normalized text,
+so the saved prefix is untouched and the delta lands at the body end."
+  (let* ((seg1 (dsh-bridge-test--view-segment "first\n\n" 7001000 1))
+         (seg2 (dsh-bridge-test--view-segment "second\n\n" 7002000 2))
+         (open (dsh-bridge-test--view-turn 7 7000000 (list seg1)))
+         (two (dsh-bridge-test--view-turn 7 7000000 (list seg1 seg2)))
+         (dsh-bridge--turns-cache (dsh-bridge-test--view-cache (list two open))))
+    (with-temp-buffer
+      (dsh-bridge-view-mode)
+      (setq-local dsh-bridge--view-follow t)
+      (dsh-bridge--view-fill "s1" open nil t)
+      (should (equal (buffer-string) (dsh-bridge-test--view-turn-render open "s1")))
+      (goto-char (point-max))
+      (let ((probe (copy-marker 3)))
+        (dsh-bridge--view-fill "s1" two nil t t)
+        (should (equal (buffer-string) (dsh-bridge-test--view-turn-render two "s1")))
+        (should (equal (point) (point-max)))
+        ;; The marker survives, so this was a splice, not a full rebuild.
+        (should (equal (marker-position probe) 3))
+        (set-marker probe nil)))))
+
 (ert-deftest dsh-bridge-view-activity-line-grammar ()
   "Activity lines carry their kind's prefix, face, and identity property."
   (let ((thinking (dsh-bridge--view-activity-line
