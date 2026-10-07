@@ -440,8 +440,7 @@ guess; the focus would then name a session no key can legally act on, and
 
 (ert-deftest dsh-bridge-dispatcher-focus-falls-back-outside-menu ()
   "Outside a menu, the focus accessors fall back on the buffer's session.
-This keeps a suffix command usable in isolation, and keeps direct callers
-on `dsh-bridge--effective-session'."
+This keeps the session verbs usable in isolation."
   (let ((dsh-bridge--focus nil)
         (dsh-bridge-pinned-target nil))
     (with-temp-buffer
@@ -577,8 +576,8 @@ The snapshot is newest-first, so \"s1\" is the newest and \"s3\" the oldest."
     (setq dsh-bridge--focus (cons "s1" 'pinned))
     (dsh-bridge--dispatcher-next)
     (should (equal (car dsh-bridge--focus) "s1"))
-    ;; A one-session set cycles nowhere, but still confirms the guess: the
-    ;; refusal message points at M-n/M-p, so they must have an effect.
+    ;; A one-session set cycles nowhere, but still confirms the guess, so
+    ;; the cycle keys keep their confirming effect.
     (setq dsh-bridge--focus-cycle '("s1"))
     (setq dsh-bridge--focus (cons "s1" 'advisory))
     (dsh-bridge--dispatcher-next)
@@ -613,30 +612,41 @@ second-newest, never on the oldest."
 
 (ert-deftest dsh-bridge-dispatcher-mutators-refuse-advisory ()
   "A session-state mutator refuses an advisory focus and acts otherwise.
-The refusal names the verb and points at the keys that confirm or pin."
+The refusal is a `user-error' telling the user to confirm or pin, and
+the guess never reaches the host."
   (let ((dsh-bridge--sessions-cache '(((id . "s1") (title . "T1") (live . t))))
-        (called nil)
-        (message-log nil))
-    (cl-letf (((symbol-function 'dsh-bridge-stop-session)
-               (lambda (&rest args) (push args called)))
-              ((symbol-function 'message)
-               (lambda (fmt &rest args)
-                 (setq message-log (apply #'format fmt args)))))
-      ;; Advisory: refuse, and do not reach the command.
-      (setq dsh-bridge--focus (cons "s1" 'advisory))
-      (dsh-bridge--dispatcher-stop)
-      (should (null called))
-      (should (string-match-p "needs a confirmed target" message-log))
-      (should (string-match-p "stopping" message-log))
+        (dsh-bridge--session-status '(("s1" running . 1000)))
+        (dsh-bridge--dispatcher-roster 'ok)
+        (calls nil))
+    (cl-letf (((symbol-function 'y-or-n-p) (lambda (_prompt) t))
+              ((symbol-function 'dsh-bridge--request)
+               (lambda (method path payload)
+                 (push (list method path payload) calls)
+                 (cons 200 (list (cons 'accepted t) (cons 'running t))))))
+      ;; Advisory: refuse, and do not reach the host.
+      (let ((dsh-bridge--focus (cons "s1" 'advisory)))
+        (let ((err (condition-case e
+                       (progn (dsh-bridge-stop-session) nil)
+                     (user-error (error-message-string e)))))
+          (should (string-match-p "unconfirmed" err))
+          (should (string-match-p "confirm or pin" err))
+          (should (string-match-p "pin it first" err)))
+        (should (null calls)))
       ;; Confirmed by cycling: proceed, addressed to the focus.
-      (setq dsh-bridge--focus (cons "s1" 'cycled))
-      (dsh-bridge--dispatcher-stop)
-      (should (equal called '((nil "s1"))))
+      (let ((dsh-bridge--focus (cons "s1" 'cycled)))
+        (dsh-bridge-stop-session)
+        (let ((stop (cadr (assoc "/sessions/stop"
+                                 (mapcar (lambda (c) (list (cadr c) c)) calls)))))
+          (should stop)
+          (should (equal (cdr (assoc 'sessionId (caddr stop))) "s1"))))
       ;; Pinned: proceed too.
-      (setq called nil)
-      (setq dsh-bridge--focus (cons "s1" 'pinned))
-      (dsh-bridge--dispatcher-stop)
-      (should (equal called '((nil "s1")))))))
+      (setq calls nil)
+      (let ((dsh-bridge--focus (cons "s1" 'pinned)))
+        (dsh-bridge-stop-session)
+        (let ((stop (cadr (assoc "/sessions/stop"
+                                 (mapcar (lambda (c) (list (cadr c) c)) calls)))))
+          (should stop)
+          (should (equal (cdr (assoc 'sessionId (caddr stop))) "s1")))))))
 
 (ert-deftest dsh-bridge-dispatcher-verbs-address-the-focus ()
   "Reads address the displayed focus, not the invoking buffer.
@@ -644,24 +654,32 @@ A menu opened in session Y's buffer while focused on X reads X."
   (let ((dsh-bridge--sessions-cache
          '(((id . "s1") (title . "T1") (live . t))
            ((id . "s2") (title . "T2") (live . t))))
-        (prompted nil) (fetched nil) (described nil))
+        (dsh-bridge--focus (cons "s2" 'cycled))
+        (dsh-bridge--dispatcher-roster 'ok)
+        (prompted nil) (fetch-path nil) (describe-path nil))
     (cl-letf (((symbol-function 'dsh-bridge--prompt-buffer)
                (lambda (id) (setq prompted id) (current-buffer)))
               ((symbol-function 'pop-to-buffer) #'ignore)
-              ((symbol-function 'dsh-bridge-fetch)
-               (lambda (&optional id _) (setq fetched id)))
-              ((symbol-function 'dsh-bridge-describe-session)
-               (lambda (&optional id) (setq described id))))
-      (setq dsh-bridge--focus (cons "s2" 'cycled))
+              ((symbol-function 'dsh-bridge--http)
+               (lambda (_method path _body)
+                 (setq fetch-path path)
+                 (list nil "{\"ok\":true}" 200)))
+              ((symbol-function 'dsh-bridge--view-open) (lambda (&rest _) nil))
+              ((symbol-function 'dsh-bridge--request)
+               (lambda (_method path _payload)
+                 (setq describe-path path)
+                 (cons 200 (list (cons 'sessionId (car dsh-bridge--focus))))))
+              ((symbol-function 'dsh-bridge--plan-goal-store) (lambda (&rest _) nil))
+              ((symbol-function 'dsh-bridge--describe-insert) (lambda (&rest _) nil)))
       (with-temp-buffer
         (dsh-bridge-view-mode)
         (setq-local dsh-bridge--view-content-session "s1")
-        (dsh-bridge--dispatcher-prompt)
-        (dsh-bridge--dispatcher-fetch)
-        (dsh-bridge--dispatcher-describe))
+        (dsh-bridge-prompt)
+        (dsh-bridge-fetch)
+        (call-interactively 'dsh-bridge-describe-session))
       (should (equal prompted "s2"))
-      (should (equal fetched "s2"))
-      (should (equal described "s2")))))
+      (should (string-match-p "sessionId=s2" fetch-path))
+      (should (string-match-p "sessionId=s2" describe-path)))))
 
 (ert-deftest dsh-bridge-dispatcher-pin-and-unpin-write-the-focus ()
   "Pin and unpin re-point the focus record so the header follows.
@@ -776,25 +794,147 @@ paints and only a render-level check catches the line going missing."
                               (line-beginning-position) (line-end-position))
                              "Send and Receive")))
             ;; ...and the header does not displace the group's suffixes.
-            (should (string-match-p "reply/open prompt buffer"
+            (should (string-match-p "open prompt buffer"
                                     (buffer-string)))))
       ;; Tear the transient down before the next prefix test; leaving it
       ;; active makes the next `(dsh-bridge)' re-enter a dead buffer.
       (ignore-errors (transient--pre-exit))
       (dsh-bridge--dispatcher-exit))))
 
-(ert-deftest dsh-bridge-dispatcher-empty-roster-message ()
-  "A mutator with no session at all names the way to create one.
-It must not fall through to the underlying command's `user-error', which
-would leave the menu with a bare error instead of advice."
+(ert-deftest dsh-bridge-confirmed-session-no-focus-refuses ()
+  "A menu with no focus and a direct call with no target both signal.
+The menu case reports the empty roster."
   (let ((dsh-bridge--sessions-cache nil)
         (dsh-bridge--focus nil)
-        (message-log nil))
-    (cl-letf (((symbol-function 'message)
-               (lambda (fmt &rest args) (setq message-log (apply #'format fmt args)))))
-      (should-not (dsh-bridge--dispatcher-may-mutate "stopping")))
-    (should (string-match-p "no sessions" message-log))
-    (should (string-match-p "\\+" message-log))))
+        (dsh-bridge-pinned-target nil))
+    (with-temp-buffer
+      (let ((dsh-bridge--dispatcher-roster 'empty))
+        (let ((err (condition-case e
+                       (progn (dsh-bridge--confirmed-session) nil)
+                     (user-error (error-message-string e)))))
+          (should (string-match-p "no sessions" err))
+          (should (string-match-p "available" err))))
+      ;; No menu open: fall through to the REQUIRE form, which signals.
+      (let ((dsh-bridge--dispatcher-roster nil))
+        (should-error (dsh-bridge--confirmed-session) :type 'user-error)))))
+
+(ert-deftest dsh-bridge-confirmed-session-refuses-advisory ()
+  "The confirmed-session resolver refuses an advisory focus.
+The `user-error' tells the user to confirm or pin the guess."
+  (let ((dsh-bridge--dispatcher-roster 'ok)
+        (dsh-bridge--focus (cons "s1" 'advisory)))
+    (let ((err (condition-case e
+                   (progn (dsh-bridge--confirmed-session) nil)
+                 (user-error (error-message-string e)))))
+      (should (string-match-p "unconfirmed" err))
+      (should (string-match-p "confirm or pin" err))
+      (should (string-match-p "pin it first" err)))))
+
+(ert-deftest dsh-bridge-confirmed-session-requires-outside-menu ()
+  "Outside a menu the resolver falls back on the REQUIRE effective session.
+With no buffer session and no pin it signals a `user-error'; with a pin,
+it returns the pin."
+  (let ((dsh-bridge--focus nil)
+        (dsh-bridge--dispatcher-roster nil))
+    (with-temp-buffer
+      (let ((dsh-bridge-pinned-target nil))
+        (should-error (dsh-bridge--confirmed-session) :type 'user-error)))
+    (with-temp-buffer
+      (let ((dsh-bridge-pinned-target "p1"))
+        (should (equal (dsh-bridge--confirmed-session) "p1"))))))
+
+(ert-deftest dsh-bridge-prompt-addresses-the-focus ()
+  "The prompt verb opens a prompt for the menu focus, not the buffer.
+This guards the `r' drift: with a view bound to s1 and the focus s2, the
+prompt is prepared for s2 even when that focus is only advisory."
+  (let ((dsh-bridge--sessions-cache
+         '(((id . "s1") (title . "T1") (live . t))
+           ((id . "s2") (title . "T2") (live . t))))
+        (dsh-bridge--focus (cons "s2" 'advisory))
+        (prompted nil))
+    (cl-letf (((symbol-function 'dsh-bridge--prompt-buffer)
+               (lambda (id) (setq prompted id) (current-buffer)))
+              ((symbol-function 'pop-to-buffer) #'ignore))
+      (with-temp-buffer
+        (dsh-bridge-view-mode)
+        (setq-local dsh-bridge--view-content-session "s1")
+        (dsh-bridge-prompt))
+      (should (equal prompted "s2")))))
+
+(ert-deftest dsh-bridge-header-indicator-passes-clicked-session ()
+  "A header click passes the clicked window's session, not the menu focus.
+With the menu focused elsewhere, a plan/goal cell click still invokes the
+command with the clicked window's own session."
+  (let ((buffer (generate-new-buffer " *dsh-bridge-header*"))
+        (outside (current-buffer))
+        (invoked-session nil))
+    (unwind-protect
+        (progn
+          (set-window-buffer (selected-window) buffer)
+          (cl-letf (((symbol-function 'dsh-bridge--effective-session)
+                     (lambda (&rest _) "s1"))
+                    ((symbol-function 'dsh-bridge-toggle-plan-mode)
+                     (lambda (_arg session) (setq invoked-session session)))
+                    ((symbol-function 'dsh-bridge-toggle-goal)
+                     (lambda (session) (setq invoked-session session)))
+                    ((symbol-function 'message) (lambda (&rest _) nil)))
+            (let ((dsh-bridge--focus (cons "s2" 'pinned))
+                  (dsh-bridge--dispatcher-roster 'ok))
+              (dsh-bridge--header-plan-at-mouse
+               (list 'mouse-1
+                     (list (selected-window) 'header-line '(0 . 0) 0
+                           (cons (propertize "plan"
+                                             'dsh-bridge-session-id "s1")
+                                 0))))
+              (should (equal invoked-session "s1"))
+              (setq invoked-session nil)
+              (dsh-bridge--header-goal-at-mouse
+               (list 'mouse-1
+                     (list (selected-window) 'header-line '(0 . 0) 0
+                           (cons (propertize "active: ship it"
+                                             'dsh-bridge-session-id "s1")
+                                 0))))
+              (should (equal invoked-session "s1")))))
+      (set-window-buffer (selected-window) outside)
+      (kill-buffer buffer))))
+
+(ert-deftest dsh-bridge-prompt-stop-or-erase-passes-buffer-session ()
+  "The prompt stop/erase path passes the buffer's own session to stop.
+Even with a menu focused elsewhere, stopping from a prompt buffer acts on
+the buffer's bound session."
+  (let ((dsh-bridge--focus (cons "s2" 'pinned))
+        (dsh-bridge--dispatcher-roster 'ok)
+        (dsh-bridge--session-status '(("s1" running . 1000)))
+        (stopped-session nil))
+    (cl-letf (((symbol-function 'dsh-bridge--effective-session)
+               (lambda (&rest _) "s1"))
+              ((symbol-function 'dsh-bridge-stop-session)
+               (lambda (_force session) (setq stopped-session session)))
+              ((symbol-function 'dsh-bridge-erase-prompt) (lambda (&rest _) nil)))
+      (with-temp-buffer
+        (dsh-bridge-prompt-mode)
+        (setq-local dsh-bridge--prompt-session "s1")
+        (dsh-bridge-prompt-stop-or-erase nil))
+      (should (equal stopped-session "s1")))))
+
+(ert-deftest dsh-bridge-revert-output-passes-shown-session ()
+  "`g' in a view refetches the shown session, never the menu focus.
+This is the first coverage of the view revert path: it verifies both the
+revert function wiring and the session it passes."
+  (let ((dsh-bridge--focus (cons "s2" 'pinned))
+        (dsh-bridge--dispatcher-roster 'ok)
+        (fetched nil))
+    (cl-letf (((symbol-function 'dsh-bridge-fetch)
+               (lambda (session) (setq fetched session))))
+      (with-temp-buffer
+        (dsh-bridge-view-mode)
+        (setq-local dsh-bridge--view-content-session "s1")
+        ;; `dsh-bridge--view-open' sets this; mirror it here so the revert
+        ;; wiring is asserted without a full open.
+        (setq-local revert-buffer-function #'dsh-bridge--revert-output)
+        (should (eq revert-buffer-function #'dsh-bridge--revert-output))
+        (dsh-bridge--revert-output))
+      (should (equal fetched "s1")))))
 
 (ert-deftest dsh-bridge-dispatcher-advisory-guess-includes-cold ()
   "A roster whose sessions are all cold still names an advisory focus.
@@ -1419,7 +1559,7 @@ is discarded rather than restored by M-n."
         (dsh-bridge--session-status '(("s1" running . 1000)))
         (dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t)))))
     (cl-letf (((symbol-function 'dsh-bridge-stop-session)
-               (lambda (&optional force) (setq called force))))
+               (lambda (force _session) (setq called force))))
       (with-temp-buffer
         (dsh-bridge-prompt-mode)
         (setq-local dsh-bridge--prompt-session "s1")
@@ -1464,7 +1604,7 @@ is discarded rather than restored by M-n."
         (dsh-bridge--session-status nil)
         (dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t)))))
     (cl-letf (((symbol-function 'dsh-bridge-stop-session)
-               (lambda (&optional force) (setq called force))))
+               (lambda (force _session) (setq called force))))
       (with-temp-buffer
         (dsh-bridge-prompt-mode)
         (setq-local dsh-bridge--prompt-session "s1")
@@ -1724,7 +1864,7 @@ M-p/M-n — and no compose/fetch/targeting verbs."
               #'dsh-bridge-view-next-reply))
   ;; The view map's own letters must not pick up the dispatcher's same-key
   ;; verbs.
-  (dolist (spec '(("f" . dsh-bridge--dispatcher-fetch)
+  (dolist (spec '(("f" . dsh-bridge-fetch)
                   ("t" . dsh-bridge--dispatcher-pin)
                   ("u" . dsh-bridge--dispatcher-unpin)))
     (should-not (eq (lookup-key dsh-bridge-view-mode-map (kbd (car spec)))
@@ -4028,9 +4168,11 @@ read still happens, since it words the confirmation."
       (should (equal (car stop) "POST"))
       (should (equal (cdr (assoc 'sessionId (caddr stop))) "s1")))))
 
-(ert-deftest dsh-bridge-stop-session-no-target-noop ()
+(ert-deftest dsh-bridge-stop-session-no-target-refuses ()
   "With no session at hand the command refuses and sends nothing."
-  (let ((called nil) (dsh-bridge-pinned-target nil))
+  (let ((called nil) (dsh-bridge-pinned-target nil)
+        (dsh-bridge--focus nil)
+        (dsh-bridge--dispatcher-roster nil))
     (cl-letf (((symbol-function 'dsh-bridge--request)
                (lambda (&rest args) (setq called args) (cons 200 nil))))
       (with-temp-buffer
@@ -7178,10 +7320,10 @@ Both commands run in the clicked window's buffer."
           (cl-letf (((symbol-function 'dsh-bridge--effective-session)
                      (lambda (&rest _) "s1"))
                     ((symbol-function 'dsh-bridge-toggle-plan-mode)
-                     (lambda (arg)
+                     (lambda (arg _session)
                        (setq plan-arg arg plan-buffer (current-buffer))))
                     ((symbol-function 'dsh-bridge-toggle-goal)
-                     (lambda () (setq goal-buffer (current-buffer)))))
+                     (lambda (_session) (setq goal-buffer (current-buffer)))))
             ;; A real header-line click carries the cell string as
             ;; (STRING . STR-POS) and names no buffer point.
             (dsh-bridge--header-plan-at-mouse
@@ -10233,6 +10375,8 @@ rows; one with stats alone renders the Stats section and no other."
                               (json-encode (nth 2 (car calls)))))))
   ;; A missing plan section is refused, and nothing is sent.
   (let ((dsh-bridge--session-plan nil)
+        (dsh-bridge--focus nil)
+        (dsh-bridge--dispatcher-roster nil)
         (posted nil))
     (cl-letf (((symbol-function 'dsh-bridge--effective-session) (lambda (&rest _) "s1"))
               ((symbol-function 'dsh-bridge--plan-goal-refresh) (lambda (&rest _) nil))
@@ -10242,6 +10386,8 @@ rows; one with stats alone renders the Stats section and no other."
       (should-not posted)))
   ;; A failed fresh read refuses rather than toggling the stale cache.
   (let ((dsh-bridge--session-plan '(("s1" (active . t))))
+        (dsh-bridge--focus nil)
+        (dsh-bridge--dispatcher-roster nil)
         (posted nil))
     (cl-letf (((symbol-function 'dsh-bridge--effective-session) (lambda (&rest _) "s1"))
               ((symbol-function 'dsh-bridge--request)
@@ -10302,6 +10448,8 @@ rows; one with stats alone renders the Stats section and no other."
         (should (equal (cdr (assq 'objective (nth 2 (car calls)))) "new"))))
     ;; A failed fresh read refuses rather than editing the stale goal.
     (let ((dsh-bridge--session-goal (list (cons "s1" section)))
+          (dsh-bridge--focus nil)
+          (dsh-bridge--dispatcher-roster nil)
           (posted nil))
       (cl-letf (((symbol-function 'dsh-bridge--effective-session) (lambda (&rest _) "s1"))
                 ((symbol-function 'dsh-bridge--request)
@@ -10361,7 +10509,9 @@ refuses earlier, since it will not offer to clear a goal that is not there."
                                            (code . "GOAL_NOT_FOUND"))))))
     (should-error (dsh-bridge-pause-goal) :type 'user-error)
     (should-error (dsh-bridge-resume-goal) :type 'user-error))
-  (let ((posted nil))
+  (let ((posted nil)
+        (dsh-bridge--focus nil)
+        (dsh-bridge--dispatcher-roster nil))
     (cl-letf (((symbol-function 'dsh-bridge--effective-session) (lambda (&rest _) "s1"))
               ((symbol-function 'dsh-bridge--session-goal) (lambda (_id) nil))
               ((symbol-function 'dsh-bridge--request)
@@ -10632,10 +10782,8 @@ one must not disturb `l'/`r' navigation."
               #'dsh-bridge-describe-session))
   (should (eq (lookup-key dsh-bridge-sessions-mode-map (kbd "D"))
               #'dsh-bridge-describe-session))
-  ;; The dispatcher's D acts on the displayed focus, so it goes through the
-  ;; focus-bound wrapper rather than the bare command.
   (should (eq (plist-get (cdr (transient-get-suffix 'dsh-bridge "D")) :command)
-              #'dsh-bridge--dispatcher-describe))
+              #'dsh-bridge-describe-session))
   (should-not (eq (lookup-key dsh-bridge-prompt-mode-map (kbd "D"))
                   #'dsh-bridge-describe-session)))
 
@@ -11956,7 +12104,9 @@ always acts on the session at hand."
 
 (ert-deftest dsh-bridge-compact-no-target-refuses ()
   "With no session at hand the command refuses and sends nothing."
-  (let ((called nil) (dsh-bridge-pinned-target nil))
+  (let ((called nil) (dsh-bridge-pinned-target nil)
+        (dsh-bridge--focus nil)
+        (dsh-bridge--dispatcher-roster nil))
     (cl-letf (((symbol-function 'dsh-bridge--request)
                (lambda (&rest args) (setq called args) (cons 200 nil))))
       (with-temp-buffer

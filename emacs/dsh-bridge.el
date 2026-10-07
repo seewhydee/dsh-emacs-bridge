@@ -1650,9 +1650,9 @@ If NODEFAULT is non-nil, skip the pinned-target fallback.
 
 If REQUIRE is non-nil, signal a `user-error' instead of returning nil.
 
-This is the resolution path for direct, non-menu callers.  The open
-dispatcher resolves through its own focus record instead; see
-`dsh-bridge--focus-session'."
+This function serves as the resolution path for helpers and internal
+callers.  User-facing session verbs consult the menu focus first, and
+fall back here if no menu is open."
   (let ((session (dsh-bridge--buffer-session buffer)))
     (unless (or session nodefault)
       (setq session dsh-bridge-pinned-target))
@@ -1662,15 +1662,40 @@ dispatcher resolves through its own focus record instead; see
 
 ;;; Dispatcher's focus management
 
-;; The focus is the session the open `dsh-bridge' menu acts on.  It is
-;; scoped to the transient dispatcher only; non-dispatcher commands
-;; never see it, and resolve through `dsh-bridge--effective-session'.
+;; The focus is the session presented by the open `dsh-bridge' menu as
+;; the target.  Session mutators use `dsh-bridge--confirmed-session'
+;; to avoid targeting a session that is just an advisory guess.
+;; Helpers and internal callers use `dsh-bridge--effective-session',
+;; which ignores the focus.
 
 (defun dsh-bridge--focus-session ()
-  "The session id the open dispatcher acts on, or nil.
-Falls back on the current buffer's effective session if no menu is open."
+  "Return the DSH session for a command to act on, or nil.
+This is the open dispatcher's focus, if any, else the current buffer's
+effective session.  Unlike `dsh-bridge--confirmed-session', advisory
+sessions (guesses based on which session was last active) are allowed."
   (or (car dsh-bridge--focus)
       (dsh-bridge--effective-session)))
+
+(defun dsh-bridge--confirmed-session ()
+  "Return the session a session-mutating command may act on.
+This is the open dispatcher's focus when its provenance is `pinned',
+`buffer', or `cycled'.  A focus that is only an `advisory' last-active
+guess, or a menu whose focus is nil (naming no session at all), signals
+a `user-error'.  With no menu open, fall back on the REQUIRE form of
+`dsh-bridge--effective-session'.
+
+This function is used by commands that alter the properties of sessions
+and must not target the wrong session accidentally."
+  (let ((focus (car-safe dsh-bridge--focus)))
+    (cond
+     ((null focus)
+      (if dsh-bridge--dispatcher-roster
+	  (user-error "dsh-bridge: no sessions available")
+	(dsh-bridge--effective-session nil nil t)))
+     ((eq (cdr dsh-bridge--focus) 'advisory)
+      (user-error "dsh-bridge: target session is an unconfirmed guess; \
+confirm or pin it first"))
+     (t focus))))
 
 (defun dsh-bridge--dispatcher-init (force-fetch)
   "Initialize the state for the DSH bridge transient dispatcher.
@@ -3871,7 +3896,7 @@ away from a link it keeps its usual behavior.
 
 (defun dsh-bridge--revert-output (&rest _)
   "Re-fetch the newest turn into the current DSH-View buffer."
-  (dsh-bridge-fetch))
+  (dsh-bridge-fetch dsh-bridge--view-content-session))
 
 ;;; DSH-View history navigation (M-p/M-n)
 
@@ -4337,7 +4362,7 @@ The session is the effective session of the current buffer; with a
 prefix argument, fetch from a chosen session for this call only.
 If SAME-WINDOW is non-nil, prefer to show the buffer in the same window."
   (interactive (list (dsh-bridge--read-session-override "Fetch from session: ")))
-  (let ((target (or session-id (dsh-bridge--effective-session))))
+  (let ((target (or session-id (dsh-bridge--focus-session))))
     (pcase-let ((`(,status ,body ,http-status)
 		 (dsh-bridge--http "GET" (dsh-bridge--path "/turns" target) nil)))
       (let* ((alist (dsh-bridge--parse-json-body body))
@@ -5964,7 +5989,7 @@ session, ask for confirmation before erasing it to start a fresh prompt.
 
 See `dsh-bridge-prompt-mode' for more information."
   (interactive)
-  (pop-to-buffer (dsh-bridge--prompt-buffer (dsh-bridge--effective-session))))
+  (pop-to-buffer (dsh-bridge--prompt-buffer (dsh-bridge--focus-session))))
 
 (defun dsh-bridge-reply ()
   "Reply to the session whose reply is shown in the current DSH-View buffer.
@@ -6187,7 +6212,7 @@ disables.  The direction is read fresh from `/session', never from the
 advisory cache.	 A session whose preset mounts no plan mode is reported
 and nothing is sent."
   (interactive "P")
-  (let* ((session (or session (dsh-bridge--effective-session nil nil t)))
+  (let* ((session (or session (dsh-bridge--confirmed-session)))
 	 (plan (progn (dsh-bridge--plan-goal-refresh session nil t)
 		      (cdr-safe (assoc session dsh-bridge--session-plan)))))
     (when (null plan)
@@ -6223,7 +6248,6 @@ and nothing is sent."
        (t
 	(message "dsh-bridge: %s"
 		 (dsh-bridge--error-message nil status alist)))))))
-
 ;;;###autoload
 (defun dsh-bridge-set-goal (&optional arg session)
   "Create or edit the goal for the session at hand.
@@ -6232,7 +6256,7 @@ objective sends nothing.  With a prefix argument, also read the goal
 round cap, defaulting to the current cap.  A complete goal is replaced
 rather than edited; the host reports which happened."
   (interactive "P")
-  (let* ((session (or session (dsh-bridge--effective-session nil nil t)))
+  (let* ((session (or session (dsh-bridge--confirmed-session)))
 	 (snapshot (alist-get 'goal (dsh-bridge--session-goal session)))
 	 (current (dsh-bridge--normalized-string (alist-get 'objective snapshot)))
 	 (objective (dsh-bridge--read-goal-objective current))
@@ -6243,7 +6267,6 @@ rather than edited; the host reports which happened."
       (dsh-bridge--goal-command 'set session
 				(append `((objective . ,objective))
 					(and cap `((maxGoalRounds . ,cap))))))))
-
 ;;;###autoload
 (defun dsh-bridge-pause-goal ()
   "Pause the session's active goal and disarm automatic continuation."
@@ -6262,7 +6285,7 @@ rather than edited; the host reports which happened."
 The decision is read fresh from `/session' so the menu checkbox and the
 command agree."
   (interactive)
-  (let* ((session (or session (dsh-bridge--effective-session nil nil t)))
+  (let* ((session (or session (dsh-bridge--confirmed-session)))
 	 (section (dsh-bridge--session-goal session))
 	 (snapshot (alist-get 'goal section))
 	 (phase (alist-get 'phase snapshot)))
@@ -6272,18 +6295,16 @@ command agree."
 	     (equal (alist-get 'activation section) "armed"))
 	(dsh-bridge--goal-command 'pause session)
       (dsh-bridge--goal-command 'resume session))))
-
 ;;;###autoload
 (defun dsh-bridge-clear-goal (&optional session)
   "Clear the session's current goal after confirmation."
   (interactive)
-  (let* ((session (or session (dsh-bridge--effective-session nil nil t)))
+  (let* ((session (or session (dsh-bridge--confirmed-session)))
 	 (snapshot (alist-get 'goal (dsh-bridge--session-goal session))))
     (unless (consp snapshot)
       (user-error "dsh-bridge: this session has no goal"))
     (when (y-or-n-p "Clear the session goal? ")
       (dsh-bridge--goal-command 'clear session))))
-
 (defun dsh-bridge--header-indicator-act (event command)
   "Run COMMAND for the session whose header indicator was clicked in EVENT.
 The clicked window must have a session target (either bound to the
@@ -6305,7 +6326,7 @@ the clicked cell; otherwise, signal an error."
 	(unless (equal cell-id session)
 	  (user-error
 	   "dsh-bridge: the clicked indicator belongs to another session"))
-	(funcall command)))))
+	(funcall command session)))))
 
 (defun dsh-bridge--header-plan-at-mouse (event)
   "Turn plan mode off for the session whose header plan cell EVENT clicked.
@@ -6315,7 +6336,7 @@ or names one other than the cell's.  The negative prefix makes
 so a click cancels a queued-on change instead of re-queueing it."
   (interactive "e")
   (dsh-bridge--header-indicator-act
-   event (lambda () (dsh-bridge-toggle-plan-mode -1))))
+   event (lambda (session) (dsh-bridge-toggle-plan-mode -1 session))))
 
 (defun dsh-bridge--header-goal-at-mouse (event)
   "Pause or resume the goal whose header goal cell EVENT clicked.
@@ -6574,7 +6595,7 @@ FORCE argument of `dsh-bridge-stop-session'."
   (if (or force
 	  (eq (dsh-bridge--status-state (dsh-bridge--effective-session))
 	      'running))
-      (dsh-bridge-stop-session force)
+      (dsh-bridge-stop-session force (dsh-bridge--effective-session))
     (dsh-bridge-erase-prompt)))
 
 (easy-menu-define dsh-bridge-prompt-menu dsh-bridge-prompt-mode-map
@@ -6769,7 +6790,7 @@ With FORCE (a prefix argument), skip the local \"is it running?\" check
 and ask the host anyway.  The confirmation prompt still applies, and the
 host still settles an idle agent as a no-op."
   (interactive "P")
-  (let ((id (or session (dsh-bridge--effective-session nil nil t))))
+  (let ((id (or session (dsh-bridge--confirmed-session))))
     (cond
       ((and (not force) (not (eq (dsh-bridge--status-state id) 'running)))
       (message "dsh-bridge: session \"%s\" is not running"
@@ -6802,7 +6823,6 @@ host still settles an idle agent as a no-op."
 	 (t
 	  (message "dsh-bridge: %s"
 		   (dsh-bridge--error-message nil status alist)))))))))
-
 (defun dsh-bridge-compact-session (&optional session)
   "Compact the context of the session at hand.
 This is the DSH session the buffer is acting on, or the session at point
@@ -6821,7 +6841,7 @@ whether compaction actually applies: a no-op (nothing compactable) is a
 success, and a busy session (another compaction already in flight, or an
 open-turn residue) is reported with the host's own text."
   (interactive)
-  (let ((id (or session (dsh-bridge--effective-session nil nil t))))
+  (let ((id (or session (dsh-bridge--confirmed-session))))
     (cond
      ((eq (dsh-bridge--status-state id) 'running)
       (user-error "dsh-bridge: session \"%s\" is running; stop it before compacting"
@@ -6881,7 +6901,6 @@ open-turn residue) is reported with the host's own text."
 	 (t
 	  (message "dsh-bridge: %s"
 		   (dsh-bridge--error-message nil status alist)))))))))
-
 ;;; The sessions buffer
 
 (defun dsh-bridge--session-at-point ()
@@ -7796,7 +7815,7 @@ effective session; with a prefix argument, prompt for any session id."
 	       (dsh-bridge--read-session-id "Describe session: ")))
 	  (current-prefix-arg
 	   (dsh-bridge--read-session-id "Describe session: "))
-	  (t (dsh-bridge--effective-session)))))
+	  (t (dsh-bridge--focus-session)))))
   (let* ((result (let ((dsh-bridge-timeout dsh-bridge-describe-timeout))
 		   (dsh-bridge--request "GET" (dsh-bridge--path "/session" session-id) nil)))
 	 (status (car result))
@@ -8128,10 +8147,11 @@ preserving point.  A buffer showing an earlier turn is left alone."
 
 ;;; The dispatcher's suffixes
 
-;; Every verb of the open menu acts on the displayed focus, never on the
-;; ambient resolution waterfall: the wrappers below pass the focus id to the
-;; underlying command.  The session-state mutators additionally refuse a
-;; focus that was only an advisory last-active guess.
+;; Every session verb of the open menu resolves its target through the
+;; menu focus first, whether it runs from the menu or directly: the reads
+;; through `dsh-bridge--focus-session', and the session-state mutators
+;; through `dsh-bridge--confirmed-session', which refuses a focus that
+;; was only an advisory last-active guess.
 
 (defun dsh-bridge--dispatcher-header ()
   "Header string for the dispatcher: status plus the focus session.
@@ -8169,20 +8189,6 @@ fetch anything itself."
 	    (if (string-empty-p status)
 		(concat label position)
 	      (concat " " status " " label position)))))))))
-
-(defun dsh-bridge--dispatcher-may-mutate (verb)
-  "Whether the dispatcher's focus is available for VERB to mutate.
-If the focus lacks a focus, or the focus is only a last-active guess,
-emit a message and return nil.  Otherwise, return t."
-  (cond
-   ((null (car dsh-bridge--focus))
-    (message "dsh-bridge: no sessions — + creates one")
-    nil)
-   ((eq (cdr dsh-bridge--focus) 'advisory)
-    (message "dsh-bridge: %s needs a confirmed target — \
-M-n/M-p to confirm, or t to pin" verb)
-    nil)
-   (t t)))
 
 (defun dsh-bridge--dispatcher-cycle (&optional backward)
   "Move the dispatcher's focus one session through its cycle set.
@@ -8223,59 +8229,6 @@ wraps.  A pinned menu reports that it is locked instead of cycling."
   "Focus the next newer session in the dispatcher's cycle set."
   (interactive)
   (dsh-bridge--dispatcher-cycle))
-
-(defun dsh-bridge--dispatcher-fetch ()
-  "Fetch the latest turn of the dispatcher's focus session."
-  (interactive)
-  (dsh-bridge-fetch (dsh-bridge--focus-session)))
-
-(defun dsh-bridge--dispatcher-describe ()
-  "Describe the dispatcher's focus session."
-  (interactive)
-  (dsh-bridge-describe-session (dsh-bridge--focus-session)))
-
-(defun dsh-bridge--dispatcher-prompt ()
-  "Open a prompt buffer bound to the dispatcher's focus session."
-  (interactive)
-  ;; Opening a prompt buffer is itself a commitment, so even an advisory
-  ;; focus binds it; the buffer then shows a bound header.
-  (pop-to-buffer (dsh-bridge--prompt-buffer (dsh-bridge--focus-session))))
-
-(defun dsh-bridge--dispatcher-stop ()
-  "Stop the dispatcher's focus session, if it is running."
-  (interactive)
-  (when (dsh-bridge--dispatcher-may-mutate "stopping")
-    (dsh-bridge-stop-session nil (dsh-bridge--focus-session))))
-
-(defun dsh-bridge--dispatcher-compact ()
-  "Compact the dispatcher's focus session's context."
-  (interactive)
-  (when (dsh-bridge--dispatcher-may-mutate "compacting")
-    (dsh-bridge-compact-session (dsh-bridge--focus-session))))
-
-(defun dsh-bridge--dispatcher-plan ()
-  "Toggle plan mode for the dispatcher's focus session."
-  (interactive)
-  (when (dsh-bridge--dispatcher-may-mutate "the plan-mode change")
-    (dsh-bridge-toggle-plan-mode nil (dsh-bridge--focus-session))))
-
-(defun dsh-bridge--dispatcher-goal ()
-  "Set or edit the goal of the dispatcher's focus session."
-  (interactive)
-  (when (dsh-bridge--dispatcher-may-mutate "the goal edit")
-    (dsh-bridge-set-goal nil (dsh-bridge--focus-session))))
-
-(defun dsh-bridge--dispatcher-toggle-goal ()
-  "Pause or resume the goal of the dispatcher's focus session."
-  (interactive)
-  (when (dsh-bridge--dispatcher-may-mutate "the goal change")
-    (dsh-bridge-toggle-goal (dsh-bridge--focus-session))))
-
-(defun dsh-bridge--dispatcher-clear-goal ()
-  "Clear the goal of the dispatcher's focus session."
-  (interactive)
-  (when (dsh-bridge--dispatcher-may-mutate "clearing the goal")
-    (dsh-bridge-clear-goal (dsh-bridge--focus-session))))
 
 (defun dsh-bridge--dispatcher-pin ()
   "Pin the dispatcher's focus session as the target.
@@ -8351,21 +8304,21 @@ instead of trusting the cached one."
 			  "\n\n"
 			  (propertize "Send and Receive"
 				      'face 'transient-heading)))
-   ("r" dsh-bridge--dispatcher-prompt
-    :description "reply/open prompt buffer")
-   ("f" dsh-bridge--dispatcher-fetch
+   ("r" dsh-bridge-prompt
+    :description "open prompt buffer")
+   ("f" dsh-bridge-fetch
     :description "fetch latest turn")]
   ["Plan and Goal"
-   ("p" dsh-bridge--dispatcher-plan
+   ("p" dsh-bridge-toggle-plan-mode
     :description "toggle plan mode" :transient t)
-   ("G" dsh-bridge--dispatcher-goal
+   ("G" dsh-bridge-set-goal
     :description "set or edit the goal" :transient t)
-   ("A" dsh-bridge--dispatcher-toggle-goal
+   ("A" dsh-bridge-toggle-goal
     :description "pause/resume goal" :transient t)
-   ("X" dsh-bridge--dispatcher-clear-goal
+   ("X" dsh-bridge-clear-goal
     :description "clear the goal" :transient t)]
   ["Sessions"
-   ("D" dsh-bridge--dispatcher-describe
+   ("D" dsh-bridge-describe-session
     :description "describe session")
    ("t" dsh-bridge--dispatcher-pin
     :description "pin this session" :transient t)
@@ -8373,9 +8326,9 @@ instead of trusting the cached one."
     :description "unpin" :transient t)
    ("T" dsh-bridge--dispatcher-pin-by-title
     :description "pin by title" :transient t)
-   ("k" dsh-bridge--dispatcher-stop
+   ("k" dsh-bridge-stop-session
     :description "stop running session" :transient t)
-   ("o" dsh-bridge--dispatcher-compact
+   ("o" dsh-bridge-compact-session
     :description "compact context" :transient t)
    ("l" dsh-bridge-list-sessions
     :description "list sessions")
