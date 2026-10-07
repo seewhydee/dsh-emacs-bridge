@@ -707,54 +707,83 @@ describe('resolveTargetId', () => {
   const persisted = [header('c', { createdAt: 30 }), header('d', { createdAt: 25, origin: 'subagent' })]
 
   it('honors an explicit live id', () => {
-    const result = resolveTargetId('a', live, [], () => true)
+    const result = resolveTargetId('a', live, [], () => true, new Set())
     expect(result).toEqual({ kind: 'target', id: 'a' })
   })
 
   it('rejects an explicit id that is neither live nor persisted with 404', () => {
-    const result = resolveTargetId('nope', live, persisted, () => true)
+    const result = resolveTargetId('nope', live, persisted, () => true, new Set())
     expect(result).toEqual({ kind: 'error', status: 404, message: 'session nope is not live' })
   })
 
   it('rejects a live id with no agent with 409', () => {
-    const result = resolveTargetId('a', live, persisted, id => id !== 'a')
+    const result = resolveTargetId('a', live, persisted, id => id !== 'a', new Set())
     expect(result).toEqual({ kind: 'error', status: 409, message: 'session a has no live agent' })
   })
 
   it('returns a cold result for an explicit persisted id', () => {
-    const result = resolveTargetId('c', live, persisted, () => true)
+    const result = resolveTargetId('c', live, persisted, () => true, new Set())
     expect(result).toEqual({ kind: 'cold', id: 'c' })
   })
 
   it('treats an explicit subagent-origin persisted id as cold (resume guard rejects it)', () => {
-    const result = resolveTargetId('d', live, persisted, () => true)
+    const result = resolveTargetId('d', live, persisted, () => true, new Set())
     expect(result).toEqual({ kind: 'cold', id: 'd' })
   })
 
+  it('still resolves an explicit archived id, leaving the 409 to the route fence', () => {
+    // The fallback must not select an archived session, but an explicit one is
+    // still classified: the route's own archived check answers with a message
+    // naming the id, rather than a generic "no active session".
+    const archived = new Set(['b', 'c'])
+    expect(resolveTargetId('b', live, persisted, () => true, archived))
+      .toEqual({ kind: 'target', id: 'b' })
+    expect(resolveTargetId('c', live, persisted, () => true, archived))
+      .toEqual({ kind: 'cold', id: 'c' })
+  })
+
   it('picks the most recently active live session with no explicit id', () => {
-    const result = resolveTargetId(undefined, live, persisted, () => true)
+    const result = resolveTargetId(undefined, live, persisted, () => true, new Set())
     expect(result).toEqual({ kind: 'target', id: 'b' })
   })
 
+  it('skips archived sessions when picking last-active live', () => {
+    // Archiving does not dispose a live session's agent, so the roster can
+    // offer it as the newest live session; it is still never a run target.
+    const result = resolveTargetId(undefined, live, persisted, () => true, new Set(['b']))
+    expect(result).toEqual({ kind: 'target', id: 'a' })
+  })
+
   it('skips sessions without a live agent when picking last-active', () => {
-    const result = resolveTargetId(undefined, live, persisted, id => id !== 'b')
+    const result = resolveTargetId(undefined, live, persisted, id => id !== 'b', new Set())
     expect(result).toEqual({ kind: 'target', id: 'a' })
   })
 
   it('falls back to the most recent cold session when nothing is live', () => {
     const liveNoAgent = [liveSession('b', { createdAt: 20, eventTimes: [50] })]
-    const result = resolveTargetId(undefined, liveNoAgent, persisted, () => false)
+    const result = resolveTargetId(undefined, liveNoAgent, persisted, () => false, new Set())
+    expect(result).toEqual({ kind: 'cold', id: 'c' })
+  })
+
+  it('skips archived sessions when picking the cold fallback', () => {
+    const persistedArchived = [header('c', { createdAt: 30 }), header('e', { createdAt: 35 })]
+    const result = resolveTargetId(undefined, [], persistedArchived, () => true, new Set(['e']))
     expect(result).toEqual({ kind: 'cold', id: 'c' })
   })
 
   it('skips subagent-origin sessions when picking the cold fallback', () => {
     const persistedWithSubagent = [header('c', { createdAt: 30 }), header('sub', { createdAt: 40, origin: 'subagent' })]
-    const result = resolveTargetId(undefined, [], persistedWithSubagent, () => true)
+    const result = resolveTargetId(undefined, [], persistedWithSubagent, () => true, new Set())
     expect(result).toEqual({ kind: 'cold', id: 'c' })
   })
 
   it('reports no active session with 409 when nothing is live or persisted', () => {
-    const result = resolveTargetId(undefined, [], [], () => true)
+    const result = resolveTargetId(undefined, [], [], () => true, new Set())
+    expect(result).toEqual({ kind: 'error', status: 409, message: 'no active session' })
+  })
+
+  it('reports no active session with 409 when every candidate is archived', () => {
+    const result = resolveTargetId(undefined, live, persisted, () => true, new Set(['a', 'b', 'c', 'd']))
     expect(result).toEqual({ kind: 'error', status: 409, message: 'no active session' })
   })
 })

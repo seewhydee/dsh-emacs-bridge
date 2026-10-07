@@ -1413,6 +1413,12 @@ export function apply(ctx: Context): void {
     return (registry?.archivedSessionIds ?? []).some(value => String(value) === id)
   }
 
+  /** The archived session ids as a string set, for the pure target resolver. */
+  function archivedIdSet(): ReadonlySet<string> {
+    const registry = ctx.get('workspaceRegistry') as WorkspaceRegistryService | undefined
+    return new Set((registry?.archivedSessionIds ?? []).map(value => String(value)))
+  }
+
   /**
    * Reject a run-oriented request that names an archived session. The harness
    * admits no model step for an archived session (the session controller's
@@ -1515,6 +1521,7 @@ export function apply(ctx: Context): void {
       live,
       await persistedHeaders(),
       hasAgent,
+      archivedIdSet(),
     )
     if (result.kind === 'error') throw new BridgeError(result.status, result.message)
     if (result.kind === 'target') {
@@ -2467,8 +2474,9 @@ export function apply(ctx: Context): void {
             })
           }
           // Refuse before resolving, so a doomed prompt does not resume an
-          // archived session as a side effect; the post-resolution check also
-          // covers the target-less fallback, which may itself be archived.
+          // archived session as a side effect; the post-resolution check
+          // covers a session archived in the race after resolution (the
+          // target-less fallback itself already skips archived sessions).
           if (explicitId !== undefined) assertNotArchived(explicitId)
           const target = await resolveTarget(explicitId)
           assertNotArchived(String(target.session.id))

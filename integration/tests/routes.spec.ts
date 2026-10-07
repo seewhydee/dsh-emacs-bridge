@@ -25,8 +25,10 @@
 //     "Send to Emacs" shape), 404 for an unknown id.
 //   - GET /dsh-bridge/context: 204 before any usage/context sample, 200 with
 //     the live projection after a turn, and the SSE context frame.
-//   - POST /dsh-bridge/send with no active session anywhere: 409 (pinned
-//     against a dedicated fixture whose home has never held a session).
+//   - POST /dsh-bridge/send with no explicit session: 409 when no session
+//     exists anywhere (pinned against a dedicated fixture whose home has never
+//     held a session), and last-active resolution that skips an archived
+//     session even while its agent is still live.
 
 import { describe, it, expect, inject } from 'vitest'
 import { launch } from '../host/launch.mjs'
@@ -169,7 +171,7 @@ describe('GET /dsh-bridge/context', () => {
   }, 90000)
 })
 
-describe('POST /dsh-bridge/send with no active session', () => {
+describe('POST /dsh-bridge/send with no explicit session', () => {
   it('is 409 on a fixture whose home has never held a session', async () => {
     // A dedicated instance: the shared fixture already holds sessions, which
     // the last-active fallback would legitimately target.
@@ -178,6 +180,29 @@ describe('POST /dsh-bridge/send with no active session', () => {
       const sent = await post(fixture, '/dsh-bridge/send', { text: 'hi' })
       expect(sent.status).toBe(409)
       expect(sent.body.error).toMatch(/no active session/)
+    } finally {
+      await fixture.kill()
+    }
+  }, 120000)
+
+  it('skips an archived session when resolving last-active', async () => {
+    // Dedicated again: the shared fixture makes the fallback nondeterministic.
+    const fixture = await launch({ timeoutMs: 120000 })
+    try {
+      // The second session is newer, so it wins the last-active fallback --
+      // until it is archived, when the older live session must take over.
+      const olderId = await createSession(fixture)
+      const archivedId = await createSession(fixture)
+
+      const archived = await post(fixture, '/dsh-bridge/sessions/archive', { sessionId: archivedId })
+      expect(archived.status, JSON.stringify(archived.body)).toBe(200)
+
+      await scriptMock(fixture, [{ kind: 'text', text: 'ok' }])
+      const sent = await post(fixture, '/dsh-bridge/send', { text: 'go' })
+      expect(sent.status, JSON.stringify(sent.body)).toBe(200)
+      // Archiving does not dispose the live agent, so the archived session is
+      // still the newest live one; the fallback must not land there.
+      expect(sent.body.sessionId).toBe(olderId)
     } finally {
       await fixture.kill()
     }

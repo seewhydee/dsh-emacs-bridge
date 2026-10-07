@@ -588,8 +588,8 @@ LABEL is the session display label.
 
 This record goes stale and is dropped when another session starts a
 turn, when an explicitly targeted prompt send names a different session,
-or when the session disappears from the roster; however, it deliberately
-outlives a newer live session appearing in the roster.")
+or when the session leaves the roster or is reported archived; however,
+it deliberately outlives a newer live session appearing in the roster.")
 
 (defvar dsh-bridge--focus nil
   "Focus record of the open `dsh-bridge' dispatcher, or nil.
@@ -1454,11 +1454,15 @@ checking STATUS for a failed request."
 	(setq dsh-bridge--session-status
 	      (seq-filter (lambda (entry) (member (car entry) seen))
 			  dsh-bridge--session-status))
-	;; A recorded resolution absent from the roster names a deleted
-	;; session, so the record must not keep shadowing the replica.
-	;; A merely older one stays: the record is the host's own answer.
-	(unless (member (car-safe dsh-bridge--last-resolved-active) seen)
-	  (setq dsh-bridge--last-resolved-active nil))
+	;; A recorded resolution absent from the roster names a
+	;; deleted session, and a recorded resolution the roster
+	;; reports archived names one that is no longer a run target.
+	;; Either way, the record must not keep shadowing the replica.
+	(let ((resolved (car-safe dsh-bridge--last-resolved-active)))
+	  (when (or (not (member resolved seen))
+		    (eq t (alist-get 'archived
+				     (dsh-bridge--session-for-id resolved))))
+	    (setq dsh-bridge--last-resolved-active nil)))
 	;; Drop the pinned target when the roster reports it archived.
 	(and dsh-bridge-pinned-target
 	     (eq t (alist-get 'archived (dsh-bridge--session-for-id
@@ -1480,10 +1484,12 @@ See `dsh-bridge--sessions-cache' for the session data format."
 (defun dsh-bridge--cache-last-active ()
   "Return the cached id of the most recently active live session, or nil.
 This replicates DSH's last-active algorithm: newest event time, falling
-back to creation time among live sessions."
+back to creation time among live sessions.  Archived sessions are
+skipped even if still live."
   (let ((best nil) (best-time -1.0))
     (dolist (s dsh-bridge--sessions-cache best)
-      (when (alist-get 'live s)
+      (when (and (alist-get 'live s)
+		 (not (eq t (alist-get 'archived s))))
 	(let ((t0 (or (alist-get 'lastActive s) (alist-get 'createdAt s) 0)))
 	  (when (> t0 best-time)
 	    (setq best-time t0)

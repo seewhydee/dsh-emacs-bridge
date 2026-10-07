@@ -385,6 +385,59 @@ last-active guess."
           (should (equal (car dsh-bridge--focus) "s2"))
           (should (eq (cdr dsh-bridge--focus) 'pinned)))))))
 
+(ert-deftest dsh-bridge-cache-last-active-skips-archived ()
+  "The last-active default ignores an archived session even while it is live.
+Archiving does not dispose a live session's agent, so a roster can report a
+session as both `live' and `archived'; it is still not a run target, so the
+bridge must not select it as the last-active default."
+  (let ((dsh-bridge--sessions-cache
+         '(((id . "arch") (live . t) (archived . t) (lastActive . 300))
+           ((id . "new") (live . t) (lastActive . 200))
+           ((id . "old") (live . t) (lastActive . 100)))))
+    ;; The archived session is the newest, but the newest eligible one wins.
+    (should (equal (dsh-bridge--cache-last-active) "new")))
+  (let ((dsh-bridge--sessions-cache
+         '(((id . "arch") (live . t) (archived . t) (lastActive . 300)))))
+    ;; Nothing else is live: nil, never the archived session.
+    (should (null (dsh-bridge--cache-last-active))))
+  (let ((dsh-bridge--sessions-cache
+         '(((id . "cold") (live . nil) (lastActive . 400))
+           ((id . "arch") (live . t) (archived . t) (lastActive . 300)))))
+    ;; A cold row is not live, so it never becomes the live default.
+    (should (null (dsh-bridge--cache-last-active)))))
+
+(ert-deftest dsh-bridge-dispatcher-focus-skips-archived-last-active ()
+  "An archived session is never the dispatcher's advisory focus.
+Archiving can leave the session live, so it otherwise wins the last-active
+guess; the focus would then name a session no key can legally act on, and
+`r' would open a prompt buffer that every send refuses."
+  (let ((dsh-bridge--sessions-cache
+         '(((id . "arch") (title . "Arch") (live . t) (archived . t)
+            (lastActive . 300))
+           ((id . "new") (title . "New") (live . t) (lastActive . 200))))
+        (dsh-bridge--last-resolved-active nil)
+        (dsh-bridge--dispatcher-roster nil)
+        (dsh-bridge--focus nil)
+        (dsh-bridge--focus-cycle nil)
+        (dsh-bridge-pinned-target nil))
+    (with-temp-buffer
+      (dsh-bridge--dispatcher-init nil)
+      (should (equal dsh-bridge--focus '("new" . advisory)))
+      (should (equal dsh-bridge--focus-cycle '("new")))))
+  ;; With only the archived session there is no focus at all, and the header
+  ;; explains itself instead of naming a dead end.
+  (let ((dsh-bridge--sessions-cache
+         '(((id . "arch") (title . "Arch") (live . t) (archived . t))))
+        (dsh-bridge--last-resolved-active nil)
+        (dsh-bridge--dispatcher-roster nil)
+        (dsh-bridge--focus nil)
+        (dsh-bridge--focus-cycle nil)
+        (dsh-bridge-pinned-target nil))
+    (with-temp-buffer
+      (dsh-bridge--dispatcher-init nil)
+      (should (null dsh-bridge--focus))
+      (should (equal (dsh-bridge--dispatcher-header) "no sessions")))))
+
 (ert-deftest dsh-bridge-dispatcher-focus-falls-back-outside-menu ()
   "Outside a menu, the focus accessors fall back on the buffer's session.
 This keeps a suffix command usable in isolation, and keeps direct callers
@@ -4528,6 +4581,37 @@ naming the host's own resolution is its purpose."
                                              (list (cons 'id "s2") (cons 'live t)))))))))
       (dsh-bridge--fetch-sessions))
     (should (equal dsh-bridge--last-resolved-active '("s1" . "Older")))))
+
+(ert-deftest dsh-bridge-fetch-sessions-drops-archived-last-resolved ()
+  "A roster reporting the recorded resolution archived retires the record.
+The record names where a target-less send last landed, and an archived
+session can never be a run target, so the record must not keep shadowing
+the replica; a live, non-archived record stays."
+  (let ((dsh-bridge--sessions-cache nil)
+        (dsh-bridge--session-status nil)
+        (dsh-bridge--last-resolved-active '("s1" . "Arch")))
+    (cl-letf (((symbol-function 'dsh-bridge--request)
+               (lambda (&rest _)
+                 (cons 200
+                       (list (cons 'sessions
+                                   (list (list (cons 'id "s1")
+                                               (cons 'title "Arch")
+                                               (cons 'live t)
+                                               (cons 'archived t)))))))))
+      (dsh-bridge--fetch-sessions))
+    (should (null dsh-bridge--last-resolved-active)))
+  (let ((dsh-bridge--sessions-cache nil)
+        (dsh-bridge--session-status nil)
+        (dsh-bridge--last-resolved-active '("s1" . "Live")))
+    (cl-letf (((symbol-function 'dsh-bridge--request)
+               (lambda (&rest _)
+                 (cons 200
+                       (list (cons 'sessions
+                                   (list (list (cons 'id "s1")
+                                               (cons 'title "Live")
+                                               (cons 'live t)))))))))
+      (dsh-bridge--fetch-sessions))
+    (should (equal dsh-bridge--last-resolved-active '("s1" . "Live")))))
 
 (ert-deftest dsh-bridge-fetch-sessions-drops-archived-pin ()
   "A roster reporting the pinned session archived drops the pin, loudly.

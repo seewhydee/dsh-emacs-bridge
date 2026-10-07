@@ -1224,12 +1224,19 @@ export function classifySessionId(
  * the web UI's invisible-resume model after a `dsh web` restart. No id in
  * either tier is 409. `hasAgent` is supplied by the caller (it consults the
  * live agent registry).
+ *
+ * `archivedIds` names sessions the workspace registry has archived. Archiving
+ * does not dispose a live session's agent, so an archived session can appear in
+ * either tier; it is never a run target, so both fallback arms skip it. An
+ * explicit archived id still resolves (as target or cold) so the route's own
+ * archived fence answers with its specific 409.
  */
 export function resolveTargetId(
   explicitId: string | undefined,
   live: readonly LiveSessionLike[],
   persisted: readonly SessionHeaderLike[],
   hasAgent: (id: string) => boolean,
+  archivedIds: ReadonlySet<string>,
 ): ResolveTargetResult {
   // The explicit-id classification keeps subagent-origin ids so the resume arm
   // (and its ownership guard) can answer 409 for them; only the bare fallback,
@@ -1248,6 +1255,7 @@ export function resolveTargetId(
   let best: string | undefined
   let bestTime = -Infinity
   for (const session of live) {
+    if (archivedIds.has(session.id)) continue
     if (!hasAgent(session.id)) continue
     const time = session.events.at(-1)?.time ?? session.header.createdAt
     if (time > bestTime) {
@@ -1260,6 +1268,7 @@ export function resolveTargetId(
   let bestCreated = -Infinity
   for (const header of persisted) {
     if (header.origin === 'subagent') continue
+    if (archivedIds.has(header.id)) continue
     if (header.createdAt > bestCreated) {
       bestCreated = header.createdAt
       bestCold = header.id
