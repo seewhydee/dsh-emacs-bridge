@@ -27,10 +27,6 @@
 (require 'cl-lib)
 (require 'dsh-bridge)
 
-;; The plugin install/uninstall code lives in the optional companion library;
-;; load it so the plugin-management tests below can drive it.
-(require 'dsh-bridge-install)
-
 ;;; Low-level HTTP plumbing
 
 (ert-deftest dsh-bridge-path-no-session ()
@@ -5111,32 +5107,38 @@ is what keeps a repurposed buffer's contents from being overwritten."
                          "user notes")))
       (kill-buffer buf))))
 
-;;; Plugin management: probe, diagnosis, install/uninstall
+;;; Plugin availability: probe and install-state diagnosis
 
 (ert-deftest dsh-bridge-bridge-status-running ()
   "A 200 naming dsh-emacs-bridge with the package version means running."
-  (let ((dsh-bridge--bridge-status-cache nil))
+  (let ((dsh-bridge--bridge-status-cache nil)
+        (dsh-bridge--plugin-reported-version nil))
     (cl-letf (((symbol-function 'url-retrieve-synchronously)
                (lambda (&rest _)
                  (dsh-bridge-test--mock-response
                   200 (format "{\"name\":\"dsh-emacs-bridge\",\"version\":\"%s\"}"
                               dsh-bridge-version)))))
       (should (eq (dsh-bridge--bridge-status) 'running))
+      (should (equal dsh-bridge--plugin-reported-version dsh-bridge-version))
       (should (eq dsh-bridge--bridge-status-cache nil)))))
 
 (ert-deftest dsh-bridge-bridge-status-incompatible ()
-  "A version mismatch (or no reported version) means incompatible."
-  (let ((dsh-bridge--bridge-status-cache nil))
+  "A version mismatch (or no reported version) means incompatible.
+The reported version is recorded either way, for the mismatch warning."
+  (let ((dsh-bridge--bridge-status-cache nil)
+        (dsh-bridge--plugin-reported-version nil))
     (cl-letf (((symbol-function 'url-retrieve-synchronously)
                (lambda (&rest _)
                  (dsh-bridge-test--mock-response
                   200 "{\"name\":\"dsh-emacs-bridge\",\"version\":\"0.0.0-test\"}"))))
-      (should (eq (dsh-bridge--bridge-status) 'incompatible)))
+      (should (eq (dsh-bridge--bridge-status) 'incompatible))
+      (should (equal dsh-bridge--plugin-reported-version "0.0.0-test")))
     (cl-letf (((symbol-function 'url-retrieve-synchronously)
                (lambda (&rest _)
                  (dsh-bridge-test--mock-response
                   200 "{\"name\":\"dsh-emacs-bridge\",\"version\":null}"))))
-      (should (eq (dsh-bridge--bridge-status) 'incompatible)))))
+      (should (eq (dsh-bridge--bridge-status) 'incompatible))
+      (should (null dsh-bridge--plugin-reported-version)))))
 
 (ert-deftest dsh-bridge-bridge-status-wrong-name ()
   "A 200 naming something else is not the bridge plugin."
@@ -5242,49 +5244,6 @@ is what keeps a repurposed buffer's contents from being overwritten."
           (should (eq (dsh-bridge--plugin-install-state) 'not-installed)))
       (delete-directory home t))))
 
-(ert-deftest dsh-bridge-dsh-command-config-overrides ()
-  "The defcustom wins over auto-detection."
-  (let ((dsh-bridge-dsh-command '("npx" "--yes" "@deepseek-ai/dsh")))
-    (should (equal (dsh-bridge--dsh-command)
-                   '("npx" "--yes" "@deepseek-ai/dsh")))))
-
-(ert-deftest dsh-bridge-dsh-command-string-split ()
-  "A string setting is split shell-style; a list stays verbatim."
-  (let ((dsh-bridge-dsh-command "npx --yes @deepseek-ai/dsh"))
-    (should (equal (dsh-bridge--dsh-command)
-                   '("npx" "--yes" "@deepseek-ai/dsh"))))
-  (let ((dsh-bridge-dsh-command "node \"/path with space/bin.js\""))
-    (should (equal (dsh-bridge--dsh-command)
-                   '("node" "/path with space/bin.js"))))
-  (let ((dsh-bridge-dsh-command "/usr/local/bin/dsh"))
-    (should (equal (dsh-bridge--dsh-command) '("/usr/local/bin/dsh")))))
-
-(ert-deftest dsh-bridge-dsh-command-auto-detect ()
-  "Auto-detection falls back PATH -> npm global bin -> npx."
-  ;; dsh on PATH wins.
-  (let ((dsh-bridge-dsh-command nil))
-    (cl-letf (((symbol-function 'executable-find)
-               (lambda (prog) (and (equal prog "dsh") "dsh"))))
-      (should (equal (dsh-bridge--dsh-command) '("dsh")))))
-  ;; npm global bin is found when dsh isn't on PATH.
-  (let ((dsh-bridge-dsh-command nil))
-    (cl-letf (((symbol-function 'executable-find)
-               (lambda (prog) (and (equal prog "npm") "npm")))
-              ((symbol-function 'process-lines)
-               (lambda (&rest _) '("/fake/prefix")))
-              ((symbol-function 'file-executable-p)
-               (lambda (file) (string-suffix-p "bin/dsh" file))))
-      (should (equal (dsh-bridge--dsh-command) '("/fake/prefix/bin/dsh")))))
-  ;; Neither dsh nor a global bin: npx fallback.
-  (let ((dsh-bridge-dsh-command nil))
-    (cl-letf (((symbol-function 'executable-find)
-               (lambda (prog) (and (equal prog "npx") "npx"))))
-      (should (equal (dsh-bridge--dsh-command) '("npx" "--yes" "@deepseek-ai/dsh")))))
-  ;; Nothing available.
-  (let ((dsh-bridge-dsh-command nil))
-    (cl-letf (((symbol-function 'executable-find) (lambda (_) nil)))
-      (should (null (dsh-bridge--dsh-command))))))
-
 (ert-deftest dsh-bridge-ensure-plugin-running-noop ()
   "A running plugin needs no diagnosis and produces no message."
   (let ((dsh-bridge--bridge-status-cache nil) (dsh-bridge--plugin-diagnosed nil) (msg nil))
@@ -5296,172 +5255,77 @@ is what keeps a repurposed buffer's contents from being overwritten."
     (should (null msg))
     (should (null dsh-bridge--plugin-diagnosed))))
 
-(ert-deftest dsh-bridge-ensure-plugin-incompatible-offers-reinstall ()
-  "An incompatible (version-mismatched) plugin offers a reinstall."
+(ert-deftest dsh-bridge-ensure-plugin-incompatible-names-versions ()
+  "A version mismatch warns, naming both versions and the releases page.
+The plugin and the Emacs package are released in lockstep, so the
+message must make a mismatched artifact pair self-explanatory."
   (let ((dsh-bridge--bridge-status-cache nil) (dsh-bridge--plugin-diagnosed nil)
-        (offered nil) (msg nil)
-        (dsh-bridge-dsh-command '("dsh")))
+        (dsh-bridge--plugin-reported-version "0.0.0-test")
+        (warned nil))
     (cl-letf (((symbol-function 'dsh-bridge--bridge-status)
                (lambda () 'incompatible))
-              ;; The reinstall offer fires regardless of the profile state.
-              ((symbol-function 'dsh-bridge--plugin-install-state) (lambda () 'no-profile))
-              ((symbol-function 'dsh-bridge--plugin-directory) (lambda () "/tmp/plugin"))
-              ((symbol-function 'executable-find)
-               (lambda (prog) (and (equal prog "pnpm") "found")))
-              ((symbol-function 'y-or-n-p)
-               (lambda (question)
-                 (setq offered question)
-                 nil))
-              ((symbol-function 'message)
-               (lambda (&rest args) (setq msg (apply #'format args)))))
+              ((symbol-function 'dsh-bridge--plugin-install-state) (lambda () 'installed))
+              ((symbol-function 'display-warning)
+               (lambda (_type msg &rest _) (setq warned msg))))
       (dsh-bridge--ensure-plugin))
-    (should (string-match-p "Reinstall" offered))
-    (should (string-match-p "install aborted" msg))))
+    (should (string-match-p "0\\.0\\.0-test" warned))
+    (should (string-match-p (regexp-quote dsh-bridge-version) warned))
+    (should (string-match-p "releases" warned))
+    (should (eq dsh-bridge--plugin-diagnosed t))))
 
-(ert-deftest dsh-bridge-ensure-plugin-offers-when-missing ()
-  "Not-running + not installed + `ask' offers; declining latches."
-  (let ((dsh-bridge--bridge-status-cache nil) (dsh-bridge--plugin-diagnosed nil) (offered nil) (msg nil)
-        (dsh-bridge-dsh-command '("dsh")))
+(ert-deftest dsh-bridge-ensure-plugin-not-installed-points-at-readme ()
+  "Not-running + not installed warns with install instructions, and latches."
+  (let ((dsh-bridge--bridge-status-cache nil) (dsh-bridge--plugin-diagnosed nil)
+        (warned nil))
     (cl-letf (((symbol-function 'dsh-bridge--bridge-status)
                (lambda () 'not-running))
               ((symbol-function 'dsh-bridge--plugin-install-state) (lambda () 'not-installed))
-              ((symbol-function 'dsh-bridge--plugin-directory) (lambda () "/tmp/plugin"))
-              ((symbol-function 'executable-find)
-               (lambda (prog) (and (equal prog "pnpm") "found")))
-              ((symbol-function 'y-or-n-p)
-               (lambda (&rest _) (setq offered t) nil))
-              ((symbol-function 'message)
-               (lambda (&rest args) (setq msg (apply #'format args)))))
+              ((symbol-function 'display-warning)
+               (lambda (_type msg &rest _) (setq warned msg))))
       (dsh-bridge--ensure-plugin))
-    (should offered)
-    (should (string-match-p "install aborted" msg))
-    ;; The diagnosis is latched: a second call does not re-prompt.
-    (let ((offered 0))
-      (cl-letf (((symbol-function 'dsh-bridge--bridge-status)
-                 (lambda () 'not-running))
-                ((symbol-function 'dsh-bridge--plugin-install-state) (lambda () 'not-installed))
-                ((symbol-function 'y-or-n-p)
-                 (lambda (&rest _) (setq offered (1+ offered)) nil))
-                ((symbol-function 'message) (lambda (&rest _) nil)))
+    (should (string-match-p "not installed" warned))
+    (should (string-match-p "#installation" warned))
+    ;; The diagnosis is latched: a second call does not warn again.
+    (let ((warned nil))
+      (cl-letf (((symbol-function 'dsh-bridge--plugin-install-state) (lambda () 'not-installed))
+                ((symbol-function 'display-warning)
+                 (lambda (_type msg &rest _) (setq warned msg))))
         (dsh-bridge--ensure-plugin))
-      (should (= offered 0)))))
-
-(ert-deftest dsh-bridge-ensure-plugin-installs-on-yes ()
-  "Accepting the offer starts the asynchronous install."
-  (let ((dsh-bridge--bridge-status-cache nil) (dsh-bridge--plugin-diagnosed nil) (installed nil)
-        (dsh-bridge-dsh-command '("dsh")))
-    (cl-letf (((symbol-function 'dsh-bridge--bridge-status)
-               (lambda () 'not-running))
-              ((symbol-function 'dsh-bridge--plugin-install-state) (lambda () 'not-installed))
-              ((symbol-function 'dsh-bridge--plugin-directory) (lambda () "/tmp/plugin"))
-              ((symbol-function 'executable-find)
-               (lambda (prog) (and (equal prog "pnpm") "found")))
-              ((symbol-function 'y-or-n-p) (lambda (&rest _) t))
-              ((symbol-function 'dsh-bridge--install-plugin-async)
-               (lambda (dir) (setq installed dir)))
-              ((symbol-function 'message) (lambda (&rest _) nil)))
-      (dsh-bridge--ensure-plugin))
-    (should (equal installed "/tmp/plugin"))))
+      (should (null warned)))))
 
 (ert-deftest dsh-bridge-ensure-plugin-installed-not-loaded ()
-  "Not-running + installed says to restart, with no offer."
-  (let ((dsh-bridge--bridge-status-cache nil) (dsh-bridge--plugin-diagnosed nil) (msg nil))
+  "Not-running + installed says to restart \"dsh web\"."
+  (let ((dsh-bridge--bridge-status-cache nil) (dsh-bridge--plugin-diagnosed nil) (warned nil))
     (cl-letf (((symbol-function 'dsh-bridge--bridge-status)
                (lambda () 'not-running))
               ((symbol-function 'dsh-bridge--plugin-install-state) (lambda () 'installed))
-              ((symbol-function 'message)
-               (lambda (&rest args) (setq msg (apply #'format args)))))
+              ((symbol-function 'display-warning)
+               (lambda (_type msg &rest _) (setq warned msg))))
       (dsh-bridge--ensure-plugin))
-    (should (string-match-p "restart" msg))))
+    (should (string-match-p "restart" warned))))
 
 (ert-deftest dsh-bridge-ensure-plugin-unreachable ()
-  "Unreachable + installed reports the server is down, no offer."
-  (let ((dsh-bridge--bridge-status-cache nil) (dsh-bridge--plugin-diagnosed nil) (msg nil))
+  "Unreachable + installed reports that no bridge is running."
+  (let ((dsh-bridge--bridge-status-cache nil) (dsh-bridge--plugin-diagnosed nil) (warned nil))
     (cl-letf (((symbol-function 'dsh-bridge--bridge-status)
                (lambda () 'unreachable))
               ((symbol-function 'dsh-bridge--plugin-install-state) (lambda () 'installed))
-              ((symbol-function 'message)
-               (lambda (&rest args) (setq msg (apply #'format args)))))
+              ((symbol-function 'display-warning)
+               (lambda (_type msg &rest _) (setq warned msg))))
       (dsh-bridge--ensure-plugin))
-    (should (string-match-p "no bridge is running" msg))))
+    (should (string-match-p "no bridge is running" warned))))
 
 (ert-deftest dsh-bridge-ensure-plugin-unreachable-not-installed ()
-  "Unreachable + not installed still offers (installing needs no server)."
-  (let ((dsh-bridge--bridge-status-cache nil) (dsh-bridge--plugin-diagnosed nil) (offered nil)
-        (dsh-bridge-dsh-command '("dsh")))
+  "Unreachable + not installed says the server may be down, else install."
+  (let ((dsh-bridge--bridge-status-cache nil) (dsh-bridge--plugin-diagnosed nil) (warned nil))
     (cl-letf (((symbol-function 'dsh-bridge--bridge-status)
                (lambda () 'unreachable))
               ((symbol-function 'dsh-bridge--plugin-install-state) (lambda () 'not-installed))
-              ((symbol-function 'dsh-bridge--plugin-directory) (lambda () "/tmp/plugin"))
-              ((symbol-function 'executable-find)
-               (lambda (prog) (and (equal prog "pnpm") "found")))
-              ((symbol-function 'y-or-n-p)
-               (lambda (&rest _) (setq offered t) nil))
-              ((symbol-function 'message) (lambda (&rest _) nil)))
-      (dsh-bridge--ensure-plugin))
-    (should offered)))
-
-(ert-deftest dsh-bridge-ensure-plugin-no-dsh-no-offer ()
-  "No profile and no real CLI: point at installing DSH, with no offer.
-This is the case the npx fallback must not paper over: downloading the
-whole CLI to install a plugin for a DSH the user never set up."
-  (let ((dsh-bridge--bridge-status-cache nil) (dsh-bridge--plugin-diagnosed nil)
-        (offered nil) (err-msg nil)
-        (dsh-bridge-dsh-command nil))
-    (cl-letf (((symbol-function 'dsh-bridge--bridge-status)
-               (lambda () 'unreachable))
-              ((symbol-function 'dsh-bridge--plugin-install-state) (lambda () 'no-profile))
-              ((symbol-function 'dsh-bridge--dsh-installed-p) (lambda () nil))
-              ((symbol-function 'y-or-n-p)
-               (lambda (&rest _) (setq offered t) nil)))
-      (condition-case err
-          (dsh-bridge--ensure-plugin)
-        (user-error (setq err-msg (error-message-string err)))))
-    (should-not offered)
-    (should (string-match-p "no DSH installation found" err-msg))))
-
-(ert-deftest dsh-bridge-ensure-plugin-no-profile-but-cli-offers ()
-  "No profile but a real CLI (DSH exists, profile never created): offer."
-  (let ((dsh-bridge--bridge-status-cache nil) (dsh-bridge--plugin-diagnosed nil)
-        (offered nil)
-        (dsh-bridge-dsh-command '("dsh")))
-    (cl-letf (((symbol-function 'dsh-bridge--bridge-status)
-               (lambda () 'unreachable))
-              ((symbol-function 'dsh-bridge--plugin-install-state) (lambda () 'no-profile))
-              ((symbol-function 'dsh-bridge--dsh-installed-p) (lambda () t))
-              ((symbol-function 'dsh-bridge--plugin-directory) (lambda () "/tmp/plugin"))
-              ((symbol-function 'executable-find)
-               (lambda (prog) (and (equal prog "pnpm") "found")))
-              ((symbol-function 'y-or-n-p)
-               (lambda (&rest _) (setq offered t) nil))
-              ((symbol-function 'message) (lambda (&rest _) nil)))
-      (dsh-bridge--ensure-plugin))
-    (should offered)))
-
-(ert-deftest dsh-bridge-ensure-plugin-no-install-library ()
-  "With the install library absent, diagnosis warns but does not offer.
-`dsh-bridge--ensure-plugin' loads the companion with `require' at diagnosis
-time; simulate absence by failing that load and leaving the diagnose entry
-point unbound."
-  (let ((dsh-bridge--bridge-status-cache 'not-running)
-        (dsh-bridge--plugin-diagnosed nil)
-        (warned nil))
-    (cl-letf (((symbol-function 'require) (lambda (&rest _) nil))
-              ((symbol-function 'dsh-bridge-install--diagnose) nil)
               ((symbol-function 'display-warning)
-               (lambda (&rest args) (setq warned args)))
-              ((symbol-function 'y-or-n-p)
-               (lambda (&rest _) (ert-fail "must not offer an install"))))
+               (lambda (_type msg &rest _) (setq warned msg))))
       (dsh-bridge--ensure-plugin))
-    (should warned)
-    (should (eq dsh-bridge--bridge-status-cache 'not-running))))
-
-(ert-deftest dsh-bridge-group-loads-install-library ()
-  "Browsing the `dsh-bridge' group makes Customize load the companion.
-The autoload cookies on the companion's defcustoms define the options, but
-`customize-group' only follows the group's `custom-loads' property to find
-them; this pins that hint."
-  (should (member "dsh-bridge-install" (get 'dsh-bridge 'custom-loads))))
+    (should (string-match-p "no bridge is running" warned))
+    (should (string-match-p "#installation" warned))))
 
 (ert-deftest dsh-bridge-plugin-install-state-tri-state ()
   "The profile probe distinguishes installed / not-installed / no-profile."
@@ -5483,136 +5347,6 @@ them; this pins that hint."
             (insert "{\"dependencies\":{\"dsh-emacs-bridge\":\"file:.\"}}"))
           (should (eq (dsh-bridge--plugin-install-state) 'installed)))
       (delete-directory home t))))
-
-(ert-deftest dsh-bridge-validate-plugin-install ()
-  "`--dump-config' success means the profile composes."
-  (let ((dsh-bridge-profile "web")
-        (dsh-bridge-dsh-command '("dsh")))
-    (cl-letf (((symbol-function 'call-process)
-               (lambda (&rest args)
-                 (if (member "--dump-config" args) 0 1))))
-      (should (dsh-bridge--validate-plugin-install)))
-    (cl-letf (((symbol-function 'call-process) (lambda (&rest _) 1)))
-      (should-not (dsh-bridge--validate-plugin-install)))))
-
-(ert-deftest dsh-bridge-install-plugin-sync ()
-  "The internal install runs pnpm via `dsh plugin add', and needs pnpm."
-  (let ((dsh-bridge-profile "web") (argv nil)
-        (dsh-bridge-dsh-command '("dsh")))
-    (cl-letf (((symbol-function 'executable-find) (lambda (_) "found"))
-              ((symbol-function 'call-process)
-               (lambda (&rest args) (setq argv args) 0)))
-      (should (dsh-bridge--install-plugin "/tmp/plugin"))
-      (should (equal (seq-filter #'stringp argv)
-                     '("dsh" "plugin" "--profile" "web" "add" "file:/tmp/plugin"))))
-    (cl-letf (((symbol-function 'executable-find) (lambda (_) "found"))
-              ((symbol-function 'call-process) (lambda (&rest _) 1)))
-      (should-not (dsh-bridge--install-plugin "/tmp/plugin")))
-    ;; Missing pnpm aborts without invoking dsh.
-    (let ((called nil))
-      (cl-letf (((symbol-function 'executable-find)
-                 (lambda (prog) (unless (equal prog "pnpm") "found")))
-                ((symbol-function 'call-process)
-                 (lambda (&rest _) (setq called t) 0)))
-        (should-not (dsh-bridge--install-plugin "/tmp/plugin"))
-        (should-not called)))))
-
-(ert-deftest dsh-bridge-install-plugin-interactive ()
-  "The interactive install validates and says to restart on success."
-  (let ((dsh-bridge-profile "web") (msg nil)
-        (dsh-bridge-dsh-command '("dsh")))
-    (cl-letf (((symbol-function 'dsh-bridge--plugin-directory) (lambda () "/tmp/plugin"))
-              ((symbol-function 'executable-find)
-               (lambda (prog) (and (equal prog "pnpm") "found")))
-              ((symbol-function 'dsh-bridge--install-plugin) (lambda (_) t))
-              ((symbol-function 'dsh-bridge--validate-plugin-install) (lambda () t))
-              ((symbol-function 'message)
-               (lambda (&rest args) (setq msg (apply #'format args)))))
-      (dsh-bridge-install-plugin))
-    (should (string-match-p "restart" msg))))
-
-(ert-deftest dsh-bridge-install-sentinel-chains-validation ()
-  "The async install sentinel chains into async validation."
-  (let ((dsh-bridge-profile "web") (validated nil))
-    (cl-letf (((symbol-function 'process-exit-status) (lambda (_) 0))
-              ((symbol-function 'dsh-bridge--validate-plugin-install-async)
-               (lambda () (setq validated t)))
-              ((symbol-function 'message) (lambda (&rest _) nil)))
-      (dsh-bridge--install-sentinel 'fake-process "finished\n"))
-    (should validated)))
-
-(ert-deftest dsh-bridge-install-sentinel-failure ()
-  "A failed async install reports the failure and skips validation."
-  (let ((validated nil) (msg nil))
-    (cl-letf (((symbol-function 'process-exit-status) (lambda (_) 1))
-              ((symbol-function 'dsh-bridge--validate-plugin-install-async)
-               (lambda () (setq validated t)))
-              ((symbol-function 'message)
-               (lambda (&rest args) (setq msg (apply #'format args)))))
-      (dsh-bridge--install-sentinel 'fake-process "finished\n"))
-    (should-not validated)
-    (should (string-match-p "failed" msg))))
-
-(ert-deftest dsh-bridge-validate-sentinel-reports ()
-  "The validation sentinel reports composition success and failure."
-  (let ((msg nil))
-    (cl-letf (((symbol-function 'process-exit-status) (lambda (_) 0))
-              ((symbol-function 'message)
-               (lambda (&rest args) (setq msg (apply #'format args)))))
-      (dsh-bridge--validate-sentinel 'fake-process "finished\n"))
-    (should (string-match-p "restart" msg)))
-  (let ((msg nil))
-    (cl-letf (((symbol-function 'process-exit-status) (lambda (_) 1))
-              ((symbol-function 'message)
-               (lambda (&rest args) (setq msg (apply #'format args)))))
-      (dsh-bridge--validate-sentinel 'fake-process "finished\n"))
-    (should (string-match-p "uninstall-plugin" msg))))
-
-(ert-deftest dsh-bridge-uninstall-skips-when-not-installed ()
-  "Uninstall pre-checks the manifest and skips pnpm otherwise."
-  (let ((called nil))
-    (cl-letf (((symbol-function 'dsh-bridge--plugin-install-state) (lambda () 'not-installed))
-              ((symbol-function 'call-process)
-               (lambda (&rest _) (setq called t) 0))
-              ((symbol-function 'message) (lambda (&rest _) nil)))
-      (dsh-bridge-uninstall-plugin))
-    (should-not called)))
-
-(ert-deftest dsh-bridge-uninstall-runs-remove ()
-  "Uninstall runs `dsh plugin remove dsh-emacs-bridge' when installed."
-  (let ((dsh-bridge-profile "web") (argv nil)
-        (dsh-bridge-dsh-command '("dsh")))
-    (cl-letf (((symbol-function 'dsh-bridge--plugin-install-state) (lambda () 'installed))
-              ((symbol-function 'executable-find)
-               (lambda (prog) (and (equal prog "pnpm") "found")))
-              ((symbol-function 'call-process)
-               (lambda (&rest args) (setq argv args) 0))
-              ((symbol-function 'message) (lambda (&rest _) nil)))
-      (dsh-bridge-uninstall-plugin))
-    (let ((strings (seq-filter #'stringp argv)))
-      (should (member "remove" strings))
-      (should (member "dsh-emacs-bridge" strings)))))
-
-(ert-deftest dsh-bridge-uninstall-remove-failure ()
-  "A failing `remove' (exit status 1) signals an error, not false success.
-Exit statuses are integers and 1 is truthy, so this guards the `zerop'."
-  (let ((dsh-bridge-profile "web")
-        (dsh-bridge-dsh-command '("dsh")))
-    (cl-letf (((symbol-function 'dsh-bridge--plugin-install-state) (lambda () 'installed))
-              ((symbol-function 'executable-find)
-               (lambda (prog) (and (equal prog "pnpm") "found")))
-              ((symbol-function 'call-process) (lambda (&rest _) 1))
-              ((symbol-function 'display-buffer) (lambda (&rest _) nil))
-              ((symbol-function 'message) (lambda (&rest _) nil)))
-      (should-error (dsh-bridge-uninstall-plugin) :type 'user-error))))
-
-(ert-deftest dsh-bridge-plugin-directory-source-load ()
-  "plugin-directory returns nil-or-a-dir (never signals) off load-path.
-Loading by path from a source checkout makes `locate-library' nil; the helper
-must fall back to the loaded file and never call `file-name-directory' on nil."
-  (cl-letf (((symbol-function 'locate-library) (lambda (&rest _) nil)))
-    (let ((dir (dsh-bridge--plugin-directory)))   ; must not signal
-      (should (or (null dir) (stringp dir))))))
 
 ;;; Dispatcher and menus
 

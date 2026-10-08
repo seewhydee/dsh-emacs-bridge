@@ -12,7 +12,6 @@
   - `tsdown.config.ts` / `tsdown.client.config.ts` — host build → ESM `lib/index.js`; browser build → CJS `lib/client.js`.
 - `emacs/`
   - `dsh-bridge.el` — the Emacs package (feature `dsh-bridge`, prefix `dsh-bridge-`, internal `dsh-bridge--`), self-contained over the loopback interface.
-  - `dsh-bridge-install.el` — optional companion: every definition that runs the `dsh` CLI or reads the DSH profile.
   - `dsh-bridge-tests.el` — ERT tests.
 - `integration/` — seam harness: boots the real plugin against a live DSH host with a mock LLM.
 - `Makefile`, `README.md` (user-facing install/usage/permissions), `PLAN.md` (design notes), `COPYING` (GPL-3.0).
@@ -38,7 +37,7 @@ Do not add an entry merely to document some change you just made. Behavior descr
 |---|---|
 | npm package | `dsh-emacs-bridge` (unscoped) |
 | Cordis id (plugin row / HMR target) | `dsh-bridge` |
-| Emacs feature / file | `dsh-bridge` / `dsh-bridge.el`, plus optional `dsh-bridge-install` / `dsh-bridge-install.el`; prefix `dsh-bridge-` |
+| Emacs feature / file | `dsh-bridge` / `dsh-bridge.el`; prefix `dsh-bridge-` |
 
 These names appear across README, Makefile, `package.json`, `cordis.patch.yml`, both source trees, and the `/status` identity route. Renaming one means updating every reference together.
 
@@ -46,17 +45,39 @@ These names appear across README, Makefile, `package.json`, `cordis.patch.yml`, 
 
 ```sh
 make build     # build the plugin → dsh-plugin/lib/index.js + lib/client.js
-make package   # build, then stage dsh-bridge-<version>.tar (Emacs package bundling the built plugin)
+make package   # stage dsh-bridge-<version>.tar (pure-elisp Emacs package; no Node toolchain needed)
+make release   # build, then pack + stage both release artifacts in .release/ (publish per "Release procedure")
 make test      # pnpm test in dsh-plugin/ + ERT via emacs --batch
 make integration-test   # seam harness in integration/
-make clean     # remove .package/ and dsh-bridge-*.tar
+make clean     # remove .package/, .release/, dsh-bridge-*.tar, and the packed .tgz
 ```
 
 Inside `dsh-plugin/`: `pnpm install`, `pnpm build`, `pnpm test`. `make build` falls back to invoking `tsdown` directly when `pnpm build` refuses a symlinked `node_modules`; preserve that fallback.
 
 ## Version single source of truth
 
-The `;; Version:` header of `emacs/dsh-bridge.el` is the source of truth. Two copies must agree with it (`make package` refuses to build on drift): the `dsh-bridge-version` defconst in the same file, and the `version` field of `dsh-plugin/package.json`. Bump all three at once.
+The `;; Version:` header of `emacs/dsh-bridge.el` is the source of truth. Two copies must agree with it (`make package` refuses to build on drift): the `dsh-bridge-version` defconst in the same file, and the `version` field of `dsh-plugin/package.json`. Bump all three at once, in the post-release bump below — that is the only commit that edits the version.
+
+The default branch carries the version of the **next** release, never the last one, so a published version appears in exactly one tree: the tagged commit's. A build from HEAD is a development build, not a release; never distribute or upload one.
+
+A version is always a plain `X.Y.Z` literal in all three places. `package.el` cannot parse a `-dev` suffix (`version-to-list` returns nil), and generating the version at build time would put stamping back into the shipped elisp.
+
+## Release procedure
+
+Distribution is two artifacts attached to a GitHub release: `dsh-emacs-bridge-<version>.tgz` (the plugin, via `pnpm pack`) and `dsh-bridge-<version>.tar` (the pure-elisp Emacs package). Because the halves verify each other by exact version, a release always ships both; they are never released independently. `make release` is local-only — build, pack, and stage both under `.release/`, safe to re-run. Publishing is a separate, deliberate step:
+
+1. Gate on `make build && make test` green, plus `make integration-test` for host-plane changes. The version already in the tree is the version being released; do not edit it.
+2. `make release`.
+3. `git tag v<version>` at that commit; push branch and tag. The `v<version>` convention is user-visible contract: README asset URLs embed it.
+4. Preflight `gh auth status`, then `gh release create v<version> .release/dsh-emacs-bridge-<version>.tgz .release/dsh-bridge-<version>.tar --title "v<version>"`.
+5. Acceptance walk: follow README's Installation end-to-end on a clean profile (a first install hot-applies — no `dsh web` restart), then the upgrade path (`dsh plugin add` with the new tarball URL replaces the installed plugin; restart `dsh web`).
+6. Only once the release is published and the walk passes, bump the three version copies (above) to the next patch (e.g. `0.17.0` → `0.17.1`), commit, and push. Bump last: tagging an already-bumped tree would publish the development version under a release tag.
+
+A release carrying a breaking install or protocol change renumbers to the next minor in one ordinary commit before step 1; the minor is reserved for that meaning, and a version skipped by such a renumber is simply never released.
+
+Releases are linear and forward-only: a fix ships as the next version from the default branch, never as a re-cut of a published release and never from a release branch.
+
+Published releases are immutable: never edit or re-upload assets on an existing release — downstream installs pin the URL and its integrity hash. Fixes ship as a new patch version. `.release/` is staging, not an archive: every `make release` replaces it, and after a bump it names the new version, so reproducing a published version means checking out its tag.
 
 ## Architecture policy
 
@@ -94,12 +115,12 @@ The README.md serves as a short introduction and quickstart; it is not an exhaus
 
 ### Emacs package (`emacs/`)
 
-- Two libraries, `lexical-binding: t`. `dsh-bridge.el` is self-contained and must never `require` the companion at load time; the sole seam is `dsh-bridge--ensure-plugin`. Both files ship in the package tar.
+- One library, `lexical-binding: t`, self-contained over the loopback interface: no Emacs code path runs the `dsh` CLI or downloads anything. Plugin availability problems are only diagnosed — `dsh-bridge--plugin-install-state` reads the profile manifest to split "installed but not loaded" from "not installed" — and answered with install/restart instructions pointing at the releases page; installing the plugin is DSH's job (`dsh plugin add`), never Emacs's.
 - Docstrings state the function's intention, its arguments and return value, and notable gotchas — nothing more. The code, not the docstring, is the contract: never use the docstring to narrate the implementation step by step. Tricky implementation details (why a splice is sound, why a race is safe) belong in code comments next to the code they describe.
 - A session command resolves its target through the menu focus first: whenever the `dsh-bridge` dispatcher is open, its recorded focus (`dsh-bridge--focus`) wins for the nine session verbs, whether they are invoked through the menu or directly. Reads consult it through `dsh-bridge--focus-session`, and mutation verbs through `dsh-bridge--confirmed-session`, which signals a `user-error` for the `advisory` last-active guess and for a menu that names no session, so the menu cannot mutate a session the user has not confirmed by cycling or pinning (a `:transient` suffix decides to stay before its body runs, so a refusal leaves the menu open). With no menu open the focus is nil and both fall back on `dsh-bridge--effective-session`: the buffer's own binding (view: shown session; prompt: bound session; describe: shown session; sessions list: row at point), then the pinned target, refusing with a `user-error` when neither names one. A refusal that stops a command before it acts is a `user-error'; a host response, a no-op, or a declined confirmation is reported with `message'. `dsh-bridge--effective-session` itself is never taught about the focus; helpers use it directly, and the three internal callers that may run while a menu is open (`dsh-bridge--header-indicator-act`, `dsh-bridge-prompt-stop-or-erase`, `dsh-bridge--revert-output`) pass an explicit session id. `dsh-bridge-answer` deliberately adds NODEFAULT on top: it acts only on the buffer's own binding and refuses from a buffer that names no session, so answering always carries the context of the session that asked, and a sole pending session elsewhere is never an implicit target.
 - DSH-View bodies are filled incrementally by `dsh-bridge--view-fill` under a recorded provenance; any mismatch falls back to a full re-render. Do not add a splice path that cannot prove those checks, and keep terminal furniture (answer/approval notes, changed-files footer) out of the body.
 - DSH-Question buffer edits go through `dsh-bridge--question-edit` (read-only, undo suppressed, modified flag cleared). A state change patches the affected region, found by text property, instead of re-rendering: a question's `detail`, and any markers or overlays inside it, must survive, so `dsh-bridge--question-render` stays the initial paint and the fallback only. A patch must re-apply the buffer's own question-id string, never the caller's — `next-single-property-change` compares with `eq`, so an equal-but-distinct string splits a block in two.
-- Requires Emacs 29.1+. Paths given to `dsh-bridge-dsh-command` are not tilde-expanded; document full paths.
+- Requires Emacs 29.1+.
 
 ## Testing
 
@@ -122,7 +143,7 @@ These are user-visible invariants; any change must update README.md's "Permissio
 ## Licensing and hygiene
 
 - Every source file carries the GPL-3.0-or-later header (see `COPYING`); add it to new files.
-- Build outputs and dependencies are gitignored (`node_modules`, `lib/`, `.package/`, `dsh-bridge-*.tar`, elisp artifacts, `pnpm-lock.yaml`). Keep source committed and artifacts ignored.
+- Build outputs and dependencies are gitignored (`node_modules`, `lib/`, `.package/`, `.release/`, `dsh-bridge-*.tar`, `dsh-emacs-bridge-*.tgz`, elisp artifacts, `pnpm-lock.yaml`). Keep source committed and artifacts ignored.
 
 ## Adjacent reference trees (not assumed)
 

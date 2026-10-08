@@ -11,52 +11,68 @@ The bridge consists of two components:
 
 - `dsh-plugin/` — a DeepSeek Harness plugin (`dsh-emacs-bridge`).
 - `emacs/dsh-bridge.el` — an Emacs package to interact with the
-  harness.  A companion library, `dsh-bridge-install.el`, is loaded on
-  demand and provides commands to install/uninstall the DSH plugin.
+  harness.
 
 ## Installation
 
 ### Requirements
 
 - `dsh`, the DeepSeek Harness.
-- Node.js and `pnpm` to build the plugin.
+- `pnpm` on the executable path (DSH uses it to install plugins).
 - Emacs 29 or later.
 - (Recommended) The [`markdown-mode`](https://jblevins.org/projects/markdown-mode/) Emacs package.
 
-### Emacs package
+### 1. Install the DSH plugin
 
-To build an Emacs package that also bundles the DSH plugin, run this
-in the repository's root directory:
+Download URLs for released versions are on the
+[releases page](https://github.com/seewhydee/dsh-emacs-bridge/releases).
+The plugin asset is `dsh-emacs-bridge-<version>.tgz`, under the release's
+`v<version>` tag. Copy its URL and run:
 
 ```sh
-make package
+dsh plugin --profile web add <tarball-url>
+dsh web   # if not already running; a first install is picked up live
 ```
 
-Then, in Emacs:
+Alternatively, paste the same URL into the "Add plugin" dialog of DSH's
+Plugins page.
 
-1. `M-x package-install-file RET /path/to/dsh-bridge-<version>.tar RET`
-2. (*optional*) If you run DSH from a source checkout, so that `dsh`
-   is *not* on the executable path or run via `npx`, customize
-   `dsh-bridge-dsh-command` (e.g., `M-x customize-variable RET
-   dsh-bridge-dsh-command RET`) to specify how to run DSH (see below).
-3. `M-x dsh-bridge-install-plugin`
-4. Start or restart `dsh web`
+**Important:** use the *release asset* URL (ending in `.tgz`), not the
+repository URL. The repository holds sources, not a built package, so a
+repository-URL (git) install does not give you a working plugin. The
+`.tgz` asset is prebuilt and needs no build step.
 
-To remove the plugin later, run `M-x dsh-bridge-uninstall-plugin`.
+Both commands above target the `web` profile, the one `dsh web` runs.
+If you run a different profile, customize `dsh-bridge-profile` to match,
+so the Emacs package's plugin diagnostics inspect the right profile.
 
-Here is an example of `dsh-bridge-dsh-command` for a source checkout:
+### 2. Install the Emacs package
 
-```elisp
-(setq dsh-bridge-dsh-command "pnpm -C /path/to/deepseek-harness dsh")
+Download `dsh-bridge-<version>.tar` from the same release, then in Emacs:
+
+```
+M-x package-install-file RET /path/to/dsh-bridge-<version>.tar RET
 ```
 
-Note that `~` is not expanded, so specify the full path.  Don't add an
-additional `web` argument to the end.
+Both halves must come from the same release. The Emacs package checks
+the plugin's version on first contact and warns if the two differ,
+naming both versions.
 
-### Manual compilation and installation
+### Upgrading
 
-Instead of an all-in-one Emacs package, you can build and install the
-DSH plugin and Emacs library manually.
+Both halves upgrade together: repeat both steps with the URLs/files of
+the new release (re-running `dsh plugin add` with the new tarball URL
+replaces the installed plugin), and restart `dsh web`.
+
+To remove the plugin later, run
+`dsh plugin --profile web remove dsh-emacs-bridge`.
+
+### Installing from a source checkout
+
+The steps above download release artifacts from GitHub. If you have this
+repository checked out — for development, or to install without network
+access — you can build and install both halves from local sources
+instead.
 
 #### Build and install the DeepSeek Harness plugin
 
@@ -66,8 +82,8 @@ From this repository's root directory:
 make build
 ```
 
-If you have `dsh` installed on the executable path, run the following
-commands:
+This requires Node.js and `pnpm`.  If you have `dsh` installed on the
+executable path, run:
 
 ```sh
 # from this repo root:
@@ -75,10 +91,9 @@ dsh plugin --profile web add link:./dsh-plugin
 dsh web
 ```
 
-If you have a source checkout of DSH and run it as a pnpm script
-(`pnpm dsh web`), run the following from the `deepseek-harness`
-directory instead, replacing the `link:` path with the appropriate
-path into this repo:
+If you run DSH from a source checkout (`pnpm dsh web`), run the following
+from the `deepseek-harness` directory instead, replacing the `link:` path
+with the appropriate path into this repo:
 
 ```sh
 # from deepseek-harness root:
@@ -94,11 +109,6 @@ replacing the path with the actual path to `dsh-bridge.el`:
 ```elisp
 (load "/path/to/dsh-emacs-bridge/emacs/dsh-bridge.el")
 ```
-
-Optionally, you can also load `dsh-bridge-install.el`, which supplies
-the `M-x dsh-bridge-install-plugin` command (see above).  If you
-installed the DSH plugin directly by following the steps in the
-preceding section, you can skip this.
 
 ## Usage
 

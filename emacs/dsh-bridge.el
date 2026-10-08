@@ -16,7 +16,7 @@
 ;; along with this program.	 If not, see <https://www.gnu.org/licenses/>.
 
 ;; Author: Chong Yidong <cyd@stupidchicken.com>
-;; Version: 0.16.1
+;; Version: 0.17.0
 ;; Package-Requires: ((emacs "29.1"))
 ;; Keywords: tools, convenience
 
@@ -26,12 +26,10 @@
 ;; session, moving text from Emacs to DSH and back over loopback HTTP.
 ;; This lets you compose prompts and read DSH's replies within Emacs.
 
-;; It is bundled with a plugin for DSH, which should be installed with
-;; before using the other commands.  The plugin can be installed via
-;; \\`M-x dsh-bridge-install-plugin' (from the `dsh-bridge-install'
-;; library, part of this Emacs package).  By default, this command
-;; tries to detect the dsh executable, but if that does not work,
-;; customize `dsh-bridge-dsh-command'.
+;; It requires the `dsh-emacs-bridge' plugin to be installed in your
+;; DSH profile, and the versions of the plugin and this package must
+;; match.  See the project's Installation instructions:
+;; https://github.com/seewhydee/dsh-emacs-bridge#installation
 
 ;; The interactive entry points for the DSH-Emacs bridge are:
 ;;
@@ -77,7 +75,7 @@
 
 ;;; Common utility functions/variables
 
-(defconst dsh-bridge-version "0.16.1"
+(defconst dsh-bridge-version "0.17.0"
   "Version string for the DSH-Bridge package.
 This should match the version reported by the running DSH plugin.")
 
@@ -104,11 +102,6 @@ by the environment variable $DSH_HOME, falling back on ~/.dsh."
   "Connect Emacs to a DeepSeek Harness session."
   :group 'tools)
 
-;; The companion `dsh-bridge-install' library defines options in this group.
-;; Have Customize load it when the group is browsed; a plain `put' avoids
-;; pulling in `cus-edit' just to call `custom-add-load' at load time.
-(put 'dsh-bridge 'custom-loads '("dsh-bridge-install"))
-
 (defcustom dsh-bridge-url "http://127.0.0.1:3080/dsh-bridge"
   "Base URL for the HTTP route to communicate with the DeepSeek Harness (DSH)."
   :type 'string
@@ -125,6 +118,12 @@ every \"/dsh-bridge\" route on the DSH loopback interface."
 (defcustom dsh-bridge-timeout 8
   "Timeout in seconds for synchronous requests to the DeepSeek Harness (DSH)."
   :type 'number
+  :group 'dsh-bridge)
+
+(defcustom dsh-bridge-profile "web"
+  "DSH profile whose manifest the plugin availability check inspects.
+This should name the profile that runs \"dsh web\"."
+  :type 'string
   :group 'dsh-bridge)
 
 (defcustom dsh-bridge-prompt-markdown t
@@ -697,7 +696,14 @@ absent entry means the session has not been seeded.")
   "Cached DSH bridge interface state, or nil if not yet probed.
 Possible values are nil, `running', `incompatible', `not-running',
 `unreachable', and `forbidden'.  The cache is set per-session, and reset
-if a real request contradicts it or an install/uninstall runs.")
+when a real request contradicts it.")
+
+(defvar dsh-bridge--plugin-reported-version nil
+  "Version string from the DSH plugin's latest `/status' probe.
+Kept so the version-mismatch warning can name both versions, including
+when the plugin reports no version of its own (nil is then rendered as
+\"unknown\").  Cleared with the status cache when a request contradicts
+it.")
 
 (defun dsh-bridge--bridge-status ()
   "Probe the status of the DSH bridge interface.
@@ -726,6 +732,8 @@ response means the route (and hence the plugin) is absent."
 	 ((and (eq status 200)
 	       (equal (alist-get 'name alist) "dsh-emacs-bridge"))
 	  (let ((version (alist-get 'version alist)))
+	    (setq dsh-bridge--plugin-reported-version
+		  (and (stringp version) version))
 	    (if (and (stringp version)
 		     (equal version dsh-bridge-version))
 		'running
@@ -736,43 +744,78 @@ response means the route (and hence the plugin) is absent."
   "Clear the DSH bridge status cache when a real request contradicts it.
 Callers invoke this on a transport failure or a 401/404."
   (if (memq dsh-bridge--bridge-status-cache '(running unreachable))
-      (setq dsh-bridge--bridge-status-cache nil)))
+      (setq dsh-bridge--bridge-status-cache nil
+	    dsh-bridge--plugin-reported-version nil)))
 
 (defvar dsh-bridge--plugin-diagnosed nil
   "Non-nil once the DSH plugin's problem has been diagnosed this session.")
 
+(defun dsh-bridge--plugin-install-state ()
+  "Return the DSH bridge plugin's installation state.
+One of `installed' (profile manifest lists the plugin), `not-installed'
+(profile exists but plugin not in manifest), or `no-profile' (no profile
+directory at all, possibly because DSH has never been run here).
+
+This function works by reading the package.json manifest in DSH's
+profile directory; the plugin counts as installed if it appears in
+`dependencies' or in `dsh.profile.bundles'."
+  (let* ((dir (expand-file-name (format "profiles/%s" dsh-bridge-profile)
+				(dsh-bridge--dsh-home)))
+	 manifest data)
+    (cond
+     ((not (file-directory-p dir)) 'no-profile)
+     ((and (file-readable-p
+	    (setq manifest (expand-file-name "package.json" dir)))
+	   (setq data (with-temp-buffer
+			(insert-file-contents manifest)
+			(dsh-bridge--parse-json-body (buffer-string))))
+	   (or (assq 'dsh-emacs-bridge (alist-get 'dependencies data))
+	       (member "dsh-emacs-bridge"
+		       (alist-get 'bundles
+				  (alist-get 'profile
+					     (alist-get 'dsh data))))))
+      'installed)
+     (t 'not-installed))))
+
 (defun dsh-bridge--warn-plugin-unavailable (state)
   "Warn that the DSH bridge plugin is missing or not loaded, from STATE.
-STATE is the `dsh-bridge--bridge-status' result.  This is the fallback
-when the optional `dsh-bridge-install' library is unavailable, so the
-profile manifest cannot be inspected and no install can be offered."
-  (display-warning
-   :error
-   (cond
-    ((eq state 'incompatible)
-     "dsh-bridge: DSH plugin version mismatch; reinstall the bundled plugin")
-    ((eq state 'forbidden)
-     "dsh-bridge: connection route forbidden; check `dsh-bridge-url'")
-    ((eq state 'unreachable)
-     (format "dsh-bridge: no bridge is running at %s" dsh-bridge-url))
-    (t
-     "dsh-bridge: DSH plugin not loaded; install it or restart \"dsh web\""))))
+STATE is the `dsh-bridge--bridge-status' result.  The advice splits on
+`dsh-bridge--plugin-install-state': an installed plugin means a missing
+restart, an absent one means install per the README.  A version
+mismatch names both versions, since the plugin and this package are
+released in lockstep and must be upgraded together."
+  (let ((installed (eq (dsh-bridge--plugin-install-state) 'installed)))
+    (display-warning
+     :error
+     (cond
+      ((eq state 'incompatible)
+       (format "dsh-bridge: DSH plugin version %s does not match Emacs package %s; install matching versions from https://github.com/seewhydee/dsh-emacs-bridge/releases"
+	       (or dsh-bridge--plugin-reported-version "unknown")
+	       dsh-bridge-version))
+      ((eq state 'forbidden)
+       "dsh-bridge: connection route forbidden; check `dsh-bridge-url'")
+      ((eq state 'unreachable)
+       (if installed
+	   (format "dsh-bridge: plugin installed, but no bridge is running at %s"
+		   dsh-bridge-url)
+	 (format "dsh-bridge: no bridge is running at %s; if \"dsh web\" is up, the plugin is not installed (see https://github.com/seewhydee/dsh-emacs-bridge#installation)"
+		 dsh-bridge-url)))
+      (installed
+       "dsh-bridge: plugin installed but not loaded; restart \"dsh web\"")
+      (t
+       "dsh-bridge: DSH plugin not installed; see https://github.com/seewhydee/dsh-emacs-bridge#installation")))))
 
 ;; To help guide the user, `dsh-bridge--ensure-plugin' is called on
-;; common entry-points, and auto-detects the DSH installation and/or
-;; the DSH plugin.  If the plugin is missing, it offers to install it.
-
-(declare-function dsh-bridge-install--diagnose "dsh-bridge-install")
+;; common entry-points; when the plugin is unreachable, absent, or
+;; version-mismatched, it warns once per session with install or
+;; restart instructions.
 
 (defun dsh-bridge--ensure-plugin ()
-  "Check for DSH bridge plugin availability, and maybe offer to install.
-This function is called at the top of every bridge request.  The plugin
-diagnosis runs only once per session; later commands proceed and surface
-an ordinary request error if the bridge is unavailable or incompatible.
-
-The install offer needs the optional `dsh-bridge-install' library.
-Without it, an unreachable or unloaded plugin is still reported, but no
-install is offered."
+  "Check for DSH bridge plugin availability, warning once if unavailable.
+This function is called at the top of every bridge request.  The
+diagnosis runs only once per session; later commands proceed and
+surface an ordinary request error if the bridge is unavailable or
+incompatible."
   (let ((state (or dsh-bridge--bridge-status-cache ; use cache or do a probe
 		   (setq dsh-bridge--bridge-status-cache
 			 (dsh-bridge--bridge-status)))))
@@ -781,10 +824,7 @@ install is offered."
      (dsh-bridge--plugin-diagnosed nil)
      (t
       (setq dsh-bridge--plugin-diagnosed t) ; bug user only once
-      (require 'dsh-bridge-install nil t)
-      (if (functionp 'dsh-bridge-install--diagnose)
-	  (dsh-bridge-install--diagnose state)
-	(dsh-bridge--warn-plugin-unavailable state))))))
+      (dsh-bridge--warn-plugin-unavailable state)))))
 
 ;;; Low-level HTTP plumbing
 
@@ -1755,7 +1795,7 @@ last-active guess, in that order of precedence."
   (if (and dsh-bridge--sessions-cache (not force-fetch))
       (setq dsh-bridge--dispatcher-roster 'ok)
     ;; Sessions cache is empty, so fetching.  Suppress the plugin
-    ;; install offer: a menu open should not prompt or raise an error.
+    ;; diagnosis: a menu open should not warn.
     (let ((dsh-bridge--plugin-diagnosed t)
 	  (dsh-bridge-timeout dsh-bridge-roster-timeout))
       (setq dsh-bridge--dispatcher-roster
@@ -6864,7 +6904,7 @@ host still settles an idle agent as a no-op."
 	 ;; route itself is missing: the installed plugin predates it.
 	 ((and (eq status 404)
 	       (memq (dsh-bridge--status-state id) '(running idle)))
-	  (message "dsh-bridge: the installed DSH plugin does not support stopping sessions; re-run M-x dsh-bridge-install-plugin"))
+	  (message "dsh-bridge: the installed DSH plugin does not support stopping sessions; upgrade the plugin"))
 	 ((eq status 409)
 	  (message "dsh-bridge: session \"%s\" is owned by a subagent"
 		   (dsh-bridge--session-label id)))
@@ -6940,7 +6980,7 @@ compaction in progress) is reported with the host-supplied text."
 	    ;; route itself is missing: the installed plugin predates it.
 	    ((and (eq status 404)
 		  (memq (dsh-bridge--status-state id) '(running idle)))
-	     (message "dsh-bridge: the installed DSH plugin does not support compaction; re-run M-x dsh-bridge-install-plugin"))
+	     (message "dsh-bridge: the installed DSH plugin does not support compaction; upgrade the plugin"))
 	    ((eq status 501)
 	     (message "dsh-bridge: this DSH profile has no compaction command"))
 	    ;; Nil STATUS is a transport failure; report it plainly rather

@@ -1,18 +1,22 @@
-# Build rules for the dsh-emacs-bridge package tar.
+# Build rules for dsh-emacs-bridge.
 #
-# `make package` builds the DSH plugin bundles and stages a multi-file
-# Emacs package tar (dsh-bridge-<version>.tar) containing the Emacs
-# package, a generated dsh-bridge-pkg.el, and the prebuilt plugin as
-# payload.  Install it with `M-x package-install-file', then run
-# `M-x dsh-bridge-install-plugin' to install the plugin into DSH.
+# `make package` stages a pure-elisp Emacs package tar
+# (dsh-bridge-<version>.tar: dsh-bridge.el plus a generated
+# dsh-bridge-pkg.el).  Install it with `M-x package-install-file'.
+# `make' with no target builds the plugin bundles too; `make package'
+# alone needs no Node toolchain.
+#
+# `make release' additionally packs the built DSH plugin
+# (dsh-emacs-bridge-<version>.tgz, via `pnpm pack') and stages both
+# artifacts in .release/, ready to attach to a GitHub release.
+# Publishing is a separate, deliberate step; see "Release procedure" in
+# AGENTS.md.
 #
 # The package version's single source of truth is the Version header of
-# emacs/dsh-bridge.el.  It is stamped into the staged plugin manifest so
-# the installed payload identifies itself and version bumps force pnpm to
-# refresh the copied plugin on re-install.  Two other copies must agree —
-# the `dsh-bridge-version' defconst (the runtime staleness comparison) and
-# the source plugin manifest (what a source-checkout install reports) —
-# and the tar recipe refuses to build when either drifts.
+# emacs/dsh-bridge.el.  Two other copies must agree — the
+# `dsh-bridge-version' defconst (the runtime staleness comparison) and
+# dsh-plugin/package.json (what the packed plugin reports) — and the tar
+# recipe refuses to build when either drifts.
 
 VERSION := $(shell sed -n 's/^;; Version: //p' emacs/dsh-bridge.el | head -1)
 
@@ -21,9 +25,9 @@ STAGE := .package/dsh-bridge-$(VERSION)
 
 PLUGIN_SRC := $(wildcard dsh-plugin/src/*.ts dsh-plugin/src/client/*.ts dsh-plugin/src/client/*.tsx)
 
-.PHONY: all build package test clean no-stale-elc
+.PHONY: all build package release test clean no-stale-elc
 
-all: package
+all: build package
 
 build: dsh-plugin/lib/index.js dsh-plugin/lib/client.js
 
@@ -42,17 +46,14 @@ dsh-plugin/lib/index.js dsh-plugin/lib/client.js: $(PLUGIN_SRC) dsh-plugin/tsdow
 
 package: $(TAR)
 
-$(TAR): build emacs/dsh-bridge.el emacs/dsh-bridge-install.el dsh-plugin/package.json dsh-plugin/cordis.patch.yml
+$(TAR): emacs/dsh-bridge.el dsh-plugin/package.json
 	@grep -q '(defconst dsh-bridge-version "$(VERSION)"' emacs/dsh-bridge.el || \
 	  { echo "error: dsh-bridge-version defconst disagrees with the Version header ($(VERSION))"; exit 1; }
 	@grep -q '"version": "$(VERSION)"' dsh-plugin/package.json || \
 	  { echo "error: dsh-plugin/package.json version disagrees with the Version header ($(VERSION))"; exit 1; }
 	rm -rf .package
-	mkdir -p $(STAGE)/dsh-plugin/lib
-	cp emacs/dsh-bridge.el emacs/dsh-bridge-install.el $(STAGE)/
-	cp dsh-plugin/package.json dsh-plugin/cordis.patch.yml $(STAGE)/dsh-plugin/
-	sed -i 's/"version": "[^"]*"/"version": "$(VERSION)"/' $(STAGE)/dsh-plugin/package.json
-	cp dsh-plugin/lib/index.js dsh-plugin/lib/client.js $(STAGE)/dsh-plugin/lib/
+	mkdir -p $(STAGE)
+	cp emacs/dsh-bridge.el $(STAGE)/
 	printf '%s\n' \
 	  ';; -*- no-byte-compile: t -*-' \
 	  '(define-package "dsh-bridge" "$(VERSION)"' \
@@ -61,9 +62,21 @@ $(TAR): build emacs/dsh-bridge.el emacs/dsh-bridge-install.el dsh-plugin/package
 	  > $(STAGE)/dsh-bridge-pkg.el
 	tar --format=ustar -cf $@ -C .package dsh-bridge-$(VERSION)
 
+RELEASE_DIR := .release
+PLUGIN_TGZ := dsh-emacs-bridge-$(VERSION).tgz
+
+# Stage both release artifacts in .release/.  `pnpm pack' honors the
+# package's `files' list (lib/, cordis.patch.yml), so the tarball carries
+# the built plugin; publishing the stage is a separate step (AGENTS.md).
+release: build package
+	rm -rf $(RELEASE_DIR)
+	mkdir -p $(RELEASE_DIR)
+	cd dsh-plugin && pnpm pack
+	mv dsh-plugin/$(PLUGIN_TGZ) $(RELEASE_DIR)/
+	cp $(TAR) $(RELEASE_DIR)/
+
 test: no-stale-elc
 	cd dsh-plugin && pnpm test
-	emacs --batch -Q -L emacs --eval '(progn (require (quote dsh-bridge)) (when (featurep (quote dsh-bridge-install)) (error "dsh-bridge.el loaded the optional install library eagerly")))'
 	emacs --batch -L emacs -l emacs/dsh-bridge-tests.el \
 	      -f ert-run-tests-batch-and-exit
 
@@ -89,4 +102,4 @@ integration-test: build no-stale-elc
 	      -f ert-run-tests-batch-and-exit
 
 clean:
-	rm -rf .package dsh-bridge-*.tar
+	rm -rf .package .release dsh-bridge-*.tar dsh-plugin/dsh-emacs-bridge-*.tgz

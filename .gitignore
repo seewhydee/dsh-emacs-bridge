@@ -13,9 +13,11 @@ pnpm-lock.yaml
 *~
 *.elc
 
-# Package tar staging and output (`make package`).
+# Package/release staging and outputs (`make package`, `make release`).
 /.package/
+/.release/
 /dsh-bridge-*.tar
+/dsh-plugin/dsh-emacs-bridge-*.tgz
 
 # Working plan files (not part of the committed repo).
 phase-*.md

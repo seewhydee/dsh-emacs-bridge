@@ -54,8 +54,7 @@ function freePort() {
 /**
  * Resolve the `dsh` command the launcher spawns. Env override
  * `DSH_BRIDGE_DSH_COMMAND` (whitespace-split) wins; else `dsh` on PATH. This is
- * launcher-only: `dsh-bridge-dsh-command` in the elisp is a richer defcustom and
- * does not read this env var.
+ * launcher-only: no elisp reads this env var.
  */
 export function resolveDshCommand() {
   const envCmd = process.env.DSH_BRIDGE_DSH_COMMAND

@@ -18,7 +18,7 @@ re-verification checklist.
 | Repo / working tree | `dsh-emacs-bridge` |
 | DSH plugin (npm package) | `dsh-emacs-bridge` (unscoped — `@deepseek-ai/` is reserved) |
 | DSH plugin (Cordis id) | `dsh-bridge` |
-| Emacs feature / file | `dsh-bridge.el` → feature `dsh-bridge`; optional companion `dsh-bridge-install.el` → feature `dsh-bridge-install`; prefix `dsh-bridge-` |
+| Emacs feature / file | `dsh-bridge.el` → feature `dsh-bridge`; prefix `dsh-bridge-` |
 
 ## New Feature Candidates
 
