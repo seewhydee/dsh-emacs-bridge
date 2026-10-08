@@ -38,18 +38,15 @@ The bridge consists of two components:
 2. Click **Install**.  When it finishes, `dsh-emacs-bridge` appears in
    the Installed section of the Plugins page.
 
-3. Click the `dsh-emacs-bridge` entry to open its configuration card,
-   then click **Install Emacs package**.  This runs the configured
-   Emacs command (`emacs` on the executable path by default) to
-   install the `dsh-bridge.el` bundled in the plugin.
+3. Click the `dsh-emacs-bridge` entry to open the plugin's
+   configuration card, then click **Install Emacs package**.  This
+   runs Emacs (`emacs` on the executable path) to install the
+   `dsh-bridge.el` bundled in the plugin.  
+Alternatively, you can install the Emacs package directly from
+`dsh-bridge-<version>.tar` in the release list.
 
 4. Restart Emacs, or evaluate `(package-initialize)` in a running
    session; `M-x dsh-bridge` is then available.
-
-If `emacs` is not found, or your init file customizes
-`package-user-dir`, change the plugin's `emacsCommand` field.
-Alternatively, you can install the Emacs library directly from
-`dsh-bridge-<version>.tar` in the release list.
 
 To upgrade, repeat these steps with the new release's URL (and the
 matching `.tar` if you installed the Emacs package by hand), and
