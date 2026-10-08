@@ -8364,7 +8364,14 @@ user-confirmed, so the mutators may still act on it."
       (dsh-bridge--dispatcher-cycle-init)
       (setq dsh-bridge--focus (cons session 'pinned)))))
 
-;;;###autoload
+;; An autoload cookie on the `transient-define-prefix' form itself would make
+;; `loaddefs-generate' copy that form verbatim into the package's autoloads
+;; file, where it signals `void-function transient-define-prefix' on any
+;; startup that has not loaded `transient' yet (this library loads it, but
+;; only when the library itself loads) -- and the failure costs the command
+;; its autoload.  Register a plain command autoload instead, so package.el
+;; defers the whole library, `transient' with it, until the dispatcher runs.
+;;;###autoload (autoload 'dsh-bridge "dsh-bridge" "Dispatch actions for the DeepSeek Harness (DSH) bridge." t)
 (transient-define-prefix dsh-bridge (&optional arg)
   "Dispatch actions for the DeepSeek Harness (DSH) bridge.
 This command opens a transient menu listing a set of actions.

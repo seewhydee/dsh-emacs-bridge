@@ -5348,6 +5348,31 @@ message must make a mismatched artifact pair self-explanatory."
           (should (eq (dsh-bridge--plugin-install-state) 'installed)))
       (delete-directory home t))))
 
+;;; Autoloads (packaging)
+
+(ert-deftest dsh-bridge-autoloads-register-the-dispatcher-plainly ()
+  "The generated autoloads must register `dsh-bridge' as a plain command.
+A `;;;###autoload' cookie on the `transient-define-prefix' form itself makes
+`loaddefs-generate' copy that form verbatim, and evaluating it at startup
+signals `void-function transient-define-prefix' on any session that has not
+loaded `transient' yet -- costing the dispatcher its autoload.  This pins the
+plain-command form so the library (and `transient' with it) stays deferred
+until the dispatcher actually runs."
+  (require 'loaddefs-gen)
+  (let ((dir (make-temp-file "dsh-bridge-autoloads-" t)))
+    (unwind-protect
+        (let ((lib (or (locate-library "dsh-bridge")
+                       (symbol-file 'dsh-bridge-version 'defconst))))
+          (should lib)
+          (copy-file lib (expand-file-name "dsh-bridge.el" dir) t)
+          (loaddefs-generate dir (expand-file-name "out-autoloads.el" dir))
+          (let ((out (with-temp-buffer
+                       (insert-file-contents (expand-file-name "out-autoloads.el" dir))
+                       (buffer-string))))
+            (should (string-match-p "(autoload 'dsh-bridge \"dsh-bridge\"" out))
+            (should-not (string-match-p "(transient-define-prefix dsh-bridge" out))))
+      (delete-directory dir t))))
+
 ;;; Dispatcher and menus
 
 (ert-deftest dsh-bridge-dispatcher-suffixes ()

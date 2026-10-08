@@ -1,5 +1,7 @@
 // dsh-emacs-bridge — DSH client plugin (browser half). Registers the
-// "Send to Emacs" action into the assistant message actions row.
+// "Send to Emacs" action into the assistant message actions row, the Emacs
+// install card on this bundle's Plugins page (plugins.bundle.config), and
+// the bridge row's command/timeout fields (plugins.row.config).
 // Copyright (C) 2026  Chong Yidong <cyd@stupidchicken.com>
 //
 // This program is free software: you can redistribute it and/or modify
@@ -22,11 +24,17 @@ import type { ISessions } from '@deepseek-ai/dsh-api-session-controller/client'
 import type {} from '@deepseek-ai/dsh-client-ui-chat/client'
 // Type-only: pulls the locale plugin's Context merge (ctx.locale).
 import type {} from '@deepseek-ai/dsh-client-locale/client'
+// Type-only: pulls the ui-plugin-manager SlotMap merge (the
+// plugins.bundle.config / plugins.row.config seats).
+import type {} from '@deepseek-ai/dsh-client-ui-plugin-manager/client'
 // Type-only: pulls the SlotRegistry service merge (ctx.slots).
 import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 import { en, zh } from './locales.ts'
 import { matchApprovalDismissRecord, type ApprovalDismissRecord } from './approval-dismiss.ts'
 import { matchDismissRecord, questionDismissalOf, type DismissRecord } from './question-dismiss.ts'
+import { callBridge, getToken } from './bridge.ts'
+import { EmacsInstall } from './EmacsInstall.tsx'
+import { EmacsCommandField } from './EmacsCommandField.tsx'
 import { SendToEmacs } from './SendToEmacs.tsx'
 
 /** Locale namespace owned by this plugin (its `t` seat on the assistant-actions entry). */
@@ -44,68 +52,17 @@ interface ConversationService {
   input: { for(ctx: SessionScopeCtx): { setDraft(text: string): void } }
 }
 
-/** In-memory token cache, so the vend fetch happens at most once per page. */
-let cachedToken: string | null = null
-
-/** Forget the in-memory and stored token, forcing a fresh vend next time. */
-function forgetToken(): void {
-  cachedToken = null
-  localStorage.removeItem('dsh-bridge-token')
-}
-
-/**
- * Resolve the bearer token: the in-memory cache, then `localStorage`, then the
- * loopback-fenced token-vend route (auto, with no manual paste).
- */
-async function getToken(): Promise<string> {
-  if (cachedToken !== null) return cachedToken
-  const stored = localStorage.getItem('dsh-bridge-token')
-  if (stored !== null) {
-    cachedToken = stored
-    return stored
-  }
-  const response = await fetch('/dsh-bridge/token')
-  if (!response.ok) throw new Error(`token fetch failed: HTTP ${response.status}`)
-  const body = (await response.json()) as { token?: string }
-  if (typeof body.token !== 'string' || body.token === '') {
-    throw new Error('/dsh-bridge/token returned no token')
-  }
-  localStorage.setItem('dsh-bridge-token', body.token)
-  cachedToken = body.token
-  return body.token
-}
-
-/** One authorized POST to a bridge route; returns the response. */
-async function postAuthorized(path: string, payload: unknown, token: string): Promise<Response> {
-  return fetch(path, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-    body: JSON.stringify(payload),
-  })
-}
-
 /**
  * Deposit one assistant message into the host outbox, addressed by durable
- * message id (the host resolves the text from the session log). A 401 means
- * the cached/stored token is stale (the host regenerated the token file), so
- * it is dropped and a fresh one vended — exactly once; a second 401 is an
- * error.
+ * message id (the host resolves the text from the session log).
  */
 async function depositOutbox(sessionId: string, messageId: string): Promise<void> {
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    const response = await postAuthorized(
-      '/dsh-bridge/outbox',
-      { sessionId, messageId, source: 'message-action' },
-      await getToken(),
-    )
-    if (response.ok) return
-    if (response.status === 401 && attempt === 0) {
-      forgetToken()
-      continue
-    }
-    throw new Error(`HTTP ${response.status}`)
-  }
-  throw new Error('HTTP 401')
+  const { ok, status } = await callBridge({
+    method: 'POST',
+    path: '/dsh-bridge/outbox',
+    payload: { sessionId, messageId, source: 'message-action' },
+  })
+  if (!ok) throw new Error(`HTTP ${status}`)
 }
 
 /** The live EventSource, so an HMR reload can drop the previous one. */
@@ -294,7 +251,8 @@ async function connectDraftStream(ctx: ClientContext): Promise<void> {
 }
 
 /**
- * Client plugin body: register the per-message "Send to Emacs" action.
+ * Client plugin body: register the per-message "Send to Emacs" action, the
+ * bundle-page Emacs install card, and the bridge row's config fields.
  * @param ctx - client root context.
  */
 export function apply(ctx: ClientContext): void {
@@ -321,6 +279,31 @@ export function apply(ctx: ClientContext): void {
         deposit: (messageId: string) => depositOutbox(sessionId, messageId),
       }),
     }, SendToEmacs)
+    return () => {
+      dispose()
+    }
+  })
+  // The bundle page's Emacs install card. Keyed by this package's name; the
+  // page renders it with only { view: 'page' } (no form), so the card fetches
+  // all state through the /dsh-bridge/emacs routes.
+  ctx.slots.inject('plugins.bundle.config', () => {
+    const dispose = ctx.slots.register({
+      name: 'plugins.bundle.config',
+      key: 'dsh-emacs-bridge',
+      locale: LOCALE_NS,
+    }, EmacsInstall)
+    return () => {
+      dispose()
+    }
+  })
+  // The bridge row's own configuration page: the Emacs command and install
+  // timeout, bound to the form the page hands the row's entry.
+  ctx.slots.inject('plugins.row.config', () => {
+    const dispose = ctx.slots.register({
+      name: 'plugins.row.config',
+      key: 'dsh-emacs-bridge#dsh-bridge',
+      locale: LOCALE_NS,
+    }, EmacsCommandField)
     return () => {
       dispose()
     }

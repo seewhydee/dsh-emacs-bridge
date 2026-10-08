@@ -7,7 +7,7 @@
 - `dsh-plugin/` — the DSH plugin (npm package `dsh-emacs-bridge`, Cordis id `dsh-bridge`).
   - `src/index.ts` — host plugin: thin route wiring only.
   - `src/logic.ts`, `src/outbox.ts` — pure, dependency-free logic (no Cordis/dsh runtime imports).
-  - `src/client/` — browser client half ("Send to Emacs" action, draft push, SSE-driven panel dismissal).
+  - `src/client/` — browser client half ("Send to Emacs" action, draft push, SSE-driven panel dismissal, Plugins-page Emacs-install card).
   - `tests/` — Vitest specs for the pure modules.
   - `tsdown.config.ts` / `tsdown.client.config.ts` — host build → ESM `lib/index.js`; browser build → CJS `lib/client.js`.
 - `emacs/`
@@ -64,7 +64,7 @@ A version is always a plain `X.Y.Z` literal in all three places. `package.el` ca
 
 ## Release procedure
 
-Distribution is two artifacts attached to a GitHub release: `dsh-emacs-bridge-<version>.tgz` (the plugin, via `pnpm pack`) and `dsh-bridge-<version>.tar` (the pure-elisp Emacs package). Because the halves verify each other by exact version, a release always ships both; they are never released independently. `make release` is local-only — build, pack, and stage both under `.release/`, safe to re-run. Publishing is a separate, deliberate step:
+Distribution is two artifacts attached to a GitHub release: `dsh-emacs-bridge-<version>.tgz` (the plugin, via `pnpm pack`) and `dsh-bridge-<version>.tar` (the pure-elisp Emacs package). The plugin tarball also carries `emacs/dsh-bridge.el` (staged into `dsh-plugin/emacs/` at pack time), so both artifacts are generated from the same source file in the same `make release` and cannot drift within a release. Because the halves verify each other by exact version, a release always ships both; they are never released independently. `make release` is local-only — build, pack, and stage both under `.release/`, safe to re-run. Publishing is a separate, deliberate step:
 
 1. Gate on `make build && make test` green, plus `make integration-test` for host-plane changes. The version already in the tree is the version being released; do not edit it.
 2. `make release`.
@@ -91,6 +91,7 @@ The README.md serves as a short introduction and quickstart; it is not an exhaus
 - Required services are in the `inject` list; optional services are read with `ctx.get(...)` and must tolerate `undefined` — a profile lacking one must still boot a degraded-but-working bridge. Follow the existing pattern (minimal structural interface, cast, documented fallback). Keep the lists in sync with `src/index.ts`.
 - All routes live under `/dsh-bridge`, registered once inside `ctx.effect(...)`; every contribution is an effect (`ctx.effect` / `ctx.on` / `ctx.inject`), never a bare registration.
 - Bearer auth is required on every route except `/token` and `/status` (loopback peer + origin fences) and `/events` (EventSource token query parameter). Never add or loosen a fence without updating README.md's "Permissions, authentication, and failure bounds".
+- The plugin's `Config` fields (`emacsCommand`, `emacsInstallTimeoutMs`) must stay `.volatile()`: the settings forms projection carries only volatile Config fields (an ordinary field never reaches the Plugins-page configure page, so the row would silently lose its form), and volatile writes apply live with no `dsh web` restart.
 - Workspace display titles are unique for this bridge: both title writers (`/workspaces/rename`, `POST /sessions/create`) reject collisions with 409 and run inside `KeyedSerial.runExclusive('workspace-titles', ...)`. Do not add a workspace-title writer outside that section.
 - Target resolution is host-side, last-active-by-default, with on-demand resume of cold sessions. Preserve the failure semantics: 404 unknown id, 409 subagent-owned / no-active-session / archived (an archived session is readable through the read-only routes but is never a run target until `POST /sessions/unarchive` restores it), 413 oversize body.
 - Cold session reads use the `sessionPersistence` snapshot/handle API; cold presets and titles are folded in-repo in `logic.ts` (a cached null title is not authoritative — fall through to the log fold).
@@ -105,6 +106,7 @@ The README.md serves as a short introduction and quickstart; it is not an exhaus
 ### Client plugin (`dsh-plugin/src/client/`)
 
 - The locale namespace is `dsh-emacs-bridge`; `zh` is the key-set source of truth and `en` must remain a complete mirror.
+- The Plugins-page presence (the install card at `plugins.bundle.config` keyed `dsh-emacs-bridge`, the config field at `plugins.row.config` keyed `dsh-emacs-bridge#dsh-bridge`) calls the bearer routes through the shared token machinery in `bridge.ts`; `@deepseek-ai/dsh-client-ui-plugin-manager` is a **type-only import, never a runtime dependency**.
 - The browser plugin dismisses its own ask/approval panels on the host's `*-resolved` SSE frames (pure matchers in `question-dismiss.ts` / `approval-dismiss.ts`); `uiSession` is an optional collaborator.
 - `tsdown.client.config.ts` replicates the harness's client-artifact contract (which is repo-locked and cannot run out-of-tree). Keep it in sync with the harness preset on any DSH version bump.
 
@@ -115,7 +117,7 @@ The README.md serves as a short introduction and quickstart; it is not an exhaus
 
 ### Emacs package (`emacs/`)
 
-- One library, `lexical-binding: t`, self-contained over the loopback interface: no Emacs code path runs the `dsh` CLI or downloads anything. Plugin availability problems are only diagnosed — `dsh-bridge--plugin-install-state` reads the profile manifest to split "installed but not loaded" from "not installed" — and answered with install/restart instructions pointing at the releases page; installing the plugin is DSH's job (`dsh plugin add`), never Emacs's.
+- One library, `lexical-binding: t`, self-contained over the loopback interface: no Emacs code path runs the `dsh` CLI or downloads anything. Plugin availability problems are only diagnosed — `dsh-bridge--plugin-install-state` reads the profile manifest to split "installed but not loaded" from "not installed" — and answered with install/restart instructions pointing at the releases page; installing the plugin is DSH's job (`dsh plugin add`), never Emacs's. The mirror direction holds too: installing the Emacs package is the plugin's job (the Plugins-page card runs the configured `emacsCommand` in batch), and no elisp ever drives an install.
 - Docstrings state the function's intention, its arguments and return value, and notable gotchas — nothing more. The code, not the docstring, is the contract: never use the docstring to narrate the implementation step by step. Tricky implementation details (why a splice is sound, why a race is safe) belong in code comments next to the code they describe.
 - A session command resolves its target through the menu focus first: whenever the `dsh-bridge` dispatcher is open, its recorded focus (`dsh-bridge--focus`) wins for the nine session verbs, whether they are invoked through the menu or directly. Reads consult it through `dsh-bridge--focus-session`, and mutation verbs through `dsh-bridge--confirmed-session`, which signals a `user-error` for the `advisory` last-active guess and for a menu that names no session, so the menu cannot mutate a session the user has not confirmed by cycling or pinning (a `:transient` suffix decides to stay before its body runs, so a refusal leaves the menu open). With no menu open the focus is nil and both fall back on `dsh-bridge--effective-session`: the buffer's own binding (view: shown session; prompt: bound session; describe: shown session; sessions list: row at point), then the pinned target, refusing with a `user-error` when neither names one. A refusal that stops a command before it acts is a `user-error'; a host response, a no-op, or a declined confirmation is reported with `message'. `dsh-bridge--effective-session` itself is never taught about the focus; helpers use it directly, and the three internal callers that may run while a menu is open (`dsh-bridge--header-indicator-act`, `dsh-bridge-prompt-stop-or-erase`, `dsh-bridge--revert-output`) pass an explicit session id. `dsh-bridge-answer` deliberately adds NODEFAULT on top: it acts only on the buffer's own binding and refuses from a buffer that names no session, so answering always carries the context of the session that asked, and a sole pending session elsewhere is never an implicit target.
 - DSH-View bodies are filled incrementally by `dsh-bridge--view-fill` under a recorded provenance; any mismatch falls back to a full re-render. Do not add a splice path that cannot prove those checks, and keep terminal furniture (answer/approval notes, changed-files footer) out of the body.
@@ -134,6 +136,7 @@ There is also an integration test suite, deliberately not part of `make test`. I
 ## Security and failure bounds
 
 - Loopback only: no route may bind beyond loopback, and no third-party service is contacted. Keep the peer-address + origin fences on `/token` and `/status`.
+- The host runs the configured `emacsCommand` once, in batch with fixed arguments, only on an explicit user action (`POST /dsh-bridge/emacs/install`, driven by the Plugins-page card); nothing from the request body reaches the command line, output capture is bounded, probe and install are serialized under one `KeyedSerial` key, and the only write outside `$DSH_HOME` is the user's Emacs package directory. Nothing else in the plugin may run Emacs.
 - Shared bearer token at `$DSH_HOME/dsh-bridge-token` (default `~/.dsh/dsh-bridge-token`), generated on first use with mode 0600, compared constant-time.
 - HTTP request bodies are capped (currently 1 MiB, 413 on oversize).
 - The DSH→Emacs outbox is bounded (`OUTBOX_DEFAULT_CAP` in `outbox.ts`), evicts the oldest, and reports overflow.

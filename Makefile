@@ -8,9 +8,11 @@
 #
 # `make release' additionally packs the built DSH plugin
 # (dsh-emacs-bridge-<version>.tgz, via `pnpm pack') and stages both
-# artifacts in .release/, ready to attach to a GitHub release.
-# Publishing is a separate, deliberate step; see "Release procedure" in
-# AGENTS.md.
+# artifacts in .release/, ready to attach to a GitHub release.  The
+# plugin tarball carries the Emacs half too: emacs/dsh-bridge.el is
+# staged into dsh-plugin/emacs/ at pack time so `make package' stays
+# pure-elisp and Node-free.  Publishing is a separate, deliberate step;
+# see "Release procedure" in AGENTS.md.
 #
 # The package version's single source of truth is the Version header of
 # emacs/dsh-bridge.el.  Two other copies must agree — the
@@ -65,13 +67,22 @@ $(TAR): emacs/dsh-bridge.el dsh-plugin/package.json
 RELEASE_DIR := .release
 PLUGIN_TGZ := dsh-emacs-bridge-$(VERSION).tgz
 
-# Stage both release artifacts in .release/.  `pnpm pack' honors the
-# package's `files' list (lib/, cordis.patch.yml), so the tarball carries
-# the built plugin; publishing the stage is a separate step (AGENTS.md).
+# Stage both release artifacts in .release/.  The plugin tarball also
+# carries the Emacs half: emacs/dsh-bridge.el is staged into the package
+# before `pnpm pack' honors the `files' list, so the Plugins-page
+# install button has the elisp at hand.  The copy is a build output
+# (gitignored, removed by `make clean'); the assertion after packing
+# fails the release rather than ship a plugin whose button cannot work.
+# Publishing the stage is a separate step (AGENTS.md).
 release: build package
 	rm -rf $(RELEASE_DIR)
 	mkdir -p $(RELEASE_DIR)
+	rm -rf dsh-plugin/emacs
+	mkdir -p dsh-plugin/emacs
+	cp emacs/dsh-bridge.el dsh-plugin/emacs/
 	cd dsh-plugin && pnpm pack
+	tar -tzf dsh-plugin/$(PLUGIN_TGZ) | grep -qx 'package/emacs/dsh-bridge.el' || \
+	  { echo "error: packed plugin tarball is missing emacs/dsh-bridge.el"; exit 1; }
 	mv dsh-plugin/$(PLUGIN_TGZ) $(RELEASE_DIR)/
 	cp $(TAR) $(RELEASE_DIR)/
 
@@ -102,4 +113,4 @@ integration-test: build no-stale-elc
 	      -f ert-run-tests-batch-and-exit
 
 clean:
-	rm -rf .package .release dsh-bridge-*.tar dsh-plugin/dsh-emacs-bridge-*.tgz
+	rm -rf .package .release dsh-bridge-*.tar dsh-plugin/dsh-emacs-bridge-*.tgz dsh-plugin/emacs

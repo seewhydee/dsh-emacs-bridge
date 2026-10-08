@@ -18,6 +18,7 @@ pnpm-lock.yaml
 /.release/
 /dsh-bridge-*.tar
 /dsh-plugin/dsh-emacs-bridge-*.tgz
+/dsh-plugin/emacs/
 
 # Working plan files (not part of the committed repo).
 phase-*.md

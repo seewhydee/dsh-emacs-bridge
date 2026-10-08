@@ -144,13 +144,33 @@
 //        session controller)
 //   GET  /dsh-bridge/workspaces                   -> workspace roster
 //   POST /dsh-bridge/workspaces/rename { workspaceId, title } -> rename a workspace
+//   GET  /dsh-bridge/emacs                        -> Emacs-side package status
+//        (runs the configured `emacsCommand` in batch: an `emacs --version`
+//        preflight — 200 { problem: emacs-not-found | emacs-version-unknown |
+//        emacs-too-old, emacsVersion? } — then a fixed status form; 200
+//        { bundledVersion, emacs, state: installed|outdated|absent,
+//        packageUserDir, emacsVersion }, or { problem: 'probe-failed',
+//        output? } when the probe cannot run or its output cannot be parsed.
+//        Every failure is a 200 with a `problem` tag: the plugin-page card
+//        needs a distinguishable, non-crashing answer)
+//   POST /dsh-bridge/emacs/install                -> batch-install the bundled
+//        emacs/dsh-bridge.el through package.el. 200 { ok, emacs, exitStatus?,
+//        output, restartRequired?, problem?, bundledPath? } — `ok` is
+//        exit-status-0 only,
+//        never output-judged; 500 when the bundled elisp is missing (a broken
+//        installation). The request body contributes NOTHING to the command
+//        line or the elisp form; both routes serialize under 'emacs-install'.
 
+import { spawn } from 'node:child_process'
+import type { ChildProcess } from 'node:child_process'
 import { createReadStream, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { open, readFile, stat } from 'node:fs/promises'
 import { randomBytes, randomUUID } from 'node:crypto'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { basename, dirname, isAbsolute, join } from 'node:path'
-import type { Context } from '@deepseek-ai/cordis'
+import { fileURLToPath } from 'node:url'
+import type { Context, Volatile } from '@deepseek-ai/cordis'
+import z from '@deepseek-ai/schemastery'
 import type { Agent, AgentOptions, ModelSelection, ModelSelectionRef } from '@deepseek-ai/dsh-agent'
 import { installModelSelection } from '@deepseek-ai/dsh-agent'
 import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
@@ -184,9 +204,14 @@ import {
   assistantTextForMessage,
   assistantTurns,
   attachmentErrorHttpStatus,
+  buildEmacsInstallForm,
+  buildEmacsStatusForm,
   cachedTitleValue,
   catalogModelName,
   changedFiles,
+  classifyEmacsInstall,
+  classifyEmacsProbeOutput,
+  classifyEmacsVersionProbe,
   classifySessionId,
   compactExecutionSettled,
   compactionFrame,
@@ -208,6 +233,7 @@ import {
   manifestVersion,
   MAX_ATTACHMENT_FILE_BYTES,
   mergeSessionRows,
+  normalizeEmacsCommand,
   outboxMessage,
   outboxSessionId,
   parseAttachmentRequests,
@@ -220,6 +246,7 @@ import {
   repliesChangedMessage,
   reportGoal,
   reportPlan,
+  resolveBundledElisp,
   resolveReadTargetId,
   resolveTargetId,
   rpcArgsPayload,
@@ -250,6 +277,8 @@ import {
   type BridgeImageMediaType,
   type CompactCommandResultLike,
   type CompactExecutionOutcome,
+  type EmacsRunResult,
+  type EmacsVersion,
   type LiveSessionLike,
   type AskUserAnswerItemLike,
   type AskUserQuestionItemLike,
@@ -271,6 +300,30 @@ import {
 export const name = 'dsh-bridge'
 
 export const inject = ['agents', 'webServer', 'sessions', 'sessionPersistence']
+
+/**
+ * Plugin config. Both fields are volatile so the settings pipeline serves
+ * them to the web UI and writes apply live — the `/emacs` routes read them at
+ * request time, never at boot, so a changed command needs no `dsh web`
+ * restart. The defaults below are the shipped behavior; `cordis.patch.yml`
+ * carries no `config:` block.
+ */
+export interface Config {
+  /**
+   * The Emacs executable the install routes run, default `"emacs"`. A string
+   * is shell-split at use (so `emacs -l ~/.emacs.d/init.el` works — the form
+   * for users who customize `package-user-dir` in their init); a list is a
+   * verbatim argv (the form for paths with spaces).
+   */
+  emacsCommand: Volatile<string | string[]>
+  /** Timeout for the batch install run, default 120000. */
+  emacsInstallTimeoutMs: Volatile<number>
+}
+
+export const Config = z.object({
+  emacsCommand: z.union([z.string(), z.array(z.string())]).default('emacs').volatile(),
+  emacsInstallTimeoutMs: z.number().step(1).min(1).default(120000).volatile(),
+})
 
 /** Minimal face of the `webServer` service. */
 interface WebServerService {
@@ -852,7 +905,115 @@ function pluginVersion(): string | null {
   }
 }
 
-export function apply(ctx: Context): void {
+/**
+ * The installed package directory, the anchor `resolveBundledElisp` searches
+ * from. Same mechanism as `pluginVersion()`: `lib/index.js` sits one level
+ * below the package root.
+ */
+function pluginPackageDir(): string | null {
+  try {
+    return fileURLToPath(new URL('..', import.meta.url))
+  } catch {
+    return null
+  }
+}
+
+/** Hard bound on captured subprocess output (stdout + stderr combined), in
+ *  JavaScript string units: a close-enough guard on how much a chatty or
+ *  looping child can hold in memory. */
+const EMACS_OUTPUT_CAP = 64 * 1024
+
+/**
+ * Fixed timeout for the `emacs --version` preflight, independent of the
+ * configured install timeout: a healthy Emacs answers in well under a second,
+ * and the preflight must not inherit a generous install budget.
+ */
+const EMACS_PREFLIGHT_TIMEOUT_MS = 15_000
+
+/** Fixed timeout for the batch status probe (same reasoning as the preflight). */
+const EMACS_PROBE_TIMEOUT_MS = 60_000
+
+/** Grace between SIGTERM and SIGKILL when a run exceeds its timeout. */
+const EMACS_KILL_GRACE_MS = 5_000
+
+/**
+ * Run Emacs (ARGV[0] plus its leading arguments) with ARGS appended, batch or
+ * `--version` alike. Never throws: every failure mode settles as an
+ * `EmacsRunResult`, so the routes can word it for the card. stdin is ignored
+ * (a batch Emacs must never block on input); stdout+stderr are captured
+ * together up to `EMACS_OUTPUT_CAP`, after which appending stops — the
+ * output is diagnostic, not a success signal, so a flood must not grow
+ * memory; past the timeout the child is killed (SIGKILL after a grace), so a
+ * wedged Emacs cannot strand the serialized install section.
+ */
+function runEmacs(
+  argv: readonly string[],
+  args: readonly string[],
+  timeoutMs: number,
+): Promise<EmacsRunResult> {
+  return new Promise((resolve) => {
+    if (argv.length === 0) {
+      resolve({ kind: 'spawn-error', error: 'empty emacs command' })
+      return
+    }
+    let child: ChildProcess
+    try {
+      child = spawn(argv[0] as string, [...argv.slice(1), ...args], {
+        shell: false,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      })
+    } catch (error: unknown) {
+      // Synchronous spawn failures (invalid arguments); ENOENT arrives via
+      // the 'error' event below.
+      resolve({ kind: 'spawn-error', error: error instanceof Error ? error.message : String(error) })
+      return
+    }
+    let output = ''
+    let timedOut = false
+    let settled = false
+    let killTimer: ReturnType<typeof setTimeout> | undefined
+    const timer = setTimeout(() => {
+      timedOut = true
+      child.kill('SIGTERM')
+      killTimer = setTimeout(() => { child.kill('SIGKILL') }, EMACS_KILL_GRACE_MS)
+    }, timeoutMs)
+    const finish = (result: EmacsRunResult): void => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      if (killTimer !== undefined) clearTimeout(killTimer)
+      resolve(result)
+    }
+    // Listeners keep draining past the cap so the child never blocks on a
+    // full pipe; only appending stops.
+    const append = (chunk: Buffer): void => {
+      if (output.length >= EMACS_OUTPUT_CAP) return
+      output += chunk.toString('utf8')
+      if (output.length > EMACS_OUTPUT_CAP) output = output.slice(0, EMACS_OUTPUT_CAP)
+    }
+    child.stdout?.on('data', append)
+    child.stderr?.on('data', append)
+    child.on('error', (error: Error & { code?: string }) => {
+      finish({
+        kind: 'spawn-error',
+        error: error.message,
+        ...error.code === undefined ? {} : { code: error.code },
+      })
+    })
+    child.on('close', (code: number | null) => {
+      finish(timedOut
+        ? { kind: 'timeout', output }
+        : { kind: 'ok', exitStatus: code, output })
+    })
+  })
+}
+
+/** Render a parsed Emacs version for the response (`29.1`). */
+function formatEmacsVersion(version: EmacsVersion): string {
+  return `${version.major}.${version.minor}`
+}
+
+export function apply(ctx: Context, config?: Config): void {
   const webServer = ctx.get('webServer') as WebServerService
   const sessions = ctx.get('sessions') as SessionService
   const sessionPersistence = ctx.get('sessionPersistence') as SessionPersistenceService
@@ -933,6 +1094,13 @@ export function apply(ctx: Context): void {
    * claim it. Both writers hold this key across the read and the write.
    */
   const workspaceTitles = new KeyedSerial()
+
+  /**
+   * Serializes the Emacs probe and install (preflights included) so two
+   * clicks cannot race and an install cannot interleave with the status
+   * probe against the same `package-user-dir`.
+   */
+  const emacsInstalls = new KeyedSerial()
 
   /** Write one SSE frame to every subscribed client, dropping dead ones. */
   function broadcast(frame: string): void {
@@ -3339,6 +3507,111 @@ export function apply(ctx: Context): void {
             error: error instanceof Error ? error.message : String(error),
             ...childId,
           })
+        }
+        return
+      }
+
+      // Emacs-side package status for the plugin-page card. Runs the
+      // configured command twice in batch: an `emacs --version` preflight,
+      // then the fixed status form. Nothing from the request reaches the
+      // command line or the form. Serialized with the install under
+      // 'emacs-install'. Every failure mode — a missing Emacs, a wedged
+      // probe, unparseable output — answers 200 with a `problem` tag, so the
+      // card can word it instead of showing a generic error.
+      if (req.method === 'GET' && pathname === '/dsh-bridge/emacs') {
+        try {
+          // Volatile config is read at request time: a settings-page write
+          // applies to the next probe with no `dsh web` restart.
+          const emacs = normalizeEmacsCommand(config?.emacsCommand.get())
+          const bundledVersion = pluginVersion()
+          const report = await emacsInstalls.runExclusive('emacs-install', async (): Promise<Record<string, unknown>> => {
+            const preflight = classifyEmacsVersionProbe(
+              await runEmacs(emacs, ['--version'], EMACS_PREFLIGHT_TIMEOUT_MS))
+            if (!preflight.ok) {
+              return {
+                problem: preflight.problem,
+                ...preflight.version === undefined
+                  ? {}
+                  : { emacsVersion: formatEmacsVersion(preflight.version) },
+              }
+            }
+            // An unreadable own-version is a broken installation; there is no
+            // bundled version to compare against, so the probe cannot answer.
+            if (bundledVersion === null) return { problem: 'probe-failed' }
+            const probe = await runEmacs(emacs,
+              ['--batch', '--eval', buildEmacsStatusForm(bundledVersion)],
+              EMACS_PROBE_TIMEOUT_MS)
+            if (probe.kind !== 'ok') {
+              return {
+                problem: 'probe-failed',
+                ...probe.kind === 'timeout' ? { output: probe.output } : {},
+              }
+            }
+            const state = classifyEmacsProbeOutput(probe.output)
+            if (state === null) return { problem: 'probe-failed', output: probe.output }
+            return {
+              emacsVersion: formatEmacsVersion(preflight.version),
+              state: state.atLeastBundled ? 'installed' : state.installed ? 'outdated' : 'absent',
+              packageUserDir: state.packageUserDir,
+            }
+          })
+          sendJson(res, 200, { bundledVersion, emacs, ...report })
+        } catch (error: unknown) {
+          sendJson(res, 500, { error: error instanceof Error ? error.message : String(error) })
+        }
+        return
+      }
+
+      // Batch-install the bundled dsh-bridge.el into the user's Emacs through
+      // package.el. INVARIANT: the request body contributes NOTHING to the
+      // command line or the elisp form — the path is the bundled file
+      // resolved from this plugin's own install directory, and the form is a
+      // fixed builder string — so there is no injection surface. The path is
+      // interpolated prin1-quoted (elispString), never concatenated: a
+      // profile path may contain quotes or backslashes. The child runs with
+      // stdin ignored, a bounded output capture, and a timeout that kills it
+      // (see runEmacs); only the exit status decides success (the install
+      // byte-compiles and prints a known harmless free-variable warning
+      // while exiting 0). Serialized with the probe under 'emacs-install'.
+      if (req.method === 'POST' && pathname === '/dsh-bridge/emacs/install') {
+        try {
+          // The body is deliberately unread; drain it for keep-alive.
+          req.resume()
+          const packageDir = pluginPackageDir()
+          const bundledPath = packageDir === null ? null : resolveBundledElisp(packageDir)
+          if (bundledPath === null) {
+            // A broken installation: never run Emacs against a missing file.
+            sendJson(res, 500, { error: 'bundled elisp missing' })
+            return
+          }
+          const emacs = normalizeEmacsCommand(config?.emacsCommand.get())
+          const timeoutMs = config?.emacsInstallTimeoutMs.get() ?? 120_000
+          const report = await emacsInstalls.runExclusive('emacs-install', async (): Promise<Record<string, unknown>> => {
+            const preflight = classifyEmacsVersionProbe(
+              await runEmacs(emacs, ['--version'], EMACS_PREFLIGHT_TIMEOUT_MS))
+            if (!preflight.ok) {
+              return {
+                ok: false,
+                problem: preflight.problem,
+                ...preflight.version === undefined
+                  ? {}
+                  : { emacsVersion: formatEmacsVersion(preflight.version) },
+              }
+            }
+            const result = await runEmacs(emacs,
+              ['--batch', '--eval', buildEmacsInstallForm(bundledPath)], timeoutMs)
+            const outcome = classifyEmacsInstall(result)
+            return {
+              ok: outcome.ok,
+              ...result.kind === 'ok' ? { exitStatus: result.exitStatus } : {},
+              output: result.kind === 'spawn-error' ? result.error : result.output,
+              ...outcome.ok ? { restartRequired: true } : {},
+              ...outcome.problem === undefined ? {} : { problem: outcome.problem },
+            }
+          })
+          sendJson(res, 200, { emacs, bundledPath, ...report })
+        } catch (error: unknown) {
+          sendJson(res, 500, { error: error instanceof Error ? error.message : String(error) })
         }
         return
       }

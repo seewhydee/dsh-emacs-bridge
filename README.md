@@ -20,6 +20,9 @@ The bridge consists of two components:
 - `dsh`, the DeepSeek Harness.
 - `pnpm` on the executable path (DSH uses it to install plugins).
 - Emacs 29 or later.
+- `emacs` on the executable path, if you install the Emacs package via
+  the Plugins-page button in step 2 (the manual route needs no such
+  thing).
 - (Recommended) The [`markdown-mode`](https://jblevins.org/projects/markdown-mode/) Emacs package.
 
 ### 1. Install the DSH plugin
@@ -48,7 +51,24 @@ so the Emacs package's plugin diagnostics inspect the right profile.
 
 ### 2. Install the Emacs package
 
-Download `dsh-bridge-<version>.tar` from the same release, then in Emacs:
+The easiest route is on the plugin's own page in DSH's Plugins page:
+the `dsh-emacs-bridge` card shows the state of your Emacs-side package,
+and its **Install Emacs package** button runs the configured Emacs
+command (`emacs` on the executable path by default) once, in batch, to
+install the `dsh-bridge.el` bundled in the plugin into your Emacs
+package directory (the card shows exactly which directory).
+Afterwards, restart Emacs — or evaluate `(package-initialize)` in a
+running session — and `M-x dsh-bridge` is available.
+
+If `emacs` is not found, or your init file customizes
+`package-user-dir`, point the `emacsCommand` field on the plugin's
+Plugins-page row at a command that loads your configuration (e.g.
+`emacs -l ~/.emacs.d/init.el`).  If you manage Emacs packages without
+package.el (Doom, straight.el), skip the button and install manually as
+below.
+
+The manual route: download `dsh-bridge-<version>.tar` from the same
+release, then in Emacs:
 
 ```
 M-x package-install-file RET /path/to/dsh-bridge-<version>.tar RET
@@ -62,7 +82,8 @@ naming both versions.
 
 Both halves upgrade together: repeat both steps with the URLs/files of
 the new release (re-running `dsh plugin add` with the new tarball URL
-replaces the installed plugin), and restart `dsh web`.
+replaces the installed plugin; the card's *Install Emacs package*
+button likewise updates the Emacs package), and restart `dsh web`.
 
 To remove the plugin later, run
 `dsh plugin --profile web remove dsh-emacs-bridge`.
@@ -332,6 +353,18 @@ The turn activity reporter, `/turns`, carries at most 60 of the latest
 activity entries per turn, and activity for at most the newest 40
 turns.  At present, reasoning activity is only shown as one-line
 summaries, with the full text staying in DSH.
+
+The Plugins page's *Install Emacs package* button is the one place
+where this bridge makes DSH spawn a process: clicking it runs the
+configured Emacs command (`emacs` by default, settable in the plugin's
+configuration) once, in batch, with fixed arguments — nothing in the
+HTTP request reaches the command line — to install the bundled
+`dsh-bridge.el` into your Emacs package directory.  That directory is
+the only location outside `$DSH_HOME` this bridge writes to.  The
+command setting inherits the trust level of the profile's own
+configuration file, and since the bearer token already lets a holder
+submit prompts to the agent, this button grants a token holder no
+comparable new authority.
 
 ## License
 
