@@ -20,73 +20,45 @@ The bridge consists of two components:
 - `dsh`, the DeepSeek Harness.
 - `pnpm` on the executable path (DSH uses it to install plugins).
 - Emacs 29 or later.
-- `emacs` on the executable path, if you install the Emacs package via
-  the Plugins-page button in step 2 (the manual route needs no such
-  thing).
+- `emacs` on the executable path, if you install the Emacs package with
+  the Plugins-page button in step 3 (installing it by hand does not need
+  it).
 - (Recommended) The [`markdown-mode`](https://jblevins.org/projects/markdown-mode/) Emacs package.
 
-### 1. Install the DSH plugin
+### Installing via the DSH Plugin Manager
 
-Download URLs for released versions are on the
-[releases page](https://github.com/seewhydee/dsh-emacs-bridge/releases).
-The plugin asset is `dsh-emacs-bridge-<version>.tgz`, under the release's
-`v<version>` tag. Copy its URL and run:
+1. **Install the DSH plugin.**  In the DeepSeek Harness (DSH) web
+   interface, click **Plugins** in the left panel, then **Add Plugin**
+   at the upper right, and paste the URL of the
+   `dsh-emacs-bridge-<version>.tgz` file from the
+   [release list](https://github.com/seewhydee/dsh-emacs-bridge/releases).
+   For the latest release (v0.17.0) that URL is
+   <https://github.com/seewhydee/dsh-emacs-bridge/releases/download/v0.17.0/dsh-emacs-bridge-0.17.0.tgz>
 
-```sh
-dsh plugin --profile web add <tarball-url>
-dsh web   # if not already running; a first install is picked up live
-```
+2. Click **Install**.  When it finishes, `dsh-emacs-bridge` appears in
+   the Installed section of the Plugins page.
 
-Alternatively, paste the same URL into the "Add plugin" dialog of DSH's
-Plugins page.
+3. **Install the Emacs package.**  Click the `dsh-emacs-bridge` entry
+   to open its configuration card, then click **Install Emacs
+   package**.  This runs the configured Emacs command (`emacs` on the
+   executable path by default) to install the `dsh-bridge.el` bundled
+   in the plugin.
 
-**Important:** use the *release asset* URL (ending in `.tgz`), not the
-repository URL. The repository holds sources, not a built package, so a
-repository-URL (git) install does not give you a working plugin. The
-`.tgz` asset is prebuilt and needs no build step.
+4. Restart Emacs, or evaluate `(package-initialize)` in a running
+   session; `M-x dsh-bridge` is then available.
 
-Both commands above target the `web` profile, the one `dsh web` runs.
-If you run a different profile, customize `dsh-bridge-profile` to match,
-so the Emacs package's plugin diagnostics inspect the right profile.
-
-### 2. Install the Emacs package
-
-The easiest route is on the plugin's own page in DSH's Plugins page:
-the `dsh-emacs-bridge` card shows the state of your Emacs-side package,
-and its **Install Emacs package** button runs the configured Emacs
-command (`emacs` on the executable path by default) once, in batch, to
-install the `dsh-bridge.el` bundled in the plugin into your Emacs
-package directory (the card shows exactly which directory).
-Afterwards, restart Emacs — or evaluate `(package-initialize)` in a
-running session — and `M-x dsh-bridge` is available.
+**Use the release asset URL (ending in `.tgz`), not the repository
+URL.**  The repository holds sources rather than a built package, so a
+repository-URL install does not give you a working plugin.
 
 If `emacs` is not found, or your init file customizes
-`package-user-dir`, point the `emacsCommand` field on the plugin's
-Plugins-page row at a command that loads your configuration (e.g.
-`emacs -l ~/.emacs.d/init.el`).  If you manage Emacs packages without
-package.el (Doom, straight.el), skip the button and install manually as
-below.
+`package-user-dir`, change the plugin's `emacsCommand` field.
+Alternatively, you can install the Emacs library directly from
+`dsh-bridge-<version>.tar` in the release list.
 
-The manual route: download `dsh-bridge-<version>.tar` from the same
-release, then in Emacs:
-
-```
-M-x package-install-file RET /path/to/dsh-bridge-<version>.tar RET
-```
-
-Both halves must come from the same release. The Emacs package checks
-the plugin's version on first contact and warns if the two differ,
-naming both versions.
-
-### Upgrading
-
-Both halves upgrade together: repeat both steps with the URLs/files of
-the new release (re-running `dsh plugin add` with the new tarball URL
-replaces the installed plugin; the card's *Install Emacs package*
-button likewise updates the Emacs package), and restart `dsh web`.
-
-To remove the plugin later, run
-`dsh plugin --profile web remove dsh-emacs-bridge`.
+To upgrade, repeat these steps with the new release's URL (and the
+matching `.tar` if you installed the Emacs package by hand), and
+restart DSH.
 
 ### Installing from a source checkout
 

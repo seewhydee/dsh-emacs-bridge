@@ -62,16 +62,19 @@ The default branch carries the version of the **next** release, never the last o
 
 A version is always a plain `X.Y.Z` literal in all three places. `package.el` cannot parse a `-dev` suffix (`version-to-list` returns nil), and generating the version at build time would put stamping back into the shipped elisp.
 
+`README.md` is the one deliberate exception. Its installation instructions always name the **last published release** (`v0.17.0` while the tree says `0.17.1`), not the development version, so a reader arriving on the repository home page can copy a tarball URL that exists and install without opening the releases page. Between a release and the next one the README therefore disagrees with the tree on purpose: the drift guard does not cover it, the post-release bump does not touch it, and "fixing" it to match the development version is the bug — it would advertise an asset that has not been published. It is updated as the first act of cutting a release, so the tagged README names the release it ships with.
+
 ## Release procedure
 
 Distribution is two artifacts attached to a GitHub release: `dsh-emacs-bridge-<version>.tgz` (the plugin, via `pnpm pack`) and `dsh-bridge-<version>.tar` (the pure-elisp Emacs package). The plugin tarball also carries `emacs/dsh-bridge.el` (staged into `dsh-plugin/emacs/` at pack time), so both artifacts are generated from the same source file in the same `make release` and cannot drift within a release. Because the halves verify each other by exact version, a release always ships both; they are never released independently. `make release` is local-only — build, pack, and stage both under `.release/`, safe to re-run. Publishing is a separate, deliberate step:
 
-1. Gate on `make build && make test` green, plus `make integration-test` for host-plane changes. The version already in the tree is the version being released; do not edit it.
-2. `make release`.
-3. `git tag v<version>` at that commit; push branch and tag. The `v<version>` convention is user-visible contract: README asset URLs embed it.
-4. Preflight `gh auth status`, then `gh release create v<version> .release/dsh-emacs-bridge-<version>.tgz .release/dsh-bridge-<version>.tar --title "v<version>"`.
-5. Acceptance walk: follow README's Installation end-to-end on a clean profile (a first install hot-applies — no `dsh web` restart), then the upgrade path (`dsh plugin add` with the new tarball URL replaces the installed plugin; restart `dsh web`).
-6. Only once the release is published and the walk passes, bump the three version copies (above) to the next patch (e.g. `0.17.0` → `0.17.1`), commit, and push. Bump last: tagging an already-bumped tree would publish the development version under a release tag.
+1. Point `README.md`'s installation example at the version being released (the asset URL under the new `v<version>` tag). The README carries the last published version the rest of the time, so this must happen before the tag.
+2. Gate on `make build && make test` green, plus `make integration-test` for host-plane changes. The version already in the tree is the version being released; do not edit it.
+3. `make release`.
+4. `git tag v<version>` at that commit; push branch and tag. The `v<version>` convention is user-visible contract: README asset URLs embed it.
+5. Preflight `gh auth status`, then `gh release create v<version> .release/dsh-emacs-bridge-<version>.tgz .release/dsh-bridge-<version>.tar --title "v<version>"`.
+6. Acceptance walk: follow README's Installation end-to-end on a clean profile (a first install hot-applies — no `dsh web` restart), then the upgrade path (`dsh plugin add` with the new tarball URL replaces the installed plugin; restart `dsh web`).
+7. Only once the release is published and the walk passes, bump the three version copies (above) to the next patch (e.g. `0.17.0` → `0.17.1`), commit, and push. Bump last: tagging an already-bumped tree would publish the development version under a release tag. The README keeps naming the version just published — that is the exception above, and what makes the home page self-sufficient until the next release.
 
 A release carrying a breaking install or protocol change renumbers to the next minor in one ordinary commit before step 1; the minor is reserved for that meaning, and a version skipped by such a renumber is simply never released.
 
