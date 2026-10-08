@@ -41,9 +41,8 @@ The bridge consists of two components:
 3. Click the `dsh-emacs-bridge` entry to open the plugin's
    configuration card, then click **Install Emacs package**.  This
    runs Emacs (`emacs` on the executable path) to install the
-   `dsh-bridge.el` bundled in the plugin.  
-Alternatively, you can install the Emacs package directly from
-`dsh-bridge-<version>.tar` in the release list.
+   `dsh-bridge` Emacs package.  (Alternatively, you can install the
+   `dsh-bridge-<version>.tar` package file in the [release list](https://github.com/seewhydee/dsh-emacs-bridge/releases).)
 
 4. Restart Emacs, or evaluate `(package-initialize)` in a running
    session; `M-x dsh-bridge` is then available.
