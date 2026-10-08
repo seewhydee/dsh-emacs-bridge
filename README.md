@@ -27,29 +27,24 @@ The bridge consists of two components:
 
 ### Installing via the DSH Plugin Manager
 
-1. **Install the DSH plugin.**  In the DeepSeek Harness (DSH) web
+1. In the DeepSeek Harness (DSH) web
    interface, click **Plugins** in the left panel, then **Add Plugin**
    at the upper right, and paste the URL of the
    `dsh-emacs-bridge-<version>.tgz` file from the
    [release list](https://github.com/seewhydee/dsh-emacs-bridge/releases).
-   For the latest release (v0.17.0) that URL is
-   <https://github.com/seewhydee/dsh-emacs-bridge/releases/download/v0.17.0/dsh-emacs-bridge-0.17.0.tgz>
+   For the latest release, this is  
+<https://github.com/seewhydee/dsh-emacs-bridge/releases/download/v0.17.0/dsh-emacs-bridge-0.17.0.tgz>
 
 2. Click **Install**.  When it finishes, `dsh-emacs-bridge` appears in
    the Installed section of the Plugins page.
 
-3. **Install the Emacs package.**  Click the `dsh-emacs-bridge` entry
-   to open its configuration card, then click **Install Emacs
-   package**.  This runs the configured Emacs command (`emacs` on the
-   executable path by default) to install the `dsh-bridge.el` bundled
-   in the plugin.
+3. Click the `dsh-emacs-bridge` entry to open its configuration card,
+   then click **Install Emacs package**.  This runs the configured
+   Emacs command (`emacs` on the executable path by default) to
+   install the `dsh-bridge.el` bundled in the plugin.
 
 4. Restart Emacs, or evaluate `(package-initialize)` in a running
    session; `M-x dsh-bridge` is then available.
-
-**Use the release asset URL (ending in `.tgz`), not the repository
-URL.**  The repository holds sources rather than a built package, so a
-repository-URL install does not give you a working plugin.
 
 If `emacs` is not found, or your init file customizes
 `package-user-dir`, change the plugin's `emacsCommand` field.
