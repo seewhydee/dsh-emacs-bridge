@@ -25,7 +25,7 @@ The bridge consists of two components:
   it).
 - (Recommended) The [`markdown-mode`](https://jblevins.org/projects/markdown-mode/) Emacs package.
 
-### Installing via the DSH Plugin Manager
+### Installing Latest Release via DSH Plugin Manager
 
 1. In the DeepSeek Harness (DSH) web
    interface, click **Plugins** in the left panel, then **Add Plugin**
@@ -36,13 +36,13 @@ The bridge consists of two components:
 <https://github.com/seewhydee/dsh-emacs-bridge/releases/download/v0.17.0/dsh-emacs-bridge-0.17.0.tgz>
 
 2. Click **Install**.  When it finishes, click **Enable Now**.  You
-   should now see `dsh-emacs-bridge` in the Plugins page.
+   should now see a `dsh-emacs-bridge` entry in the Plugins page.
 
 3. Click the `dsh-emacs-bridge` entry to open the plugin's
-   configuration card, then click the **Install Emacs package**
-   button.  This runs Emacs (`emacs` on the executable path) to
-   install the `dsh-bridge` Emacs package.  (Alternatively, you can
-   manually install the `dsh-bridge-<version>.tar` package file from the
+   configuration card, then click on **Install Emacs package**.  This
+   runs Emacs (`emacs` on the executable path) to install the
+   `dsh-bridge` Emacs package.  (Alternatively, you can manually
+   install the `dsh-bridge-<version>.tar` package file from the
    [release list](https://github.com/seewhydee/dsh-emacs-bridge/releases).)
 
 4. Restart Emacs, or do `M-x package-initialize` in a running session.
@@ -78,7 +78,6 @@ the following from the `deepseek-harness` directory, replacing the
 ```sh
 # from deepseek-harness root:
 pnpm dsh plugin --profile web add link:/absolute/path/to/dsh-emacs-bridge/dsh-plugin
-pnpm dsh web
 ```
 
 Finally, install the Emacs library by putting this in your Emacs init
