@@ -66,10 +66,13 @@ import {
   sessionsChangedMessage,
   tokenRequestsSameOrigin,
   tokensEqual,
+  turnBoundaries,
   turnCompleteMessage,
+  turnEndFailure,
   turnStartMessage,
   turnsSince,
   userPrompts,
+  withActivityTurns,
   workspaceRefsBySession,
   workspaceTitleConflict,
   attachmentErrorHttpStatus,
@@ -224,6 +227,10 @@ function turnStart(turn: number, time: number): SessionEventLike {
 
 function turnEnd(turn: number, time: number, reason = 'completed'): SessionEventLike {
   return { time, type: 'turn/end', data: { turn, reason: { kind: reason } } }
+}
+
+function turnEndError(turn: number, time: number, error: { message: string; code?: string }): SessionEventLike {
+  return { time, type: 'turn/end', data: { turn, reason: { kind: 'error', error } } }
 }
 
 function userMessage(time: number): SessionEventLike {
@@ -403,6 +410,34 @@ describe('assistantTurns', () => {
     ])
   })
 
+  it('carries a failing turn sanitized failure detail alongside its text', () => {
+    const log = turnLog([
+      turnStart(7, 1000), userMessage(1010),
+      assistantMessage(7, 1, 1100, text('partial reply')),
+      turnEndError(7, 1200, { message: 'rate limited', code: 'RATE_LIMIT' }),
+    ])
+    expect(assistantTurns(log)).toEqual([
+      {
+        turn: 7,
+        startedAt: 1000,
+        endedAt: 1200,
+        reason: 'error',
+        endSeq: 3,
+        failure: { message: 'rate limited', code: 'RATE_LIMIT' },
+        segments: [{ text: 'partial reply', time: 1100, step: 1 }],
+      },
+    ])
+  })
+
+  it('blanks the AUTH failure message before it crosses the bridge', () => {
+    const log = turnLog([
+      turnStart(8, 1000), userMessage(1010),
+      assistantMessage(8, 1, 1100, text('partial reply')),
+      turnEndError(8, 1200, { message: 'Authorization failed for key ...sk-****', code: 'AUTH' }),
+    ])
+    expect(assistantTurns(log)[0]!.failure).toEqual({ code: 'AUTH', message: '' })
+  })
+
   it('falls back to the first segment time when the turn/start event is absent', () => {
     const log = turnLog([
       userMessage(1010),
@@ -459,6 +494,85 @@ describe('assistantTurns', () => {
     expect(turn.endedAt).toBe(1500)
     expect(turn.reason).toBeUndefined()
     expect(turn.endSeq).toBe(3)
+  })
+})
+
+describe('turnEndFailure', () => {
+  it('is undefined for a non-error, non-signed-out turn', () => {
+    expect(turnEndFailure({ turn: 1, reason: { kind: 'completed' } })).toBeUndefined()
+    expect(turnEndFailure({ turn: 1, reason: { kind: 'aborted' } })).toBeUndefined()
+  })
+
+  it('returns sanitized failure for an error reason', () => {
+    expect(turnEndFailure({ turn: 1, reason: { kind: 'error', error: { message: 'boom', code: 'X' } } }))
+      .toEqual({ message: 'boom', code: 'X' })
+  })
+
+  it('blanks the AUTH message for privacy', () => {
+    expect(turnEndFailure({ turn: 1, reason: { kind: 'error', error: { message: 'key ...sk-****', code: 'AUTH' } } }))
+      .toEqual({ code: 'AUTH', message: '' })
+  })
+
+  it('synthesizes a signed-out abort', () => {
+    expect(turnEndFailure({ turn: 1, reason: { kind: 'aborted', reason: { kind: 'hook', reason: 'deepseek-account/signed-out' } } }))
+      .toEqual({ code: 'ACCOUNT_SIGNED_OUT', message: 'Stopped because you signed out of DeepSeek.' })
+  })
+})
+
+describe('withActivityTurns', () => {
+  it('synthesizes a text-less, activity-less failed turn into a failure record', () => {
+    const events = [
+      turnStart(4, 1000), userMessage(1010),
+      turnEndError(4, 1500, { message: 'API key is invalid', code: 'AUTH' }),
+    ]
+    const records = withActivityTurns([], new Map(), turnBoundaries(events), new Set())
+    expect(records).toEqual([
+      { turn: 4, startedAt: 1000, endedAt: 1500, reason: 'error', endSeq: 2,
+        failure: { code: 'AUTH', message: '' }, segments: [] },
+    ])
+  })
+
+  it('synthesizes a signed-out abort as an ACCOUNT_SIGNED_OUT failure', () => {
+    const events = [
+      turnStart(5, 1000), userMessage(1010),
+      { time: 1500, type: 'turn/end', data: { turn: 5,
+        reason: { kind: 'aborted', reason: { kind: 'hook', reason: 'deepseek-account/signed-out' } } } },
+    ]
+    const records = withActivityTurns([], new Map(), turnBoundaries(events), new Set())
+    expect(records).toEqual([
+      { turn: 5, startedAt: 1000, endedAt: 1500, reason: 'aborted', endSeq: 2,
+        failure: { code: 'ACCOUNT_SIGNED_OUT', message: 'Stopped because you signed out of DeepSeek.' },
+        segments: [] },
+    ])
+  })
+
+  it('keeps a failure record when a compaction shadows the turn text', () => {
+    // The turn's message-producing node was removed from the surface (compaction
+    // replaced it), so `assistantTurns` returns nothing; the failure-only record
+    // still surfaces because it is keyed off the log boundary facts.
+    const events = [
+      turnStart(6, 1000), userMessage(1010),
+      assistantMessage(6, 1, 1100, text('old text')),
+      turnEndError(6, 1500, { message: 'oops', code: 'RATE_LIMIT' }),
+    ]
+    const records = withActivityTurns([], new Map(), turnBoundaries(events), new Set())
+    expect(records).toEqual([
+      { turn: 6, startedAt: 1000, endedAt: 1500, reason: 'error', endSeq: 3,
+        failure: { message: 'oops', code: 'RATE_LIMIT' }, segments: [] },
+    ])
+  })
+
+  it('does not duplicate a failed turn that already has a text record', () => {
+    const events = [
+      turnStart(7, 1000), userMessage(1010),
+      assistantMessage(7, 1, 1100, text('hello')),
+      turnEndError(7, 1500, { message: 'oops', code: 'RATE_LIMIT' }),
+    ]
+    const turns = assistantTurns(turnLog(events))
+    const records = withActivityTurns(turns, new Map(), turnBoundaries(events), new Set())
+    expect(records.map(record => record.turn)).toEqual([7])
+    expect(records[0]!.failure).toEqual({ message: 'oops', code: 'RATE_LIMIT' })
+    expect(records[0]!.segments).toHaveLength(1)
   })
 })
 
@@ -944,6 +1058,13 @@ describe('turnCompleteMessage', () => {
   it('omits the turn when the event payload lacks one (defensive)', () => {
     expect(turnCompleteMessage('session-1', 'aborted', 1234)).toBe(
       'data: {"kind":"turn-complete","sessionId":"session-1","reason":"aborted","time":1234}\n\n',
+    )
+  })
+
+  it('carries the sanitized failure on an error turn', () => {
+    expect(turnCompleteMessage('session-1', 'error', 1234, 7,
+      { code: 'AUTH', message: '' })).toBe(
+      'data: {"kind":"turn-complete","sessionId":"session-1","reason":"error","time":1234,"turn":7,"failure":{"code":"AUTH","message":""}}\n\n',
     )
   })
 })

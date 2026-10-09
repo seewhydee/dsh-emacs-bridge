@@ -2327,13 +2327,14 @@ buffer and reports the missing id."
         (cons 'time (or time 1000))
         (cons 'step (or step 1))))
 
-(defun dsh-bridge-test--view-turn (turn started-at segments &optional ended-at reason files activity)
+(defun dsh-bridge-test--view-turn (turn started-at segments &optional ended-at reason files activity failure)
   "A turn-record alist: TURN number, STARTED-AT ms-epoch, SEGMENTS oldest first.
 The turn is open (running) unless ENDED-AT is given; REASON defaults to
 \"completed\".  FILES, when non-nil, is the changed-files list `GET /turns'
 attaches to a turn that mutated files, as `((path . P) (op . O))' alists.
 ACTIVITY, when non-nil, is the turn's host activity list (see
-`dsh-bridge-test--view-thinking' et al.)."
+`dsh-bridge-test--view-thinking' et al.).  FAILURE, when non-nil, is the
+turn's sanitized failure alist `(code . message)'."
   (let ((record (list (cons 'turn turn)
                       (cons 'startedAt started-at)
                       (cons 'segments segments))))
@@ -2344,6 +2345,8 @@ ACTIVITY, when non-nil, is the turn's host activity list (see
       (setq record (append record (list (cons 'files files)))))
     (when activity
       (setq record (append record (list (cons 'activity activity)))))
+    (when failure
+      (setq record (append record (list (cons 'failure failure)))))
     record))
 
 (defun dsh-bridge-test--view-thinking (summary &optional seq ord step time)
@@ -3195,6 +3198,105 @@ refill must still take a record that carries either."
       (should-not (dsh-bridge--view-turn-renders-empty-p nil "s1"))
       (setq-local dsh-bridge--view-activity t)
       (should-not (dsh-bridge--view-turn-renders-empty-p blank "s1")))))
+
+(ert-deftest dsh-bridge-view-failure-text ()
+  "Known failure codes map to fixed display strings; unknown ones fall back
+to the host message, and a blank message (e.g. the privacy-blanked AUTH) falls
+back to a generic phrase."
+  (should (equal (dsh-bridge--failure-text (list (cons 'code "AUTH") (cons 'message "")))
+                 "API key is invalid"))
+  (should (equal (dsh-bridge--failure-text (list (cons 'code "QUOTA") (cons 'message "")))
+                 "Request quota exhausted."))
+  (should (equal (dsh-bridge--failure-text (list (cons 'code "ACCOUNT_QUOTA") (cons 'message "")))
+                 "Request quota exhausted."))
+  (should (equal (dsh-bridge--failure-text (list (cons 'code "ACCOUNT_SIGNED_OUT") (cons 'message "")))
+                 "Stopped because you signed out of DeepSeek."))
+  (should (equal (dsh-bridge--failure-text (list (cons 'message "rate limited")))
+                 "rate limited"))
+  (should (equal (dsh-bridge--failure-text (list (cons 'message "")))
+                 "the turn failed")))
+
+(ert-deftest dsh-bridge-view-failure-suffix-note ()
+  "A completed failed turn renders its failure note as terminal furniture.
+The note follows any body text (a partial turn keeps its text alongside the
+failure) and makes the record non-empty."
+  (let ((failed-text (dsh-bridge-test--view-turn
+                      7 7000000
+                      (list (dsh-bridge-test--view-segment "partial" 7001000 1))
+                      7002000 "error" nil nil
+                      (list (cons 'code "AUTH") (cons 'message ""))))
+        (failed-empty (dsh-bridge-test--view-turn
+                       8 8000000 nil 8002000 "error" nil nil
+                       (list (cons 'code "AUTH") (cons 'message "")))))
+    (with-temp-buffer
+      (dsh-bridge-view-mode)
+      (setq-local dsh-bridge--view-activity nil)
+      (let ((text-suffix (dsh-bridge--view-turn-suffix failed-text "s1"))
+            (empty-suffix (dsh-bridge--view-turn-suffix failed-empty "s1")))
+        (should (string-match-p "API key is invalid" text-suffix))
+        (should (string-match-p "API key is invalid" empty-suffix))
+        (should (string-match-p "failed" text-suffix)))
+      (should-not (dsh-bridge--view-turn-renders-empty-p failed-text "s1"))
+      (should-not (dsh-bridge--view-turn-renders-empty-p failed-empty "s1")))))
+
+(ert-deftest dsh-bridge-turn-complete-refetch-error-note ()
+  "A turn that fails with no text becomes an explicit terminal failure note.
+The host serves a failure-only record with empty `segments'; the waiting view
+must fill it (rather than blank to idle), showing the failure note where the
+`(running...)' placeholder was."
+  (let ((dsh-bridge--session-status nil)
+        (dsh-bridge--turns-cache nil)
+        (response (concat "{\"sessionId\":\"s1\",\"turns\":["
+                          "{\"turn\":3,\"startedAt\":3000000,"
+                          "\"endedAt\":3009000,\"reason\":\"error\","
+                          "\"segments\":[],"
+                          "\"failure\":{\"code\":\"AUTH\",\"message\":\"\"}}]}")))
+    (with-current-buffer (get-buffer-create "*dsh-bridge-output*")
+      (dsh-bridge-view-mode)
+      (setq-local dsh-bridge--view-content-session "s1")
+      (dsh-bridge--view-waiting-fill "s1" 2)
+      (should (equal (buffer-string) dsh-bridge--view-running-placeholder)))
+    (cl-letf (((symbol-function 'dsh-bridge--http)
+               (lambda (&rest _) (list nil response 200)))
+              ((symbol-function 'dsh-bridge--status-set) #'ignore)
+              ((symbol-function 'dsh-bridge--apply-session-directory) #'ignore))
+      (dsh-bridge--turn-complete-refetch "s1" "error" 3
+                                          (list (cons 'code "AUTH") (cons 'message "")))
+      (with-current-buffer "*dsh-bridge-output*"
+        (should (string-match-p "API key is invalid" (buffer-string)))
+        (should (null dsh-bridge--view-waiting))
+        (should (equal dsh-bridge--view-turn 3))))
+    (when (buffer-live-p (get-buffer "*dsh-bridge-output*"))
+      (kill-buffer "*dsh-bridge-output*"))))
+
+(ert-deftest dsh-bridge-turn-complete-refetch-error-partial ()
+  "A turn that emitted partial text then failed keeps that text and adds the
+failure note, rather than one replacing the other."
+  (let ((dsh-bridge--session-status nil)
+        (dsh-bridge--turns-cache nil)
+        (response (concat "{\"sessionId\":\"s1\",\"turns\":["
+                          "{\"turn\":3,\"startedAt\":3000000,"
+                          "\"endedAt\":3009000,\"reason\":\"error\","
+                          "\"segments\":[{\"text\":\"partial reply\","
+                          "\"time\":3001000,\"step\":1}],"
+                          "\"failure\":{\"code\":\"RATE_LIMIT\","
+                          "\"message\":\"rate limited\"}}]}")))
+    (with-current-buffer (get-buffer-create "*dsh-bridge-output*")
+      (dsh-bridge-view-mode)
+      (setq-local dsh-bridge--view-content-session "s1")
+      (dsh-bridge--view-waiting-fill "s1" 2))
+    (cl-letf (((symbol-function 'dsh-bridge--http)
+               (lambda (&rest _) (list nil response 200)))
+              ((symbol-function 'dsh-bridge--status-set) #'ignore)
+              ((symbol-function 'dsh-bridge--apply-session-directory) #'ignore))
+      (dsh-bridge--turn-complete-refetch "s1" "error" 3)
+      (with-current-buffer "*dsh-bridge-output*"
+        (should (string-match-p "partial reply" (buffer-string)))
+        (should (string-match-p "rate limited" (buffer-string)))
+        (should (null dsh-bridge--view-waiting))
+        (should (equal dsh-bridge--view-turn 3))))
+    (when (buffer-live-p (get-buffer "*dsh-bridge-output*"))
+      (kill-buffer "*dsh-bridge-output*"))))
 
 (ert-deftest dsh-bridge-view-link-target ()
   "A local file link's line is parsed from its anchor or a :LINE suffix.
@@ -7368,11 +7470,11 @@ the refetch can settle a blocked turn that `/turns' cannot name."
               ((symbol-function 'dsh-bridge--models-event-refresh) #'ignore)
               ((symbol-function 'dsh-bridge--view-turns-cache-refresh) #'ignore)
               ((symbol-function 'dsh-bridge--turn-complete-act)
-               (lambda (id reason turn) (setq seen (list id reason turn)))))
+               (lambda (id reason turn &optional failure) (setq seen (list id reason turn failure)))))
       (dsh-bridge--notification-handle-events
        '(((kind . "turn-complete") (sessionId . "s1")
           (reason . "blocked") (turn . 7)))))
-    (should (equal seen '("s1" "blocked" 7)))))
+    (should (equal seen '("s1" "blocked" 7 nil)))))
 
 (ert-deftest dsh-bridge-notification-replies-changed-refreshes ()
   "A replies-changed frame schedules a turn-cache refresh for the session."

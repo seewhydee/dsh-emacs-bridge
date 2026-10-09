@@ -1110,7 +1110,8 @@ Currently supported events are:
 	(dsh-bridge--models-event-refresh id)
 	(dsh-bridge--describe-maybe-refresh id)
 	(dsh-bridge--turn-complete-act id (alist-get 'reason event)
-				       (alist-get 'turn event)))
+				       (alist-get 'turn event)
+				       (alist-get 'failure event)))
        ((equal kind "replies-changed")
 	;; The first text segment after an answer retires its note;
 	;; the refill below splices the segment in.  The note's
@@ -2654,44 +2655,47 @@ This is used in place of `dsh-bridge--view-running-marker' when a new
 turn has just been started, but the first reply has not yet arrived.")
 
 (defun dsh-bridge--view-awaiting-note (session-id)
-  "The terminal DSH-View marker line when awaiting an ask-user question.
-This string is displayed in place of the usual \"(continuing...)\" if
-SESSION-ID is parked on an ask-user question.  It should instruct the
-user on what to do next."
-  (let* ((entry (dsh-bridge--pending-question session-id))
-	 (questions (and entry (cdr entry)))
-	 (count (length questions))
-	 (key (substitute-command-keys "\\[dsh-bridge-answer]"))
-	 (body (if (> count 1)
-		   (format "(Awaiting response [%d questions]: \
+  "DSH-View marker line for a pending query for SESSION-ID, or nil.
+This is the string to show at the end of the DSH-View buffer for a turn
+parked on a user query.  If SESSION-ID is nil, or there is no pending
+query, return nil."
+  (let ((entry (and session-id (dsh-bridge--pending-question session-id))))
+    (when (consp entry)
+      (let* ((questions (cdr entry))
+	     (count (length questions))
+	     (key (substitute-command-keys "\\[dsh-bridge-answer]"))
+	     (body (if (> count 1)
+		       (format "(Awaiting response [%d questions]: \
 press %s to view and answer" count key)
-		 (format "(Awaiting response: press %s to view and answer)"
-			 key))))
-    ;; Apply both `face' and `font-lock-face' text properties; the
-    ;; latter prevents clobbering by Font Lock mode.
-    (propertize body
-		'face 'dsh-bridge-view-awaiting-face
-		'font-lock-face 'dsh-bridge-view-awaiting-face
-		'dsh-bridge-turn-marker t
-		'dsh-bridge-awaiting t)))
+		     (format "(Awaiting response: press %s to view and answer)"
+			     key))))
+	;; Apply both `face' and `font-lock-face' text properties; the
+	;; latter prevents clobbering by Font Lock mode.
+	(propertize body
+		    'face 'dsh-bridge-view-awaiting-face
+		    'font-lock-face 'dsh-bridge-view-awaiting-face
+		    'dsh-bridge-turn-marker t
+		    'dsh-bridge-awaiting t)))))
 
 (defun dsh-bridge--view-approval-note (session-id)
-  "The terminal DSH-View marker line when awaiting an approval decision.
-This string is displayed in place of the usual \"(continuing...)\" if
-SESSION-ID is parked on an approval request.  It should instruct the user
-on what to do next."
-  (let* ((plist (dsh-bridge--pending-approval session-id))
-	 (tool (or (plist-get plist :tool-name) "a tool"))
-	 (key (substitute-command-keys "\\[dsh-bridge-answer]"))
-	 (body (format "(Awaiting approval for %s: press %s to review)"
-		       tool key)))
-    ;; Apply both `face' and `font-lock-face' text properties; the
-    ;; latter prevents clobbering by Font Lock mode.
-    (propertize body
-		'face 'dsh-bridge-view-awaiting-face
-		'font-lock-face 'dsh-bridge-view-awaiting-face
-		'dsh-bridge-turn-marker t
-		'dsh-bridge-awaiting t)))
+  "DSH-View marker line for a pending approval for SESSION-ID, or nil.
+This is the string to show at the end of the DSH-View buffer for a turn
+parked on an approval request.  If SESSION-ID is nil, or there is no
+pending approval, return nil."
+  (let ((plist (and session-id
+		    (dsh-bridge--pending-approval session-id))))
+    (when (consp plist)
+      (let* ((tool (or (plist-get plist :tool-name) "a tool"))
+	     (key (substitute-command-keys "\\[dsh-bridge-answer]"))
+	     (body (format "(Awaiting approval for %s: press %s to review)"
+			   tool key)))
+	;; Apply both `face' and `font-lock-face' text properties; the
+	;; latter prevents clobbering by Font Lock mode.
+	(propertize body
+		    'face 'dsh-bridge-view-awaiting-face
+		    'font-lock-face 'dsh-bridge-view-awaiting-face
+		    'dsh-bridge-turn-marker t
+		    'dsh-bridge-awaiting t)))))
 
 (defun dsh-bridge--view-answer-note-clear (session-id)
   "Retire SESSION-ID's answered note, if one is recorded."
@@ -2700,40 +2704,40 @@ on what to do next."
 	  (assoc-delete-all session-id dsh-bridge--view-answer-notes))))
 
 (defun dsh-bridge--view-answer-note (session-id turn)
-  "The active answered-note text for SESSION-ID and TURN, or nil.
-TURN is the rendered turn record or `new'.  The note applies only while
-TURN is still open and has not gained a segment since the answer, so it is
-shown exactly during the wait it explains.  A `:unknown' baseline (the
-turn list was not cached when the question was answered) matches any open
-turn and relies on the notification handlers to retire it."
-  (when (and dsh-bridge-view-answer-echo session-id)
-    (let* ((note (cdr (assoc session-id dsh-bridge--view-answer-notes)))
-	   (baseline (plist-get note :baseline))
-	   (text (plist-get note :text)))
-      (cond
-       ((null note) nil)
-       ((eq turn 'new)
-	;; Waiting for the first committed reply: only a note recorded
-	;; before any segment existed can still be current.
-	(and (eq baseline :unknown) text))
-       ((and (consp turn) (dsh-bridge--view-turn-open-p turn))
-	(let* ((segments (alist-get 'segments turn))
-	       (last (car (last segments)))
-	       (key (and last (dsh-bridge--view-segment-key last))))
-	  (and (or (eq baseline :unknown) (equal baseline key)) text)))
-       (t nil)))))
+  "DSH-View marker line for a user-supplied answer, or nil.
+After an ask-user query is answered for SESSION-ID, the note is
+displayed temporarily, until the next turn segment arrives.  TURN should
+be the rendered turn record or `new'.  A baseline of `:unknown' (the
+turn list was not cached when the question was answered) matches any
+open turn and relies on the notification handlers to retire it.
 
-(defun dsh-bridge--view-answered-note (text)
-  "The terminal DSH-View furniture line for TEXT, an answered note.
-TEXT is the raw note phrase; the result is parenthesized, given the
-continuation suffix, and propertized as furniture, exactly as the awaiting
-note is, so it is never mistaken for model text and satisfies the
-open-turn provenance check."
-  (propertize (concat "(" text " \u2014 continuing\u2026)")
-	      'face 'dsh-bridge-view-answered-face
-	      'font-lock-face 'dsh-bridge-view-answered-face
-	      'dsh-bridge-turn-marker t
-	      'dsh-bridge-answered t))
+If SESSION-ID is nil, or no answer note is recorded for it, return nil."
+  (let ((note (and dsh-bridge-view-answer-echo session-id
+		   (cdr (assoc session-id dsh-bridge--view-answer-notes)))))
+    (when note
+      (let ((baseline (plist-get note :baseline))
+	    text)
+	(cond
+	 ;; If waiting for the first committed reply: only a note
+	 ;; recorded before any segment existed can still be current.
+	 ((eq turn 'new)
+	  (if (eq baseline :unknown)
+	      (setq text (plist-get note :text))))
+	 ;; Otherwise, check the turn identity.
+	 ((and (consp turn) (dsh-bridge--view-turn-open-p turn))
+	  (when (or (eq baseline :unknown)
+		    (let* ((segments (alist-get 'segments turn))
+			   (last (car (last segments))))
+		      (and last
+			   (equal baseline
+				  (dsh-bridge--view-segment-key last)))))
+	    (setq text (plist-get note :text)))))
+	(when text
+	  (propertize (concat "(" text " \u2014 continuing\u2026)")
+		      'face 'dsh-bridge-view-answered-face
+		      'font-lock-face 'dsh-bridge-view-answered-face
+		      'dsh-bridge-turn-marker t
+		      'dsh-bridge-answered t))))))
 
 (defun dsh-bridge--view-waiting-fill (session-id base &optional cwd)
   "Put the current DSH-View for SESSION-ID into the waiting state.
@@ -2987,47 +2991,64 @@ non-nil) activity lines per `dsh-bridge--view-turn-items'."
       (dsh-bridge--view-join-items (dsh-bridge--view-turn-items turn))
     ""))
 
+(defun dsh-bridge--failure-text (failure)
+  "Return the display text for FAILURE.
+FAILURE should be an alist of (code . message) entries.  A known code
+maps to a fixed display string; anything else falls back to the
+host-provided message, else a generic message."
+  (let ((code (alist-get 'code failure))
+	(message (or (alist-get 'message failure) "")))
+    (cond
+     ((equal code "AUTH") "API key is invalid")
+     ((equal code "QUOTA") "Request quota exhausted.")
+     ((equal code "ACCOUNT_QUOTA") "Request quota exhausted.")
+     ((equal code "ACCOUNT_SIGNED_OUT") "Stopped because you signed out of DeepSeek.")
+     ((equal code "ACCOUNT_SIGN_IN_REQUIRED")
+      "Sign in to DeepSeek and ensure the request destination supports account authentication.")
+     ((not (string-empty-p message)) message)
+     (t "the turn failed"))))
+
+(defun dsh-bridge--view-failure-note (turn)
+  "The terminal DSH-View furniture line for TURN's failure, or nil.
+TURN is a turn record carrying a `failure' alist entry (code . message).
+A known code maps to a display string (see `dsh-bridge--failure-text');
+the note is parenthesized and propertized as furniture, so it is never
+mistaken for model text and satisfies the terminal-marker conventions."
+  (let ((failure (and (consp turn) (alist-get 'failure turn))))
+    (when failure
+      (propertize (format "(failed \u2014 %s)" (dsh-bridge--failure-text failure))
+		  'face 'dsh-bridge-view-marker-face
+		  'font-lock-face 'dsh-bridge-view-marker-face
+		  'dsh-bridge-turn-marker t))))
+
 (defun dsh-bridge--view-turn-suffix (turn session-id)
   "The terminal suffix of TURN for SESSION-ID's view.
 TURN is a turn record, `new' while a just-sent turn waits for its first
 committed reply, or nil for no turn at all.
 
-The suffix is the changed-files footer (when TURN changed files), then the
-terminal furniture: an answered note (the user just resolved an ask), an
-ask-user awaiting note, an approval awaiting note, the running placeholder for
-`new', or the running marker for an open turn.  A completed turn with none of
-those has an empty suffix.  The terminal marker, when present, always stays
-last so the provenance check can still find it after the body."
+The suffix is the changed-files footer (when TURN changed files), then
+the terminal marker indicating a failure, pending query or approval,
+answer acknowledgment, the running placeholder for a new turn, or the
+running marker for an open turn.  A completed turn with no failure has
+no terminal marker at all."
   (if (null turn)
       ""
     (let* ((completed (and (consp turn)
 			   (not (dsh-bridge--view-turn-open-p turn))))
 	   (files (dsh-bridge--view-changed-files turn))
-	   (answered (and session-id
-			  (dsh-bridge--view-answer-note session-id turn)))
-	   (furniture
-	    (and (not completed)
-		 (cond
-		  ;; A fresh question owns the slot: the awaiting note supersedes
-		  ;; an answered note for the same parked turn.
-		  ((and session-id (assoc session-id dsh-bridge--pending-questions))
-		   (dsh-bridge--view-awaiting-note session-id))
-		  ;; Likewise a fresh approval: a session cannot be parked on both
-		  ;; a question and an approval, but the question arm above stays
-		  ;; first so its existing behavior is unchanged.
-		  ((and session-id (assoc session-id dsh-bridge--pending-approvals))
-		   (dsh-bridge--view-approval-note session-id))
-		  (answered
-		   (dsh-bridge--view-answered-note answered))
-		  ((eq turn 'new)
-		   dsh-bridge--view-running-placeholder)
-		  ;; An open turn ends with the continuation marker.  A
-		  ;; completed turn has already short-circuited to no
-		  ;; furniture above (even while an ask is pending, its
-		  ;; answer belongs to a later, open turn).
-		  ((consp turn)
-		   dsh-bridge--view-running-marker)
-		  (t nil)))))
+	   (furniture (dsh-bridge--view-failure-note turn)))
+      ;; Show the failure note regardless of the turn completion
+      ;; status.  Otherwise, check if the turn is parked on an
+      ;; awaiting or answered note, else the continuation marker.
+      (unless (or completed furniture)
+	(setq furniture
+	      (or (dsh-bridge--view-awaiting-note session-id)
+		  (dsh-bridge--view-approval-note session-id)
+		  (dsh-bridge--view-answer-note session-id turn)
+		  (and (eq turn 'new)
+		       dsh-bridge--view-running-placeholder)
+		  (and (consp turn)
+		       dsh-bridge--view-running-marker))))
       (if (and (null files) (null furniture))
 	  ""
 	(concat
@@ -8072,11 +8093,12 @@ If BUFFER is omitted or nil, it defaults to the current buffer."
 	   (and (derived-mode-p 'dsh-bridge-view-mode)
 		dsh-bridge--view-browsing)))))
 
-(defun dsh-bridge--turn-complete-act (session-id reason &optional turn)
+(defun dsh-bridge--turn-complete-act (session-id reason &optional turn failure)
   "Update cache and inform the user after a turn ends.
 SESSION-ID is the session id for the ended session, REASON is a string
-describing how/why it ended, and TURN, when non-nil, is the ended turn's
-number from the frame.
+describing how/why it ended, TURN, when non-nil, is the ended turn's
+number from the frame, and FAILURE, when non-nil, is the frame's sanitized
+failure alist `(code . message)'.
 
 This function runs the actions prescribed by `dsh-bridge-turn-complete',
 then emits a message if `dsh-bridge-turn-boundary-echo' is non-nil and no
@@ -8090,7 +8112,7 @@ terminal marker is now stale.  Only a session no view shows falls back to
 the cache-only refresh."
   (if (and (eq dsh-bridge-turn-complete 'refetch)
 	   (dsh-bridge--session-view session-id))
-      (run-at-time 0 nil #'dsh-bridge--turn-complete-refetch session-id reason turn)
+      (run-at-time 0 nil #'dsh-bridge--turn-complete-refetch session-id reason turn failure)
     (run-at-time 0 nil #'dsh-bridge--view-turns-cache-refresh session-id))
   (when (and dsh-bridge-turn-boundary-echo
 	     (not (dsh-bridge--view-displayed-p session-id)))
@@ -8099,7 +8121,9 @@ the cache-only refresh."
 	     (pcase reason
 	       ("completed" "finished")
 	       ("aborted" "interrupted")
-	       ("error" "failed")
+	       ("error" (if failure
+			    (format "failed \u2014 %s" (dsh-bridge--failure-text failure))
+			  "failed"))
 	       ("max-tokens" "stopped at the token limit")
 	       ("blocked" "blocked")
 	       (_ "ended")))))
@@ -8124,11 +8148,12 @@ the cache-only refresh."
   (setq header-line-format dsh-bridge--view-header-line-format)
   (dsh-bridge--view-ticker-ensure))
 
-(defun dsh-bridge--turn-complete-refetch (session-id &optional reason ended-turn)
+(defun dsh-bridge--turn-complete-refetch (session-id &optional reason ended-turn failure)
   "Refill DSH-View buffers showing SESSION-ID's completed turn.
 This function fetches the turn data from the host and updates any
 DSH-View buffer following the turn, without popping to the buffer.
-REASON and ENDED-TURN are the completed turn's facts from the frame.
+REASON, ENDED-TURN and FAILURE are the completed turn's facts from the
+frame.
 
 The update clears the DSH-View buffer's \"(continuing...)\" tag,
 preserving point.  A buffer showing an earlier turn is left alone."
@@ -8190,6 +8215,19 @@ preserving point.  A buffer showing an earlier turn is left alone."
 		(when (and newest
 			   (not (dsh-bridge--view-turn-renders-empty-p newest shown-id)))
 		  (dsh-bridge--view-fill shown-id newest nil t t)))
+	       ;; A failed turn produced no reply and never will.
+	       ;; Unlike `blocked', it may have emitted no text or
+	       ;; activity, so the segment/activity guard below would
+	       ;; drop its empty-segment record and blank the waiting
+	       ;; view.  Fill the ended turn's failure record instead.
+	       ((and dsh-bridge--view-waiting
+		     (or failure (equal reason "error"))
+		     (numberp ended-turn))
+		(let ((record (seq-find (lambda (r)
+					  (equal (alist-get 'turn r) ended-turn))
+					turns)))
+		  (when (and record (alist-get 'failure record))
+		    (dsh-bridge--view-fill shown-id record nil t t))))
 	       ;; If the buffer is being prepped for a fresh turn,
 	       ;; insert the new segment if it's for the awaited turn
 	       ;; (or a later one).  A synthetic activity-only record

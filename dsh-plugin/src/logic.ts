@@ -104,6 +104,21 @@ export interface AssistantTurnSegment {
 }
 
 /**
+ * A turn's sanitized terminal failure, mirroring the web's `displayFailure`
+ * projection exactly: the stable provider `code` (when present) plus a
+ * UI-safe `message`. For `code === 'AUTH'` the message is blanked — provider
+ * AUTH diagnostics may echo a masked or partially preserved credential, so
+ * nothing credential-bearing crosses the bridge. Localization of known codes
+ * (e.g. `AUTH` → "API key is invalid") is Emacs's job, not the host's.
+ */
+export interface TurnFailure {
+  /** The stable failure code (`AUTH` / `QUOTA` / `ACCOUNT_SIGNED_OUT`/...). */
+  code?: string
+  /** The sanitized failure message; empty when the code blanks it (`AUTH`). */
+  message: string
+}
+
+/**
  * One agent turn that produced at least one text-bearing assistant message.
  * A turn (user prompt → final reply → idle) may commit several such messages
  * between tool calls; the DSH-View shows them as one unit.
@@ -124,6 +139,11 @@ export interface AssistantTurn {
    * this turn (the harness's `session/fork` boundary). Absent while the turn
    * is open, which is what makes an unfinished turn un-forkable. */
   endSeq?: number
+  /** The turn's sanitized terminal failure, carried when the `turn/end`
+   * reason was `error` (or a signed-out abort). Present even when the turn
+   * has no text and no activity, so a first-request failure still reaches the
+   * view. */
+  failure?: TurnFailure
   /** The turn's text-bearing assistant messages, oldest first. */
   segments: readonly AssistantTurnSegment[]
 }
@@ -141,7 +161,54 @@ export interface TurnBoundaries {
   /** Ms-epoch `turn/start` time; first wins. */
   starts: Map<number, number>
   /** `turn/end` facts; last wins. `seq` is the fork anchor. */
-  ends: Map<number, { time: number; reason?: string; seq: number }>
+  ends: Map<number, { time: number; reason?: string; seq: number; failure?: TurnFailure }>
+}
+
+/** Sanitize a raw turn failure to bridge-safe fields, mirroring the web's
+ * `displayFailure` projection exactly: `AUTH` blanks the message (provider
+ * AUTH diagnostics may echo a masked or partially preserved credential), and
+ * every other code passes the message through unchanged. The bridge stores no
+ * credentials; this keeps it that way. */
+function sanitizeFailure(failure: unknown): TurnFailure {
+  if (failure === null || typeof failure !== 'object') return { message: String(failure) }
+  const record = failure as { code?: unknown; message?: unknown }
+  const code = typeof record.code === 'string' ? record.code : undefined
+  if (code === 'AUTH') return { code, message: '' }
+  return {
+    ...(code === undefined ? {} : { code }),
+    message: typeof record.message === 'string' ? record.message : JSON.stringify(failure),
+  }
+}
+
+/** The sanitized terminal failure of a `turn/end` event's data, or undefined.
+ * Mirrors the web's `turn-error` node match: a reason of `kind === 'error'`
+ * carries its `error` (an `LlmFailure`), and a `kind === 'aborted'` with a
+ * `deepseek-account/signed-out` hook reason is synthesized as a failure so
+ * `/turns` and the SSE stream report it with exactly the web's semantics. */
+export function turnEndFailure(data: unknown): TurnFailure | undefined {
+  if (!isRecord(data)) return undefined
+  const reason = data.reason
+  if (!isRecord(reason)) return undefined
+  if (reason.kind === 'error') return sanitizeFailure(reason.error)
+  if (reason.kind === 'aborted'
+    && isRecord(reason.reason)
+    && reason.reason.kind === 'hook'
+    && reason.reason.reason === 'deepseek-account/signed-out') {
+    return sanitizeFailure({
+      message: 'Stopped because you signed out of DeepSeek.',
+      code: 'ACCOUNT_SIGNED_OUT',
+    })
+  }
+  return undefined
+}
+
+/** Project a turn's `turn/end` facts onto RECORD: its end time, reason kind,
+ * fork-anchor `endSeq`, and sanitized terminal failure (when the turn failed). */
+function applyTurnEnd(record: AssistantTurn, end: { time: number; reason?: string; seq: number; failure?: TurnFailure }): void {
+  record.endedAt = end.time
+  if (end.reason !== undefined) record.reason = end.reason
+  record.endSeq = end.seq
+  if (end.failure !== undefined) record.failure = end.failure
 }
 
 /**
@@ -166,10 +233,12 @@ export function turnBoundaries(events: readonly SessionEventLike[]): TurnBoundar
       const turn = data?.turn
       if (typeof turn === 'number') {
         const kind = data?.reason?.kind
+        const failure = turnEndFailure(event.data)
         ends.set(turn, {
           time: event.time,
           ...(typeof kind === 'string' ? { reason: kind } : {}),
           seq: typeof event.seq === 'number' ? event.seq : index,
+          ...(failure === undefined ? {} : { failure }),
         })
       }
     }
@@ -226,11 +295,7 @@ export function assistantTurns(log: SessionTurnLogLike): AssistantTurn[] {
       segments: [...segments],
     }
     const end = ends.get(turn)
-    if (end !== undefined) {
-      record.endedAt = end.time
-      if (end.reason !== undefined) record.reason = end.reason
-      record.endSeq = end.seq
-    }
+    if (end !== undefined) applyTurnEnd(record, end)
     turns.push(record)
   }
   return turns
@@ -981,7 +1046,8 @@ export function turnActivity(events: readonly SessionEventLike[]): Map<number, T
 /**
  * Insert a synthetic record for every activity-bearing turn that has no
  * text-bearing record, so activity is visible from a turn's first tool call or
- * reasoning block rather than only from its first reply.
+ * reasoning block rather than only from its first reply. A turn that also
+ * failed carries its failure detail on that record.
  *
  * SURFACE-SEQS is the set of seqs currently on the model-visible surface
  * (`Session.surface.nodes`). A turn whose append assistant messages are all
@@ -989,6 +1055,13 @@ export function turnActivity(events: readonly SessionEventLike[]): Map<number, T
  * its surviving raw-log events, matching the surface walk's "shadowed turns
  * simply vanish" rule (`assistantTurns`). Records come back in ascending turn
  * order, as `assistantTurns` produces them; `/turns` reverses once.
+ *
+ * A text-less, activity-less turn that ended in failure is synthesized too: a
+ * first-request auth/network failure emits no assistant message, tool call, or
+ * reasoning, so neither the text fold nor the activity fold can host it, yet
+ * the web still renders its terminal error row. These failure-only records are
+ * keyed off the `turn/end` boundary facts (a log fact the web also retains),
+ * so they survive a compaction that shadows a failed turn's partial text.
  */
 export function withActivityTurns(
   turns: readonly AssistantTurn[],
@@ -998,7 +1071,7 @@ export function withActivityTurns(
 ): AssistantTurn[] {
   const records = [...turns].sort((a, b) => a.turn - b.turn)
   const present = new Set(records.map(record => record.turn))
-  const synthetic: AssistantTurn[] = []
+  const synthetic = new Map<number, AssistantTurn>()
   for (const [turn, act] of activity) {
     if (present.has(turn) || act.entries.length === 0) continue
     const visible = act.messageSeqs.some(seq => surfaceSeqs.has(seq))
@@ -1009,26 +1082,36 @@ export function withActivityTurns(
     if (start === undefined) continue
     const record: AssistantTurn = { turn, startedAt: start, segments: [] }
     const end = boundaries.ends.get(turn)
-    if (end !== undefined) {
-      record.endedAt = end.time
-      if (end.reason !== undefined) record.reason = end.reason
-      record.endSeq = end.seq
-    }
-    synthetic.push(record)
+    if (end !== undefined) applyTurnEnd(record, end)
+    synthetic.set(turn, record)
   }
-  if (synthetic.length === 0) return records
-  synthetic.sort((a, b) => a.turn - b.turn)
+  // Failure-only synthesis: every failed `turn/end` that no text or activity
+  // record already covers gets its own text-less record, so a failed turn with
+  // zero output still reaches the view with its failure detail. Keyed off the
+  // boundary facts, so a compacted failed turn survives as a failure record.
+  for (const [turn, end] of boundaries.ends) {
+    if (present.has(turn) || synthetic.has(turn) || end.failure === undefined) continue
+    const record: AssistantTurn = {
+      turn,
+      startedAt: boundaries.starts.get(turn) ?? end.time,
+      segments: [],
+    }
+    applyTurnEnd(record, end)
+    synthetic.set(turn, record)
+  }
+  if (synthetic.size === 0) return records
+  const list = [...synthetic.values()].sort((a, b) => a.turn - b.turn)
   const merged: AssistantTurn[] = []
   let next = 0
   for (const record of records) {
-    while (next < synthetic.length && synthetic[next]!.turn < record.turn) {
-      merged.push(synthetic[next]!)
+    while (next < list.length && list[next]!.turn < record.turn) {
+      merged.push(list[next]!)
       next += 1
     }
     merged.push(record)
   }
-  while (next < synthetic.length) {
-    merged.push(synthetic[next]!)
+  while (next < list.length) {
+    merged.push(list[next]!)
     next += 1
   }
   return merged
@@ -1469,15 +1552,19 @@ export function turnStartMessage(sessionId: string, time: number, turn?: number)
  * without echoing "finished". `time` is the event's ms-epoch timestamp, used
  * to refresh the sessions-list recency; the glyph returns to idle regardless
  * of reason. TURN names the ended turn, so Emacs can refill exactly the view
- * whose closing divider it must draw.
+ * whose closing divider it must draw. FAILURE, when the turn failed (an
+ * `error` reason, or a signed-out abort), is the sanitized
+ * `{ code?, message }` — see `TurnFailure` — so Emacs can phrase
+ * "failed — <message>" promptly, ahead of any `/turns` refetch.
  */
-export function turnCompleteMessage(sessionId: string, reason: string, time: number, turn?: number): string {
+export function turnCompleteMessage(sessionId: string, reason: string, time: number, turn?: number, failure?: TurnFailure): string {
   return `data: ${JSON.stringify({
     kind: 'turn-complete',
     sessionId,
     reason,
     time,
     ...(turn === undefined ? {} : { turn }),
+    ...(failure === undefined ? {} : { failure }),
   })}\n\n`
 }
 

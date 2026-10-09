@@ -152,9 +152,19 @@ describe('a failing model call', () => {
       const complete = await sse.waitFor('turn-complete')
       expect(complete.sessionId).toBe(sessionId)
       expect(complete.reason).toBe('error')
+      // The frame carries the sanitized failure so Emacs can phrase it before
+      // any `/turns` refetch.  A generic adapter error surfaces with the
+      // harness's default `code: 'UNKNOWN'` and the thrown message.
+      expect(complete.failure).toEqual({ code: 'UNKNOWN', message: 'mock provider exploded' })
 
       const turns = await get(fixture, `/dsh-bridge/turns?sessionId=${sessionId}`)
       expect(turns.body.running).toBe(false)
+      // The text-less failed turn now surfaces as a failure record (rather than
+      // being absent from the fold), carrying the same sanitized detail.
+      const failed = turns.body.turns.find((turn: { reason?: string }) => turn.reason === 'error')
+      expect(failed).toBeDefined()
+      expect(failed.segments).toEqual([])
+      expect(failed.failure).toEqual({ code: 'UNKNOWN', message: 'mock provider exploded' })
     } finally {
       sse.close()
     }

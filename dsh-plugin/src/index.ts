@@ -50,11 +50,14 @@
 //   GET  /dsh-bridge/prompts?sessionId=           -> user prompts, newest first
 //   GET  /dsh-bridge/turns?sessionId=             -> turn-aggregated assistant
 //        replies, newest first (each turn: { turn, startedAt, endedAt?,
-//        reason?, endSeq?, segments: [{ text, time, step }], files?:
-//        [{ path, op }], activity?: [{ kind, seq, ord, time, turn, step,
-//        callId?, name?, summary?, isError? }] };
+//        reason?, endSeq?, failure?: { code?, message }, segments:
+//        [{ text, time, step }], files?: [{ path, op }], activity?: [{ kind,
+//        seq, ord, time, turn, step, callId?, name?, summary?, isError? }] };
 //        endSeq is the turn/end event's seq — the session/fork anchor — and is
-//        absent while the turn is open; files is the changed-files fold's
+//        absent while the turn is open; failure is the sanitized terminal
+//        error ({ code, message }, message blanked for AUTH), present when the
+//        turn ended in error or a signed-out abort, even when it produced no
+//        text and no activity; files is the changed-files fold's
 //        per-turn attribution, absent when the turn changed nothing; activity
 //        is the tool-call/result + thinking-summary fold (summary-only: full
 //        reasoning never leaves the host; the newest 60 entries per turn),
@@ -263,6 +266,7 @@ import {
   turnActivity,
   turnBoundaries,
   turnCompleteMessage,
+  turnEndFailure,
   turnStartMessage,
   turnsSince,
   userPrompts,
@@ -1837,11 +1841,13 @@ export function apply(ctx: Context, config?: Config): void {
     if (event.type === 'turn/end') {
       const data = event.data as { reason?: unknown } | undefined
       const reason = data?.reason as { kind?: unknown } | undefined
+      const failure = turnEndFailure(event.data)
       broadcast(turnCompleteMessage(
         id,
         typeof reason?.kind === 'string' ? reason.kind : 'unrecognized',
         event.time,
         turnNumberOf(event.data),
+        failure,
       ))
       return
     }
