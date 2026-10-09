@@ -29,45 +29,41 @@ The bridge consists of two components:
 
 1. In the DeepSeek Harness (DSH) web
    interface, click **Plugins** in the left panel, then **Add Plugin**
-   at the upper right, and paste the URL of the
+   at the upper right.  Paste in the URL of the
    `dsh-emacs-bridge-<version>.tgz` file from the
    [release list](https://github.com/seewhydee/dsh-emacs-bridge/releases).
    For the latest release, this is  
 <https://github.com/seewhydee/dsh-emacs-bridge/releases/download/v0.17.0/dsh-emacs-bridge-0.17.0.tgz>
 
-2. Click **Install**.  When it finishes, `dsh-emacs-bridge` appears in
-   the Installed section of the Plugins page.
+2. Click **Install**.  When it finishes, click **Enable Now**.  You
+   should now see `dsh-emacs-bridge` in the Plugins page.
 
 3. Click the `dsh-emacs-bridge` entry to open the plugin's
-   configuration card, then click **Install Emacs package**.  This
-   runs Emacs (`emacs` on the executable path) to install the
-   `dsh-bridge` Emacs package.  (Alternatively, you can install the
-   `dsh-bridge-<version>.tar` package file in the [release list](https://github.com/seewhydee/dsh-emacs-bridge/releases).)
+   configuration card, then click the **Install Emacs package**
+   button.  This runs Emacs (`emacs` on the executable path) to
+   install the `dsh-bridge` Emacs package.  (Alternatively, you can
+   manually install the `dsh-bridge-<version>.tar` package file from the
+   [release list](https://github.com/seewhydee/dsh-emacs-bridge/releases).)
 
-4. Restart Emacs, or evaluate `(package-initialize)` in a running
-   session; `M-x dsh-bridge` is then available.
+4. Restart Emacs, or do `M-x package-initialize` in a running session.
+   The [`dsh-bridge` commands](#Usage) will now be available.
 
-To upgrade, repeat these steps with the new release's URL (and the
-matching `.tar` if you installed the Emacs package by hand), and
-restart DSH.
+To upgrade, repeat these steps with the new release's URL, and restart
+DSH.
 
 ### Installing from a source checkout
 
-The steps above download release artifacts from GitHub. If you have this
-repository checked out — for development, or to install without network
-access — you can build and install both halves from local sources
-instead.
+If you have this repository checked out, you can instead directly
+build and install the DSH plugin and Emacs library.
 
-#### Build and install the DeepSeek Harness plugin
-
-From this repository's root directory:
+First, build the plugin by running the following in this repository's
+root directory:
 
 ```sh
 make build
 ```
 
-This requires Node.js and `pnpm`.  If you have `dsh` installed on the
-executable path, run:
+Next, install the plugin.  If you have `dsh` installed on the executable path, run this:
 
 ```sh
 # from this repo root:
@@ -75,9 +71,9 @@ dsh plugin --profile web add link:./dsh-plugin
 dsh web
 ```
 
-If you run DSH from a source checkout (`pnpm dsh web`), run the following
-from the `deepseek-harness` directory instead, replacing the `link:` path
-with the appropriate path into this repo:
+If instead you run DSH from a source checkout (`pnpm dsh web`), run
+the following from the `deepseek-harness` directory, replacing the
+`link:` path with the appropriate path into this repo:
 
 ```sh
 # from deepseek-harness root:
@@ -85,10 +81,9 @@ pnpm dsh plugin --profile web add link:/absolute/path/to/dsh-emacs-bridge/dsh-pl
 pnpm dsh web
 ```
 
-#### Install the Emacs library
-
-Put this in your Emacs init file (`~/.emacs.d/init.el` or `~/.emacs`),
-replacing the path with the actual path to `dsh-bridge.el`:
+Finally, install the Emacs library by putting this in your Emacs init
+file (`~/.emacs.d/init.el` or `~/.emacs`), replacing the path with the
+actual path to `dsh-bridge.el`:
 
 ```elisp
 (load "/path/to/dsh-emacs-bridge/emacs/dsh-bridge.el")
@@ -320,11 +315,10 @@ summaries, with the full text staying in DSH.
 The Plugins page's *Install Emacs package* button is the one place
 where this bridge makes DSH spawn a process: clicking it runs the
 configured Emacs command (`emacs` by default, settable in the plugin's
-configuration) once, in batch, with fixed arguments — nothing in the
-HTTP request reaches the command line — to install the bundled
-`dsh-bridge.el` into your Emacs package directory.  That directory is
-the only location outside `$DSH_HOME` this bridge writes to.  The
-command setting inherits the trust level of the profile's own
+configuration) once, in batch, with fixed arguments, to install the
+bundled `dsh-bridge.el` into your Emacs package directory.  That
+directory is the only location outside `$DSH_HOME` this bridge writes
+to.  The command setting inherits the trust level of the profile's own
 configuration file, and since the bearer token already lets a holder
 submit prompts to the agent, this button grants a token holder no
 comparable new authority.
