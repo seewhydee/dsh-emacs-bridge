@@ -13,7 +13,7 @@ user interface is designed to closely follow Emacs conventions.
 
 The bridge consists of two components: a DeepSeek Harness plugin
 (`dsh-emacs-bridge`), and an Emacs package to interact with the
-harness (dsh-bridge.el`).  The easiest installation method is to use
+harness (`dsh-bridge.el`).  The easiest installation method is to use
 the DSH plugin manager, as detailed below.
 
 ### Requirements
