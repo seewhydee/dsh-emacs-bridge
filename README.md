@@ -7,13 +7,14 @@ This is a two-way bridge between
 prompts, reading replies, and controlling sessions.  The Emacs-side
 user interface is designed to closely follow Emacs conventions.
 
-The bridge consists of two components:
-
-- `dsh-plugin/` — a DeepSeek Harness plugin (`dsh-emacs-bridge`).
-- `emacs/dsh-bridge.el` — an Emacs package to interact with the
-  harness.
+![Screenshot of the dsh-emacs-bridge interface in Emacs](dsh-bridge-screenshot.png)
 
 ## Installation
+
+The bridge consists of two components: a DeepSeek Harness plugin
+(`dsh-emacs-bridge`), and an Emacs package to interact with the
+harness (dsh-bridge.el`).  The easiest installation method is to use
+the DSH plugin manager, as detailed below.
 
 ### Requirements
 
