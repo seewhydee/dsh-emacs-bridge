@@ -64,7 +64,9 @@
 //        absent when the turn has none.  A turn that has activity but no text
 //        yet is also served, with segments: [] and its turn/start (and
 //        turn/end, once closed) boundary facts.) plus running, archived,
-//        epoch, title and cwd.  Optional
+//        epoch, title and cwd (the session's effective working directory: the
+//        last `working-directory/change`, else the header's original project).
+//        Optional
 //        since=<turn>&epoch=<n> request the incremental suffix: turns with
 //        turn >= since when the epoch matches the surface's replaceGeneration,
 //        else the full list (incremental: true|false)
@@ -222,6 +224,7 @@ import {
   contextUsedTokens,
   currentModelSelection,
   draftMessage,
+  effectiveCwd,
   goalActivationChangedMessage,
   goalChangedMessage,
   goalErrorCode,
@@ -1473,6 +1476,15 @@ export function apply(ctx: Context, config?: Config): void {
       }))
   }
 
+  /**
+   * The session's effective working directory, as reported to Emacs: the last
+   * committed `working-directory/change`, else the header's original project.
+   * The header alone is not enough once the model moves the directory.
+   */
+  function sessionCwd(session: Session): string | null {
+    return effectiveCwd(session.header, session.snapshotEvents() as readonly SessionEventLike[]) ?? null
+  }
+
   /** Whether a live, targetable session id has a live agent. */
   function hasAgent(id: string): boolean {
     const session = sessions.list().find(s => String(s.id) === id)
@@ -2509,7 +2521,7 @@ export function apply(ctx: Context, config?: Config): void {
             ok: true,
             sessionId: String(target.session.id),
             title: sessionTitle(target.session.snapshotEvents()),
-            cwd: target.session.header.cwd ?? null,
+            cwd: sessionCwd(target.session),
           })
         } catch (error: unknown) {
           sendJson(res, bridgeErrorStatus(error), { error: error instanceof Error ? error.message : String(error) })
@@ -2683,7 +2695,7 @@ export function apply(ctx: Context, config?: Config): void {
             ok: true,
             sessionId: String(target.session.id),
             title: sessionTitle(target.session.snapshotEvents()),
-            cwd: target.session.header.cwd ?? null,
+            cwd: sessionCwd(target.session),
             ...(echo.length === 0 ? {} : { attachments: echo }),
           })
         } catch (error: unknown) {
@@ -2706,7 +2718,7 @@ export function apply(ctx: Context, config?: Config): void {
           sendJson(res, 200, {
             sessionId: String(target.session.id),
             title: sessionTitle(target.session.snapshotEvents()),
-            cwd: target.session.header.cwd ?? null,
+            cwd: sessionCwd(target.session),
             text: latestAssistantText(target.agent.session.deriveMessages()),
             running: ctx.agents.get(String(target.session.id))?.status === 'running',
           })
@@ -2757,10 +2769,13 @@ export function apply(ctx: Context, config?: Config): void {
           const events = session.snapshotEvents() as readonly SessionEventLike[]
           // The changed-files fold walks the raw log (`tool/call` is log-only),
           // unlike the surface-walking turn fold it is merged into.  The
-          // activity fold rides the same raw log; it also supplies synthetic
-          // records for activity-bearing turns that have no text yet, so the
-          // view can stream activity before the turn's first reply.  The
-          // surface set keeps compaction-shadowed turns vanished.
+          // header's original project is only its starting point: the fold
+          // moves the directory it resolves against at each committed
+          // `working-directory/change`.  The activity fold rides the same raw
+          // log; it also supplies synthetic records for activity-bearing turns
+          // that have no text yet, so the view can stream activity before the
+          // turn's first reply.  The surface set keeps compaction-shadowed
+          // turns vanished.
           const fold = changedFiles(events, session.header.cwd)
           const activity = turnActivity(events)
           const records = withActivityTurns(
@@ -2789,7 +2804,7 @@ export function apply(ctx: Context, config?: Config): void {
           sendJson(res, 200, {
             sessionId: String(session.id),
             title: sessionTitle(session.snapshotEvents()),
-            cwd: session.header.cwd ?? null,
+            cwd: sessionCwd(session),
             turns,
             incremental,
             running: ctx.agents.get(String(session.id))?.status === 'running',
@@ -3057,7 +3072,7 @@ export function apply(ctx: Context, config?: Config): void {
             ok: true,
             sessionId: String(target.session.id),
             title: sessionTitle(target.session.snapshotEvents()),
-            cwd: target.session.header.cwd ?? null,
+            cwd: sessionCwd(target.session),
           })
           broadcastSessionsChanged(String(target.session.id))
         } catch (error: unknown) {

@@ -234,6 +234,23 @@ describe('sessionReport', () => {
     expect(report.missing).not.toContain('title')
   })
 
+  it('serves the effective working directory folded from the log', () => {
+    const report = sessionReport({
+      source: 'live',
+      header: { id: 's5', createdAt: 5, cwd: '/w' },
+      events: [{ time: 9, type: 'working-directory/change', data: { cwd: '/w/sub' } }],
+    })
+    expect(report.cwd).toBe('/w/sub')
+  })
+
+  it('serves the header project when the observation carries no events', () => {
+    const report = sessionReport({
+      source: 'prepared',
+      header: { id: 's6', createdAt: 5, cwd: '/w' },
+    })
+    expect(report.cwd).toBe('/w')
+  })
+
   it('folds the title and preset from the log for a header-only report', () => {
     const report = sessionReport({
       source: 'prepared',

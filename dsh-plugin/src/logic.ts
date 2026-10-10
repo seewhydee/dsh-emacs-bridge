@@ -446,6 +446,34 @@ export function sessionPreset(
 }
 
 /**
+ * The session's effective working directory: the last well-formed
+ * `working-directory/change` event's cwd, else the header's cwd.
+ *
+ * DSH 0.2.1-alpha.2 split the two: the header keeps the *original project* the
+ * session was created in, while a committed `working-directory/change` moves
+ * the directory subsequent directory-based operations use. This is the in-repo
+ * replica of the harness's `workingDirectory` session projection (init
+ * `header.cwd`, then each change event overwrites it), which the bridge folds
+ * because it reads cold logs rather than live projections.
+ *
+ * @param header - a session header carrying the original project directory.
+ * @param events - the session's raw event log.
+ * @returns the effective directory, or undefined when neither source names one.
+ */
+export function effectiveCwd(
+  header: { cwd?: string },
+  events: readonly SessionEventLike[],
+): string | undefined {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index]
+    if (event?.type !== 'working-directory/change') continue
+    const cwd = (event.data as { cwd?: unknown } | undefined)?.cwd
+    if (typeof cwd === 'string' && cwd !== '') return cwd
+  }
+  return header.cwd
+}
+
+/**
  * Whether SEQ is the seq of a `turn/end` event in EVENTS — the completed-turn
  * boundary `POST /fork` accepts as an explicit anchor.
  *
@@ -477,6 +505,11 @@ export function isCompletedTurnAnchor(events: readonly SessionEventLike[], seq: 
 // client-side, not a host contract, so it is mirrored here rather than
 // imported. Re-verify it (and the `tool/result.meta.diffs` shape) on every DSH
 // version bump; see AGENTS.md.
+//
+// Relative paths resolve against the directory current *when the call ran*, not
+// the header's original project: each `working-directory/change` moves it for
+// the calls that follow (see `effectiveCwd`). The header cwd is only the
+// starting point.
 
 /** Maximum changed files named by one session's fold. */
 export const MAX_CHANGED_FILES = 200
@@ -492,7 +525,8 @@ export const MAX_CHANGED_FILES_PER_TURN = 50
 export interface ChangedFile {
   /** The exact path spelling the tool call carried. */
   path: string
-  /** `resolve(cwd, path)`, or the logged spelling when no cwd is known. */
+  /** `resolve(cwd, path)` against the directory in effect at the call, or the
+   * logged spelling when no directory was known. */
   absolute: string
   /** The mutation operation that first named the file, e.g. `write`,
    * `edit`, `str_replace_editor:create`. */
@@ -660,15 +694,23 @@ function mutationCall(name: string, argsRaw: string): MutationCall | null {
  * `truncated` reports a dropped entry rather than growing without limit.
  *
  * @param events - the session's raw event log (log-only events included).
- * @param cwd - the session working directory, for the `absolute` resolution.
+ * @param cwd - the session's original project directory (the header cwd), the
+ *   starting point for the `absolute` resolution: each
+ *   `working-directory/change` event moves it for the calls that follow.
  *   Absent (a header without a cwd) keeps the logged path verbatim.
  */
 export function changedFiles(
   events: readonly SessionEventLike[],
   cwd?: string,
 ): ChangedFilesResult {
-  const resolvePath = (path: string): string => cwd === undefined ? path : resolve(cwd, path)
-  const pending = new Map<string, MutationCall & { turn: number }>()
+  const resolveAgainst = (base: string | undefined, path: string): string =>
+    base === undefined ? path : resolve(base, path)
+  // The directory in effect as the walk advances: the original project until a
+  // change moves it, then that directory's spelling. A mutation records the
+  // directory current at its call, not its result, so a `cd` between the two
+  // cannot re-resolve an already-issued call.
+  let currentCwd = cwd
+  const pending = new Map<string, MutationCall & { turn: number; cwd?: string }>()
   const files: ChangedFile[] = []
   const byPath = new Map<string, ChangedFile>()
   const byTurn = new Map<number, ChangedFile[]>()
@@ -676,11 +718,16 @@ export function changedFiles(
   let truncated = false
 
   for (const event of events) {
+    if (event.type === 'working-directory/change') {
+      const next = (event.data as { cwd?: unknown } | undefined)?.cwd
+      if (typeof next === 'string' && next !== '') currentCwd = next
+      continue
+    }
     if (event.type === 'tool/call') {
       const call = toolCallFact(event)
       if (call !== null) {
         const mutation = mutationCall(call.name, call.arguments)
-        if (mutation !== null) pending.set(call.callId, { ...mutation, turn: call.turn })
+        if (mutation !== null) pending.set(call.callId, { ...mutation, turn: call.turn, cwd: currentCwd })
       }
       continue
     }
@@ -707,7 +754,7 @@ export function changedFiles(
         }
         file = {
           path: call.path,
-          absolute: resolvePath(call.path),
+          absolute: resolveAgainst(call.cwd, call.path),
           op: call.op,
           firstTurn: call.turn,
           lastTurn: call.turn,
@@ -731,7 +778,7 @@ export function changedFiles(
       for (const entry of data.files) {
         if (!isRecord(entry) || typeof entry.path !== 'string') continue
         const file = byPath.get(entry.path)
-          ?? files.find(candidate => candidate.absolute === resolvePath(entry.path as string))
+          ?? files.find(candidate => candidate.absolute === resolveAgainst(currentCwd, entry.path as string))
         if (file !== undefined) file.delivered = true
       }
     }
@@ -1144,6 +1191,8 @@ export function activityRelevantEvent(event: SessionEventLike): boolean {
 export interface SessionRow {
   id: string
   title: string | null
+  /** Effective working directory for a live row (folded from the log); a
+   * persisted row serves the header's original project. */
   cwd: string | null
   live: boolean
   /** Whether the session's agent is currently running a turn (never for cold). */
@@ -1231,7 +1280,9 @@ export function cachedTitleValue(block: ProjectionBlockLike | undefined): string
 /**
  * Merge live sessions with persisted (cold) headers into one inventory.
  * `live` is already filtered to targetable sessions by the caller; persisted
- * entries are skipped when subagent-owned or already present as live.
+ * entries are skipped when subagent-owned or already present as live. A live
+ * row's cwd is the effective directory folded from its log; a persisted row
+ * carries only a header, so it serves the original project.
  */
 export function mergeSessionRows(
   live: readonly LiveSessionLike[],
@@ -1245,7 +1296,7 @@ export function mergeSessionRows(
     rows.push({
       id,
       title: sessionTitle(session.events),
-      cwd: session.header.cwd ?? null,
+      cwd: effectiveCwd(session.header, session.events) ?? null,
       live: true,
       running: session.running,
       lastActive: session.events.at(-1)?.time ?? session.header.createdAt,
@@ -2350,9 +2401,10 @@ export function reportGoal(value: unknown): SessionReportGoal | null {
  * sample), so they join `missing` only when the key is absent. `goal` is the
  * exception: null (no goal) is legitimate, so only a present-but-malformed
  * value earns `missing`. The live plan/goal refinement is a separate pure
- * pass ({@link refinePlanGoal}). The only fallback folds (title, preset) read
- * the log the caller already materialized when it has no projection value to
- * prefer.
+ * pass ({@link refinePlanGoal}). The fallback folds (title, preset) read the
+ * log the caller already materialized when it has no projection value to
+ * prefer; `cwd` likewise folds the log when the observation carries events,
+ * and otherwise serves the header's original project.
  */
 export function sessionReport(
   observation: SessionObservationLike,
@@ -2404,7 +2456,7 @@ export function sessionReport(
     basis: observation.projections === undefined ? 'header' : 'observation',
     missing,
     title,
-    cwd: observation.header.cwd ?? null,
+    cwd: effectiveCwd(observation.header, observation.events ?? []) ?? null,
     workspace: extras.workspace ?? null,
     workspaceId: extras.workspaceId ?? null,
     archived: extras.archived === true,

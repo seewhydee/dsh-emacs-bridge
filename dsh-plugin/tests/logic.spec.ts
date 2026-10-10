@@ -35,6 +35,7 @@ import {
   contextUsedTokens,
   currentModelSelection,
   draftMessage,
+  effectiveCwd,
   goalActivationChangedMessage,
   goalChangedMessage,
   goalErrorCode,
@@ -686,6 +687,19 @@ describe('mergeSessionRows', () => {
   it('falls back to createdAt when a live session has no events', () => {
     const rows = mergeSessionRows([liveSession('a', { createdAt: 10 })], [])
     expect(rows[0]!.lastActive).toBe(10)
+  })
+
+  it('folds a live row cwd from the last change, keeping the header project for persisted rows', () => {
+    const rows = mergeSessionRows(
+      [liveSession('a', { cwd: '/w', events: [cwdChange('/w/sub')] })],
+      [header('b', { cwd: '/w' })],
+    )
+    expect(rows.map(row => [row.id, row.cwd])).toEqual([['a', '/w/sub'], ['b', '/w']])
+  })
+
+  it('serves the header project for a live row with no change logged', () => {
+    const rows = mergeSessionRows([liveSession('a', { cwd: '/w', events: [titleEvent('t')] })], [])
+    expect(rows[0]!.cwd).toBe('/w')
   })
 
   it('marks persisted sessions as not running and skips subagent headers', () => {
@@ -1762,6 +1776,11 @@ function presented(turn: number, files: string[]): SessionEventLike {
   return { time: 1000, type: 'deliverables/presented', data: { turn, callId: 'c1', files: files.map(path => ({ path })) } }
 }
 
+/** A committed `working-directory/change` event moving the session to CWD. */
+function cwdChange(cwd: unknown): SessionEventLike {
+  return { time: 1000, type: 'working-directory/change', data: { cwd } }
+}
+
 /** A settled `write` call for PATH with CONTENT. */
 function writeCall(turn: number, callId: string, path: string, content: string): SessionEventLike[] {
   return [
@@ -1903,6 +1922,39 @@ describe('changedFiles', () => {
     expect(result.files[0]!.absolute).toBe('/abs/a.ts')
   })
 
+  it('resolves each call against the directory a change had committed by then', () => {
+    const result = changedFiles([
+      ...writeCall(1, 'c1', 'src/before.ts', 'one'),
+      cwdChange('/w/sub'),
+      ...writeCall(2, 'c2', 'src/after.ts', 'two'),
+      cwdChange('/w/sub/deeper'),
+      ...writeCall(3, 'c3', 'src/deep.ts', 'three'),
+    ], '/w')
+    expect(result.files.map(file => [file.path, file.absolute])).toEqual([
+      ['src/before.ts', '/w/src/before.ts'],
+      ['src/after.ts', '/w/sub/src/after.ts'],
+      ['src/deep.ts', '/w/sub/deeper/src/deep.ts'],
+    ])
+  })
+
+  it('keeps the directory of a call whose result lands after a change', () => {
+    const result = changedFiles([
+      toolCall(1, 1, 'c1', 'write', { file_path: 'src/a.ts', content: 'one' }),
+      cwdChange('/w/sub'),
+      mutatingResult(1, 1, 'c1'),
+    ], '/w')
+    expect(result.files[0]!.absolute).toBe('/w/src/a.ts')
+  })
+
+  it('ignores a malformed or empty working-directory/change cwd', () => {
+    const result = changedFiles([
+      cwdChange(42),
+      cwdChange(''),
+      ...writeCall(1, 'c1', 'src/a.ts', 'one'),
+    ], '/w')
+    expect(result.files[0]!.absolute).toBe('/w/src/a.ts')
+  })
+
   it('bounds the total and per-turn files, reporting truncation', () => {
     const events: SessionEventLike[] = []
     for (let i = 0; i < MAX_CHANGED_FILES_PER_TURN + 1; i += 1) {
@@ -1919,6 +1971,26 @@ describe('changedFiles', () => {
     const total = changedFiles(many, '/w')
     expect(total.files).toHaveLength(MAX_CHANGED_FILES)
     expect(total.truncated).toBe(true)
+  })
+})
+
+describe('effectiveCwd', () => {
+  it('falls back to the header project when no change is logged', () => {
+    expect(effectiveCwd({ cwd: '/w' }, [])).toBe('/w')
+    expect(effectiveCwd({ cwd: '/w' }, [{ time: 1, type: 'user/message', data: {} }])).toBe('/w')
+    expect(effectiveCwd({}, [])).toBeUndefined()
+  })
+
+  it('returns the last well-formed working-directory/change', () => {
+    expect(effectiveCwd({ cwd: '/w' }, [cwdChange('/w/a'), cwdChange('/w/b')])).toBe('/w/b')
+    // A later malformed change does not discard the last good directory.
+    expect(effectiveCwd({ cwd: '/w' }, [cwdChange('/w/a'), cwdChange(7), cwdChange(null)])).toBe('/w/a')
+    expect(effectiveCwd({ cwd: '/w' }, [cwdChange('')])).toBe('/w')
+  })
+
+  it('prefers a change over the header project', () => {
+    expect(effectiveCwd({ cwd: '/w' }, [cwdChange('/elsewhere')])).toBe('/elsewhere')
+    expect(effectiveCwd({}, [cwdChange('/elsewhere')])).toBe('/elsewhere')
   })
 })
 
