@@ -83,8 +83,7 @@ pnpm dsh plugin --profile web add link:/absolute/path/to/dsh-emacs-bridge/dsh-pl
 ```
 
 Finally, install the Emacs library by putting this in your Emacs init
-file (`~/.emacs.d/init.el` or `~/.emacs`), replacing the path with the
-actual path to `dsh-bridge.el`:
+file, replacing the path with the actual path to `dsh-bridge.el`:
 
 ```elisp
 (load "/path/to/dsh-emacs-bridge/emacs/dsh-bridge.el")
@@ -293,36 +292,27 @@ specific assistant messages to Emacs.  This automatically pops to the
 DSH-View buffer in Emacs.  You can use `i` in the DSH-View buffer (or
 run `M-x dsh-bridge-receive`) to pull the last message pushed.
 
-## Permissions, authentication, and failure bounds
+## Security Matters
 
-The bridge listens on the DSH web server's loopback interface and
-never contacts a third-party service.  Every route is gated by a
-shared bearer token, generated on first use and stored with owner-only
-permissions at `~/.dsh/dsh-bridge-token`.  Emacs reads that file
-directly, and the browser plugin fetches it from a route fenced to
+The DSH-Emacs bridge listens on the DSH web server's loopback
+interface.  It never contacts a third-party service.  Every route is
+gated by a shared bearer token, generated on first use and stored with
+owner-only permissions at `~/.dsh/dsh-bridge-token`.  Emacs reads that
+file directly, and the plugin fetches it from a route fenced to
 loopback peers and same-origin pages.  Any third party with access to
-the token can do everything this Emacs package can: send prompts, read
-session logs, answer queries and approval requests, interrupt running
-turns, etc.  Approvals submitted via this route grant no authority the
-web UI could not grant.
+the token can do everything this Emacs package can (send prompts, read
+session logs, answer queries and approval requests, etc.).
 
 Request bodies are capped at 1 MiB, and messages waiting for Emacs sit
-in a bounded outbox that evicts the oldest entries (with a warning).
-The turn activity reporter, `/turns`, carries at most 60 of the latest
-activity entries per turn, and activity for at most the newest 40
-turns.  At present, reasoning activity is only shown as one-line
-summaries, with the full text staying in DSH.
+in a bounded outbox.  The turn activity reporter, `/turns`, carries at
+most 60 of the latest activity entries per turn, and activity for at
+most the newest 40 turns.  At present, reasoning activity is only
+shown as one-line summaries; the full text stays in DSH.
 
-The Plugins page's *Install Emacs package* button is the one place
-where this bridge makes DSH spawn a process: clicking it runs the
-configured Emacs command (`emacs` by default, settable in the plugin's
-configuration) once, in batch, with fixed arguments, to install the
-bundled `dsh-bridge.el` into your Emacs package directory.  That
-directory is the only location outside `$DSH_HOME` this bridge writes
-to.  The command setting inherits the trust level of the profile's own
-configuration file, and since the bearer token already lets a holder
-submit prompts to the agent, this button grants a token holder no
-comparable new authority.
+The *Install Emacs package* button in the plugin configuration card is
+the one place that spawns a process.  Clicking it runs `emacs` in
+batch mode, with fixed arguments, to install the bundled
+`dsh-bridge.el` into the [Emacs packaging system](https://www.gnu.org/software/emacs/manual/html_node/emacs/Packages.html).
 
 ## License
 
