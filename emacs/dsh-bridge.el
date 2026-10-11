@@ -789,9 +789,10 @@ released in lockstep and must be upgraded together."
      :error
      (cond
       ((eq state 'incompatible)
-       (format "dsh-bridge: DSH plugin version %s does not match Emacs package %s; install matching versions from https://github.com/seewhydee/dsh-emacs-bridge/releases"
+       (format "dsh-bridge: DSH plugin version %s does not match Emacs package %s; install matching versions from https://github.com/seewhydee/dsh-emacs-bridge/releases (the plugin half is also on npm: \"dsh plugin --profile %s add dsh-emacs-bridge\")"
 	       (or dsh-bridge--plugin-reported-version "unknown")
-	       dsh-bridge-version))
+	       dsh-bridge-version
+	       dsh-bridge-profile))
       ((eq state 'forbidden)
        "dsh-bridge: connection route forbidden; check `dsh-bridge-url'")
       ((eq state 'unreachable)

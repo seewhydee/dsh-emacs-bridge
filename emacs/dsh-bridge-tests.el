@@ -5358,9 +5358,11 @@ The reported version is recorded either way, for the mismatch warning."
     (should (null dsh-bridge--plugin-diagnosed))))
 
 (ert-deftest dsh-bridge-ensure-plugin-incompatible-names-versions ()
-  "A version mismatch warns, naming both versions and the releases page.
+  "A version mismatch warns, naming both versions and where to get a match.
 The plugin and the Emacs package are released in lockstep, so the
-message must make a mismatched artifact pair self-explanatory."
+message must make a mismatched artifact pair self-explanatory, and
+must name both places the plugin half is published: the release assets
+and the npm package."
   (let ((dsh-bridge--bridge-status-cache nil) (dsh-bridge--plugin-diagnosed nil)
         (dsh-bridge--plugin-reported-version "0.0.0-test")
         (warned nil))
@@ -5373,6 +5375,10 @@ message must make a mismatched artifact pair self-explanatory."
     (should (string-match-p "0\\.0\\.0-test" warned))
     (should (string-match-p (regexp-quote dsh-bridge-version) warned))
     (should (string-match-p "releases" warned))
+    (should (string-match-p
+             (regexp-quote (format "dsh plugin --profile %s add dsh-emacs-bridge"
+                                   dsh-bridge-profile))
+             warned))
     (should (eq dsh-bridge--plugin-diagnosed t))))
 
 (ert-deftest dsh-bridge-ensure-plugin-not-installed-points-at-readme ()

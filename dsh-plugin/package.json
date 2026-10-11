@@ -1,9 +1,8 @@
 {
   "name": "dsh-emacs-bridge",
   "version": "0.17.1",
-  "private": true,
   "description": "Two-way bridge between Emacs and a running DeepSeek Harness session.",
-  "license": "GPL-3.0",
+  "license": "GPL-3.0-or-later",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/seewhydee/dsh-emacs-bridge.git",
@@ -40,6 +39,7 @@
   },
   "scripts": {
     "build": "tsdown && tsdown --config tsdown.client.config.ts",
+    "prepack": "node scripts/prepack.mjs",
     "test": "vitest run"
   },
   "peerDependencies": {

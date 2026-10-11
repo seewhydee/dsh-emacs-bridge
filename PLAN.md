@@ -20,6 +20,16 @@ re-verification checklist.
 | DSH plugin (Cordis id) | `dsh-bridge` |
 | Emacs feature / file | `dsh-bridge.el` → feature `dsh-bridge`; prefix `dsh-bridge-` |
 
+## Distribution
+
+The DSH plugin ships through two channels from one build: the GitHub release
+asset and the npm registry (`make publish` uploads the tarball `make release`
+staged, so both hold the same bytes). The Emacs package is not published
+separately — it rides inside the plugin tarball and is installed from the
+Plugins-page card. MELPA/ELPA publication is a non-goal: their date-based
+versions fight the exact-version lockstep the two halves verify. Release steps
+live in AGENTS.md.
+
 ## New Feature Candidates
 
 Ordered by recommended sequence, but out-of-sequence implementation is
