@@ -2,7 +2,7 @@
 
 This is a two-way bridge between
 [GNU Emacs](https://www.gnu.org/software/emacs/) and the
-[Deepseek Harness](https://github.com/deepseek-ai/deepseek-harness)
+[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)
 (DSH).  It lets you control DSH from Emacs, including submitting
 prompts, reading replies, and controlling sessions.  The Emacs-side
 user interface is designed to closely follow Emacs conventions.
@@ -17,7 +17,7 @@ harness (`dsh-bridge.el`).
 
 ### Requirements
 
-- `dsh`, the [Deepseek Harness](https://github.com/deepseek-ai/deepseek-harness).
+- `dsh`, the [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness).
 - `pnpm` installed on the executable path (DSH uses it to install plugins).
 - [GNU Emacs](https://www.gnu.org/software/emacs/), version 29 or later, installed on the executable path.
 - (Recommended) The [Markdown mode](https://jblevins.org/projects/markdown-mode/) Emacs package.  From Emacs, install it via `M-x package-install RET markdown-mode RET`.
