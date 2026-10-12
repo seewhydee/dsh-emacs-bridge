@@ -5758,6 +5758,17 @@ reconnect for the listener the user just paused."
 
 ;;; Turn notifications, session status, and the header line
 
+(defun dsh-bridge-test--notification-turn-complete (session-id)
+  "Drive the production `turn-complete' notification for SESSION-ID.
+The handler's display and refetch side effects are stubbed out, leaving
+the registry cleanup a turn boundary performs."
+  (cl-letf (((symbol-function 'dsh-bridge--status-event-render) #'ignore)
+            ((symbol-function 'dsh-bridge--models-event-refresh) #'ignore)
+            ((symbol-function 'dsh-bridge--describe-maybe-refresh) #'ignore)
+            ((symbol-function 'dsh-bridge--turn-complete-act) #'ignore))
+    (dsh-bridge--notification-handle-events
+     (list (list (cons 'kind "turn-complete") (cons 'sessionId session-id))))))
+
 (ert-deftest dsh-bridge-status-unknown-fallback ()
   "With no tracker and no session row, the status is unknown; the row's
 `running' flag is a seed when the tracker has no opinion."
@@ -8881,7 +8892,7 @@ copy silently instead of duplicating the registry entry."
     ;; buffer it finds, and only that one.
     (let ((pending (cdr (assoc "s1" dsh-bridge--pending-questions))))
       (dsh-bridge--question-buffer "s1" (car pending) (cdr pending)))
-    (dsh-bridge--ask-user-session-clear "s1")
+    (dsh-bridge-test--notification-turn-complete "s1")
     (with-current-buffer (dsh-bridge--question-find-buffer "q1")
       (should dsh-bridge--question-resolution)
       (should (string-match-p "no longer pending" (buffer-string))))
@@ -11193,7 +11204,9 @@ silently; the defensive turn-complete clear drops the registry."
                                                    :reason "second" :detail nil)))
     (should (equal messages 1))
     (should (equal (length (cdr (assoc "s1" dsh-bridge--pending-approvals))) 1))
-    (should (equal (plist-get (dsh-bridge--pending-approval "s1") :reason) "second"))
+    (should (equal (plist-get (cdadr (assoc "s1" dsh-bridge--pending-approvals))
+                              :reason)
+                   "second"))
     ;; Approvals share the ask-user "asking" state: there is no separate
     ;; approval glyph, so a parked approval lights the same indicator.
     (let ((dsh-bridge-status-indicator 'emoji))
@@ -11202,7 +11215,7 @@ silently; the defensive turn-complete clear drops the registry."
       (dsh-bridge-view-mode)
       (setq-local dsh-bridge--view-content-session "s1")
       (should (string-match-p "awaiting approval" (dsh-bridge--view-header-line))))
-    (dsh-bridge--approval-session-clear "s1")
+    (dsh-bridge-test--notification-turn-complete "s1")
     (should-not dsh-bridge--pending-approvals)
     (kill-buffer "*dsh-bridge-output*")))
 
@@ -11453,10 +11466,10 @@ approval; an unbound buffer refuses, so the union is never guessed at."
 
 (ert-deftest dsh-bridge-visit-session-pending-approval ()
   "A pending approval sends RET to the answer buffer, before any resume/fetch."
-  (let ((approved nil) (ensured nil) (fetched nil))
-    (cl-letf (((symbol-function 'dsh-bridge--pending-approval)
-               (lambda (id) (and (equal id "s1") (list :tool-name "bash"))))
-              ((symbol-function 'dsh-bridge-answer) (lambda () (setq approved t)))
+  (let ((approved nil) (ensured nil) (fetched nil)
+        (dsh-bridge--pending-approvals
+         (dsh-bridge-test--pending-approval-registry "s1" "a1")))
+    (cl-letf (((symbol-function 'dsh-bridge-answer) (lambda () (setq approved t)))
               ((symbol-function 'dsh-bridge--ensure-session-live)
                (lambda (_id) (setq ensured t) t))
               ((symbol-function 'dsh-bridge--session-turns)

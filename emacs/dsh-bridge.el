@@ -1104,9 +1104,16 @@ Currently supported events are:
 	(dsh-bridge--status-set id 'idle)
 	;; Fold the turn's timestamp into the session cache.
 	(dsh-bridge--session-update-last-active id (alist-get 'time event))
+	;; If host says the turn is complete, take their word for it,
+	;; and clear out any pending questions and approval requests.
+	(let ((query (assoc id dsh-bridge--pending-questions)))
+	  (when query
+	    (dsh-bridge--question-mark-resolved (cadr query) 'stale)))
+	(setq dsh-bridge--pending-questions
+	      (assoc-delete-all id dsh-bridge--pending-questions))
+	(setq dsh-bridge--pending-approvals
+	      (assoc-delete-all id dsh-bridge--pending-approvals))
 	;; Avoid the header line showing the stale `awaiting' state.
-	(dsh-bridge--ask-user-session-clear id)
-	(dsh-bridge--approval-session-clear id)
 	(dsh-bridge--status-event-render id)
 	(dsh-bridge--models-event-refresh id)
 	(dsh-bridge--describe-maybe-refresh id)
@@ -2685,7 +2692,7 @@ This is the string to show at the end of the DSH-View buffer for a turn
 parked on an approval request.  If SESSION-ID is nil, or there is no
 pending approval, return nil."
   (let ((plist (and session-id
-		    (dsh-bridge--pending-approval session-id))))
+		    (cdadr (assoc session-id dsh-bridge--pending-approvals)))))
     (when (consp plist)
       (let* ((tool (or (plist-get plist :tool-name) "a tool"))
 	     (key (substitute-command-keys "\\[dsh-bridge-answer]"))
@@ -4843,17 +4850,6 @@ the result on-screen."
 	      (error "dsh-bridge: unknown query resolution %S" outcome)))
 	  (dsh-bridge--question-patch-header))))))
 
-(defun dsh-bridge--ask-user-session-clear (session-id)
-  "Drop SESSION-ID's pending ask, bannering its live question buffer.
-Defensive cleanup on `turn-complete': a turn that ended without a resolved
-frame cannot still be waiting on the user."
-  (when session-id
-    (let ((pending (assoc session-id dsh-bridge--pending-questions)))
-      (when pending
-	(dsh-bridge--question-mark-resolved (cadr pending) 'stale)))
-    (setq dsh-bridge--pending-questions
-	  (assoc-delete-all session-id dsh-bridge--pending-questions))))
-
 (defun dsh-bridge--ask-user-arrive (session-id request-id questions)
   "Process a newly-arrived query from the DSH bridge.
 The announcement is made in the echo area and the session's DSH-View
@@ -5608,7 +5604,7 @@ request, report that nothing is pending."
      ((setq query (cdr (assoc session dsh-bridge--pending-questions)))
       (pop-to-buffer
        (dsh-bridge--question-buffer session (car query) (cdr query))))
-     ((setq approval (dsh-bridge--pending-approval-entry session))
+     ((setq approval (cadr (assoc session dsh-bridge--pending-approvals)))
       (if (eq dsh-bridge-approval-answer 'notify-only)
 	  (progn
 	    (dsh-bridge--approval-show session (cdr approval))
@@ -5675,15 +5671,6 @@ an option's number key.	 These commands are also available:
 Used only by the `notify-only' display path; a decision is prompted in
 the minibuffer instead.")
 
-(defun dsh-bridge--pending-approval-entry (session-id)
-  "The first (APPROVAL-ID . PLIST) pending for SESSION-ID, or nil."
-  (let ((entry (and session-id (assoc session-id dsh-bridge--pending-approvals))))
-    (cadr entry)))
-
-(defun dsh-bridge--pending-approval (session-id)
-  "The first pending approval's plist for SESSION-ID, or nil."
-  (cdr (dsh-bridge--pending-approval-entry session-id)))
-
 ;; Registry maintenance ------------------------------------------------------
 
 (defun dsh-bridge--approval-retire (session-id approval-id)
@@ -5692,19 +5679,17 @@ Idempotent: a decision POST and the host's `approval-resolved' frame for the
 same approval both call this, in either order."
   (let ((entry (assoc session-id dsh-bridge--pending-approvals)))
     (when entry
-      (setcdr entry (cl-delete approval-id (cdr entry) :key #'car :test #'equal))
-      (when (null (cdr entry))
-	(setq dsh-bridge--pending-approvals
-	      (assoc-delete-all session-id dsh-bridge--pending-approvals)))))
+      ;; Remove all approval entries with id `equal' to APPROVAL-ID
+      (let ((remaining nil))
+	(dolist (pair (cdr entry))
+	  (unless (equal (car pair) approval-id)
+	    (push pair remaining)))
+	(if remaining
+	    (setcdr entry (nreverse remaining))
+	  (setq dsh-bridge--pending-approvals
+		(delq entry dsh-bridge--pending-approvals))))))
   (dsh-bridge--status-event-render session-id)
   (dsh-bridge--view-await-refresh session-id))
-
-(defun dsh-bridge--approval-session-clear (session-id)
-  "Drop every pending approval for SESSION-ID.
-Defensive cleanup on `turn-complete': a turn that ended without a resolved
-frame cannot still be waiting on an approval."
-  (setq dsh-bridge--pending-approvals
-	(assoc-delete-all session-id dsh-bridge--pending-approvals)))
 
 (defun dsh-bridge--approval-arrive (session-id approval-id plist)
   "Record a newly arrived approval and announce it.
@@ -6881,7 +6866,7 @@ hand."
       ;; Query and approval request are exclusive
       (cond ((assoc session-id dsh-bridge--pending-questions)
 	     (push "waiting for your answer" notes))
-	    ((dsh-bridge--pending-approval-entry session-id)
+	    ((assoc session-id dsh-bridge--pending-approvals)
 	     (push "waiting for your approval" notes)))
       (format "Stop running session%s?"
 	      (if notes
@@ -6963,7 +6948,7 @@ compaction in progress) is reported with the host-supplied text."
      ((and id (assoc id dsh-bridge--pending-questions))
       (user-error "dsh-bridge: session \"%s\" is waiting for your answer"
 		  (dsh-bridge--session-label id)))
-     ((dsh-bridge--pending-approval-entry id)
+     ((and id (assoc id dsh-bridge--pending-approvals))
       (user-error "dsh-bridge: session \"%s\" is waiting for your approval"
 		  (dsh-bridge--session-label id)))
      ((let ((counts (dsh-bridge--pending-prompt-counts id)))
@@ -7257,7 +7242,7 @@ to read it."
       (message "dsh-bridge: session \"%s\" is archived; unarchive it first"
 	       (dsh-bridge--session-label id)))
      ((or (assoc id dsh-bridge--pending-questions)
-	  (dsh-bridge--pending-approval id))
+	  (assoc id dsh-bridge--pending-approvals))
       ;; `dsh-bridge-answer' resolves the row's session itself.
       (dsh-bridge-answer))
      (t
