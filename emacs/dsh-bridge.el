@@ -6445,16 +6445,12 @@ and refusal rules match the command, its `A' binding, and its menu item."
 
 ;;; Menu state helpers (evaluated when a mode menu is built)
 
-(defun dsh-bridge--menu-session ()
-  "The session a plan/goal menu item acts on: the buffer's effective session."
-  (dsh-bridge--effective-session))
-
 (defun dsh-bridge--menu-plan-state ()
   "The cached plan section for the menu's session, or nil.
 Seeds the cache through the read-through fetch first: a DSH-Sessions
 buffer has no other seed path, so without this the menu items stay
 shaded until some other buffer seeds the session."
-  (let ((session (dsh-bridge--menu-session)))
+  (let ((session (dsh-bridge--effective-session)))
     (when session
       (dsh-bridge--plan-goal-refresh session t)
       (cdr (assoc session dsh-bridge--session-plan)))))
@@ -6465,7 +6461,7 @@ A missing section (no plan mode) shades it; an unseeded session is
 seeded read-through, so only a failed seed shades it.  A cold session
 stays enabled: its durable projection gives the direction, and the
 mutation route resumes it on demand (501 if its preset has none)."
-  (let* ((session (dsh-bridge--menu-session))
+  (let* ((session (dsh-bridge--effective-session))
 	 (plan (dsh-bridge--menu-plan-state)))
     (and session (consp plan))))
 
@@ -6478,7 +6474,7 @@ mutation route resumes it on demand (501 if its preset has none)."
   "The cached goal section for the menu's session, or nil.
 Seeds the cache through the read-through fetch first (the fetch fills
 both the plan and goal caches in one request)."
-  (let ((session (dsh-bridge--menu-session)))
+  (let ((session (dsh-bridge--effective-session)))
     (when session
       (dsh-bridge--plan-goal-refresh session t)
       (cdr (assoc session dsh-bridge--session-goal)))))
@@ -6487,7 +6483,7 @@ both the plan and goal caches in one request)."
   "Whether the Goal Active menu item can act.
 Shaded without a goal, for a complete goal (resume rejects it), for a cold
 session, and when the activation is unknown (never asserted as disarmed)."
-  (let* ((session (dsh-bridge--menu-session))
+  (let* ((session (dsh-bridge--effective-session))
 	 (goal (dsh-bridge--menu-goal-state))
 	 (snapshot (alist-get 'goal goal)))
     (and session
