@@ -386,7 +386,7 @@ follow-up."
                15000))
       ;; The bridge mints the question id, so read it from the pending
       ;; registry rather than assuming the asker's own id.
-      (let ((question-id (caar (cdr (assoc session-id dsh-bridge--pending-questions)))))
+      (let ((question-id (cadr (assoc session-id dsh-bridge--pending-questions))))
         ;; `dsh-bridge-answer' acts on the buffer's own session, so drive it
         ;; from the view following the asking session.
         (with-current-buffer (dsh-bridge-it--view session-id)
@@ -696,7 +696,7 @@ reply tail."
   "Answer SESSION-ID's pending ask-user question with option LABEL.
 Posts through the bridge's own `/answer' route — the settlement the question
 buffer's `C-c C-c' performs — so the turn can resume."
-  (let ((entry (dsh-bridge--pending-question session-id)))
+  (let ((entry (cdr (assoc session-id dsh-bridge--pending-questions))))
     (unless entry
       (error "dsh-bridge-it: session %s has no pending question" session-id))
     (let* ((questions (cdr entry))
@@ -811,7 +811,7 @@ instead of the bare `(continuing...)' marker, which is what explains the wait."
       ;; Answer through the real question buffer (the `C-c C-c' path).  The
       ;; bridge mints the question id, so read it from the pending registry
       ;; rather than assuming the asker's own id.
-      (let ((question-id (caar (cdr (assoc session-id dsh-bridge--pending-questions)))))
+      (let ((question-id (cadr (assoc session-id dsh-bridge--pending-questions))))
         (with-current-buffer (dsh-bridge-it--view session-id)
           (dsh-bridge-answer))
         (with-current-buffer (dsh-bridge--question-find-buffer question-id)

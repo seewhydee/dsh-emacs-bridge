@@ -3548,10 +3548,9 @@ The host's reason is what the user sees first."
 
 (ert-deftest dsh-bridge-visit-session-pending-answers ()
   "A pending question sends RET to the answer buffer, before any resume/fetch."
-  (let ((answered nil) (ensured nil) (fetched nil))
-	(cl-letf (((symbol-function 'dsh-bridge--pending-question)
-			   (lambda (id) (and (equal id "s1") '("q1" . nil))))
-			  ((symbol-function 'dsh-bridge-answer) (lambda () (setq answered t)))
+  (let ((answered nil) (ensured nil) (fetched nil)
+	(dsh-bridge--pending-questions (dsh-bridge-test--pending-ask "s1" "Q?")))
+	(cl-letf (((symbol-function 'dsh-bridge-answer) (lambda () (setq answered t)))
 			  ((symbol-function 'dsh-bridge--ensure-session-live)
 			   (lambda (_id) (setq ensured t) t))
 			  ((symbol-function 'dsh-bridge--session-turns)
@@ -3565,8 +3564,7 @@ The host's reason is what the user sees first."
   "A running session shows its DSH-View in following state, not a prompt."
   (let ((alist '((sessionId . "s1") (cwd . "/w") (running . t) (turns)))
 		(shown nil) (prompted nil))
-	(cl-letf (((symbol-function 'dsh-bridge--pending-question) (lambda (_id) nil))
-			  ((symbol-function 'dsh-bridge--ensure-session-live) (lambda (_id) t))
+	(cl-letf (((symbol-function 'dsh-bridge--ensure-session-live) (lambda (_id) t))
 			  ((symbol-function 'dsh-bridge--session-turns) (lambda (_id) alist))
 			  ((symbol-function 'dsh-bridge--view-for-session)
 			   (lambda (_id &optional _alist) 'view-buffer))
@@ -3583,8 +3581,7 @@ The host's reason is what the user sees first."
   (let ((alist '((sessionId . "s1") (cwd . "/w")
 				 (turns ((turn . 1) (segments . nil)))))
 		(shown nil))
-	(cl-letf (((symbol-function 'dsh-bridge--pending-question) (lambda (_id) nil))
-			  ((symbol-function 'dsh-bridge--ensure-session-live) (lambda (_id) t))
+	(cl-letf (((symbol-function 'dsh-bridge--ensure-session-live) (lambda (_id) t))
 			  ((symbol-function 'dsh-bridge--session-turns) (lambda (_id) alist))
 			  ((symbol-function 'dsh-bridge--view-for-session)
 			   (lambda (_id &optional _alist) 'view-buffer))
@@ -3597,8 +3594,7 @@ The host's reason is what the user sees first."
   "A session with no output opens a prompt in the same window."
   (let ((alist '((sessionId . "s1") (cwd . "/w") (turns)))
 		(popped nil) (shown nil))
-	(cl-letf (((symbol-function 'dsh-bridge--pending-question) (lambda (_id) nil))
-			  ((symbol-function 'dsh-bridge--ensure-session-live) (lambda (_id) t))
+	(cl-letf (((symbol-function 'dsh-bridge--ensure-session-live) (lambda (_id) t))
 			  ((symbol-function 'dsh-bridge--session-turns) (lambda (_id) alist))
 			  ((symbol-function 'dsh-bridge--prompt-buffer)
 			   (lambda (_id) 'prompt-buffer))
@@ -3624,8 +3620,7 @@ the view in another window (else below the prompt), selecting the prompt."
 	(events nil))
     (unwind-protect
 	(progn
-	  (cl-letf (((symbol-function 'dsh-bridge--pending-question) (lambda (_id) nil))
-		    ((symbol-function 'dsh-bridge--ensure-session-live) (lambda (_id) t))
+	  (cl-letf (((symbol-function 'dsh-bridge--ensure-session-live) (lambda (_id) t))
 		    ((symbol-function 'dsh-bridge--session-turns) (lambda (_id) alist))
 		    ((symbol-function 'dsh-bridge--view-for-session)
 		     (lambda (_id &optional _alist) view))
@@ -3675,9 +3670,7 @@ launcher left behind, so the frame keeps two usable windows."
           (other-window 1)
           (setq sessions-window (selected-window))
           (set-window-buffer sessions-window sessions)
-          (cl-letf (((symbol-function 'dsh-bridge--pending-question)
-                     (lambda (_id) nil))
-                    ((symbol-function 'dsh-bridge--ensure-session-live)
+          (cl-letf (((symbol-function 'dsh-bridge--ensure-session-live)
                      (lambda (_id) t))
                     ((symbol-function 'dsh-bridge--session-turns)
                      (lambda (_id) alist))
@@ -3702,8 +3695,7 @@ launcher left behind, so the frame keeps two usable windows."
 					 (cons 'turns (list dsh-bridge-test--complete-turn))))
 		(dsh-bridge-session-default-visit-action 'view)
 		(shown nil) (prompted nil))
-	(cl-letf (((symbol-function 'dsh-bridge--pending-question) (lambda (_id) nil))
-			  ((symbol-function 'dsh-bridge--ensure-session-live) (lambda (_id) t))
+	(cl-letf (((symbol-function 'dsh-bridge--ensure-session-live) (lambda (_id) t))
 			  ((symbol-function 'dsh-bridge--session-turns) (lambda (_id) alist))
 			  ((symbol-function 'dsh-bridge--view-for-session)
 			   (lambda (_id &optional _alist) 'view-buffer))
@@ -3721,8 +3713,7 @@ launcher left behind, so the frame keeps two usable windows."
 					 (cons 'turns (list dsh-bridge-test--complete-turn))))
 		(dsh-bridge-session-default-visit-action 'prompt)
 		(popped nil) (shown nil))
-	(cl-letf (((symbol-function 'dsh-bridge--pending-question) (lambda (_id) nil))
-			  ((symbol-function 'dsh-bridge--ensure-session-live) (lambda (_id) t))
+	(cl-letf (((symbol-function 'dsh-bridge--ensure-session-live) (lambda (_id) t))
 			  ((symbol-function 'dsh-bridge--session-turns) (lambda (_id) alist))
 			  ((symbol-function 'dsh-bridge--prompt-buffer)
 			   (lambda (_id) 'prompt-buffer))
@@ -3740,8 +3731,7 @@ launcher left behind, so the frame keeps two usable windows."
 dead session never reaches the network."
   (let ((dsh-bridge--sessions-cache nil)
         (caught nil))
-	(cl-letf (((symbol-function 'dsh-bridge--pending-question) (lambda (_id) nil))
-			  ((symbol-function 'dsh-bridge--session-turns)
+	(cl-letf (((symbol-function 'dsh-bridge--session-turns)
 			   (lambda (_id) (ert-fail "must not fetch for a dead session"))))
 	  (setq caught (should-error (dsh-bridge-test--visit-session "gone")
 								 :type 'user-error)))
@@ -3750,8 +3740,7 @@ dead session never reaches the network."
 (ert-deftest dsh-bridge-visit-session-fetch-failure-stops ()
   "A failed /turns fetch opens nothing (the request already echoed the error)."
   (let ((shown nil) (prompted nil))
-	(cl-letf (((symbol-function 'dsh-bridge--pending-question) (lambda (_id) nil))
-			  ((symbol-function 'dsh-bridge--ensure-session-live) (lambda (_id) t))
+	(cl-letf (((symbol-function 'dsh-bridge--ensure-session-live) (lambda (_id) t))
 			  ((symbol-function 'dsh-bridge--session-turns) (lambda (_id) nil))
 			  ((symbol-function 'dsh-bridge--show-session-view)
 			   (lambda (buffer) (setq shown buffer) buffer))
@@ -3765,8 +3754,7 @@ dead session never reaches the network."
   "RET acts on the row without touching the pinned target."
   (let ((dsh-bridge-pinned-target "default")
 		(alist '((sessionId . "s1") (turns))))
-	(cl-letf (((symbol-function 'dsh-bridge--pending-question) (lambda (_id) nil))
-			  ((symbol-function 'dsh-bridge--ensure-session-live) (lambda (_id) t))
+	(cl-letf (((symbol-function 'dsh-bridge--ensure-session-live) (lambda (_id) t))
 			  ((symbol-function 'dsh-bridge--session-turns) (lambda (_id) alist))
 			  ((symbol-function 'dsh-bridge--prompt-buffer)
 			   (lambda (_id) 'prompt-buffer))
@@ -4435,7 +4423,7 @@ read still happens, since it words the confirmation."
     (cl-letf (((symbol-function 'dsh-bridge--request)
                (lambda (&rest _) (cons 200 nil))))
       (let ((dsh-bridge--pending-questions
-             (list (cons "s1" (list (cons "q1" nil)))))
+             (list (cons "s1" (cons "q1" nil))))
             (dsh-bridge--pending-approvals nil))
         (should (string-match-p "waiting for your answer"
                                 (dsh-bridge--stop-confirmation "s1"))))
@@ -4904,7 +4892,7 @@ A pending ask still outranks it: the question needs an answer."
     (let ((dsh-bridge-status-indicator 'none))
       (should (string= (dsh-bridge--status-glyph "s1") "")))
     (let ((dsh-bridge-status-indicator 'geometric)
-          (dsh-bridge--pending-questions '(("s1" . "q1"))))
+          (dsh-bridge--pending-questions '(("s1" "q1"))))
       (should (string= (dsh-bridge--status-glyph "s1") "▲")))))
 
 (ert-deftest dsh-bridge-relative-age ()
@@ -8879,7 +8867,8 @@ copy silently instead of duplicating the registry entry."
       (dsh-bridge--ask-user-arrive "s1" "q1" '(( (id . "q1") (question . "Go?") )))
       (dsh-bridge--ask-user-arrive "s1" "q1" '(( (id . "q1") (question . "Go? v2") ))))
     (should (equal messages 1))
-    (should (equal (length (cdr (assoc "s1" dsh-bridge--pending-questions))) 1))
+    (should (equal (cdr (assoc "s1" dsh-bridge--pending-questions))
+                   '("q1" ((id . "q1") (question . "Go? v2")))))
     (should-not (dsh-bridge--question-find-buffer "q1"))
     (let ((dsh-bridge-status-indicator 'emoji))
       (should (string= (dsh-bridge--status-glyph "s1") "💬")))
@@ -8890,7 +8879,7 @@ copy silently instead of duplicating the registry entry."
     ;; The user opened the question buffer (the `a' path) and then the turn
     ;; ended without a resolved frame: the defensive clear banners the live
     ;; buffer it finds, and only that one.
-    (let ((pending (dsh-bridge--pending-question "s1")))
+    (let ((pending (cdr (assoc "s1" dsh-bridge--pending-questions))))
       (dsh-bridge--question-buffer "s1" (car pending) (cdr pending)))
     (dsh-bridge--ask-user-session-clear "s1")
     (with-current-buffer (dsh-bridge--question-find-buffer "q1")
@@ -8925,6 +8914,26 @@ command is unbound — the frame is handled from an arbitrary buffer."
   (when (dsh-bridge--question-find-buffer "q2")
     (kill-buffer (dsh-bridge--question-find-buffer "q2"))))
 
+(ert-deftest dsh-bridge-ask-user-arrive-replaces-superseded-request ()
+  "One ask per session: a new request id replaces the stored one and announces
+itself; a resolved frame naming the superseded id leaves the live ask alone;
+resolving the live id retires the session's entry."
+  (let ((dsh-bridge--pending-questions nil)
+        (dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t))))
+        (messages 0))
+    (cl-letf (((symbol-function 'message) (lambda (&rest _) (cl-incf messages)))
+              ((symbol-function 'dsh-bridge--status-event-render) #'ignore))
+      (dsh-bridge--ask-user-arrive "s1" "q1" '(((id . "q1") (question . "First?"))))
+      (should (equal (cadr (assoc "s1" dsh-bridge--pending-questions)) "q1"))
+      (dsh-bridge--ask-user-arrive "s1" "q2" '(((id . "q2") (question . "Second?"))))
+      (should (equal messages 2))
+      (should (equal (cdr (assoc "s1" dsh-bridge--pending-questions))
+                     '("q2" ((id . "q2") (question . "Second?")))))
+      (dsh-bridge--ask-user-resolved "s1" "q1" "answered")
+      (should (equal (cadr (assoc "s1" dsh-bridge--pending-questions)) "q2"))
+      (dsh-bridge--ask-user-resolved "s1" "q2" "answered")
+      (should-not (assoc "s1" dsh-bridge--pending-questions)))))
+
 (ert-deftest dsh-bridge-ask-user-resolved ()
   "A resolved frame retires the pending question and banners the question buffer.
 The banner stands on its own line, the resolved buffer no longer claims the
@@ -8938,7 +8947,7 @@ session is waiting for an answer, and nothing jumps: the user did not act."
       (dsh-bridge--ask-user-arrive "s1" "q1" '(( (id . "q1") (question . "Go?") )))
       ;; The user had opened the buffer (the `a' path) before it resolved
       ;; elsewhere; that open buffer is what gets bannered.
-      (let ((pending (dsh-bridge--pending-question "s1")))
+      (let ((pending (cdr (assoc "s1" dsh-bridge--pending-questions))))
         (dsh-bridge--question-buffer "s1" (car pending) (cdr pending)))
       (dsh-bridge--ask-user-resolved "s1" "q1" "answered"))
     (with-current-buffer (get-buffer "*dsh-bridge-question: T*")
@@ -9000,7 +9009,7 @@ without jumping."
               ((symbol-function 'dsh-bridge--exit-to-view)
                (lambda (&rest _) (ert-fail "a cancelled frame must not jump"))))
       (dsh-bridge--ask-user-arrive "s1" "q1" '(( (id . "q1") (question . "Go?") )))
-      (let ((pending (dsh-bridge--pending-question "s1")))
+      (let ((pending (cdr (assoc "s1" dsh-bridge--pending-questions))))
         (dsh-bridge--question-buffer "s1" (car pending) (cdr pending)))
       (dsh-bridge--ask-user-resolved "s1" "q1" "cancelled")
       (should (null dsh-bridge--pending-questions)))
@@ -9017,8 +9026,8 @@ without jumping."
 (defun dsh-bridge-test--pending-ask (session question)
   "A `dsh-bridge--pending-questions' registry with one QUESTION for SESSION."
   (list (cons session
-              (list (cons "q1"
-                          (list (list (cons 'id "q1") (cons 'question question))))))))
+              (cons "q1"
+                    (list (list (cons 'id "q1") (cons 'question question)))))))
 
 (defun dsh-bridge-test--answer-note-text (session)
   "The recorded answered-note text for SESSION, or nil."
@@ -9071,9 +9080,9 @@ the question text itself is left to the question buffer."
     ;; Several questions under one ask: the count tells the user what to expect.
     (let ((dsh-bridge--pending-questions
            (list (cons "s1"
-                       (list (cons "q1"
-                                   (list (list (cons 'id "q1") (cons 'question "One?"))
-                                         (list (cons 'id "q2") (cons 'question "Two?")))))))))
+                       (cons "q1"
+                             (list (list (cons 'id "q1") (cons 'question "One?"))
+                                   (list (cons 'id "q2") (cons 'question "Two?"))))))))
       (should (string-match-p "Awaiting response \\[2 questions\\]: press a"
                               (dsh-bridge--view-awaiting-note "s1"))))
     ;; A question whose text is empty or whitespace reads the same.
@@ -11445,8 +11454,7 @@ approval; an unbound buffer refuses, so the union is never guessed at."
 (ert-deftest dsh-bridge-visit-session-pending-approval ()
   "A pending approval sends RET to the answer buffer, before any resume/fetch."
   (let ((approved nil) (ensured nil) (fetched nil))
-    (cl-letf (((symbol-function 'dsh-bridge--pending-question) (lambda (_id) nil))
-              ((symbol-function 'dsh-bridge--pending-approval)
+    (cl-letf (((symbol-function 'dsh-bridge--pending-approval)
                (lambda (id) (and (equal id "s1") (list :tool-name "bash"))))
               ((symbol-function 'dsh-bridge-answer) (lambda () (setq approved t)))
               ((symbol-function 'dsh-bridge--ensure-session-live)
@@ -11852,7 +11860,7 @@ carries the host's settle."
   "A session waiting on an ask-user answer is refused locally."
   (let ((called nil)
         (dsh-bridge--session-status nil)
-        (dsh-bridge--pending-questions '(("s1" ("q1" . ((id . "q1"))))))
+        (dsh-bridge--pending-questions '(("s1" "q1" (id . "q1"))))
         (dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t)))))
     (cl-letf (((symbol-function 'dsh-bridge--request)
                (lambda (&rest _) (setq called t) (cons 200 nil)))

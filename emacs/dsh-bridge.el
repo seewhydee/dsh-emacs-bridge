@@ -652,10 +652,15 @@ turn's `turn-complete' may have already set the truth.")
 This variable is set during `dsh-bridge-select-model', and used as a
 display cache to show the active model in DSH-prompt buffers.")
 
+;; The harness allows at most one query per session; a second request
+;; cannot arrive before the first is resolved.
 (defvar dsh-bridge--pending-questions nil
   "Alist of \"ask-user\" questions pending in DSH sessions.
-Each entry has the form (SESSION-ID . ((REQUEST-ID . QUESTIONS) ...)).")
+Each entry has the form (SESSION-ID . (REQUEST-ID . QUESTIONS)).")
 
+;; For approvals, however, DSH internals retains the possibility of
+;; multiple approvals per session.  Each approval request mints its
+;; own approval id, and dispatches independently.
 (defvar dsh-bridge--pending-approvals nil
   "Alist of DSH approval requests pending in sessions.
 Each entry has the form (SESSION-ID . ((APPROVAL-ID . PLIST) ...)).  PLIST
@@ -892,11 +897,6 @@ cached session data's `running' flag, and finally falling back on
 	       (and (consp entry) (car entry))))
 	(and row (if (alist-get 'running row) 'running 'idle))
 	'unknown)))
-
-(defun dsh-bridge--pending-question (session-id)
-  "The (REQUEST-ID . QUESTIONS) entry for SESSION-ID's pending ask, or nil."
-  (let ((entry (and session-id (assoc session-id dsh-bridge--pending-questions))))
-    (and entry (car (cdr entry)))))
 
 (defun dsh-bridge--status-glyph (session-id)
   "Return a status indicator for SESSION-ID as a propertized string.
@@ -2660,9 +2660,10 @@ turn has just been started, but the first reply has not yet arrived.")
 This is the string to show at the end of the DSH-View buffer for a turn
 parked on a user query.  If SESSION-ID is nil, or there is no pending
 query, return nil."
-  (let ((entry (and session-id (dsh-bridge--pending-question session-id))))
-    (when (consp entry)
-      (let* ((questions (cdr entry))
+  (let ((entry (and session-id
+		    (assoc session-id dsh-bridge--pending-questions))))
+    (when entry
+      (let* ((questions (cddr entry))
 	     (count (length questions))
 	     (key (substitute-command-keys "\\[dsh-bridge-answer]"))
 	     (body (if (> count 1)
@@ -4843,32 +4844,34 @@ the result on-screen."
 	  (dsh-bridge--question-patch-header))))))
 
 (defun dsh-bridge--ask-user-session-clear (session-id)
-  "Drop every pending ask for SESSION-ID, bannering any live question buffers.
+  "Drop SESSION-ID's pending ask, bannering its live question buffer.
 Defensive cleanup on `turn-complete': a turn that ended without a resolved
 frame cannot still be waiting on the user."
-  (dolist (pending (cdr (assoc session-id dsh-bridge--pending-questions)))
-    (dsh-bridge--question-mark-resolved (car pending) 'stale))
-  (setq dsh-bridge--pending-questions
-	(assoc-delete-all session-id dsh-bridge--pending-questions)))
+  (when session-id
+    (let ((pending (assoc session-id dsh-bridge--pending-questions)))
+      (when pending
+	(dsh-bridge--question-mark-resolved (cadr pending) 'stale)))
+    (setq dsh-bridge--pending-questions
+	  (assoc-delete-all session-id dsh-bridge--pending-questions))))
 
 (defun dsh-bridge--ask-user-arrive (session-id request-id questions)
   "Process a newly-arrived query from the DSH bridge.
 The announcement is made in the echo area and the session's DSH-View
 buffer (if any); the query is stored in `dsh-bridge--pending-questions'.
-In case the request id is already in the registry, refresh the stored
-copy silently (this may happen if another SSE client reconnects, which
-triggers the DSH plugin to re-announce pending asks).
+A repeat of the session's stored request id refreshes that copy silently
+(this may happen if another SSE client reconnects, which triggers the DSH
+plugin to re-announce pending asks); a different id replaces it, which the
+host does only after the previous ask was resolved.
 
 This function does not create the DSH-Question buffer; that is done on
 demand by `\\[dsh-bridge-answer]'."
   (let* ((entry (assoc session-id dsh-bridge--pending-questions))
-	 (slot (and entry (assoc request-id (cdr entry)))))
-    (if slot
-	(setcdr slot questions)
-      (if entry
-	  (setcdr entry (cons (cons request-id questions) (cdr entry)))
-	(push (cons session-id (list (cons request-id questions)))
-	      dsh-bridge--pending-questions))
+	 (replay (and entry (equal (cadr entry) request-id))))
+    (if entry
+	(setcdr entry (cons request-id questions))
+      (push (cons session-id (cons request-id questions))
+	    dsh-bridge--pending-questions))
+    (unless replay
       (let* ((first (car questions))
 	     (q (and (listp first) (alist-get 'question first))))
 	(message "dsh-bridge: session \"%s\" asks: %s (press %s to answer)"
@@ -4881,14 +4884,13 @@ demand by `\\[dsh-bridge-answer]'."
 
 (defun dsh-bridge--ask-user-resolved (session-id request-id outcome)
   "Retire a pending ask for SESSION-ID if it was answered or cancelled.
-Update the DSH-Question buffer's banner accordingly."
+Only the stored request id retires the entry: a frame naming an ask this
+session has already moved past leaves the live one alone.  Update the
+DSH-Question buffer's banner accordingly."
   (let ((entry (assoc session-id dsh-bridge--pending-questions)))
-    (when entry
-      (setcdr entry (cl-delete request-id (cdr entry)
-			       :key #'car :test #'equal))
-      (when (null (cdr entry))
-	(setq dsh-bridge--pending-questions
-	      (assoc-delete-all session-id dsh-bridge--pending-questions)))))
+    (when (and entry (equal (cadr entry) request-id))
+      (setq dsh-bridge--pending-questions
+	    (assoc-delete-all session-id dsh-bridge--pending-questions))))
   (dsh-bridge--status-event-render session-id)
   (dsh-bridge--view-await-refresh session-id)
   (dsh-bridge--question-mark-resolved
@@ -5596,26 +5598,25 @@ the minibuffer or shows the appproval request, depending on the value of
 request, report that nothing is pending."
   (interactive)
   ;; NODEFAULT plus REQUIRE: the pinned target is a mutation target,
-  ;; never an answer target.  Workflow via the transient menu is to go
+  ;; not an answer target.  Workflow via the transient menu is to go
   ;; to the view buffer, then type "a".
   (let* ((session (dsh-bridge--effective-session nil t t))
-	 (question (and session (dsh-bridge--pending-question session)))
-	 (approval (and session (dsh-bridge--pending-approval-entry session))))
+	 query approval)
     (cond
-     (question
-      (pop-to-buffer (dsh-bridge--question-buffer session (car question) (cdr question))))
-     (approval
+     ((null session)
+      (message "dsh-bridge: no target session"))
+     ((setq query (cdr (assoc session dsh-bridge--pending-questions)))
+      (pop-to-buffer
+       (dsh-bridge--question-buffer session (car query) (cdr query))))
+     ((setq approval (dsh-bridge--pending-approval-entry session))
       (if (eq dsh-bridge-approval-answer 'notify-only)
 	  (progn
 	    (dsh-bridge--approval-show session (cdr approval))
-	    (message (concat "dsh-bridge: approval answering is disabled "
-			     "(dsh-bridge-approval-answer is notify-only); "
+	    (message (concat "dsh-bridge: approval answering is disabled; "
 			     "resolve this request in the web UI")))
 	(dsh-bridge--approval-prompt session (car approval) (cdr approval))))
-     (session
-      (message "dsh-bridge: session \"%s\" has no pending query or approval"
-	       (dsh-bridge--session-label session)))
-     (t (message "dsh-bridge: no pending query or approval")))))
+     (t
+      (message "dsh-bridge: session has no pending query or approval")))))
 
 (defvar-keymap dsh-bridge-question-mode-map
   :parent special-mode-map
@@ -5677,7 +5678,7 @@ the minibuffer instead.")
 (defun dsh-bridge--pending-approval-entry (session-id)
   "The first (APPROVAL-ID . PLIST) pending for SESSION-ID, or nil."
   (let ((entry (and session-id (assoc session-id dsh-bridge--pending-approvals))))
-    (car (cdr entry))))
+    (cadr entry)))
 
 (defun dsh-bridge--pending-approval (session-id)
   "The first pending approval's plist for SESSION-ID, or nil."
@@ -6526,7 +6527,7 @@ The last-sent entry for SESSION-ID must equal the current buffer content; a
 single edit makes them differ and the marker disappears (the `(:eval)' header
 recomputes on the next redisplay)."
   (let ((entry (and session-id (assoc session-id dsh-bridge--last-sent))))
-    (if (and entry (equal (car (cdr entry)) (buffer-string)))
+    (if (and entry (equal (cadr entry) (buffer-string)))
 	(format " ✓ sent %s" (format-time-string "%H:%M" (cdr (cdr entry))))
       "")))
 
@@ -6864,27 +6865,27 @@ advisory: a read that fails simply drops that part of the text.  SESSION-ID
 is read only for that pending state: the text names no session label, which
 can be arbitrarily long, because the stop always acts on the session at
 hand."
-  (let* ((counts (dsh-bridge--pending-prompt-counts session-id))
-	 (queued (car-safe counts))
-	 (steering (cdr-safe counts))
-	 (waiting (cond ((dsh-bridge--pending-question session-id)
-			 "waiting for your answer")
-			((dsh-bridge--pending-approval-entry session-id)
-			 "waiting for your approval")))
-	 (notes nil))
-    (when (and queued (> queued 0))
-      (push (format "%d prompt%s queued to run afterward"
-		    queued (if (= queued 1) "" "s"))
-	    notes))
-    (when (and steering (> steering 0))
-      (push (format "%d steering prompt%s may linger or be discarded"
-		    steering (if (= steering 1) "" "s"))
-	    notes))
-    (let ((clauses (if waiting (cons waiting (nreverse notes))
-		     (nreverse notes))))
+  (when session-id
+    (let* ((counts (dsh-bridge--pending-prompt-counts session-id))
+	   (queued (car-safe counts))
+	   (steering (cdr-safe counts))
+	   (notes nil))
+      (when (and steering (> steering 0))
+	(push (format "%d steering prompt%s may linger or be discarded"
+		      steering (if (= steering 1) "" "s"))
+	      notes))
+      (when (and queued (> queued 0))
+	(push (format "%d prompt%s queued to run afterward"
+		      queued (if (= queued 1) "" "s"))
+	      notes))
+      ;; Query and approval request are exclusive
+      (cond ((assoc session-id dsh-bridge--pending-questions)
+	     (push "waiting for your answer" notes))
+	    ((dsh-bridge--pending-approval-entry session-id)
+	     (push "waiting for your approval" notes)))
       (format "Stop running session%s?"
-	      (if clauses
-		  (format " (%s)" (string-join clauses "; "))
+	      (if notes
+		  (format " (%s)" (string-join notes "; "))
 		"")))))
 
 (defun dsh-bridge-stop-session (&optional force session)
@@ -6959,7 +6960,7 @@ compaction in progress) is reported with the host-supplied text."
      ((eq (dsh-bridge--status-state id) 'running)
       (user-error "dsh-bridge: session \"%s\" is running; stop it before compacting"
 		  (dsh-bridge--session-label id)))
-     ((dsh-bridge--pending-question id)
+     ((and id (assoc id dsh-bridge--pending-questions))
       (user-error "dsh-bridge: session \"%s\" is waiting for your answer"
 		  (dsh-bridge--session-label id)))
      ((dsh-bridge--pending-approval-entry id)
@@ -7255,7 +7256,7 @@ to read it."
 	     (eq (alist-get 'archived session) t))
       (message "dsh-bridge: session \"%s\" is archived; unarchive it first"
 	       (dsh-bridge--session-label id)))
-     ((or (dsh-bridge--pending-question id)
+     ((or (assoc id dsh-bridge--pending-questions)
 	  (dsh-bridge--pending-approval id))
       ;; `dsh-bridge-answer' resolves the row's session itself.
       (dsh-bridge-answer))
