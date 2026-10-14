@@ -4360,6 +4360,27 @@ read still happens, since it words the confirmation."
     (should (assoc "/sessions/stop"
                    (mapcar (lambda (c) (list (cadr c) c)) calls)))))
 
+(ert-deftest dsh-bridge-stop-session-stale-cold-row-still-stops ()
+  "A tracked running session is stopped even when the roster calls it cold.
+The row is a snapshot the `turn-start' frame postdates, so the command
+must reach the host rather than refusing the session as not running."
+  (let ((stop nil) (msg nil)
+        (dsh-bridge--session-status '(("s1" running . 1000)))
+        (dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . nil)))))
+    (cl-letf (((symbol-function 'y-or-n-p) (lambda (_prompt) t))
+              ((symbol-function 'dsh-bridge--request)
+               (lambda (_method path payload)
+                 (when (equal path "/sessions/stop") (setq stop payload))
+                 (cons 200 (list (cons 'accepted t) (cons 'running t)))))
+              ((symbol-function 'message)
+               (lambda (&rest args) (setq msg (apply #'format args)))))
+      (with-temp-buffer
+        (dsh-bridge-view-mode)
+        (setq-local dsh-bridge--view-content-session "s1")
+        (dsh-bridge-stop-session)))
+    (should (equal (cdr (assoc 'sessionId stop)) "s1"))
+    (should (string-match-p "stop requested" msg))))
+
 (ert-deftest dsh-bridge-stop-session-sessions-row-target ()
   "In DSH-Sessions the stop targets the row under point."
   (let ((calls nil)
@@ -5769,6 +5790,17 @@ the registry cleanup a turn boundary performs."
     (dsh-bridge--notification-handle-events
      (list (list (cons 'kind "turn-complete") (cons 'sessionId session-id))))))
 
+(defun dsh-bridge-test--notification-turn-start (session-id)
+  "Drive the production `turn-start' notification for SESSION-ID.
+The handler's display and refetch side effects are stubbed out, leaving
+the status-tracker update a turn boundary performs."
+  (cl-letf (((symbol-function 'dsh-bridge--view-answer-note-clear) #'ignore)
+            ((symbol-function 'dsh-bridge--status-event-render) #'ignore)
+            ((symbol-function 'dsh-bridge--models-event-refresh) #'ignore)
+            ((symbol-function 'dsh-bridge--view-turns-cache-refresh) #'ignore))
+    (dsh-bridge--notification-handle-events
+     (list (list (cons 'kind "turn-start") (cons 'sessionId session-id))))))
+
 (ert-deftest dsh-bridge-status-unknown-fallback ()
   "With no tracker and no session row, the status is unknown; the row's
 `running' flag is a seed when the tracker has no opinion."
@@ -5781,6 +5813,16 @@ the registry cleanup a turn boundary performs."
   (let ((dsh-bridge--session-status nil)
         (dsh-bridge--sessions-cache '(((id . "s1") (live . t) (running . nil)))))
     (should (eq (dsh-bridge--status-state "s1") 'idle))))
+
+(ert-deftest dsh-bridge-status-running-outranks-stale-cold-row ()
+  "A tracked `running' beats a roster row calling the session cold, while
+a tracked `idle' keeps the cold row's `unknown'."
+  (let ((dsh-bridge--session-status '(("s1" running . 1000)))
+        (dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . nil)))))
+    (should (eq (dsh-bridge--status-state "s1") 'running)))
+  (let ((dsh-bridge--session-status '(("s1" idle)))
+        (dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . nil)))))
+    (should (eq (dsh-bridge--status-state "s1") 'unknown))))
 
 (ert-deftest dsh-bridge-status-glyph ()
   "The status glyph reflects the indicator type and the session state."
@@ -5814,6 +5856,73 @@ the registry cleanup a turn boundary performs."
     (dsh-bridge--notification-handle-events
      '(((kind . "turn-complete") (sessionId . "s1") (reason . "completed"))))
     (should (eq (dsh-bridge--status-state "s1") 'idle))))
+
+(ert-deftest dsh-bridge-status-set-if-unmoved ()
+  "A snapshot write is dropped when the tracker moved since the capture,
+and lands when it did not."
+  (let ((dsh-bridge--session-status nil)
+        (dsh-bridge--sessions-cache nil)
+        (dsh-bridge--status-revision nil))
+    (let ((revisions dsh-bridge--status-revision))
+      ;; A live frame lands while the read is in flight.
+      (dsh-bridge--status-set "s1" 'running 1000)
+      (dsh-bridge--status-set-if-unmoved revisions "s1" 'idle)
+      (should (eq (dsh-bridge--status-state "s1") 'running))))
+  (let ((dsh-bridge--session-status nil)
+        (dsh-bridge--sessions-cache nil)
+        (dsh-bridge--status-revision nil))
+    (let ((revisions dsh-bridge--status-revision))
+      (dsh-bridge--status-set-if-unmoved revisions "s1" 'idle)
+      (should (eq (dsh-bridge--status-state "s1") 'idle)))))
+
+(ert-deftest dsh-bridge-status-snapshot-loses-to-frame-during-read ()
+  "A frame handled while a status-seeding read is in flight wins, for the
+roster fetch, the view-opening `/turns' read, and the turn-complete refetch."
+  ;; The roster snapshot predates the turn and does not list the session.
+  (let ((dsh-bridge--session-status nil)
+        (dsh-bridge--sessions-cache nil)
+        (dsh-bridge--status-revision nil))
+    (cl-letf (((symbol-function 'dsh-bridge--request)
+               (lambda (&rest _)
+                 (dsh-bridge-test--notification-turn-start "s2")
+                 (cons 200
+                       (list (cons 'sessions
+                                   (list (list (cons 'id "s1")
+                                               (cons 'live t)))))))))
+      (dsh-bridge--fetch-sessions))
+    (should (eq (dsh-bridge--status-state "s2") 'running))
+    (should (equal (mapcar (lambda (row) (alist-get 'id row))
+                           dsh-bridge--sessions-cache)
+                   '("s1"))))
+  ;; Opening a view: the snapshot says the turn that just began is over.
+  (let ((dsh-bridge-pinned-target "s1")
+        (dsh-bridge--session-status nil)
+        (dsh-bridge--status-revision nil)
+        (dsh-bridge--turns-cache nil)
+        (dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t)))))
+    (cl-letf (((symbol-function 'dsh-bridge--http)
+               (lambda (&rest _)
+                 (dsh-bridge-test--notification-turn-start "s1")
+                 (list nil
+                       "{\"sessionId\":\"s1\",\"turns\":[],\"running\":false}"
+                       200))))
+      (dsh-bridge-fetch "s1"))
+    (should (eq (dsh-bridge--status-state "s1") 'running))
+    (when (buffer-live-p (get-buffer "*dsh-bridge-output*"))
+      (kill-buffer "*dsh-bridge-output*")))
+  ;; The turn-complete refetch of a superseded turn.
+  (let ((dsh-bridge--session-status nil)
+        (dsh-bridge--status-revision nil)
+        (dsh-bridge--turns-cache nil)
+        (dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t)))))
+    (cl-letf (((symbol-function 'dsh-bridge--http)
+               (lambda (&rest _)
+                 (dsh-bridge-test--notification-turn-start "s1")
+                 (list nil
+                       "{\"sessionId\":\"s1\",\"turns\":[],\"running\":false}"
+                       200))))
+      (dsh-bridge--turn-complete-refetch "s1" "completed" 1 nil))
+    (should (eq (dsh-bridge--status-state "s1") 'running))))
 
 (ert-deftest dsh-bridge-status-event-render-forces-redisplay ()
   "A tracker change forces the DSH-Prompt header's `(:eval)' repaint.

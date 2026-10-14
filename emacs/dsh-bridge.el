@@ -640,12 +640,10 @@ start time was recorded.
 This variable is seeded from the host's sessions list, and updated based
 on turn-start/turn-complete frames in the notification stream.")
 
-(defvar dsh-bridge--status-generation 0
-  "Counter bumped on every `dsh-bridge--status-set' call.
-A caller that writes a *guessed* status after an asynchronous request (the
-optimistic \"running\" mark in `dsh-bridge-send-text') samples this across
-the request and skips the write when the tracker changed meanwhile: a fast
-turn's `turn-complete' may have already set the truth.")
+(defvar dsh-bridge--status-revision nil
+  "Alist of (SESSION-ID . REVISION), bumped on every status write for it.
+Capture it before a request whose response seeds a status, and pass the
+capture to `dsh-bridge--status-set-if-unmoved'.")
 
 (defvar dsh-bridge--session-models nil
   "Alist of (SESSION-ID . MODEL-DATA) for the DSH model catalog.
@@ -865,7 +863,11 @@ headers (\"\" when no header terminator is present)."
   "Record SESSION-ID's status as STATE (`running' or `idle').
 START-MS, if non-nil, specifies the ms-epoch turn-start time kept for
 the elapsed ticker; it is dropped when the session goes idle."
-  (setq dsh-bridge--status-generation (1+ dsh-bridge--status-generation))
+  (when session-id
+    (setq dsh-bridge--status-revision
+	  (cons (cons session-id
+		      (1+ (or (cdr (assoc session-id dsh-bridge--status-revision)) 0)))
+		(assoc-delete-all session-id dsh-bridge--status-revision))))
   (setq dsh-bridge--session-status
 	(assoc-delete-all session-id dsh-bridge--session-status))
   (when (and session-id (memq state '(running idle)))
@@ -874,6 +876,26 @@ the elapsed ticker; it is dropped when the session goes idle."
 				start-ms
 			      nil)))
 	  dsh-bridge--session-status)))
+
+;; A request's snapshot can be older than a frame handled while it was in
+;; flight: `dsh-bridge--http' waits with `accept-process-output' on a nil
+;; PROCESS, so the notification filter runs before the response is applied.
+;; A snapshot write therefore yields to a write for the same session.
+
+(defun dsh-bridge--status-moved-p (revisions session-id)
+  "Whether SESSION-ID's revision moved since REVISIONS was captured.
+REVISIONS is a `dsh-bridge--status-revision' snapshot; a session it does
+not name counts as revision 0."
+  (/= (or (cdr (assoc session-id revisions)) 0)
+      (or (cdr (assoc session-id dsh-bridge--status-revision)) 0)))
+
+(defun dsh-bridge--status-set-if-unmoved (revisions session-id state &optional start-ms)
+  "Record SESSION-ID's status as STATE unless a live frame moved it.
+REVISIONS is the `dsh-bridge--status-revision' snapshot taken before the
+request whose snapshot produced STATE; use this for any status derived
+from a request rather than from a frame."
+  (unless (dsh-bridge--status-moved-p revisions session-id)
+    (dsh-bridge--status-set session-id state start-ms)))
 
 (defun dsh-bridge--status-turn-start (session-id)
   "Return the ms-epoch turn-start time for SESSION-ID, or nil.
@@ -886,17 +908,24 @@ see any \"turn-start\" frame for the session."
 
 (defun dsh-bridge--status-state (session-id)
   "Return SESSION-ID's display status: `running', `idle', or `unknown'.
-Saved (cold) sessions are always `unknown'; for others, the result is
-obtained by trying the cache `dsh-bridge--session-status', then the
+Saved (cold) sessions are `unknown', except that a tracked `running'
+outranks a roster row calling the session not live.  Otherwise the result
+is obtained by trying the cache `dsh-bridge--session-status', then the
 cached session data's `running' flag, and finally falling back on
 `unknown'.  No retrieval is done.  See `dsh-bridge--session-status'."
-  (let ((row (and session-id (dsh-bridge--session-for-id session-id))))
-    (or (and row (not (alist-get 'live row)) 'unknown)
-	(and session-id
-	     (let ((entry (cdr (assoc session-id dsh-bridge--session-status))))
-	       (and (consp entry) (car entry))))
-	(and row (if (alist-get 'running row) 'running 'idle))
-	'unknown)))
+  (if (null session-id)
+      'unknown
+    (let* ((row (dsh-bridge--session-for-id session-id))
+	   (entry (cdr (assoc session-id dsh-bridge--session-status)))
+	   (traced (and (consp entry) (car entry))))
+      (cond
+       ;; Only a live agent emits `turn-start', so a tracked `running'
+       ;; beats a roster row that still calls the session cold.
+       ((eq traced 'running) 'running)
+       ((and row (not (alist-get 'live row))) 'unknown)
+       (traced traced)
+       (row (if (alist-get 'running row) 'running 'idle))
+       (t 'unknown)))))
 
 (defun dsh-bridge--status-glyph (session-id)
   "Return a status indicator for SESSION-ID as a propertized string.
@@ -1529,23 +1558,29 @@ Also, update `dsh-bridge--sessions-cache' with the results.
 SESSIONS may be nil if the roster is empty, or when the response has no
 `sessions' key; callers can distinguish between the two cases by
 checking STATUS for a failed request."
-  (let* ((result (dsh-bridge--request "GET" "/sessions" nil))
+  (let* ((revisions dsh-bridge--status-revision)
+	 (result (dsh-bridge--request "GET" "/sessions" nil))
 	 (status (car result))
 	 (sessions (and (eq status 200)
 			(cdr (assq 'sessions (cdr result))))))
     (when (eq status 200)
       (setq dsh-bridge--sessions-cache sessions)
-      ;; Update session status trackers.  Each session's `running'
-      ;; flag becomes its live status; unlisted sessions are dropped."
+      ;; Update session status trackers.  Each session's `running' flag
+      ;; becomes its live status; unlisted sessions are dropped.  A frame
+      ;; handled during the request outranks this snapshot, so a session
+      ;; whose revision moved keeps the frame's status, and one the roster
+      ;; omits is pruned only if no frame has touched it since.
       (let ((seen '()) id)
 	(dolist (session sessions)
 	  (when (setq id (alist-get 'id session))
 	    (push id seen)
-	    (dsh-bridge--status-set id (if (alist-get 'running session)
-					   'running
-					 'idle))))
+	    (dsh-bridge--status-set-if-unmoved
+	     revisions id
+	     (if (alist-get 'running session) 'running 'idle))))
 	(setq dsh-bridge--session-status
-	      (seq-filter (lambda (entry) (member (car entry) seen))
+	      (seq-filter (lambda (entry)
+			    (or (member (car entry) seen)
+				(dsh-bridge--status-moved-p revisions (car entry))))
 			  dsh-bridge--session-status))
 	;; A recorded resolution absent from the roster names a
 	;; deleted session, and a recorded resolution the roster
@@ -2292,7 +2327,7 @@ running turn (the web UI's \"steer message\").	The host cannot report
 whether a steer reached a step boundary, so a steered send says only
 that steering was requested."
   (let* ((target (dsh-bridge--effective-session))
-	 (generation dsh-bridge--status-generation)
+	 (revisions dsh-bridge--status-revision)
 	 (payload `((text . ,text))))
     (when target
       (push `(sessionId . ,target) payload))
@@ -2323,8 +2358,7 @@ that steering was requested."
 	      ;; a fast turn can start and finish before the response
 	      ;; lands, and its `turn-complete' is the truth (overwriting
 	      ;; it with a stale running would prompt the next send).
-	      (unless (/= generation dsh-bridge--status-generation)
-		(dsh-bridge--status-set sent-id 'running))
+	      (dsh-bridge--status-set-if-unmoved revisions sent-id 'running)
 	      (dsh-bridge--status-event-render sent-id)
 	      (message "dsh-bridge: %s"
 		       (pcase mode
@@ -3274,7 +3308,7 @@ since the only other feedback is the header's `⤓' marker."
     (dsh-bridge--view-ticker-ensure)
     (message "dsh-bridge: following the newest turn")))
 
-(defun dsh-bridge--view-open (session-alist &optional same-window)
+(defun dsh-bridge--view-open (session-alist revisions &optional same-window)
   "Pop to a DSH-View buffer showing the session described by SESSION-ALIST.
 SESSION-ALIST is the body of a successful \"GET /dsh-bridge/turns\"
 response, and has a different format from the session alists stored in
@@ -3288,6 +3322,9 @@ response, and has a different format from the session alists stored in
   presence (not truthiness) seeds the status tracker.
 - `title' (string, optional) and `cwd' (string, optional): display title
   and workspace directory (used for our display cache).
+
+REVISIONS is the `dsh-bridge--status-revision' snapshot taken before the
+request that produced SESSION-ALIST.
 
 This function reuses a live DSH-View buffer already showing the session,
 else a `*dsh-bridge-output*' buffer.  If SAME-WINDOW is non-nil, prefer
@@ -3308,7 +3345,8 @@ to pop to the buffer using the same window.  Return the buffer."
       ;; Seed the status tracker when the field is present.
       ;; JSON `false' decodes to nil, so compare value against t.
       (when running-pair
-	(dsh-bridge--status-set id (if running 'running 'idle)))
+	(dsh-bridge--status-set-if-unmoved revisions id
+					   (if running 'running 'idle)))
       ;; Cache the whole turns array: an explicit empty list is a
       ;; known-empty entry that replaces a stale one.
       (when turns-pair
@@ -4482,7 +4520,8 @@ The session is the effective session of the current buffer; with a
 prefix argument, fetch from a chosen session for this call only.
 If SAME-WINDOW is non-nil, prefer to show the buffer in the same window."
   (interactive (list (dsh-bridge--read-session-override "Fetch from session: ")))
-  (let ((target (or session-id (dsh-bridge--focus-session))))
+  (let ((target (or session-id (dsh-bridge--focus-session)))
+	(revisions dsh-bridge--status-revision))
     (pcase-let ((`(,status ,body ,http-status)
 		 (dsh-bridge--http "GET" (dsh-bridge--path "/turns" target) nil)))
       (let* ((alist (dsh-bridge--parse-json-body body))
@@ -4496,7 +4535,7 @@ If SAME-WINDOW is non-nil, prefer to show the buffer in the same window."
 	  ;; A nil target is resolved by the host: record it for display.
 	  (unless target
 	    (dsh-bridge--record-last-resolved alist))
-	  (dsh-bridge--view-open alist same-window)))))))
+	  (dsh-bridge--view-open alist revisions same-window)))))))
 
 (defun dsh-bridge-view-toggle-activity ()
   "Toggle whether this DSH-View buffer shows turn activity.
@@ -8140,9 +8179,11 @@ frame.
 
 The update clears the DSH-View buffer's \"(continuing...)\" tag,
 preserving point.  A buffer showing an earlier turn is left alone."
-  (pcase-let ((`(,status ,body ,http-status)
-	       (dsh-bridge--http "GET"
-				 (dsh-bridge--path "/turns" session-id) nil)))
+  ;; Sample `dsh-bridge--status-revision' before the request.
+  (pcase-let* ((revisions dsh-bridge--status-revision)
+	       (`(,status ,body ,http-status)
+		(dsh-bridge--http "GET"
+				  (dsh-bridge--path "/turns" session-id) nil)))
     (let* ((alist (dsh-bridge--parse-json-body body))
 	   (err (dsh-bridge--error-message status http-status alist)))
       (if err
@@ -8164,11 +8205,13 @@ preserving point.  A buffer showing an earlier turn is left alone."
 	    (dsh-bridge--turns-cache-store shown-id turns
 					   (alist-get 'epoch alist)))
 	  ;; Seed the tracker only when the response carries
-	  ;; `running'; JSON `false' decodes to nil, `true' to t.
+	  ;; `running'; JSON `false' decodes to nil, `true' to t.  A
+	  ;; `turn-start' for the next turn can land while this read
+	  ;; is blocked, in which case the snapshot is already stale.
 	  (when running-pair
-	    (dsh-bridge--status-set shown-id
-				    (if (eq (cdr running-pair) t)
-					'running 'idle)))
+	    (dsh-bridge--status-set-if-unmoved
+	     revisions shown-id
+	     (if (eq (cdr running-pair) t) 'running 'idle)))
 	  ;; Update DSH-View buffer(s).
 	  (dolist (buf views)
 	    (with-current-buffer buf
