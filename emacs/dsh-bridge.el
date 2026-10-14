@@ -2111,7 +2111,7 @@ matches no workspace names a new one, whose directory is then read."
 				   workspaces))))
     (cond
      ((string-empty-p trimmed)
-      (or default-id (user-error "dsh-bridge: a workspace name is required")))
+      (or default-id (user-error "A workspace name is required")))
      ((= (length matches) 1) (alist-get 'id (car matches)))
      ((> (length matches) 1)
       (dsh-bridge--read-ambiguous-workspace trimmed matches))
@@ -2124,8 +2124,7 @@ matches no workspace names a new one, whose directory is then read."
 	       (or (alist-get 'path default) default-directory)))
 	     (path (and answer-dir (expand-file-name answer-dir))))
 	(unless (and path (file-directory-p path))
-	  (user-error "dsh-bridge: %s is not an existing directory"
-		      (or path "no directory given")))
+	  (user-error "Directory does not exist"))
 	(cons path trimmed))))))
 
 ;;; Prompt history
@@ -2227,7 +2226,7 @@ contents, stash it in `dsh-bridge--prompt-draft', so that a future
   (let ((prompts (dsh-bridge--buffer-prompt-history)))
     (cond
      ((null prompts)
-      (message "dsh-bridge: no earlier prompts in this session"))
+      (message "No earlier prompts."))
      ;; Stash the draft.
      ((null dsh-bridge--prompt-history-index)
       (setq-local dsh-bridge--prompt-draft (buffer-string))
@@ -2236,12 +2235,9 @@ contents, stash it in `dsh-bridge--prompt-draft', so that a future
      ;; If we edited a history prompt, disallow walking to avoid
      ;; losing data.
      ((buffer-modified-p)
-      (message
-       (substitute-command-keys
-	"dsh-bridge: prompt history edited; \
-send or `\\[revert-buffer]' first")))
+      (message "Prompt modified; send it or revert buffer first."))
      ((>= dsh-bridge--prompt-history-index (1- (length prompts)))
-      (message "dsh-bridge: no earlier prompts in this session"))
+      (message "No earlier prompts."))
      (t
       (setq-local dsh-bridge--prompt-history-index
 		  (1+ dsh-bridge--prompt-history-index))
@@ -2256,12 +2252,10 @@ stashed in `dsh-bridge-prompt-previous-history'."
    ((not (derived-mode-p 'dsh-bridge-prompt-mode))
     (user-error "Not in a DSH-Prompt buffer"))
    ((null dsh-bridge--prompt-history-index)
-    (message "dsh-bridge: no newer prompts"))
+    (message "No newer prompts."))
    ;; If we edited a history prompt, disallow walking.
    ((buffer-modified-p)
-    (message
-     (substitute-command-keys
-      "dsh-bridge: prompt history edited; send or `\\[revert-buffer]' first")))
+    (message "Prompt modified; send it or revert buffer first."))
    (t
     (setq-local dsh-bridge--prompt-history-index
 		(unless (zerop dsh-bridge--prompt-history-index)
@@ -2525,7 +2519,7 @@ The DSH analogue of Message mode's attach-buffer: DSH carries files, so
 the visited file (not the buffer text) is attached."
   (interactive)
   (let ((file buffer-file-name))
-    (unless file (user-error "dsh-bridge: no file to attach"))
+    (unless file (user-error "No file to attach"))
     (dsh-bridge-attach-file (list file))))
 
 ;;;###autoload
@@ -2533,10 +2527,10 @@ the visited file (not the buffer text) is attached."
   "Remove every attachment tag line from this DSH-Prompt buffer."
   (interactive)
   (unless (derived-mode-p 'dsh-bridge-prompt-mode)
-    (user-error "dsh-bridge: not a DSH-Prompt buffer"))
+    (user-error "Not in a DSH-Prompt buffer"))
   (let ((count (dsh-bridge--attachment-count)))
     (dsh-bridge--remove-attachment-tags)
-    (message "dsh-bridge: removed %d attachment%s"
+    (message "Removed %d attachment%s"
 	     count (if (= count 1) "" "s"))))
 
 ;;; The DSH-View buffer
@@ -4273,7 +4267,7 @@ newest cached turn."
   (let ((turns (dsh-bridge--view-turns-refresh
 		(not dsh-bridge--view-browsing))))
     (if (null turns)
-	(message "dsh-bridge: no turns in this session")
+	(message "No turns in this session.")
       (let* ((index (dsh-bridge--view-turn-index turns))
 	     ;; POS is the position the walk steps back from.  The buffer's
 	     ;; anchor (`dsh-bridge--view-turn') is normally the displayed
@@ -4289,7 +4283,7 @@ newest cached turn."
 			(t 0)))
 	     (next (1+ pos)))
 	(if (>= next (length turns))
-	    (message "dsh-bridge: at the oldest turn")
+	    (message "No earlier turns.")
 	  (dsh-bridge--view-show-turn next turns))))))
 
 (defun dsh-bridge-view-next-reply ()
@@ -4298,7 +4292,7 @@ newest cached turn."
   (unless (derived-mode-p 'dsh-bridge-view-mode)
     (user-error "Not in a DSH-View buffer"))
   (if dsh-bridge--view-follow
-      (message "dsh-bridge: already following the newest turn")
+      (message "Already following newest turn.")
     (let* ((turn dsh-bridge--view-turn)
 	   ;; At rest, force-refresh the turn list before deriving the
 	   ;; turn index; mid-browse steps reuse the cache.  Content
@@ -4309,7 +4303,7 @@ newest cached turn."
 	   (k (and turns (dsh-bridge--view-turn-index turns turn))))
       (cond
        ((null k)
-	(message "dsh-bridge: no newer turns"))
+	(message "No newer turns."))
        ((or (zerop k)
 	    (and (= k 1) dsh-bridge-view-follow-at-newest))
 	(dsh-bridge--view-follow-enter))
@@ -4376,7 +4370,7 @@ After a successful send, pop to a DSH-View buffer following the session
 and bury the buffer (see `dsh-bridge--prompt-exit')."
   (interactive "P")
   (unless (derived-mode-p 'dsh-bridge-prompt-mode)
-    (user-error "dsh-bridge: not a DSH-Prompt buffer"))
+    (user-error "Not in a DSH-Prompt buffer"))
   (let* ((parsed (dsh-bridge--parse-attachments ; strip attachments
 		  (substring-no-properties (buffer-string))))
 	 (text (car parsed))
@@ -4391,7 +4385,7 @@ and bury the buffer (see `dsh-bridge--prompt-exit')."
 	 (lazy-p (and (null dsh-bridge--prompt-session)
 		      (null dsh-bridge-pinned-target))))
     (if (and (string-empty-p text) (null attachments))
-	(user-error "dsh-bridge: no text or attachments to send")
+	(user-error "No text or attachments to send")
       ;; Guard against an identical re-send to the session.
       (when (and dsh-bridge-prompt-resend-confirm
 		 (equal text (car-safe
@@ -4550,7 +4544,7 @@ renders.  The rebuild keeps the reader's place: the new tail for a following
 view parked at the end, the approximate position otherwise."
   (interactive)
   (unless (derived-mode-p 'dsh-bridge-view-mode)
-    (user-error "dsh-bridge: not a DSH-View buffer"))
+    (user-error "Not in a DSH-View buffer"))
   (let ((record (dsh-bridge--view-turn-record))
 	(waiting (and dsh-bridge--view-waiting
 		      (numberp dsh-bridge--view-turn))))
@@ -6180,7 +6174,7 @@ that has not completed cannot be a fork anchor, so an open turn is
 refused.  Only meaningful in a DSH-View buffer."
   (interactive)
   (unless (derived-mode-p 'dsh-bridge-view-mode)
-    (user-error "dsh-bridge: not a DSH-View buffer"))
+    (user-error "Not in a DSH-View buffer"))
   (let ((id dsh-bridge--view-content-session))
     (unless id
       (user-error "dsh-bridge: this view has no session"))
@@ -6803,7 +6797,7 @@ Updates the header and the session directory, and resets the
 prompt-history walk when the binding changes."
   (interactive (list (dsh-bridge--read-session-id "Switch to Session: ")))
   (unless (derived-mode-p 'dsh-bridge-prompt-mode)
-    (user-error "dsh-bridge: not a DSH-Prompt buffer"))
+    (user-error "Not in a DSH-Prompt buffer"))
   (unless (equal session-id dsh-bridge--prompt-session)
     ;; The history walk refers to the old session; reset it.
     (setq-local dsh-bridge--prompt-history-index nil)
@@ -7494,7 +7488,7 @@ title, defaulting to the current workspace title."
 	 (session (and id (dsh-bridge--session-for-id id)))
 	 (workspaceId (and session (alist-get 'workspaceId session))))
     (if (null id)
-	(message "dsh-bridge: no session under point")
+	(message "No DSH session at point.")
       (unless workspaceId
 	(user-error "dsh-bridge: session \"%s\" has no workspace to rename"
 		    (dsh-bridge--session-label id)))
@@ -7932,9 +7926,7 @@ failure reason, never a fake zero."
 		  (get-text-property (cdr string-pos)
 				     'dsh-bridge-session-id
 				     (car string-pos)))))
-    (if id
-	(dsh-bridge-describe-session id)
-      (message "dsh-bridge: no session under the mouse"))))
+    (if id (dsh-bridge-describe-session id))))
 
 ;;;###autoload
 (defun dsh-bridge-describe-session (&optional session-id)
@@ -8033,7 +8025,7 @@ Return the buffer if it was filled, else nil; the fetch happens either way."
 Signal an error when the current buffer is not a DSH-Sessions buffer.  If
 the fetch fails, leave the buffer untouched."
   (unless (derived-mode-p 'dsh-bridge-sessions-mode)
-    (error "dsh-bridge: not a DSH-Sessions buffer"))
+    (error "Not in a DSH-Sessions buffer"))
   (let ((fetch (dsh-bridge--fetch-sessions)))
     (when (eq (car fetch) 200)
       (dsh-bridge--sessions-fill (cdr fetch)))))
@@ -8350,8 +8342,7 @@ BACKWARD walks toward older sessions, and otherwise toward newer; the walk
 wraps.  A pinned menu reports that it is locked instead of cycling."
   (cond
    ((eq (cdr dsh-bridge--focus) 'pinned)
-    (message "dsh-bridge: menu is pinned to \"%s\" (u to unpin)"
-	     (dsh-bridge--session-label (car dsh-bridge--focus))))
+    (message "Target session is pinned; unpin it to reselect."))
    ((< (length dsh-bridge--focus-cycle) 2)
     ;; There is nowhere to walk, but the keystroke still confirms the
     ;; displayed guess: the refusal message sends the user here.
@@ -8370,9 +8361,7 @@ wraps.  A pinned menu reports that it is locked instead of cycling."
       ;; Cycling is what confirms an advisory guess, even when the
       ;; walk comes back around to the same session.
       (when to-session
-	(setq dsh-bridge--focus (cons to-session 'cycled)))
-      (message "dsh-bridge: %s" (dsh-bridge--session-label
-				 (nth next dsh-bridge--focus-cycle)))))))
+	(setq dsh-bridge--focus (cons to-session 'cycled)))))))
 
 (defun dsh-bridge--dispatcher-prev ()
   "Focus the next older session in the dispatcher's cycle set."
@@ -8392,7 +8381,7 @@ without a re-invocation."
   (interactive)
   (let ((session (dsh-bridge--focus-session)))
     (if (null session)
-	(message "dsh-bridge: no session to pin")
+	(message "No session to pin.")
       (dsh-bridge-pin-target session)
       (setq dsh-bridge--focus (cons session 'pinned)))))
 
