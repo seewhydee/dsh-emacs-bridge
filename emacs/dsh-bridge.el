@@ -782,37 +782,37 @@ profile directory; the plugin counts as installed if it appears in
 
 (defun dsh-bridge--warn-plugin-unavailable (state)
   "Warn that the DSH bridge plugin is missing or not loaded, from STATE.
-STATE is the `dsh-bridge--bridge-status' result.  The advice splits on
-`dsh-bridge--plugin-install-state': an installed plugin means a missing
-restart, an absent one means install per the README.  A version
-mismatch names both versions, since the plugin and this package are
-released in lockstep and must be upgraded together."
+STATE is the `dsh-bridge--bridge-status' result.  The warning's type is
+the `dsh-bridge' custom group, which `display-warning' prints ahead of
+the message, so the messages do not name the bridge themselves.  The
+message splits on `dsh-bridge--plugin-install-state': an installed
+plugin means a missing restart, an absent one means not installed, and a
+version mismatch names both versions, since the plugin and this package
+are released in lockstep and must be upgraded together."
   (let ((installed (eq (dsh-bridge--plugin-install-state) 'installed)))
     (display-warning
-     :error
+     'dsh-bridge
      (cond
       ((eq state 'incompatible)
-       (format "dsh-bridge: DSH plugin version %s does not match Emacs package %s; install matching versions from https://github.com/seewhydee/dsh-emacs-bridge/releases (the plugin half is also on npm: \"dsh plugin --profile %s add dsh-emacs-bridge\")"
+       (format "DSH plugin version %s does not match Emacs package %s"
 	       (or dsh-bridge--plugin-reported-version "unknown")
-	       dsh-bridge-version
-	       dsh-bridge-profile))
+	       dsh-bridge-version))
       ((eq state 'forbidden)
-       "dsh-bridge: connection route forbidden; check `dsh-bridge-url'")
+       "connection route forbidden; check `dsh-bridge-url'")
       ((eq state 'unreachable)
        (if installed
-	   (format "dsh-bridge: plugin installed, but no bridge is running at %s"
+	   (format "plugin installed, but no bridge running at %s"
 		   dsh-bridge-url)
-	 (format "dsh-bridge: no bridge is running at %s; if \"dsh web\" is up, the plugin is not installed (see https://github.com/seewhydee/dsh-emacs-bridge#installation)"
+	 (format "no bridge running at %s"
 		 dsh-bridge-url)))
       (installed
-       "dsh-bridge: plugin installed but not loaded; restart \"dsh web\"")
+       "plugin installed but not loaded; restart DSH")
       (t
-       "dsh-bridge: DSH plugin not installed; see https://github.com/seewhydee/dsh-emacs-bridge#installation")))))
+       "DSH plugin not installed")))))
 
 ;; To help guide the user, `dsh-bridge--ensure-plugin' is called on
 ;; common entry-points; when the plugin is unreachable, absent, or
-;; version-mismatched, it warns once per session with install or
-;; restart instructions.
+;; version-mismatched, it warns once per session with the diagnosis.
 
 (defun dsh-bridge--ensure-plugin ()
   "Check for DSH bridge plugin availability, warning once if unavailable.

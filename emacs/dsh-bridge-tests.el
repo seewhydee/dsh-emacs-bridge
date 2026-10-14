@@ -5367,31 +5367,27 @@ The reported version is recorded either way, for the mismatch warning."
     (should (null dsh-bridge--plugin-diagnosed))))
 
 (ert-deftest dsh-bridge-ensure-plugin-incompatible-names-versions ()
-  "A version mismatch warns, naming both versions and where to get a match.
+  "A version mismatch warns under `dsh-bridge', naming both versions.
 The plugin and the Emacs package are released in lockstep, so the
-message must make a mismatched artifact pair self-explanatory, and
-must name both places the plugin half is published: the release assets
-and the npm package."
+message must make a mismatched artifact pair self-explanatory."
   (let ((dsh-bridge--bridge-status-cache nil) (dsh-bridge--plugin-diagnosed nil)
         (dsh-bridge--plugin-reported-version "0.0.0-test")
-        (warned nil))
+        (warned nil) (warned-type nil))
     (cl-letf (((symbol-function 'dsh-bridge--bridge-status)
                (lambda () 'incompatible))
               ((symbol-function 'dsh-bridge--plugin-install-state) (lambda () 'installed))
               ((symbol-function 'display-warning)
-               (lambda (_type msg &rest _) (setq warned msg))))
+               (lambda (type msg &rest _) (setq warned-type type warned msg))))
       (dsh-bridge--ensure-plugin))
+    (should (eq warned-type 'dsh-bridge))
     (should (string-match-p "0\\.0\\.0-test" warned))
     (should (string-match-p (regexp-quote dsh-bridge-version) warned))
-    (should (string-match-p "releases" warned))
-    (should (string-match-p
-             (regexp-quote (format "dsh plugin --profile %s add dsh-emacs-bridge"
-                                   dsh-bridge-profile))
-             warned))
+    ;; The group in the warning header already names the bridge.
+    (should-not (string-match-p "dsh-bridge:" warned))
     (should (eq dsh-bridge--plugin-diagnosed t))))
 
-(ert-deftest dsh-bridge-ensure-plugin-not-installed-points-at-readme ()
-  "Not-running + not installed warns with install instructions, and latches."
+(ert-deftest dsh-bridge-ensure-plugin-not-installed ()
+  "Not-running + not installed warns that the plugin is absent, and latches."
   (let ((dsh-bridge--bridge-status-cache nil) (dsh-bridge--plugin-diagnosed nil)
         (warned nil))
     (cl-letf (((symbol-function 'dsh-bridge--bridge-status)
@@ -5401,7 +5397,7 @@ and the npm package."
                (lambda (_type msg &rest _) (setq warned msg))))
       (dsh-bridge--ensure-plugin))
     (should (string-match-p "not installed" warned))
-    (should (string-match-p "#installation" warned))
+    (should-not (string-match-p "dsh-bridge:" warned))
     ;; The diagnosis is latched: a second call does not warn again.
     (let ((warned nil))
       (cl-letf (((symbol-function 'dsh-bridge--plugin-install-state) (lambda () 'not-installed))
@@ -5411,7 +5407,7 @@ and the npm package."
       (should (null warned)))))
 
 (ert-deftest dsh-bridge-ensure-plugin-installed-not-loaded ()
-  "Not-running + installed says to restart \"dsh web\"."
+  "Not-running + installed says to restart DSH."
   (let ((dsh-bridge--bridge-status-cache nil) (dsh-bridge--plugin-diagnosed nil) (warned nil))
     (cl-letf (((symbol-function 'dsh-bridge--bridge-status)
                (lambda () 'not-running))
@@ -5430,10 +5426,11 @@ and the npm package."
               ((symbol-function 'display-warning)
                (lambda (_type msg &rest _) (setq warned msg))))
       (dsh-bridge--ensure-plugin))
-    (should (string-match-p "no bridge is running" warned))))
+    (should (string-match-p "no bridge running" warned))
+    (should (string-match-p (regexp-quote dsh-bridge-url) warned))))
 
 (ert-deftest dsh-bridge-ensure-plugin-unreachable-not-installed ()
-  "Unreachable + not installed says the server may be down, else install."
+  "Unreachable + not installed reports no bridge at the configured URL."
   (let ((dsh-bridge--bridge-status-cache nil) (dsh-bridge--plugin-diagnosed nil) (warned nil))
     (cl-letf (((symbol-function 'dsh-bridge--bridge-status)
                (lambda () 'unreachable))
@@ -5441,8 +5438,9 @@ and the npm package."
               ((symbol-function 'display-warning)
                (lambda (_type msg &rest _) (setq warned msg))))
       (dsh-bridge--ensure-plugin))
-    (should (string-match-p "no bridge is running" warned))
-    (should (string-match-p "#installation" warned))))
+    (should (string-match-p "no bridge running" warned))
+    (should (string-match-p (regexp-quote dsh-bridge-url) warned))
+    (should-not (string-match-p "dsh-bridge:" warned))))
 
 (ert-deftest dsh-bridge-plugin-install-state-tri-state ()
   "The profile probe distinguishes installed / not-installed / no-profile."
