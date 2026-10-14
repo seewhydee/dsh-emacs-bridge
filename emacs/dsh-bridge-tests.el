@@ -1185,6 +1185,42 @@ result with the session's display role."
                 'dsh-bridge-session-default-face))
     (should (null (dsh-bridge--session-label "s2" t t)))))
 
+(ert-deftest dsh-bridge-session-label-trim ()
+  "TRIM caps a label at `dsh-bridge--label-display-cap' display columns.
+Session titles are arbitrary host text, and an echo-area message that
+embeds one must stay a readable line, so the cut is measured in display
+columns: a wide-character title cannot slip past the cap by being short
+in characters."
+  (let* ((long (make-string 60 ?x))
+         (wide (make-string 30 ?漢))
+         (fit (make-string dsh-bridge--label-display-cap ?y))
+         (label (dsh-bridge--session-label `((id . "s1") (title . ,long))
+                                           nil nil t)))
+    (should (<= (string-width label) dsh-bridge--label-display-cap))
+    (should (string-prefix-p (substring long 0 10) label))
+    ;; The cut lands mid-run of "x", so an ellipsis was appended.
+    (should-not (eq (aref label (1- (length label))) ?x))
+    ;; A title that already fits is returned untouched.
+    (should (equal (dsh-bridge--session-label `((id . "s2") (title . ,fit))
+                                              nil nil t)
+                   fit))
+    ;; Without TRIM nothing is cut.
+    (should (equal (dsh-bridge--session-label `((id . "s3") (title . ,long)))
+                   long))
+    ;; Display columns, not characters: 30 wide characters are 60 columns.
+    (should (<= (string-width (dsh-bridge--session-label
+                               `((id . "s4") (title . ,wide)) nil nil t))
+                dsh-bridge--label-display-cap))
+    ;; The face lands on the truncated label.
+    (should (eq (get-text-property
+                 0 'face
+                 (dsh-bridge--session-label `((id . "s5") (title . ,long))
+                                            nil t t))
+                'dsh-bridge-session-default-face))
+    ;; The untitled placeholder is short, so TRIM leaves it alone.
+    (should (equal (dsh-bridge--session-label '((id . "s6")) nil nil t)
+                   "[Untitled Session]"))))
+
 (ert-deftest dsh-bridge-read-session-id-skips-untitled ()
   "Untitled sessions are not completion candidates; a titled one still is.
 Excluding them is why the dispatcher's create verb demands a title."
@@ -6222,8 +6258,8 @@ so the buffer must stop re-rolling the host's last-active resolution on
 every later send from it."
   (let ((result (dsh-bridge-test--lazy-send nil nil "s1")))
     (should (equal (car result) "s1"))
-    (should (member "dsh-bridge: prompt buffer bound to session \"s1\""
-                    (cdr result)))))
+    (should-not (seq-some (lambda (m) (string-match-p "bound to session" m))
+                          (cdr result)))))
 
 (ert-deftest dsh-bridge-send-and-exit-does-not-pin-explicit-targets ()
   "Only a send with no target at all adopts the host's session.

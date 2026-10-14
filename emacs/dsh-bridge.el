@@ -1124,7 +1124,7 @@ Currently supported events are:
 	(when (and dsh-bridge-turn-boundary-echo
 		   (not (dsh-bridge--view-displayed-p id)))
 	  (message "dsh-bridge: session \"%s\" is running..."
-		   (dsh-bridge--session-label id)))
+		   (dsh-bridge--session-label id nil nil t)))
 	;; A turn boundary also grows the turn list, so refresh the
 	;; cache now so the header-line is immediately up to date.
 	(run-at-time 0 nil #'dsh-bridge--view-turns-cache-refresh id))
@@ -1657,7 +1657,12 @@ appropriate directory, do nothing."
 
 ;;; Session labels
 
-(defun dsh-bridge--session-label (session &optional no-default add-face)
+(defconst dsh-bridge--label-display-cap 40
+  "Maximum display width, in columns, of a DSH session label.
+Echo-area and error messages cap a label here, and the DSH-Sessions
+buffer uses it as the width of its Session column.")
+
+(defun dsh-bridge--session-label (session &optional no-default add-face trim)
   "Return the display label for SESSION.
 SESSION should be a string (a session ID), or a session data alist in
 the format described in `dsh-bridge--sessions-cache'.
@@ -1667,12 +1672,13 @@ id with no cached row labels as the id itself, since that is the only
 name there is.  If NO-DEFAULT is non-nil, an untitled session labels as
 nil instead of the placeholder.
 
-With ADD-FACE, the label carries a `face' text property naming the
-session's display role: `dsh-bridge-session-untitled-face' for the
-placeholder (which a pin does not override: there is no title to
-emphasize), `dsh-bridge-session-pinned-face' when it is the title of
-`dsh-bridge-pinned-target', and `dsh-bridge-session-default-face'
-otherwise."
+If ADD-FACE is non-nil, add a `face' text property corresponding to the
+session's display role: `dsh-bridge-session-untitled-face' for a
+placeholder, `dsh-bridge-session-pinned-face' for a pinned session, and
+`dsh-bridge-session-default-face' otherwise.
+
+If TRIM is non-nil, trim the label to `dsh-bridge--label-display-cap'
+display columns."
   (let (alist id title)
     (if (stringp session)
 	(setq alist (dsh-bridge--session-for-id session) id session)
@@ -1683,6 +1689,9 @@ otherwise."
       (setq title (dsh-bridge--normalized-string id)))
     (cond
      (title
+      (when trim
+	(setq title (truncate-string-to-width
+		     title dsh-bridge--label-display-cap nil nil t)))
       (if add-face
 	  (propertize title 'face
 		      (if (and id (equal id dsh-bridge-pinned-target))
@@ -4413,9 +4422,7 @@ and bury the buffer (see `dsh-bridge--prompt-exit')."
 	   ;; target-less send went, so pin the buffer to it now; the
 	   ;; header, `default-directory', and the history walk follow.
 	   (when (and lazy-p sent-id)
-	     (dsh-bridge-set-prompt-session sent-id)
-	     (message "dsh-bridge: prompt buffer bound to session \"%s\""
-		      (dsh-bridge--session-label sent-id)))
+	     (dsh-bridge-set-prompt-session sent-id))
 	   ;; Drop the tags from the kept text, so an immediate resend
 	   ;; cannot re-upload them, then hand the prompt over to the view.
 	   (when attachments
@@ -4904,7 +4911,7 @@ demand by `\\[dsh-bridge-answer]'."
       (let* ((first (car questions))
 	     (q (and (listp first) (alist-get 'question first))))
 	(message "dsh-bridge: session \"%s\" asks: %s (press %s to answer)"
-		 (dsh-bridge--session-label session-id)
+		 (dsh-bridge--session-label session-id nil nil t)
 		 (or (and (stringp q) (substring q 0 (min 60 (length q)))) "")
 		 (substitute-command-keys "\\[dsh-bridge-answer]")))
       (dsh-bridge--status-event-render session-id)
@@ -5559,7 +5566,7 @@ and pop to the session's DSH-View in turn-following state."
 		 dsh-bridge--question-request-id 'not-pending))
 	       (accepted
 		(message "dsh-bridge: answer sent to \"%s\""
-			 (dsh-bridge--session-label dsh-bridge--question-session))
+			 (dsh-bridge--session-label dsh-bridge--question-session nil nil t))
 		(dsh-bridge--question-mark-resolved
 		 dsh-bridge--question-request-id 'sent)
 		(dsh-bridge--exit-to-view
@@ -5738,7 +5745,7 @@ the stored copy, silently, without re-messaging."
 	(push (cons session-id (list (cons approval-id plist)))
 	      dsh-bridge--pending-approvals))
       (message "dsh-bridge: session \"%s\" requests approval for %s (press %s to review)"
-	       (dsh-bridge--session-label session-id)
+	       (dsh-bridge--session-label session-id nil nil t)
 	       (or (plist-get plist :tool-name) "a tool")
 	       (substitute-command-keys "\\[dsh-bridge-answer]"))
       (dsh-bridge--status-event-render session-id)
@@ -6264,7 +6271,7 @@ entries in them, in place."
 	  (dsh-bridge--plan-goal-store session-id (cdr result)))
 	 (signal-error
 	  (user-error "dsh-bridge: could not read session \"%s\""
-		      (dsh-bridge--session-label session-id))))))))
+		      (dsh-bridge--session-label session-id nil nil t))))))))
 
 (defun dsh-bridge--plan-effective (plan)
   "The wanted plan-mode state in PLAN: its pending direction, else active."
@@ -6348,7 +6355,7 @@ and nothing is sent."
 		      (cdr-safe (assoc session dsh-bridge--session-plan)))))
     (when (null plan)
       (user-error "dsh-bridge: session \"%s\" has no plan mode"
-		  (dsh-bridge--session-label session)))
+		  (dsh-bridge--session-label session nil nil t)))
     (let* ((active (if arg
 		       (> (prefix-numeric-value arg) 0)
 		     (not (dsh-bridge--plan-effective plan))))
@@ -6811,7 +6818,7 @@ prompt-history walk when the binding changes."
 	     (if (null session-id)
 		 "follows the pinned target"
 	       (format "bound to session \"%s\""
-		       (dsh-bridge--session-label session-id))))))
+		       (dsh-bridge--session-label session-id nil nil t))))))
 
 (defun dsh-bridge--set-pinned-target (session-id)
   "Make SESSION-ID the pinned target, and follow it in the displays.
@@ -6846,7 +6853,7 @@ automatically.  Use `dsh-bridge-unpin-target' to clear the pin."
     (dsh-bridge--set-pinned-target session-id)
     (dsh-bridge--refresh-sessions-buffer)
     (message "dsh-bridge: pinned target %s"
-	     (dsh-bridge--session-label session-id)))))
+	     (dsh-bridge--session-label session-id nil nil t)))))
 
 (defun dsh-bridge-unpin-target ()
   "Clear the pinned target; the bridge falls back to last-active."
@@ -6921,7 +6928,7 @@ host still settles an idle agent as a no-op."
     (cond
       ((and (not force) (not (eq (dsh-bridge--status-state id) 'running)))
       (message "dsh-bridge: session \"%s\" is not running"
-	       (dsh-bridge--session-label id)))
+	       (dsh-bridge--session-label id nil nil t)))
      ((not (y-or-n-p (dsh-bridge--stop-confirmation id)))
       (message "dsh-bridge: aborted"))
      (t
@@ -6933,10 +6940,10 @@ host still settles an idle agent as a no-op."
 	(cond
 	 ((and (eq status 200) (eq t (alist-get 'running alist)))
 	  (message "dsh-bridge: stop requested for session \"%s\""
-		   (dsh-bridge--session-label id)))
+		   (dsh-bridge--session-label id nil nil t)))
 	 ((eq status 200)
 	  (message "dsh-bridge: session \"%s\" was no longer running"
-		   (dsh-bridge--session-label id)))
+		   (dsh-bridge--session-label id nil nil t)))
 	 ;; A 404 while the session still has a known live state means the
 	 ;; route itself is missing: the installed plugin predates it.
 	 ((and (eq status 404)
@@ -6944,7 +6951,7 @@ host still settles an idle agent as a no-op."
 	  (message "dsh-bridge: the installed DSH plugin does not support stopping sessions; upgrade the plugin"))
 	 ((eq status 409)
 	  (message "dsh-bridge: session \"%s\" is owned by a subagent"
-		   (dsh-bridge--session-label id)))
+		   (dsh-bridge--session-label id nil nil t)))
 	 ((eq status 501)
 	  (message "dsh-bridge: this DSH profile has no session controller"))
 	 (t
@@ -6973,17 +6980,17 @@ compaction in progress) is reported with the host-supplied text."
     (cond
      ((eq (dsh-bridge--status-state id) 'running)
       (user-error "dsh-bridge: session \"%s\" is running; stop it before compacting"
-		  (dsh-bridge--session-label id)))
+		  (dsh-bridge--session-label id nil nil t)))
      ((and id (assoc id dsh-bridge--pending-questions))
       (user-error "dsh-bridge: session \"%s\" is waiting for your answer"
-		  (dsh-bridge--session-label id)))
+		  (dsh-bridge--session-label id nil nil t)))
      ((and id (assoc id dsh-bridge--pending-approvals))
       (user-error "dsh-bridge: session \"%s\" is waiting for your approval"
-		  (dsh-bridge--session-label id)))
+		  (dsh-bridge--session-label id nil nil t)))
      ((let ((counts (dsh-bridge--pending-prompt-counts id)))
 	(and (consp counts) (> (car counts) 0)))
       (user-error "dsh-bridge: session \"%s\" has input queued to start a turn; stop or send it first"
-		  (dsh-bridge--session-label id)))
+		  (dsh-bridge--session-label id nil nil t)))
      ((let ((context (dsh-bridge--prompt-context-label id)))
 	(not (y-or-n-p
 	      (concat "Compact session"
@@ -7007,7 +7014,7 @@ compaction in progress) is reported with the host-supplied text."
 	     (message "dsh-bridge: %s"
 		      (or (alist-get 'text alist)
 			  (format "session \"%s\" compacted"
-				  (dsh-bridge--session-label id)))))
+				  (dsh-bridge--session-label id nil nil t)))))
 	    ;; A 409 with host text is the sole failure channel for a manual
 	    ;; compact (busy/cancelled/changed/summary/commit/persistence).
 	    ;; Echo it.
@@ -7269,7 +7276,7 @@ to read it."
      ((progn (setq session (dsh-bridge--session-for-id id))
 	     (eq (alist-get 'archived session) t))
       (message "dsh-bridge: session \"%s\" is archived; unarchive it first"
-	       (dsh-bridge--session-label id)))
+	       (dsh-bridge--session-label id nil nil t)))
      ((or (assoc id dsh-bridge--pending-questions)
 	  (assoc id dsh-bridge--pending-approvals))
       ;; `dsh-bridge-answer' resolves the row's session itself.
@@ -7402,7 +7409,7 @@ archive.  Archiving is reversible with \\[dsh-bridge-unarchive-session]."
 	    (progn
 	      (dsh-bridge--list-sessions-in-buffer)
 	      (message "dsh-bridge: archived session %s"
-		       (dsh-bridge--session-label id)))
+		       (dsh-bridge--session-label id nil nil t)))
 	  (message "dsh-bridge: %s"
 		   (dsh-bridge--error-message nil status alist))))))))
 
@@ -7420,7 +7427,7 @@ archive.  Archiving is reversible with \\[dsh-bridge-unarchive-session]."
 	    (progn
 	      (dsh-bridge--list-sessions-in-buffer)
 	      (message "dsh-bridge: unarchived session %s"
-		       (dsh-bridge--session-label id)))
+		       (dsh-bridge--session-label id nil nil t)))
 	  ;; The registry drops the id without re-checking that the
 	  ;; session exists, so this never reports 404; 501 means the
 	  ;; installed plugin predates unarchive support.
@@ -7491,7 +7498,7 @@ title, defaulting to the current workspace title."
 	(message "No DSH session at point.")
       (unless workspaceId
 	(user-error "dsh-bridge: session \"%s\" has no workspace to rename"
-		    (dsh-bridge--session-label id)))
+		    (dsh-bridge--session-label id nil nil t)))
       (let* ((current (or (alist-get 'workspace session) ""))
 	     (prompt (format "Rename workspace %s to: " current))
 	     (title (read-string prompt current)))
@@ -8047,7 +8054,7 @@ glyphs are double-width, and in a one-column cell `tabulated-list-print-col'
 would cover the glyph with an ellipsis `display' property."
   (let ((format (vector (list "*" 1 t)
 			(list "?" (if (eq dsh-bridge-status-indicator 'emoji) 2 1) t)
-			(list "Session" 40 t)
+			(list "Session" dsh-bridge--label-display-cap t)
 			(list "Age" 8 'dsh-bridge--age-sorter)
 			(list "Workspace" 0 t))))
     (if dsh-bridge-show-session-ids
@@ -8131,7 +8138,7 @@ the cache-only refresh."
   (when (and dsh-bridge-turn-boundary-echo
 	     (not (dsh-bridge--view-displayed-p session-id)))
     (message "dsh-bridge: session \"%s\" %s"
-	     (dsh-bridge--session-label session-id)
+	     (dsh-bridge--session-label session-id nil nil t)
 	     (pcase reason
 	       ("completed" "finished")
 	       ("aborted" "interrupted")
@@ -8313,7 +8320,7 @@ every transient redisplay, so it reads the seeded roster and must not
 fetch anything itself."
   (let* ((id (car dsh-bridge--focus))
 	 (pinned (eq (cdr dsh-bridge--focus) 'pinned))
-	 (label (and id (dsh-bridge--session-label id nil t))))
+	 (label (and id (dsh-bridge--session-label id nil t t))))
     (cond
      ((null id)
       (if (eq dsh-bridge--dispatcher-roster 'unreachable)
