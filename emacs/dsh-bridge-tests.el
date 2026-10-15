@@ -2223,7 +2223,26 @@ every collected id."
               ((symbol-function 'message)
                (lambda (&rest args) (setq msg (apply #'format args)))))
       (dsh-bridge-receive))
-    (should (string-match-p "2 messages received from DSH" msg))))
+    (should (string-match-p "2 messages received" msg))))
+
+(ert-deftest dsh-bridge-receive-single-message-message ()
+  "One pending entry produces the singular 'received' message."
+  (let ((msg nil))
+    (cl-letf (((symbol-function 'dsh-bridge--request)
+               (lambda (method _path _payload)
+                 (cond ((equal method "GET")
+                        (cons 200
+                              (list (cons 'entries
+                                          (list (list (cons 'id "e1")
+                                                      (cons 'sessionId "s1")
+                                                      (cons 'text "only")
+                                                      (cons 'ts 1000000)))))))
+                       (t (cons 200 (list (cons 'ok t)))))))
+              ((symbol-function 'message)
+               (lambda (&rest args) (setq msg (apply #'format args)))))
+      (dsh-bridge-receive))
+    (should (string-match-p "1 message received" msg))
+    (should-not (string-match-p "1 messages received" msg))))
 
 (ert-deftest dsh-bridge-receive-overflow-warns ()
   "When the host reports outbox overflow, receive warns that it dropped
@@ -2240,10 +2259,10 @@ older messages; without the flag there is no warning."
               ((symbol-function 'message)
                (lambda (&rest args) (push (apply #'format args) msgs))))
       (dsh-bridge-receive))
-    (should (seq-some (lambda (m) (string-match-p "dropped older messages" m))
+    (should (seq-some (lambda (m) (string-match-p "old messages dropped" m))
                       msgs))
     ;; The summary still went out alongside the warning.
-    (should (seq-some (lambda (m) (string-match-p "messages received from DSH" m))
+    (should (seq-some (lambda (m) (string-match-p "messages received" m))
                       msgs)))
   (let ((msgs nil))
     (cl-letf (((symbol-function 'dsh-bridge--request)
@@ -2253,7 +2272,7 @@ older messages; without the flag there is no warning."
               ((symbol-function 'message)
                (lambda (&rest args) (push (apply #'format args) msgs))))
       (dsh-bridge-receive))
-    (should-not (seq-some (lambda (m) (string-match-p "dropped older messages" m))
+    (should-not (seq-some (lambda (m) (string-match-p "old messages dropped" m))
                           msgs))))
 
 (ert-deftest dsh-bridge-receive-pops-by-default ()
@@ -2290,7 +2309,7 @@ selecting it."
               ((symbol-function 'message)
                (lambda (&rest args) (setq msg (apply #'format args)))))
       (dsh-bridge-receive))
-    (should (string-match-p "nothing to receive" msg))))
+    (should (string-match-p "No messages from the DSH bridge." msg))))
 
 (ert-deftest dsh-bridge-receive-sets-workspace-best-effort ()
   "Receive points the output buffer at the session's workspace when known."
@@ -4075,7 +4094,6 @@ the session archived, and that observation retires the pin."
         (goto-char (point-min))
         (dsh-bridge-archive-session)))
     (should (null dsh-bridge-pinned-target))
-    (should (member "dsh-bridge: unpinning archived session" msgs))
     (should (member "dsh-bridge: archived session T" msgs))))
 
 (ert-deftest dsh-bridge-archive-session-aborts-on-no ()
@@ -5050,27 +5068,23 @@ the replica; a live, non-archived record stays."
     (should (equal dsh-bridge--last-resolved-active '("s1" . "Live")))))
 
 (ert-deftest dsh-bridge-fetch-sessions-drops-archived-pin ()
-  "A roster reporting the pinned session archived drops the pin, loudly.
+  "A roster reporting the pinned session archived drops the pin.
 Pinning and archival are mutually exclusive: an archived session is not a
 run target, so it cannot stay the pin.  The roster is the one funnel every
 archive is observed through, so the prune covers an archive made anywhere;
 unarchiving does not restore the pin."
   (let ((dsh-bridge-pinned-target "s1")
         (dsh-bridge--sessions-cache nil)
-        (dsh-bridge--session-status nil)
-        (msg nil))
+        (dsh-bridge--session-status nil))
     (cl-letf (((symbol-function 'dsh-bridge--request)
                (lambda (&rest _)
                  (cons 200
                        (list (cons 'sessions
                                    (list (list (cons 'id "s1")
                                                (cons 'title "Arch")
-                                               (cons 'archived t))))))))
-              ((symbol-function 'message)
-               (lambda (&rest args) (setq msg (apply #'format args)))))
+                                               (cons 'archived t)))))))))
       (dsh-bridge--fetch-sessions))
-    (should (null dsh-bridge-pinned-target))
-    (should (equal msg "dsh-bridge: unpinning archived session"))))
+    (should (null dsh-bridge-pinned-target))))
 
 (ert-deftest dsh-bridge-fetch-sessions-keeps-unarchived-pin ()
   "A roster that does not report the pinned session archived keeps the pin.
@@ -6173,25 +6187,29 @@ The segment is a cell like any other; passing it as a bare string made
 
 (ert-deftest dsh-bridge-send-and-exit-resend-guard ()
   "C-c C-c confirms before an identical re-send to the same session;
-declining aborts, and edited text sends without asking."
+declining aborts the send with a message, and edited text sends without
+asking."
   (let ((dsh-bridge-prompt-resend-confirm t)
         (dsh-bridge--last-sent '(("s1" . ("hello" . 1234567.0))))
         ;; The session reads idle, so the busy choice never prompts.
         (dsh-bridge--sessions-cache nil)
         (dsh-bridge--session-status nil)
-        (asked nil) (sent nil))
+        (asked nil) (sent nil) (msg nil))
     (with-temp-buffer
       (dsh-bridge-prompt-mode)
       (setq-local dsh-bridge--prompt-session "s1")
       (cl-letf (((symbol-function 'dsh-bridge-send-text)
                  (lambda (text &rest _) (setq sent text)))
+                ((symbol-function 'message)
+                 (lambda (&rest args) (setq msg (apply #'format args))))
                 ((symbol-function 'y-or-n-p)
                  (lambda (&rest _) (setq asked t) nil)))
         ;; Identical text: the guard fires; declining aborts the send.
         (insert "hello")
-        (should-error (dsh-bridge-send-and-exit) :type 'user-error)
+        (dsh-bridge-send-and-exit)
         (should asked)
         (should (null sent))
+        (should (equal msg "Aborted."))
         ;; Edited text: no guard, sends.
         (setq asked nil)
         (insert "!")
@@ -6314,9 +6332,10 @@ nothing was sent."
   (should (eq (dsh-bridge-test--busy-send-and-exit '(?s "steer")) 'steer)))
 
 (ert-deftest dsh-bridge-send-and-exit-busy-cancel-keeps-prompt ()
-  "Choosing cancel sends nothing and leaves the prompt untouched."
+  "Choosing cancel sends nothing, reports it, and leaves the prompt untouched."
   (dsh-bridge-test--kill-prompt-buffer)
   (let ((sent nil)
+        (msg nil)
         (dsh-bridge-prompt-resend-confirm nil)
         (dsh-bridge--last-sent nil)
         (dsh-bridge--session-status '(("s1" running . 1000)))
@@ -6330,9 +6349,12 @@ nothing was sent."
           (cl-letf (((symbol-function 'read-multiple-choice)
                      (lambda (&rest _) (list ?c "cancel")))
                     ((symbol-function 'dsh-bridge-send-text)
-                     (lambda (&rest _) (setq sent t))))
-            (should-error (dsh-bridge-send-and-exit) :type 'user-error))
+                     (lambda (&rest _) (setq sent t)))
+                    ((symbol-function 'message)
+                     (lambda (&rest args) (setq msg (apply #'format args)))))
+            (dsh-bridge-send-and-exit))
           (should-not sent)
+          (should (equal msg "Aborted."))
           (should (equal (buffer-string) "hello")))
       (dsh-bridge-test--kill-prompt-buffer))))
 
@@ -7685,7 +7707,7 @@ even when newer turns have arrived mid-walk, and announces it."
       (should (equal (buffer-string) (dsh-bridge-test--view-turn-render newest-open)))
       (should (eq dsh-bridge--view-follow t))
       (should (null dsh-bridge--view-browsing))
-      (should (string-match-p "following the newest turn" msg)))))
+      (should (string-match-p "Following the newest turn" msg)))))
 
 (ert-deftest dsh-bridge-view-turns-cache-refresh-keeps-browsing-position ()
   "A turn-cache refresh keeps a browsing view on its shown turn: the `(k/n)'
@@ -8030,7 +8052,7 @@ state (\"turn 0\") and announces it."
         (should (equal (buffer-string) (dsh-bridge-test--view-turn-render newest)))
         (should (eq dsh-bridge--view-follow t))
         (should (null dsh-bridge--view-browsing))
-        (should (string-match-p "following the newest turn" msg)))
+        (should (string-match-p "Following the newest turn" msg)))
       (kill-buffer "*dsh-bridge-output*"))))
 
 (ert-deftest dsh-bridge-view-next-reply-from-rest-not-found ()
@@ -11234,11 +11256,19 @@ removes them from the kept text."
       (delete-file file)
       (dsh-bridge-test--kill-prompt-buffer))))
 
-(ert-deftest dsh-bridge-send-and-exit-empty-signals ()
-  "Neither text nor attachments is an error."
-  (with-temp-buffer
-    (dsh-bridge-prompt-mode)
-    (should-error (dsh-bridge-send-and-exit) :type 'user-error)))
+(ert-deftest dsh-bridge-send-and-exit-empty-reports ()
+  "Neither text nor attachments sends; the command reports it in the echo area."
+  (let ((sent nil)
+        (msg nil))
+    (with-temp-buffer
+      (dsh-bridge-prompt-mode)
+      (cl-letf (((symbol-function 'dsh-bridge-send-text)
+                 (lambda (&rest _) (setq sent t)))
+                ((symbol-function 'message)
+                 (lambda (&rest args) (setq msg (apply #'format args)))))
+        (dsh-bridge-send-and-exit))
+      (should-not sent)
+      (should (equal msg "No text or attachments to send.")))))
 
 (ert-deftest dsh-bridge-send-and-exit-failure-keeps-attachments ()
   "A failed send leaves the tag lines in place for a retry."

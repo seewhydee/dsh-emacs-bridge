@@ -1595,9 +1595,7 @@ checking STATUS for a failed request."
 	(and dsh-bridge-pinned-target
 	     (eq t (alist-get 'archived (dsh-bridge--session-for-id
 					 dsh-bridge-pinned-target)))
-	     (progn
-	       (dsh-bridge--set-pinned-target nil)
-	       (message "dsh-bridge: unpinning archived session")))))
+	     (dsh-bridge--set-pinned-target nil))))
     (cons status sessions)))
 
 ;;; Session cache
@@ -2035,7 +2033,7 @@ Untitled sessions are not offered for completion."
 			 ((cdr group) (dsh-bridge--group-annotation group))
 			 (t (dsh-bridge--session-annotation (car group))))))))
     (if (null groups)
-	(user-error "dsh-bridge: no sessions")
+	(user-error "dsh-bridge: no sessions available")
       (let* ((title (completing-read prompt table nil t))
 	     (group (cdr (assoc title groups))))
 	(cond
@@ -2193,7 +2191,7 @@ that variable."
 	 (alist (cdr result))
 	 (session-id (and alist (alist-get 'sessionId alist))))
     (unless session-id
-      (error "dsh-bridge: could not fetch prompt history"))
+      (error "dsh-bridge: failed to fetch prompt history"))
     ;; Inject fetched history into `dsh-bridge--prompt-history'.
     (setq dsh-bridge--prompt-history
 	  (cons (cons session-id (or (alist-get 'prompts alist) '()))
@@ -2483,7 +2481,7 @@ Signal a `user-error' for anything that is not a regular file."
   (mapcar (lambda (file)
 	    (let ((expanded (expand-file-name file)))
 	      (unless (file-regular-p expanded)
-		(user-error "dsh-bridge: not a regular file: %s" file))
+		(user-error "Could not attach %s (not a regular file)" file))
 	      expanded))
 	  files))
 
@@ -2517,9 +2515,7 @@ prompts are deliberately absent."
       (unless (or (bobp) (bolp)) (insert "\n"))
       (dolist (path paths)
 	(dsh-bridge--insert-attachment-tag path)))
-    (pop-to-buffer prompt)
-    (message "dsh-bridge: attached %s"
-	     (mapconcat #'file-name-nondirectory paths ", "))))
+    (pop-to-buffer prompt)))
 
 ;;;###autoload
 (defun dsh-bridge-attach-buffer-file ()
@@ -3282,8 +3278,7 @@ segments are committed and flipping to a newer turn when one starts producing.
 A session already running a turn that has no record yet — the turn a send
 started, with no committed reply — is shown as its running placeholder
 instead of as the newest turn that does have one.  Also ensures the header's
-elapsed ticker runs if the session is live.  Announces the state change,
-since the only other feedback is the header's `⤓' marker."
+elapsed ticker runs if the session is live."
   (let* ((session dsh-bridge--view-content-session)
 	 (turns (dsh-bridge--view-turns-refresh t))
 	 (newest (car-safe turns))
@@ -3308,8 +3303,7 @@ since the only other feedback is the header's `⤓' marker."
       (when turns
 	(dsh-bridge--view-fill session (car turns) nil t)))
     (setq header-line-format dsh-bridge--view-header-line-format)
-    (dsh-bridge--view-ticker-ensure)
-    (message "dsh-bridge: following the newest turn")))
+    (dsh-bridge--view-ticker-ensure)))
 
 (defun dsh-bridge--view-open (session-alist revisions &optional same-window)
   "Pop to a DSH-View buffer showing the session described by SESSION-ALIST.
@@ -3414,7 +3408,7 @@ host resumes a cold session as part of resolving the target."
 	 (alist (cdr result)))
     (cond
      ((null status)
-      (message "dsh-bridge: request failed (is `dsh web' running?)")
+      (message "dsh-bridge: failed to fetch turns")
       nil)
      ((>= status 400)
       (message "dsh-bridge: %s"
@@ -4315,7 +4309,8 @@ newest cached turn."
 	(message "No newer turns."))
        ((or (zerop k)
 	    (and (= k 1) dsh-bridge-view-follow-at-newest))
-	(dsh-bridge--view-follow-enter))
+	(dsh-bridge--view-follow-enter)
+	(message "Following the newest turn."))
        (t
 	(dsh-bridge--view-show-turn (1- k) turns))))))
 
@@ -4384,54 +4379,49 @@ and bury the buffer (see `dsh-bridge--prompt-exit')."
 		  (substring-no-properties (buffer-string))))
 	 (text (car parsed))
 	 (attachments (cdr parsed))
-	 ;; Only an explicit binding (or the pinned target); a guessed last-active
-	 ;; id must not key the guard.
+	 ;; Only an explicit binding (or the pinned target).
+	 ;; A guessed last-active id must not key the guard.
 	 (guard-session dsh-bridge--prompt-session)
-	 ;; Whether this send leaves the choice of session to the host.	 The
-	 ;; test is "no explicit target was sent", not "the buffer is
-	 ;; unbound": a send through `dsh-bridge-pinned-target' must keep
-	 ;; following the default rather than freeze to one session.
+	 ;; Whether this send leaves the choice of session to the
+	 ;; host.  Note that a send through `dsh-bridge-pinned-target'
+	 ;; must keep following the default.
 	 (lazy-p (and (null dsh-bridge--prompt-session)
 		      (null dsh-bridge-pinned-target))))
-    (if (and (string-empty-p text) (null attachments))
-	(user-error "No text or attachments to send")
-      ;; Guard against an identical re-send to the session.
-      (when (and dsh-bridge-prompt-resend-confirm
-		 (equal text (car-safe
-			      (cdr-safe
-			       (assoc guard-session dsh-bridge--last-sent))))
-		 (not (y-or-n-p "Prompt was previously sent.  Resend it? ")))
-	(user-error "dsh-bridge: aborted"))
-      ;; Capture the invoking window for `dsh-bridge--prompt-exit', and the
-      ;; instant the prompt leaves: `--after-prompt-view' uses the latter to
-      ;; recognize the turn this send began even when that turn committed (or
-      ;; finished) while the synchronous POST was still on the wire.
+    (cond
+     ((and (string-empty-p text) (null attachments))
+      (message "No text or attachments to send."))
+     ;; Guard against an identical re-send to the session.
+     ((and dsh-bridge-prompt-resend-confirm
+	   (equal text (car-safe
+			(cdr-safe
+			 (assoc guard-session dsh-bridge--last-sent))))
+	   (not (y-or-n-p "Prompt was previously sent.  Resend it? ")))
+      (message "Aborted."))
+     (t
+      ;; Do the send.  Record the invoking window, and the time at
+      ;; which the prompt leaves.  The latter lets us recognize the
+      ;; turn for this send, even if the turn committed (or finished)
+      ;; while the synchronous POST was in progress.
       (let ((choice (dsh-bridge--send-and-exit-choice steer))
 	    (window (selected-window))
 	    (sent-at (floor (* 1000 (float-time)))))
-	;; Cancelling the busy prompt leaves the buffer and its text
-	;; untouched, like declining the resend guard above.
-	(when (eq choice 'cancel)
-	  (user-error "dsh-bridge: send cancelled"))
-	(dsh-bridge-send-text
-	 text
-	 (lambda (sent-id)
-	   ;; This is still the prompt buffer: the ON-SUCCESS callback runs
-	   ;; in the buffer that sent the text (see `dsh-bridge-send-text').
-	   ;; The host's report is the only ground truth about where a
-	   ;; target-less send went, so pin the buffer to it now; the
-	   ;; header, `default-directory', and the history walk follow.
-	   (when (and lazy-p sent-id)
-	     (dsh-bridge-set-prompt-session sent-id))
-	   ;; Drop the tags from the kept text, so an immediate resend
-	   ;; cannot re-upload them, then hand the prompt over to the view.
-	   (when attachments
-	     (dsh-bridge--remove-attachment-tags))
-	   (dsh-bridge--prompt-exit sent-id window sent-at))
-	 attachments
-	 ;; `send' means an ordinary follow-up turn; the mode argument is
-	 ;; the busy choice itself.
-	 (unless (eq choice 'send) choice))))))
+	(if (eq choice 'cancel)
+	    (message "Aborted.")
+	  (dsh-bridge-send-text
+	   text
+	   ;; This callback runs in the buffer that sent the text:
+	   (lambda (sent-id)
+	     ;; For a target-less send, use the host's report to bind
+	     ;; the buffer to the destination session.
+	     (when (and lazy-p sent-id)
+	       (dsh-bridge-set-prompt-session sent-id))
+	     ;; Judgment call: we drop attachment tags from the kept
+	     ;; text, so an immediate resend cannot re-upload them.
+	     (when attachments
+	       (dsh-bridge--remove-attachment-tags))
+	     (dsh-bridge--prompt-exit sent-id window sent-at))
+	   attachments
+	   (unless (eq choice 'send) choice))))))))
 
 (defun dsh-bridge--after-prompt-view (session-id &optional sent-at)
   "Return a DSH-View buffer for SESSION-ID after a prompt.
@@ -4580,51 +4570,44 @@ view parked at the end, the approximate position otherwise."
 	  (goto-char (if (and dsh-bridge--view-follow at-tail)
 			 (point-max)
 		       (min pos (point-max)))))))
-    (message "dsh-bridge: turn activity %s"
+    (message "Turn activity %s."
 	     (if dsh-bridge--view-activity "shown" "hidden"))))
 
 ;;;###autoload
 (defun dsh-bridge-receive ()
   "Receive the latest \"Send to Emacs\" message into a DSH-View buffer.
-Pulls the host's pending DSH→Emacs entries and displays the newest in a
-DSH-View buffer, then acks every collected id.	Unless `dsh-bridge-receive-pop'
-is nil, the buffer is selected (the push originates from the user clicking
-the button in the DSH web UI, so the common flow is to want the message
-visible on arrival).  When several messages were pending, only the latest is
-shown and the message says so (the ack invariant weakens deliberately: the
-alternative, a durable per-session store, is the deferred transcript buffer).
-When the host reports outbox overflow (older entries were evicted before
-Emacs collected them), a warning follows the summary message.
-This is also the manual fallback if you want to fetch the pending message
-yourself; the SSE listener calls it automatically unless
-`dsh-bridge-notifications-stop' has been run."
+This function pulls the host's pending DSH-to-Emacs entries and displays
+the newest in a DSH-View buffer.  It is called automatically by the SSE
+notification listener, but can also be called interactively (e.g., if
+the user has run `dsh-bridge-notifications-stop' to stop the listener).
+
+Unless `dsh-bridge-receive-pop' is nil, select the buffer.  If several
+messages were pending, only the latest is shown."
   (interactive)
   (let* ((result (dsh-bridge--request "GET" "/outbox" nil))
 	 (status (car result))
-	 (alist (cdr result)))
+	 (alist (cdr result))
+	 entries)
     (cond
      ((null status)
-      (message "dsh-bridge: request failed (is `dsh web' running?)"))
+      (message "dsh-bridge: failed to fetch outbox"))
      ((>= status 400)
       (message "dsh-bridge: %s"
 	       (or (alist-get 'error alist) (format "HTTP %s" status))))
+     ((null (setq entries (alist-get 'entries alist)))
+      (message "No messages from the DSH bridge."))
      (t
-      (let ((entries (alist-get 'entries alist)))
-	(if (null entries)
-	    (message "dsh-bridge: nothing to receive")
-	  (let ((buf (dsh-bridge--display-received entries)))
-	    ;; Ack all collected ids, shown or not.
-	    (dsh-bridge--request "POST" "/outbox/ack"
-				 `((ids . ,(mapcar (lambda (e) (alist-get 'id e))
-						   entries))))
-	    (when dsh-bridge-receive-pop
-	      (pop-to-buffer buf))
-	    (if (= (length entries) 1)
-		(message "dsh-bridge: DSH sent a message to %s" (buffer-name buf))
-	      (message "dsh-bridge: %d messages received from DSH"
-		       (length entries)))
-	    (when (alist-get 'overflowed alist)
-	      (message "dsh-bridge: the host dropped older messages (outbox overflow)")))))))))
+      (let ((buf (dsh-bridge--display-received entries))
+	    (payload (mapcar (lambda (e) (alist-get 'id e)) entries)))
+	;; Ack all collected ids, shown or not.
+	(dsh-bridge--request "POST" "/outbox/ack" `((ids . ,payload)))
+	(when dsh-bridge-receive-pop
+	  (pop-to-buffer buf))
+	(message "dsh-bridge: %s message%s received"
+		 (length entries)
+		 (if (= (length entries) 1) "" "s"))
+	(when (alist-get 'overflowed alist)
+	  (message "dsh-bridge: old messages dropped (outbox overflow)")))))))
 
 (defun dsh-bridge--view-fill (session-id turn &optional cwd no-turns-refresh preserve-point)
   "Fill the current buffer with TURN as the shown content of SESSION-ID.
