@@ -1707,7 +1707,8 @@ is discarded rather than restored by M-n."
         (should (equal (buffer-string) ""))))))
 
 (ert-deftest dsh-bridge-prompt-stop-or-erase-declining-does-not-erase ()
-  "Declining the stop confirmation must not erase the prompt as a fallback."
+  "Declining the stop confirmation must not erase the prompt as a fallback.
+The refusal surfaces as a `user-error'."
   (let ((dsh-bridge--session-status '(("s1" running . 1000)))
         (dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t)))))
     (cl-letf (((symbol-function 'y-or-n-p) (lambda (_prompt) nil))
@@ -1719,7 +1720,7 @@ is discarded rather than restored by M-n."
         (setq-local dsh-bridge--prompt-session "s1")
         (insert "draft")
         (set-buffer-modified-p t)
-        (dsh-bridge-prompt-stop-or-erase)
+        (should-error (dsh-bridge-prompt-stop-or-erase) :type 'user-error)
         (should (equal (buffer-string) "draft"))))))
 
 (ert-deftest dsh-bridge-prompt-stop-or-erase-force-stops-when-idle ()
@@ -1902,7 +1903,8 @@ empty roster errors instead of yielding a follow-the-default binding."
       (kill-buffer buf))))
 
 (ert-deftest dsh-bridge-prompt-history-edited-blocks-walk ()
-  "Editing a history entry blocks walking until it is sent or reverted."
+  "Editing a history entry blocks walking with a `user-error' until it is
+sent or reverted."
   (let ((dsh-bridge-pinned-target "s1"))
     (with-temp-buffer
       (dsh-bridge-prompt-mode)
@@ -1914,9 +1916,9 @@ empty roster errors instead of yielding a follow-the-default binding."
         (insert "draft")
         (dsh-bridge-prompt-previous-history)
         (insert " edited")
-        (dsh-bridge-prompt-previous-history)
+        (should-error (dsh-bridge-prompt-previous-history) :type 'user-error)
         (should (equal (buffer-string) "new edited"))
-        (dsh-bridge-prompt-next-history)
+        (should-error (dsh-bridge-prompt-next-history) :type 'user-error)
         (should (equal (buffer-string) "new edited"))))))
 
 (ert-deftest dsh-bridge-prompt-revert-history ()
@@ -4109,7 +4111,7 @@ the session archived, and that observation retires the pin."
         (let ((inhibit-read-only t))
           (insert (propertize "s1 row" 'tabulated-list-id "s1")))
         (goto-char (point-min))
-        (dsh-bridge-archive-session)))
+        (should-error (dsh-bridge-archive-session) :type 'user-error)))
     (should (null called))))
 
 (ert-deftest dsh-bridge-archive-session-stops-active-and-retries ()
@@ -4294,7 +4296,7 @@ The title carries no \"[archived]\" suffix; the glyph names the state."
       (should stop)
       (should (equal (car stop) "POST"))
       (should (equal (cdr (assoc 'sessionId (caddr stop))) "s1"))
-      (should (string-match-p "stop requested" msg)))))
+      (should (string-match-p "stopping session" msg)))))
 
 (ert-deftest dsh-bridge-stop-session-not-running-noop ()
   "A session that is not running is reported and never contacted."
@@ -4313,25 +4315,23 @@ The title carries no \"[archived]\" suffix; the glyph names the state."
     (should (string-match-p "is not running" msg))))
 
 (ert-deftest dsh-bridge-stop-session-aborts-on-no ()
-  "Declining the confirmation sends no stop request.  The advisory queue
-read still happens, since it words the confirmation."
-  (let ((calls nil) (msg nil)
+  "Declining the confirmation refuses with a `user-error' and sends no stop
+request.  The advisory queue read still happens, since it words the
+confirmation."
+  (let ((calls nil)
         (dsh-bridge--session-status '(("s1" running . 1000)))
         (dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t)))))
     (cl-letf (((symbol-function 'y-or-n-p) (lambda (_prompt) nil))
               ((symbol-function 'dsh-bridge--request)
                (lambda (method path payload)
                  (push (list method path payload) calls)
-                 (cons 200 nil)))
-              ((symbol-function 'message)
-               (lambda (&rest args) (setq msg (apply #'format args)))))
+                 (cons 200 nil))))
       (with-temp-buffer
         (dsh-bridge-view-mode)
         (setq-local dsh-bridge--view-content-session "s1")
-        (dsh-bridge-stop-session)))
+        (should-error (dsh-bridge-stop-session) :type 'user-error)))
     (should-not (assoc "/sessions/stop"
-                       (mapcar (lambda (c) (cadr c)) calls)))
-    (should (string-match-p "aborted" msg))))
+                       (mapcar (lambda (c) (cadr c)) calls)))))
 
 (ert-deftest dsh-bridge-stop-session-race-reports-no-longer-running ()
   "A host that settled the stop as a no-op is reported honestly."
@@ -4347,7 +4347,7 @@ read still happens, since it words the confirmation."
         (dsh-bridge-view-mode)
         (setq-local dsh-bridge--view-content-session "s1")
         (dsh-bridge-stop-session)))
-    (should (string-match-p "no longer running" msg))))
+    (should (string-match-p "already stopped" msg))))
 
 (ert-deftest dsh-bridge-stop-session-route-errors ()
   "Route failures surface the matching message, including version skew."
@@ -4433,7 +4433,7 @@ must reach the host rather than refusing the session as not running."
         (setq-local dsh-bridge--view-content-session "s1")
         (dsh-bridge-stop-session)))
     (should (equal (cdr (assoc 'sessionId stop)) "s1"))
-    (should (string-match-p "stop requested" msg))))
+    (should (string-match-p "stopping session" msg))))
 
 (ert-deftest dsh-bridge-stop-session-sessions-row-target ()
   "In DSH-Sessions the stop targets the row under point."
@@ -6187,29 +6187,26 @@ The segment is a cell like any other; passing it as a bare string made
 
 (ert-deftest dsh-bridge-send-and-exit-resend-guard ()
   "C-c C-c confirms before an identical re-send to the same session;
-declining aborts the send with a message, and edited text sends without
-asking."
+declining aborts the send with a `user-error', and edited text sends
+without asking."
   (let ((dsh-bridge-prompt-resend-confirm t)
         (dsh-bridge--last-sent '(("s1" . ("hello" . 1234567.0))))
         ;; The session reads idle, so the busy choice never prompts.
         (dsh-bridge--sessions-cache nil)
         (dsh-bridge--session-status nil)
-        (asked nil) (sent nil) (msg nil))
+        (asked nil) (sent nil))
     (with-temp-buffer
       (dsh-bridge-prompt-mode)
       (setq-local dsh-bridge--prompt-session "s1")
       (cl-letf (((symbol-function 'dsh-bridge-send-text)
                  (lambda (text &rest _) (setq sent text)))
-                ((symbol-function 'message)
-                 (lambda (&rest args) (setq msg (apply #'format args))))
                 ((symbol-function 'y-or-n-p)
                  (lambda (&rest _) (setq asked t) nil)))
         ;; Identical text: the guard fires; declining aborts the send.
         (insert "hello")
-        (dsh-bridge-send-and-exit)
+        (should-error (dsh-bridge-send-and-exit) :type 'user-error)
         (should asked)
         (should (null sent))
-        (should (equal msg "Aborted."))
         ;; Edited text: no guard, sends.
         (setq asked nil)
         (insert "!")
@@ -6332,10 +6329,10 @@ nothing was sent."
   (should (eq (dsh-bridge-test--busy-send-and-exit '(?s "steer")) 'steer)))
 
 (ert-deftest dsh-bridge-send-and-exit-busy-cancel-keeps-prompt ()
-  "Choosing cancel sends nothing, reports it, and leaves the prompt untouched."
+  "Choosing cancel sends nothing, refuses with a `user-error', and leaves
+the prompt untouched."
   (dsh-bridge-test--kill-prompt-buffer)
   (let ((sent nil)
-        (msg nil)
         (dsh-bridge-prompt-resend-confirm nil)
         (dsh-bridge--last-sent nil)
         (dsh-bridge--session-status '(("s1" running . 1000)))
@@ -6349,12 +6346,9 @@ nothing was sent."
           (cl-letf (((symbol-function 'read-multiple-choice)
                      (lambda (&rest _) (list ?c "cancel")))
                     ((symbol-function 'dsh-bridge-send-text)
-                     (lambda (&rest _) (setq sent t)))
-                    ((symbol-function 'message)
-                     (lambda (&rest args) (setq msg (apply #'format args)))))
-            (dsh-bridge-send-and-exit))
+                     (lambda (&rest _) (setq sent t))))
+            (should-error (dsh-bridge-send-and-exit) :type 'user-error))
           (should-not sent)
-          (should (equal msg "Aborted."))
           (should (equal (buffer-string) "hello")))
       (dsh-bridge-test--kill-prompt-buffer))))
 
@@ -9611,6 +9605,30 @@ like sending from DSH-Prompt."
     (when (dsh-bridge--question-find-buffer "q1")
       (kill-buffer (dsh-bridge--question-find-buffer "q1")))))
 
+(ert-deftest dsh-bridge-question-submit-unanswered-refuses ()
+  "A submit with a question still unanswered refuses with a `user-error'
+and posts nothing."
+  (let ((posted nil))
+    (with-current-buffer
+        (dsh-bridge--question-buffer
+         "s1" "q1"
+         '(((id . "q1") (question . "Go?")
+            (options . (((label . "Yes")) ((label . "No")))))
+           ((id . "q2") (question . "Also?")
+            (options . (((label . "Yes")) ((label . "No")))))))
+      (goto-char (point-min))
+      (re-search-forward "1\\. Yes")
+      (goto-char (line-beginning-position))
+      (dsh-bridge--question-toggle-at-point)
+      (should-not (dsh-bridge--question-validate))
+      (cl-letf (((symbol-function 'dsh-bridge--http)
+                 (lambda (&rest _) (setq posted t))))
+        (should-error (dsh-bridge--question-submit) :type 'user-error))
+      (should-not posted)
+      (should-not dsh-bridge--question-sent))
+    (when (dsh-bridge--question-find-buffer "q1")
+      (kill-buffer (dsh-bridge--question-find-buffer "q1")))))
+
 (ert-deftest dsh-bridge-question-decline-shows-view ()
   "An accepted decline banners the buffer and exits to the session's view too:
 cancelling the tool call resumes the model exactly as answering does."
@@ -11257,18 +11275,14 @@ removes them from the kept text."
       (dsh-bridge-test--kill-prompt-buffer))))
 
 (ert-deftest dsh-bridge-send-and-exit-empty-reports ()
-  "Neither text nor attachments sends; the command reports it in the echo area."
-  (let ((sent nil)
-        (msg nil))
+  "Neither text nor attachments sends; the command refuses with a `user-error'."
+  (let ((sent nil))
     (with-temp-buffer
       (dsh-bridge-prompt-mode)
       (cl-letf (((symbol-function 'dsh-bridge-send-text)
-                 (lambda (&rest _) (setq sent t)))
-                ((symbol-function 'message)
-                 (lambda (&rest args) (setq msg (apply #'format args)))))
-        (dsh-bridge-send-and-exit))
-      (should-not sent)
-      (should (equal msg "No text or attachments to send.")))))
+                 (lambda (&rest _) (setq sent t))))
+        (should-error (dsh-bridge-send-and-exit) :type 'user-error))
+      (should-not sent))))
 
 (ert-deftest dsh-bridge-send-and-exit-failure-keeps-attachments ()
   "A failed send leaves the tag lines in place for a retry."
@@ -12093,8 +12107,8 @@ carries the host's settle."
     (should-not called)))
 
 (ert-deftest dsh-bridge-compact-aborts-on-no ()
-  "Declining the confirmation sends no compact request."
-  (let ((calls nil) (msg nil)
+  "Declining the confirmation sends no compact request; it refuses instead."
+  (let ((calls nil)
         (dsh-bridge--session-status nil)
         (dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t)))))
     (cl-letf (((symbol-function 'y-or-n-p) (lambda (_prompt) nil))
@@ -12104,16 +12118,13 @@ carries the host's settle."
                  (cons 200 '((queued . 0) (steering . 0)))))
               ((symbol-function 'dsh-bridge--request-async)
                (lambda (method path payload _callback)
-                 (push (list method path payload) calls)))
-              ((symbol-function 'message)
-               (lambda (&rest args) (setq msg (apply #'format args)))))
+                 (push (list method path payload) calls))))
       (with-temp-buffer
         (dsh-bridge-view-mode)
         (setq-local dsh-bridge--view-content-session "s1")
-        (dsh-bridge-compact-session)))
+        (should-error (dsh-bridge-compact-session) :type 'user-error)))
     (should-not (assoc "/sessions/compact"
-                       (mapcar (lambda (c) (cadr c)) calls)))
-    (should (string-match-p "aborted" msg))))
+                       (mapcar (lambda (c) (cadr c)) calls)))))
 
 (ert-deftest dsh-bridge-compact-noop-echo ()
   "A 200 no-op is final feedback, not an error."
