@@ -4065,7 +4065,7 @@ An untitled row falls back on the placeholder with
       (should archive)
       (should (equal (car archive) "POST"))
       (should (equal (cdr (assoc 'sessionId (caddr archive))) "s1"))
-      (should (string-match-p "archived session" msg)))))
+      (should (string-match-p "Session archived" msg)))))
 
 (ert-deftest dsh-bridge-archive-session-unpins-the-target ()
   "Archiving the pinned session drops the pin along with the roster refetch.
@@ -4094,7 +4094,7 @@ the session archived, and that observation retires the pin."
         (goto-char (point-min))
         (dsh-bridge-archive-session)))
     (should (null dsh-bridge-pinned-target))
-    (should (member "dsh-bridge: archived session T" msgs))))
+    (should (member "Session archived." msgs))))
 
 (ert-deftest dsh-bridge-archive-session-aborts-on-no ()
   "Archive declines without a request when the user answers no."
@@ -4139,7 +4139,7 @@ stopActivity."
       (should (= (length attempts) 2))
       (should (null (assoc 'stopActivity (caddr (car attempts)))))
       (should (eq t (cdr (assoc 'stopActivity (caddr (cadr attempts))))))
-      (should (string-match-p "archived session" msg)))))
+      (should (string-match-p "Session archived" msg)))))
 
 (ert-deftest dsh-bridge-unarchive-session-marshals-args ()
   "Unarchive POSTs the row's session id to /sessions/unarchive."
@@ -4163,7 +4163,7 @@ stopActivity."
       (should unarchive)
       (should (equal (car unarchive) "POST"))
       (should (equal (cdr (assoc 'sessionId (caddr unarchive))) "s1"))
-      (should (string-match-p "unarchived session" msg)))))
+      (should (string-match-p "Session unarchived" msg)))))
 
 (ert-deftest dsh-bridge-ensure-session-live-refuses-archived ()
   "An archived session is refused, never resumed."
@@ -8328,7 +8328,7 @@ boundary), and never echo when `dsh-bridge-turn-boundary-echo' is nil."
             (dsh-bridge--notification-handle-events
              '(((kind . "turn-complete") (sessionId . "s1") (reason . "completed"))))
             (should (string-match-p "T" msg))
-            (should (string-match-p "finished" msg))
+            (should (string-match-p "completed" msg))
             ;; A visible DSH-View of s1 suppresses the echo as redundant.
             (setq msg nil)
             (with-current-buffer (get-buffer-create "*dsh-bridge-output*")

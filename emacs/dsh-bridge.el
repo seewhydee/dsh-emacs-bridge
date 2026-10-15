@@ -1754,6 +1754,17 @@ raw cwd, or an empty string."
 	       (and (not (string-empty-p base)) base))))
       (or (alist-get 'cwd session) "")))
 
+(defun dsh-bridge--read-title (prompt &optional initial)
+  "Read a non-empty title for a session or workspace, prompting with PROMPT.
+This function continues prompting until a non-blank title is entered.
+INITIAL, if non-nil, is the initial input."
+  (let (title)
+    (while (string-empty-p
+	    (setq title (string-trim
+			 (read-string (concat prompt ": ") initial))))
+      (message "A non-empty title is required."))
+    title))
+
 ;;; Target helpers
 
 (defun dsh-bridge--buffer-session (&optional buffer)
@@ -6797,7 +6808,7 @@ prompt-history walk when the binding changes."
   (dsh-bridge--apply-session-directory session-id nil (current-buffer))
   (dsh-bridge--refresh-prompt-metadata)
   (when (called-interactively-p 'any)
-    (message "dsh-bridge: prompt buffer %s"
+    (message "Prompt buffer %s"
 	     (if (null session-id)
 		 "follows the pinned target"
 	       (format "bound to session \"%s\""
@@ -6824,26 +6835,24 @@ follows the pin.  This function does not fetch or refresh the roster."
 SESSION-ID must be a session id string.  If called interactively, prompt
 for a session and use its id.  A saved (cold) session is resumed
 automatically.  Use `dsh-bridge-unpin-target' to clear the pin."
-  (interactive
-   (list (dsh-bridge--read-session-id "Pinned target: ")))
+  (interactive (list (dsh-bridge--read-session-id "Pin session: ")))
   (cond
    ((null session-id)
-    (user-error "dsh-bridge: invalid session"))
+    (user-error "Invalid DSH session"))
    ((eq t (alist-get 'archived
 		     (dsh-bridge--session-for-id session-id)))
-    (user-error "dsh-bridge: session is archived; unarchive it first"))
+    (user-error "Session is archived; unarchive it first"))
    (t
     (dsh-bridge--set-pinned-target session-id)
     (dsh-bridge--refresh-sessions-buffer)
-    (message "dsh-bridge: pinned target %s"
-	     (dsh-bridge--session-label session-id nil nil t)))))
+    (message "Target session pinned."))))
 
 (defun dsh-bridge-unpin-target ()
   "Clear the pinned target; the bridge falls back to last-active."
   (interactive)
   (dsh-bridge--set-pinned-target nil)
   (dsh-bridge--refresh-sessions-buffer)
-  (message "dsh-bridge: unpinned target"))
+  (message "Target session unpinned."))
 
 ;;; Stopping a running session
 
@@ -6940,6 +6949,7 @@ host still settles an idle agent as a no-op."
 	 (t
 	  (message "dsh-bridge: %s"
 		   (dsh-bridge--error-message nil status alist)))))))))
+
 (defun dsh-bridge-compact-session (&optional session)
   "Compact the context of the session at hand.
 This is the DSH session the buffer is acting on, or the session at point
@@ -7225,7 +7235,7 @@ change the pinned target session."
   (interactive)
   (let ((id (dsh-bridge--session-at-point)))
     (if (null id)
-	(message "dsh-bridge: no session under point")
+	(message "No session at point.")
       (let ((session (dsh-bridge--session-for-id id)))
 	(dsh-bridge--ensure-session-live session)
 	;; `pop-to-buffer-same-window' takes no display action.
@@ -7255,10 +7265,10 @@ to read it."
 	session)
     (cond
      ((null id)
-      (message "dsh-bridge: no session under point"))
+      (message "No session at point."))
      ((progn (setq session (dsh-bridge--session-for-id id))
 	     (eq (alist-get 'archived session) t))
-      (message "dsh-bridge: session \"%s\" is archived; unarchive it first"
+      (message "Session \"%s\" is archived; unarchive it first."
 	       (dsh-bridge--session-label id nil nil t)))
      ((or (assoc id dsh-bridge--pending-questions)
 	  (assoc id dsh-bridge--pending-approvals))
@@ -7304,9 +7314,9 @@ is a display-and-target choice, and the host resumes the session when a
 later request actually acts on it."
   (interactive)
   (let ((id (dsh-bridge--session-at-point)))
-    (if (null id)
-	(message "dsh-bridge: no session under point")
-      (dsh-bridge-pin-target id))))
+    (if id
+	(dsh-bridge-pin-target id)
+      (message "No session at point."))))
 
 (defun dsh-bridge-peek-session ()
   "In a DSH-Sesssions buffer, view the session under point in a DSH-View buffer."
@@ -7314,7 +7324,7 @@ later request actually acts on it."
   (let ((id (dsh-bridge--session-at-point)))
     (if id
 	(dsh-bridge-fetch id t)
-      (message "dsh-bridge: no session under point"))))
+      (message "No session at point."))))
 
 (defun dsh-bridge-toggle-archived-sessions ()
   "Toggle whether archived sessions are shown in the session list.
@@ -7325,8 +7335,9 @@ hides them for the current buffer only."
     (user-error "Not in a DSH-Sessions buffer"))
   (setq dsh-bridge--sessions-archived-p (not dsh-bridge--sessions-archived-p))
   (dsh-bridge--list-sessions-in-buffer)
-  (message "dsh-bridge: %s archived sessions"
-	   (if dsh-bridge--sessions-archived-p "showing" "hiding")))
+  (message (if dsh-bridge--sessions-archived-p
+	       "Showing archived sessions."
+	     "Hiding archived sessions.")))
 
 ;; FIXME: this could be turned into a general-purpose command.
 (defun dsh-bridge-rename-session ()
@@ -7337,23 +7348,21 @@ resumed first."
   (interactive)
   (let ((id (dsh-bridge--session-at-point)))
     (if (null id)
-	(message "dsh-bridge: no session under point")
+	(message "No session at point.")
       (let* ((session (dsh-bridge--session-for-id id))
 	     (current (or (alist-get 'title session) ""))
-	     (title (read-string "Rename session to: " current)))
-	(if (string-empty-p title)
-	    (message "dsh-bridge: empty title")
-	  (let* ((result (dsh-bridge--request "POST" "/sessions/rename"
-					      (list (cons 'sessionId id)
-						    (cons 'title title))))
-		 (status (car result))
-		 (alist (cdr result)))
-	    (if (eq status 200)
-		(progn
-		  (dsh-bridge--list-sessions-in-buffer)
-		  (message "dsh-bridge: renamed session to %s" title))
-	      (message "dsh-bridge: %s"
-		       (dsh-bridge--error-message nil status alist)))))))))
+	     (title (dsh-bridge--read-title "Rename session to" current))
+	     (result (dsh-bridge--request "POST" "/sessions/rename"
+					  (list (cons 'sessionId id)
+						(cons 'title title))))
+	     (status (car result))
+	     (alist (cdr result)))
+	(if (eq status 200)
+	    (progn
+	      (dsh-bridge--list-sessions-in-buffer)
+	      (message "Session renamed."))
+	  (message "dsh-bridge: %s"
+		   (dsh-bridge--error-message nil status alist)))))))
 
 (defun dsh-bridge--request-archive (id stop-activity)
   "POST /sessions/archive for session ID.
@@ -7373,9 +7382,9 @@ archive.  Archiving is reversible with \\[dsh-bridge-unarchive-session]."
   (let ((id (dsh-bridge--session-at-point)))
     (cond
      ((null id)
-      (message "dsh-bridge: no session under point"))
+      (message "No session at point."))
      ((not (y-or-n-p "Archive session? "))
-      (message "dsh-bridge: aborted"))
+      (message "Aborted."))
      (t
       (let* ((result (dsh-bridge--request-archive id nil))
 	     (status (car result))
@@ -7391,8 +7400,7 @@ archive.  Archiving is reversible with \\[dsh-bridge-unarchive-session]."
 	(if (eq status 200)
 	    (progn
 	      (dsh-bridge--list-sessions-in-buffer)
-	      (message "dsh-bridge: archived session %s"
-		       (dsh-bridge--session-label id nil nil t)))
+	      (message "Session archived."))
 	  (message "dsh-bridge: %s"
 		   (dsh-bridge--error-message nil status alist))))))))
 
@@ -7401,7 +7409,7 @@ archive.  Archiving is reversible with \\[dsh-bridge-unarchive-session]."
   (interactive)
   (let ((id (dsh-bridge--session-at-point)))
     (if (null id)
-	(message "dsh-bridge: no session under point")
+	(message "No session at point.")
       (let* ((result (dsh-bridge--request "POST" "/sessions/unarchive"
 					  (list (cons 'sessionId id))))
 	     (status (car result))
@@ -7409,23 +7417,13 @@ archive.  Archiving is reversible with \\[dsh-bridge-unarchive-session]."
 	(if (eq status 200)
 	    (progn
 	      (dsh-bridge--list-sessions-in-buffer)
-	      (message "dsh-bridge: unarchived session %s"
-		       (dsh-bridge--session-label id nil nil t)))
+	      (message "Session unarchived."))
 	  ;; The registry drops the id without re-checking that the
 	  ;; session exists, so this never reports 404; 501 means the
 	  ;; installed plugin predates unarchive support.
 	  (message "dsh-bridge: %s"
 		   (or (dsh-bridge--error-message nil status alist)
 		       (format "failed to unarchive session %s" id))))))))
-
-(defun dsh-bridge--read-new-session-title ()
-  "Read a non-empty session title, re-prompting until one is entered."
-  (let (title)
-    (while (string-empty-p
-	    (setq title (string-trim
-			 (read-string "Session title (required): "))))
-      (message "dsh-bridge: a session title is required"))
-    title))
 
 (defun dsh-bridge-create-session (&optional set-title)
   "Create a new DSH session in an existing or new workspace.
@@ -7438,8 +7436,8 @@ before creating the session, rather than leaving the session untitled.
 This does not change the pinned target; the dispatcher's `+' key calls
 this command with SET-TITLE and then pins what it created."
   (interactive "P")
-  (let* ((workspace (dsh-bridge--read-workspace "Create session in workspace"))
-	 (title (and set-title (dsh-bridge--read-new-session-title)))
+  (let* ((workspace (dsh-bridge--read-workspace "Workspace for new session"))
+	 (title (and set-title (dsh-bridge--read-title "Session title")))
 	 (payload (append
 		   (if (stringp workspace)
 		       (list (cons 'workspaceId workspace))
@@ -7466,7 +7464,7 @@ this command with SET-TITLE and then pins what it created."
       (when sessions-buffer
 	(with-current-buffer sessions-buffer
 	  (dsh-bridge--sessions-goto-id session-id))))
-    (message "dsh-bridge: created a new session")
+    (message "Session created.")
     session-id))
 
 (defun dsh-bridge-rename-workspace ()
@@ -7477,28 +7475,30 @@ title, defaulting to the current workspace title."
   (let* ((id (dsh-bridge--session-at-point))
 	 (session (and id (dsh-bridge--session-for-id id)))
 	 (workspaceId (and session (alist-get 'workspaceId session))))
-    (if (null id)
-	(message "No DSH session at point.")
-      (unless workspaceId
-	(user-error "dsh-bridge: session \"%s\" has no workspace to rename"
-		    (dsh-bridge--session-label id nil nil t)))
+    (cond
+     ((null id)
+      (message "No DSH session at point."))
+     ((null session)
+      (user-error "dsh-bridge: no DSH session found; buffer may be out-of-date"))
+     ((null workspaceId)
+      (user-error "dsh-bridge: session \"%s\" has no workspace"
+	     (dsh-bridge--session-label id nil nil t)))
+     (t
       (let* ((current (or (alist-get 'workspace session) ""))
-	     (prompt (format "Rename workspace %s to: " current))
-	     (title (read-string prompt current)))
-	(when (string-empty-p title)
-	  (user-error "dsh-bridge: empty title"))
-	(let* ((payload `((workspaceId . ,workspaceId)
-			  (title . ,title)))
-	       (result (dsh-bridge--request "POST" "/workspaces/rename"
-					    payload))
-	       (status (car result))
-	       (alist (cdr result)))
-	  (if (eq status 200)
-	      (progn
-		(dsh-bridge--list-sessions-in-buffer)
-		(message "dsh-bridge: renamed workspace to %s" title))
-	    (message "dsh-bridge: %s"
-		     (dsh-bridge--error-message nil status alist))))))))
+	     (prompt (format "Rename workspace %s to" current))
+	     (title (dsh-bridge--read-title prompt current))
+	     (payload `((workspaceId . ,workspaceId)
+			(title . ,title)))
+	     (result (dsh-bridge--request "POST" "/workspaces/rename"
+					  payload))
+	     (status (car result))
+	     (alist (cdr result)))
+	(if (eq status 200)
+	    (progn
+	      (dsh-bridge--list-sessions-in-buffer)
+	      (message "Workspace renamed."))
+	  (message "dsh-bridge: %s"
+		   (dsh-bridge--error-message nil status alist))))))))
 
 ;;; Session report (DSH-Describe)
 
@@ -7890,19 +7890,22 @@ failure reason, never a fake zero."
       (when tokens	(dsh-bridge--describe-tokens tokens))
       (when context (dsh-bridge--describe-context context breakdown)))))
 
-(defun dsh-bridge--describe-open-prompt (&optional id)
+(defun dsh-bridge--describe-open-prompt ()
   "Open the DSH-Prompt buffer for the described session."
   (interactive)
-  (let ((id (or id dsh-bridge--describe-session)))
+  (let ((id dsh-bridge--describe-session))
     (if id
-	(pop-to-buffer (dsh-bridge--prompt-buffer id) dsh-bridge-prompt-display-action)
-      (message "dsh-bridge: no session"))))
+	(pop-to-buffer (dsh-bridge--prompt-buffer id)
+		       dsh-bridge-prompt-display-action)
+      (message "No DSH session for this buffer."))))
 
-(defun dsh-bridge--describe-open-view (&optional id)
+(defun dsh-bridge--describe-open-view ()
   "Fetch the described session's latest turn into a DSH-View buffer."
   (interactive)
-  (let ((id (or id dsh-bridge--describe-session)))
-    (if id (dsh-bridge-fetch id) (message "dsh-bridge: no session"))))
+  (let ((id dsh-bridge--describe-session))
+    (if id
+	(dsh-bridge-fetch id)
+      (message "No DSH session for this buffer."))))
 
 ;;;###autoload
 (defun dsh-bridge-describe-session-at-mouse (event)
@@ -8123,13 +8126,15 @@ the cache-only refresh."
     (message "dsh-bridge: session \"%s\" %s"
 	     (dsh-bridge--session-label session-id nil nil t)
 	     (pcase reason
-	       ("completed" "finished")
-	       ("aborted" "interrupted")
-	       ("error" (if failure
-			    (format "failed \u2014 %s" (dsh-bridge--failure-text failure))
-			  "failed"))
-	       ("max-tokens" "stopped at the token limit")
+	       ("completed" "completed")
+	       ("aborted" "aborted")
 	       ("blocked" "blocked")
+	       ("error"
+		(if failure
+		    (format "failed \u2014 %s"
+			    (dsh-bridge--failure-text failure))
+		  "failed"))
+	       ("max-tokens" "stopped at token limit")
 	       (_ "ended")))))
 
 (defun dsh-bridge--view-blocked-fill (session-id)
