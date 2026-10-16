@@ -2033,13 +2033,6 @@ Untitled sessions are not offered for completion."
 	 ((null (cdr group)) (alist-get 'id (car group)))
 	 (t (dsh-bridge--read-ambiguous-session title group)))))))
 
-(defun dsh-bridge--read-session-override (prompt)
-  "With a prefix argument, read a session for one-shot use.
-Returns the chosen session id, or nil without a prefix argument (the caller
-then uses the effective session)."
-  (when current-prefix-arg
-    (dsh-bridge--read-session-id prompt)))
-
 ;;; Workspace selection
 
 (defun dsh-bridge--read-ambiguous-workspace (label workspaces)
@@ -4502,7 +4495,8 @@ invoked from.  SENT-AT, if non-nil, is the ms-epoch the prompt was sent;
 The session is the effective session of the current buffer; with a
 prefix argument, fetch from a chosen session for this call only.
 If SAME-WINDOW is non-nil, prefer to show the buffer in the same window."
-  (interactive (list (dsh-bridge--read-session-override "Fetch from session: ")))
+  (interactive (list (when current-prefix-arg
+		       (dsh-bridge--read-session-id "Fetch from session: "))))
   (let ((target (or session-id (dsh-bridge--focus-session)))
 	(revisions dsh-bridge--status-revision))
     (pcase-let ((`(,status ,body ,http-status)
