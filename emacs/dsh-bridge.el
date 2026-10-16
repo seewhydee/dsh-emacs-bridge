@@ -3125,11 +3125,10 @@ recorded splice."
 	:tail-length tail-length))
 
 (defun dsh-bridge--view-provenance-intact-p (provenance)
-  "Whether the buffer still looks exactly like PROVENANCE describes.
-The cheap drift guard for in-place splicing: the buffer must have the recorded
-body plus suffix length, and a rendered-open turn must still carry its terminal
-furniture line (identified by the `dsh-bridge-turn-marker' property) after the
-recorded body."
+  "Whether the current DSH-View buffer still matches PROVENANCE.
+The buffer must have the recorded body plus suffix length, and an open
+turn must still carry its terminal line with `dsh-bridge-turn-marker'
+property."
   (let ((body (plist-get provenance :body-length))
 	(tail (plist-get provenance :tail-length)))
     (and (equal (buffer-size) (+ body tail))
@@ -4516,15 +4515,7 @@ If SAME-WINDOW is non-nil, prefer to show the buffer in the same window."
 
 (defun dsh-bridge-view-toggle-activity ()
   "Toggle whether this DSH-View buffer shows turn activity.
-Turn activity is the shown turn's tool calls, their results, and one-line
-thinking summaries; the full reasoning text never leaves the host.  The
-toggle is buffer-local and starts from `dsh-bridge-view-activity'.  A view
-waiting for a just-sent turn's first content has no record yet, but the
-toggle still works there: turning it on mid-wait is the only way to render
-the activity that arrives before the first reply.  A pushed message (no turn
-identity at all) signals a `user-error' rather than flipping a state nothing
-renders.  The rebuild keeps the reader's place: the new tail for a following
-view parked at the end, the approximate position otherwise."
+Turn activity includes tool calls and one-line thinking summaries."
   (interactive)
   (unless (derived-mode-p 'dsh-bridge-view-mode)
     (user-error "Not in a DSH-View buffer"))
@@ -4597,53 +4588,42 @@ messages were pending, only the latest is shown."
 
 (defun dsh-bridge--view-fill (session-id turn &optional cwd no-turns-refresh preserve-point)
   "Fill the current buffer with TURN as the shown content of SESSION-ID.
-The current buffer, which the caller is responsible for selecting and/or
-creating, is put into `dsh-bridge-view-mode' if it is not already.  This
-function does not perform any window-management.
+The current buffer is put into `dsh-bridge-view-mode' if it is not
+already.  This function does no window-management.
 
 TURN is either a turn record (see `dsh-bridge--turns-cache'), a raw text
 string (a pushed message with no turn identity), or nil (empty content).
 
 CWD is the session's current working directory.
 
-NO-TURNS-REFRESH, if non-nil, means not to refresh the session's turn
-list (if omitted or default, a record fill refreshes this so the `(k/n)'
-position count remains up-to-date).
+NO-TURNS-REFRESH, if non-nil, means not to refresh the turn list.
 
-If PRESERVE-POINT, a turn that merely grew is spliced in place: the recorded
-provenance (`dsh-bridge--view-provenance') is checked against the cached
-record's epoch, turn, render-item identities and activity state, and any
-mismatch falls back to a full re-render.	 Point is left alone unless it sat at
-the body end, in which case it follows the new tail.  A rebuild — no
-PRESERVE-POINT, or a splice fallback — lands at the end when the view is
-following and PRESERVE-POINT was given, otherwise at the top.
-
-The DSH-View buffer's turn-following state is preserved when refilling
-the same session, and dropped when the shown session changes; so is the
-buffer-local activity toggle, which is reset to `dsh-bridge-view-activity'.
-Filling also ends the buffer's post-send waiting state
-(`dsh-bridge--view-waiting') and mid-browse state (`dsh-bridge--view-browsing'),
-so callers that render content need not clear them themselves, and the header
-computed below already carries the settled `(k/n)' position."
+PRESERVE-POINT, if non-nil, means to try to splice any turn update in
+place, leaving point alone (or at the end of the buffer if there).
+However, if the turn's provenance record (`dsh-bridge--view-provenance')
+does not match the cached turn data, a full re-render must performed,
+and splicing in place is not possible."
   (unless (derived-mode-p 'dsh-bridge-view-mode)
     (dsh-bridge-view-mode))
   (add-hook 'kill-buffer-hook #'dsh-bridge--view-ticker-ensure nil t)
   (setq-local revert-buffer-function #'dsh-bridge--revert-output)
+  ;; If refilling the session, preserve turn-following state and reset
+  ;; the turn activity view toggle to its global default.  If
+  ;; switching to a new session, reset turn-following to nil; the
+  ;; caller is responsible for enabling it.
   (let ((old dsh-bridge--view-content-session))
     (setq-local dsh-bridge--view-content-session session-id)
     (unless (equal session-id old)
       (setq-local dsh-bridge--view-follow nil)
       (setq-local dsh-bridge--view-activity dsh-bridge-view-activity)))
-  ;; Rendering content ends the placeholder.  Clearing before the header is
-  ;; computed (below) means an accepted refill shows its position at once
-  ;; rather than waiting for the next ticker repaint; `--view-waiting-fill'
-  ;; re-sets the state and the awaited turn after its own fill.
+  ;; Reset other DSH-View vars.
   (setq-local dsh-bridge--view-waiting nil)
   (setq-local dsh-bridge--view-browsing nil)
   (setq-local dsh-bridge--view-turn
 	      (and (not (stringp turn)) (alist-get 'turn turn)))
-  (dsh-bridge--apply-session-directory session-id cwd (current-buffer))
-  (when (and session-id (not no-turns-refresh) (not (stringp turn)))
+  (dsh-bridge--apply-session-directory session-id cwd)
+  ;; Fetch the turns data if necessary.
+  (unless (or (null session-id) no-turns-refresh (stringp turn))
     (dsh-bridge--view-turns-refresh t))
   (let* ((old-point (point))
 	 (epoch (car (dsh-bridge--turns-cache-entry session-id)))
@@ -4651,10 +4631,10 @@ computed below already carries the settled `(k/n)' position."
 	 (items (and record-p (dsh-bridge--view-turn-items turn)))
 	 (new-keys (mapcar #'car items))
 	 (prov dsh-bridge--view-provenance)
-	 ;; Splice only when the buffer provably holds a prefix of the new
-	 ;; turn: an equal, numeric history epoch means the turn can only have
-	 ;; grown by appending items (the plugin's `turnsSince' contract), and
-	 ;; an equal activity state means the render rules are unchanged.
+	 ;; Before splicing, verify that the buffer holds a prefix of
+	 ;; the new turn.  The history epoch must be equal, meaning
+	 ;; the turn can grew by appending items, and the activity
+	 ;; state must be the same.
 	 (splice (and preserve-point
 		      record-p
 		      (numberp epoch)
