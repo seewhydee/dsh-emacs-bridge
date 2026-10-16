@@ -755,9 +755,8 @@ Callers invoke this on a transport failure or a 401/404."
 
 (defun dsh-bridge--plugin-install-state ()
   "Return the DSH bridge plugin's installation state.
-One of `installed' (profile manifest lists the plugin), `not-installed'
-(profile exists but plugin not in manifest), or `no-profile' (no profile
-directory at all, possibly because DSH has never been run here).
+One of `installed', `not-installed' (profile exists but plugin not in
+manifest), or `no-profile' (no profile directory exists).
 
 This function works by reading the package.json manifest in DSH's
 profile directory; the plugin counts as installed if it appears in
@@ -782,13 +781,7 @@ profile directory; the plugin counts as installed if it appears in
 
 (defun dsh-bridge--warn-plugin-unavailable (state)
   "Warn that the DSH bridge plugin is missing or not loaded, from STATE.
-STATE is the `dsh-bridge--bridge-status' result.  The warning's type is
-the `dsh-bridge' custom group, which `display-warning' prints ahead of
-the message, so the messages do not name the bridge themselves.  The
-message splits on `dsh-bridge--plugin-install-state': an installed
-plugin means a missing restart, an absent one means not installed, and a
-version mismatch names both versions, since the plugin and this package
-are released in lockstep and must be upgraded together."
+STATE is the `dsh-bridge--bridge-status' result."
   (let ((installed (eq (dsh-bridge--plugin-install-state) 'installed)))
     (display-warning
      'dsh-bridge
@@ -817,9 +810,8 @@ are released in lockstep and must be upgraded together."
 (defun dsh-bridge--ensure-plugin ()
   "Check for DSH bridge plugin availability, warning once if unavailable.
 This function is called at the top of every bridge request.  The
-diagnosis runs only once per session; later commands proceed and
-surface an ordinary request error if the bridge is unavailable or
-incompatible."
+diagnosis runs only once per session; later commands proceed and surface
+an ordinary request error if the bridge is unavailable or incompatible."
   (let ((state (or dsh-bridge--bridge-status-cache ; use cache or do a probe
 		   (setq dsh-bridge--bridge-status-cache
 			 (dsh-bridge--bridge-status)))))
@@ -834,9 +826,8 @@ incompatible."
 
 (defun dsh-bridge--parse-response (buffer)
   "Return (STATUS . BODY) for BUFFER.
-STATUS is the HTTP response status code (`url-http-response-status', or nil
-when the buffer carries none); BODY is the UTF-8 text after the response
-headers (\"\" when no header terminator is present)."
+STATUS is the HTTP response status code or nil; BODY is the UTF-8 text
+after the response headers (\"\" when no header terminator is present)."
   (with-current-buffer buffer
     (let ((status (bound-and-true-p url-http-response-status)))
       (goto-char (point-min))
@@ -859,23 +850,21 @@ headers (\"\" when no header terminator is present)."
 
 ;;; Session status
 
-(defun dsh-bridge--status-set (session-id state &optional start-ms)
-  "Record SESSION-ID's status as STATE (`running' or `idle').
+(defun dsh-bridge--status-set (id state &optional start-ms)
+  "Record the status for session ID as STATE (`running' or `idle').
 START-MS, if non-nil, specifies the ms-epoch turn-start time kept for
 the elapsed ticker; it is dropped when the session goes idle."
-  (when session-id
-    (setq dsh-bridge--status-revision
-	  (cons (cons session-id
-		      (1+ (or (cdr (assoc session-id dsh-bridge--status-revision)) 0)))
-		(assoc-delete-all session-id dsh-bridge--status-revision))))
-  (setq dsh-bridge--session-status
-	(assoc-delete-all session-id dsh-bridge--session-status))
-  (when (and session-id (memq state '(running idle)))
-    (push (cons session-id
-		(cons state (if (and (eq state 'running) (numberp start-ms))
-				start-ms
-			      nil)))
-	  dsh-bridge--session-status)))
+  (when id
+    (let* ((entry (assoc id dsh-bridge--status-revision))
+	   (revision (1+ (or (cdr entry) 0))))
+      (setq dsh-bridge--status-revision
+	    (cons (cons id revision)
+		  (assoc-delete-all id dsh-bridge--status-revision))))
+    (setq dsh-bridge--session-status
+	  (assoc-delete-all id dsh-bridge--session-status))
+    (when (memq state '(running idle))
+      (let ((epoch (and (eq state 'running) (numberp start-ms) start-ms)))
+	(push (cons id (cons state epoch)) dsh-bridge--session-status)))))
 
 ;; A request's snapshot can be older than a frame handled while it was in
 ;; flight: `dsh-bridge--http' waits with `accept-process-output' on a nil
@@ -889,19 +878,19 @@ not name counts as revision 0."
   (/= (or (cdr (assoc session-id revisions)) 0)
       (or (cdr (assoc session-id dsh-bridge--status-revision)) 0)))
 
-(defun dsh-bridge--status-set-if-unmoved (revisions session-id state &optional start-ms)
+(defun dsh-bridge--status-set-if-unmoved (revisions session-id state
+						    &optional start-ms)
   "Record SESSION-ID's status as STATE unless a live frame moved it.
 REVISIONS is the `dsh-bridge--status-revision' snapshot taken before the
-request whose snapshot produced STATE; use this for any status derived
-from a request rather than from a frame."
+request whose snapshot produced STATE."
   (unless (dsh-bridge--status-moved-p revisions session-id)
     (dsh-bridge--status-set session-id state start-ms)))
 
 (defun dsh-bridge--status-turn-start (session-id)
   "Return the ms-epoch turn-start time for SESSION-ID, or nil.
 The start time is set while the session's status is `running' and
-cleared when it goes idle.  The value can also be nil if Emacs did not
-see any \"turn-start\" frame for the session."
+cleared when it goes idle.  The value can also be nil if no
+\"turn-start\" frame was emitted for the session."
   (let ((entry (and session-id
 		    (assoc session-id dsh-bridge--session-status))))
     (cdr-safe (cdr-safe entry))))
