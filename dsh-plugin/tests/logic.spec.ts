@@ -24,7 +24,7 @@ import {
   askUserResolvedMessage,
   assistantMessageHasText,
   assistantMessageText,
-  assistantTextForMessage,
+  assistantTurnForMessage,
   assistantTurns,
   cachedTitleValue,
   changedFiles,
@@ -1449,23 +1449,34 @@ describe('isCompletedTurnAnchor', () => {
   })
 })
 
-describe('assistantTextForMessage', () => {
+describe('assistantTurnForMessage', () => {
   const events: SessionEventLike[] = [
     {
       time: 1,
       type: 'assistant/message',
-      data: { message: { id: 'm1', content: [{ type: 'text', text: 'hello ' }, { type: 'tool-call' }, { type: 'text', text: 'world' }] } },
+      data: { turn: 7, message: { id: 'm1', content: [{ type: 'text', text: 'hello' }] } },
     },
     { time: 2, type: 'user/message', data: { message: { id: 'm2', content: [{ type: 'text', text: 'hi' }] } } },
+    {
+      time: 3,
+      type: 'assistant/message',
+      data: { message: { id: 'm3', content: [{ type: 'text', text: 'no turn' }] } },
+    },
   ]
+  const log = { nodes: [0, 1, 2], events }
 
-  it('joins the text blocks of the addressed assistant message', () => {
-    expect(assistantTextForMessage(events, 'm1')).toBe('hello world')
+  it('finds the turn of the addressed visible assistant message', () => {
+    expect(assistantTurnForMessage(log, 'm1')).toBe(7)
   })
 
-  it('returns undefined for an unknown id or a non-assistant event', () => {
-    expect(assistantTextForMessage(events, 'm9')).toBeUndefined()
-    expect(assistantTextForMessage(events, 'm2')).toBeUndefined()
+  it('returns undefined for an unknown id, a non-assistant event, or no numeric turn', () => {
+    expect(assistantTurnForMessage(log, 'm9')).toBeUndefined()
+    expect(assistantTurnForMessage(log, 'm2')).toBeUndefined()
+    expect(assistantTurnForMessage(log, 'm3')).toBeUndefined()
+  })
+
+  it('does not resolve a raw-log message hidden from the current surface', () => {
+    expect(assistantTurnForMessage({ nodes: [1], events }, 'm1')).toBeUndefined()
   })
 })
 

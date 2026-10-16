@@ -1,7 +1,7 @@
 // dsh-emacs-bridge — "Send to Emacs" action for the assistant message actions
 // row. The browser addresses the durable message by id; the host resolves its
-// text from the session log and deposits it into the outbox for Emacs to pull
-// (the chat node tree no longer rides the client session snapshot).
+// turn from the session log and deposits that reference into the outbox for
+// Emacs to pull (the chat node tree no longer rides the client session snapshot).
 // Copyright (C) 2026  Chong Yidong <cyd@stupidchicken.com>
 //
 // This program is free software: you can redistribute it and/or modify

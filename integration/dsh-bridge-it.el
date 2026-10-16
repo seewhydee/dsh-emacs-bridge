@@ -29,8 +29,8 @@
 ;;; - `dsh-bridge-it-notifications-reconnect`: the SSE listener survives the
 ;;;   host dying and reconnects to a fresh fixture on the same port.
 ;;; - `dsh-bridge-it-list-sessions`: DSH-Sessions renders the live roster.
-;;; - `dsh-bridge-it-receive-outbox`: a DSH->Emacs outbox deposit lands in a
-;;;   DSH-View buffer and the ack drains the host outbox.
+;;; - `dsh-bridge-it-receive-outbox`: a turn-addressed outbox deposit lands in
+;;;   a DSH-View buffer and the ack drains the host outbox.
 ;;; - `dsh-bridge-it-cold-resume`: a persisted-only session resumes on demand
 ;;;   when Emacs sends to it after a host restart.
 ;;; - `dsh-bridge-it-attach-file`: C-c C-a staging plus send-time tag
@@ -484,38 +484,74 @@ registry."
       (kill-buffer "*dsh-bridge-sessions*"))))
 
 (ert-deftest dsh-bridge-it-receive-outbox ()
-  "A DSH->Emacs outbox deposit lands in a DSH-View buffer and acks.
-Deposits through the bridge's own outbox route (the seam the web UI's
-\"Send to Emacs\" action uses, minus the message-id indirection), receives
-with the real `dsh-bridge-receive', and proves the ack drained the host
-outbox: a second receive reports nothing to receive."
+  "A turn-addressed outbox deposit lands in a DSH-View buffer and acks.
+Creates a real assistant message, deposits its durable id through the seam
+the web UI's \"Send to Emacs\" action uses, and receives it with the real
+`dsh-bridge-receive'.  The addressed turn, not the session's newest turn,
+renders before the ack drains the host outbox."
   (dsh-bridge-it--with-fixture
+    (dsh-bridge-it--script-mock
+     (vector (list :kind "text" :text "Pushed from DSH.")
+             (list :kind "text" :text "A later turn.")))
     (let ((session-id (dsh-bridge-it--create-session
                        (expand-file-name "../" dsh-bridge-it--directory))))
-      (dsh-bridge-it--post "/dsh-bridge/outbox"
-                           (list (cons 'sessionId session-id)
-                                 (cons 'text "Pushed from DSH.")))
-      (dsh-bridge-receive)
-      (let ((buffer (or (dsh-bridge-it--view session-id)
-                        (get-buffer "*dsh-bridge-output*"))))
-        (should buffer)
-        (with-current-buffer buffer
-          (should (derived-mode-p 'dsh-bridge-view-mode))
-          (should (string-match-p "Pushed from DSH\\." (buffer-string)))))
-      ;; The ack drained the host outbox.
-      (should (null (alist-get 'entries
-                               (cdr (dsh-bridge--request "GET" "/outbox" nil)))))
-      ;; ... and a second receive says so (substring match: the exact wording
-      ;; is the package's own).
-      (let (seen)
-        (cl-letf (((symbol-function 'message)
-                   (lambda (format-string &rest args)
-                     (push (apply #'format-message format-string args) seen))))
-          (dsh-bridge-receive))
-        (should (seq-some (lambda (m) (string-match-p "nothing to receive" m))
-                          seen)))
-      (when (get-buffer "*dsh-bridge-output*")
-        (kill-buffer "*dsh-bridge-output*")))))
+      (dsh-bridge-it--send-text session-id "First prompt.")
+      (should (dsh-bridge-it--wait-for-completed-turn session-id 30000))
+      (dsh-bridge-it--send-text session-id "Second prompt.")
+      (should (dsh-bridge-it--wait
+               (lambda ()
+                 (let* ((result (dsh-bridge--request
+                                 "GET" (dsh-bridge--path "/turns" session-id) nil))
+                        (newest (car (alist-get 'turns (cdr result)))))
+                   (and newest (equal (alist-get 'turn newest) 2)
+                        (alist-get 'endSeq newest))))
+               30000))
+      ;; The second request replays the first assistant message and thereby
+      ;; exposes its host-minted id to the test.
+      (let* ((requests (alist-get 'requests
+                                  (dsh-bridge-it--get "/mock-llm/requests")))
+             (main (seq-filter (lambda (request)
+                                 (null (alist-get 'purpose request)))
+                               requests))
+             (messages (and (= (length main) 2)
+                            (alist-get 'messages (elt main 1))))
+             (assistant
+              (seq-find
+               (lambda (message)
+                 (and (equal (alist-get 'role message) "assistant")
+                      (seq-some (lambda (block)
+                                  (and (equal (alist-get 'type block) "text")
+                                       (equal (alist-get 'text block)
+                                              "Pushed from DSH.")))
+                                (alist-get 'content message))))
+               messages))
+             (message-id (and assistant (alist-get 'id assistant))))
+        (should message-id)
+        (dsh-bridge-it--post "/dsh-bridge/outbox"
+                             (list (cons 'sessionId session-id)
+                                   (cons 'messageId message-id)))
+        (dsh-bridge-receive)
+        (let ((buffer (or (dsh-bridge-it--view session-id)
+                          (get-buffer "*dsh-bridge-output*"))))
+          (should buffer)
+          (with-current-buffer buffer
+            (should (derived-mode-p 'dsh-bridge-view-mode))
+            (should (equal dsh-bridge--view-turn 1))
+            (should (eq dsh-bridge--view-browsing t))
+            (should-not dsh-bridge--view-follow)
+            (should (string-match-p "Pushed from DSH\\." (buffer-string)))
+            (should-not (string-match-p "A later turn\\." (buffer-string)))))
+        ;; The ack drained the host outbox.
+        (should (null (alist-get 'entries
+                                 (cdr (dsh-bridge--request "GET" "/outbox" nil)))))
+        (let (seen)
+          (cl-letf (((symbol-function 'message)
+                     (lambda (format-string &rest args)
+                       (push (apply #'format-message format-string args) seen))))
+            (dsh-bridge-receive))
+          (should (seq-some (lambda (m) (string-match-p "No messages" m)) seen)))
+        (when (get-buffer "*dsh-bridge-output*")
+          (kill-buffer "*dsh-bridge-output*"))))))
 
 (ert-deftest dsh-bridge-it-cold-resume ()
   "A persisted-only session resumes on demand when Emacs sends to it.

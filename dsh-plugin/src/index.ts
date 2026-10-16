@@ -72,9 +72,9 @@
 //        else the full list (incremental: true|false)
 //   POST /dsh-bridge/draft { text, sessionId? }   -> push a composer draft (SSE)
 //   GET  /dsh-bridge/outbox                       -> collect DSH->Emacs entries
-//   POST /dsh-bridge/outbox { text | messageId, sessionId, source? }
-//        -> deposit an entry (sessionId required: every entry is session-scoped;
-//        a messageId deposit resolves the assistant message's text host-side)
+//   POST /dsh-bridge/outbox { messageId, sessionId, source? }
+//        -> deposit a turn-addressed entry (sessionId required; the host
+//        resolves the visible assistant message's turn from the current surface)
 //   POST /dsh-bridge/outbox/ack { ids }           -> clear collected entries
 //   POST /dsh-bridge/answer { questionId, sessionId, answers? | cancelled? }
 //        -> settle the bridge's pending ask-user waterfall answerer
@@ -180,7 +180,14 @@ import type { Agent, AgentOptions, ModelSelection, ModelSelectionRef } from '@de
 import { installModelSelection } from '@deepseek-ai/dsh-agent'
 import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
 import { createUserMessage, type ContentBlock } from '@deepseek-ai/dsh-llm'
-import type { Session, SessionHeader, SessionId } from '@deepseek-ai/dsh-session'
+import { foldSurface } from '@deepseek-ai/dsh-session'
+import type {
+  Session,
+  SessionEvent,
+  SessionHeader,
+  SessionId,
+  SessionMessageProjection,
+} from '@deepseek-ai/dsh-session'
 // Type-only: pulls the `user-questions/request` waterfall declaration (the
 // ask-user seam the bridge answers) into the cordis Events merge. Erased at
 // build; never a runtime import.
@@ -206,7 +213,7 @@ import {
   askUserMessage,
   askUserResolvedMessage,
   assistantMessageHasText,
-  assistantTextForMessage,
+  assistantTurnForMessage,
   assistantTurns,
   attachmentErrorHttpStatus,
   buildEmacsInstallForm,
@@ -343,9 +350,10 @@ interface WebServerService {
   port: number
 }
 
-/** Minimal face of the `sessions` service: enumerate live sessions. */
+/** Minimal face of the `sessions` service: live sessions and detached surface replay. */
 interface SessionService {
   list(): Session[]
+  readonly messageProjections: readonly SessionMessageProjection[]
 }
 
 /**
@@ -381,7 +389,7 @@ interface SessionPersistenceService {
 /** Minimal face of one open read handle on a stored session. */
 interface SessionReadHandleLike {
   readonly header: SessionHeader
-  read(): Promise<{ events: readonly SessionEventLike[] }>
+  read(): Promise<{ events: readonly SessionEvent[] }>
   close(): Promise<void>
 }
 
@@ -1992,22 +2000,27 @@ export function apply(ctx: Context, config?: Config): void {
   })
 
   /**
-   * The durable text of one assistant message, addressed by its message id,
-   * WITHOUT resuming anything: a live session serves its event snapshot, and
-   * a cold (persisted-only) session is read once through a read handle — a
-   * deposit is a read, not a targeting operation, so it must not spawn an
-   * agent. Returns undefined when the session is unknown or no logged
-   * assistant message carries the id.
+   * The turn of one visible assistant message, addressed by its message id,
+   * WITHOUT resuming anything: a live session serves its current surface, and
+   * a cold (persisted-only) session's surface is reconstructed through one
+   * read handle — a deposit is a read, not a targeting operation, so it must
+   * not spawn an agent. Returns undefined when the session is unknown or no
+   * visible assistant message with a numeric turn carries the id.
    */
-  async function resolveMessageText(sessionId: string, messageId: string): Promise<string | undefined> {
+  async function resolveMessageTurn(sessionId: string, messageId: string): Promise<number | undefined> {
     const live = sessions.list().find(s => String(s.id) === sessionId)
     if (live !== undefined) {
-      return assistantTextForMessage(live.snapshotEvents() as readonly SessionEventLike[], messageId)
+      return assistantTurnForMessage(
+        { nodes: live.surface.nodes, events: live.snapshotEvents() },
+        messageId,
+      )
     }
     try {
       const handle = await sessionPersistence.open(sessionId, 'read')
       try {
-        return assistantTextForMessage((await handle.read()).events, messageId)
+        const events = (await handle.read()).events
+        const { nodes } = foldSurface(events, sessions.messageProjections)
+        return assistantTurnForMessage({ nodes, events }, messageId)
       } finally {
         await handle.close()
       }
@@ -2538,7 +2551,7 @@ export function apply(ctx: Context, config?: Config): void {
       if (req.method === 'POST' && pathname === '/dsh-bridge/outbox') {
         try {
           const body = (await readJson(req)) as
-            { sessionId?: unknown; source?: unknown; text?: unknown; messageId?: unknown } | undefined
+            { sessionId?: unknown; source?: unknown; messageId?: unknown } | undefined
           // Every entry is session-scoped (UX plan 2, Section 1.4): a deposit
           // without a sessionId is a contract violation, not a bridge message.
           const sessionId = outboxSessionId(body)
@@ -2546,30 +2559,21 @@ export function apply(ctx: Context, config?: Config): void {
             sendJson(res, 400, { error: 'sessionId is required' })
             return
           }
-          // Two deposit shapes: a literal `text`, or a durable `messageId` the
-          // host resolves against the session log (the "Send to Emacs" action —
-          // the chat node tree no longer rides the client session snapshot, so
-          // the browser addresses the message and the host owns its text).
-          // Resolution is a pure read: a cold session's log is read through a
-          // persistence handle, never resumed.
-          let text = typeof body?.text === 'string' ? body.text : ''
-          if (typeof body?.messageId === 'string' && body.messageId !== '') {
-            const resolved = await resolveMessageText(sessionId, body.messageId)
-            if (resolved === undefined) {
-              sendJson(res, 404, { error: `no assistant message ${body.messageId}` })
-              return
-            }
-            text = resolved
+          const messageId = body?.messageId
+          if (typeof messageId !== 'string' || messageId === '') {
+            sendJson(res, 400, { error: 'messageId is required' })
+            return
           }
-          if (text.trim() === '') {
-            sendJson(res, 400, { error: 'text is required' })
+          const turn = await resolveMessageTurn(sessionId, messageId)
+          if (turn === undefined) {
+            sendJson(res, 404, { error: `no visible assistant message ${messageId}` })
             return
           }
           const evicted = outbox.deposit({
             id: randomUUID(),
             sessionId,
             source: typeof body?.source === 'string' ? body.source : 'bridge',
-            text,
+            turn,
             ts: Date.now(),
           })
           // Notify every subscribed client (the browser and Emacs) that new

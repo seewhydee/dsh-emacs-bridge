@@ -53,8 +53,8 @@ interface ConversationService {
 }
 
 /**
- * Deposit one assistant message into the host outbox, addressed by durable
- * message id (the host resolves the text from the session log).
+ * Deposit one assistant message's turn into the host outbox, addressed by
+ * durable message id (the host resolves its turn from the current surface).
  */
 async function depositOutbox(sessionId: string, messageId: string): Promise<void> {
   const { ok, status } = await callBridge({

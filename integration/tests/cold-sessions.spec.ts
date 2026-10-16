@@ -31,6 +31,7 @@
 // The second half drives the documented cold WRITE paths: naming a persisted-
 // only id in POST /dsh-bridge/send resumes the session on demand and lands the
 // prompt, and POST /dsh-bridge/sessions/resume brings a cold id live directly.
+// The cold outbox case instead requires a detached surface replay with no resume.
 
 import { describe, it, expect } from 'vitest'
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
@@ -197,6 +198,58 @@ describe('cold (persisted-only) session listing', () => {
       expect(row).toBeDefined()
       expect(row.live).toBe(false)
       expect(row.title).toBe(sentinel)
+    } finally {
+      if (first !== undefined) await first.kill()
+      if (second !== undefined) await second.kill()
+      rmSync(dshHome, { recursive: true, force: true })
+    }
+  }, 240000)
+
+  it('resolves a cold session\'s outbox turn without resuming it', async () => {
+    const dshHome = mkdtempSync(join(tmpdir(), 'dsh-bridge-cold-outbox-'))
+    let first
+    let second
+    try {
+      first = await launch({ dshHome, timeoutMs: 120000 })
+      await scriptMock(first, [
+        { kind: 'text', text: 'Cold first reply.' },
+        { kind: 'text', text: 'Cold second reply.' },
+      ])
+      const sessionId = await createSession(first)
+      const sse = openSse(first, { timeoutMs: 20000 })
+      try {
+        await post(first, '/dsh-bridge/send', { text: 'one', sessionId })
+        await sse.waitFor('turn-complete')
+        await post(first, '/dsh-bridge/send', { text: 'two', sessionId })
+        await poll(() => sse.frames.filter((f) => f.kind === 'turn-complete').length >= 2)
+      } finally {
+        sse.close()
+      }
+
+      const requests = await mockRequests(first)
+      const main = requests.filter((r) => r.purpose === undefined)
+      expect(main.length).toBe(2)
+      const replayed = (main[1].messages ?? [])
+        .filter((m) => m.role === 'assistant')
+        .find((m) => (m.content ?? [])
+          .some((b) => b.type === 'text' && b.text === 'Cold first reply.'))
+      expect(replayed?.id).toBeDefined()
+      await first.kill()
+      first = undefined
+
+      second = await launch({ dshHome, timeoutMs: 120000 })
+      const before = await get(second, '/dsh-bridge/sessions')
+      expect(before.body.sessions.find((s) => s.id === sessionId)?.live).toBe(false)
+      const deposit = await post(second, '/dsh-bridge/outbox', {
+        sessionId, messageId: replayed.id,
+      })
+      expect(deposit.status, JSON.stringify(deposit.body)).toBe(200)
+      const collected = await get(second, '/dsh-bridge/outbox')
+      const entry = collected.body.entries.find((e) => e.sessionId === sessionId)
+      expect(entry?.turn).toBe(1)
+      expect(entry?.text).toBeUndefined()
+      const after = await get(second, '/dsh-bridge/sessions')
+      expect(after.body.sessions.find((s) => s.id === sessionId)?.live).toBe(false)
     } finally {
       if (first !== undefined) await first.kill()
       if (second !== undefined) await second.kill()

@@ -21,8 +21,8 @@
 //     Broadcast is universal by design — Emacs clients receive kinds they
 //     ignore — so the enforceable purpose split pinned here is the 409 arm.
 //   - POST /dsh-bridge/outbox { sessionId, messageId }: the host resolves the
-//     assistant message's text from the session log (the browser's
-//     "Send to Emacs" shape), 404 for an unknown id.
+//     assistant message's turn from the current surface (the browser's
+//     "Send to Emacs" shape), followed by collect + ack; 404 for an unknown id.
 //   - GET /dsh-bridge/context: 204 before any usage/context sample, 200 with
 //     the live projection after a turn, and the SSE context frame.
 //   - POST /dsh-bridge/send with no explicit session: 409 when no session
@@ -85,7 +85,7 @@ describe('POST /dsh-bridge/draft (composer-draft push)', () => {
 })
 
 describe('POST /dsh-bridge/outbox { sessionId, messageId }', () => {
-  it('resolves the assistant message text host-side from the session log', async () => {
+  it('resolves the assistant message turn host-side from the current surface', async () => {
     const fixture = inject('fixture')
     await post(fixture, '/mock-llm/reset', {})
     await scriptMock(fixture, [
@@ -122,18 +122,28 @@ describe('POST /dsh-bridge/outbox { sessionId, messageId }', () => {
     expect(deposit.status, JSON.stringify(deposit.body)).toBe(200)
     expect(deposit.body.ok).toBe(true)
 
+    const turns = await get(fixture, `/dsh-bridge/turns?sessionId=${sessionId}`)
+    const expected = turns.body.turns.find((record) => (record.segments ?? [])
+      .some((segment) => segment.text === 'First reply.'))
+    expect(expected).toBeDefined()
     const collected = await get(fixture, '/dsh-bridge/outbox')
-    const entry = collected.body.entries.find((e) => e.text === 'First reply.')
+    const entry = collected.body.entries.find((e) => e.turn === expected.turn)
     expect(entry).toBeTruthy()
     expect(entry.sessionId).toBe(sessionId)
+    expect(entry.text).toBeUndefined()
+
+    const ack = await post(fixture, '/dsh-bridge/outbox/ack', { ids: [entry.id] })
+    expect(ack.status).toBe(200)
+    const drained = await get(fixture, '/dsh-bridge/outbox')
+    expect(drained.body.entries.find((e) => e.id === entry.id)).toBeUndefined()
 
     const unknown = await post(fixture, '/dsh-bridge/outbox', {
       sessionId, messageId: 'msg-does-not-exist',
     })
     expect(unknown.status).toBe(404)
 
-    const noSession = await post(fixture, '/dsh-bridge/outbox', { text: 'orphan' })
-    expect(noSession.status).toBe(400)
+    const noMessage = await post(fixture, '/dsh-bridge/outbox', { sessionId, text: 'orphan' })
+    expect(noMessage.status).toBe(400)
   }, 90000)
 })
 

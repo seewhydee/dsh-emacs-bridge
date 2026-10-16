@@ -2138,8 +2138,8 @@ No request is issued."
         (should-error (dsh-bridge-fork-turn) :type 'user-error))
       (should-not requested))))
 
-(ert-deftest dsh-bridge-fork-turn-refuses-pushed-message ()
-  "A shown message with no turn identity is refused; no request is issued."
+(ert-deftest dsh-bridge-fork-turn-refuses-empty-view ()
+  "An empty view has no fork anchor; no request is issued."
   (let ((dsh-bridge--turns-cache (dsh-bridge-test--view-cache dsh-bridge-test--view-turns))
         (requested nil))
     (with-temp-buffer
@@ -2179,199 +2179,245 @@ No request is issued."
 
 ;;; Receive (the DSH→Emacs push; the outbox is invisible transport)
 
-(defconst dsh-bridge-test--receive-response
+(defconst dsh-bridge-test--receive-turn
+  '((turn . 2) (startedAt . 1000) (endedAt . 2000) (reason . "completed")
+    (segments . (((text . "first") (time . 1100) (step . 1))
+                 ((text . "newest") (time . 1200) (step . 2))))
+    (files . (((path . "src/a.ts") (op . "write"))))))
+
+(defun dsh-bridge-test--receive-turns-response-for (turn)
+  "Return a successful `/turns' response containing TURN, or no turns for nil."
+  (cons 200
+        (list (cons 'sessionId "s2")
+              (cons 'cwd "/w/sess2")
+              (cons 'epoch 1)
+              (cons 'turns (and turn (list turn))))))
+
+(defvar dsh-bridge-test--receive-turns-response
+  (dsh-bridge-test--receive-turns-response-for dsh-bridge-test--receive-turn))
+
+(defvar dsh-bridge-test--receive-response
   (cons 200
         (list (cons 'entries
                     (list (list (cons 'id "e1")
                                 (cons 'sessionId "s1")
                                 (cons 'source "message-action")
-                                (cons 'text "older")
+                                (cons 'turn 1)
                                 (cons 'ts 1000000))
                           (list (cons 'id "e2")
                                 (cons 'sessionId "s2")
                                 (cons 'source "message-action")
-                                (cons 'text "newest")
+                                (cons 'turn 2)
                                 (cons 'ts 2000000))))
               (cons 'overflowed nil))))
 
+(defvar dsh-bridge-test--receive-acked nil)
+
+(defun dsh-bridge-test--receive-request (method path payload)
+  "Serve the outbox, turns, and ack fixtures used by the receive tests."
+  (cond
+   ((and (equal method "GET") (equal path "/outbox"))
+    dsh-bridge-test--receive-response)
+   ((and (equal method "GET") (string-prefix-p "/turns?" path))
+    dsh-bridge-test--receive-turns-response)
+   ((and (equal method "POST") (equal path "/outbox/ack"))
+    (setq dsh-bridge-test--receive-acked payload)
+    (cons 200 (list (cons 'ok t))))
+   (t
+    (cons 404 (list (cons 'error "unexpected request"))))))
+
+(defmacro dsh-bridge-test--with-receive (&rest body)
+  "Run BODY with receive HTTP stubbed and the output buffer cleaned up."
+  (declare (indent 0) (debug t))
+  `(let ((dsh-bridge--turns-cache nil)
+         (dsh-bridge--sessions-cache nil)
+         (dsh-bridge-test--receive-acked nil))
+     (when (get-buffer "*dsh-bridge-output*")
+       (kill-buffer "*dsh-bridge-output*"))
+     (unwind-protect
+         (cl-letf (((symbol-function 'dsh-bridge--request)
+                    #'dsh-bridge-test--receive-request))
+           ,@body)
+       (when (get-buffer "*dsh-bridge-output*")
+         (kill-buffer "*dsh-bridge-output*")))))
+
 (ert-deftest dsh-bridge-receive-shows-newest-and-acks-all ()
-  "Receive displays the newest pending entry in the output buffer and acks
-every collected id."
-  (let (acked-payload)
-    (cl-letf (((symbol-function 'dsh-bridge--request)
-               (lambda (method path payload)
-                 (cond
-                  ((equal method "GET") dsh-bridge-test--receive-response)
-                  ((equal method "POST") (setq acked-payload payload)
-                   (cons 200 (list (cons 'ok t))))
-                  (t (cons 404 (list (cons 'error "unexpected"))))))))
-      (dsh-bridge-receive))
-    (should (equal acked-payload '((ids . ("e1" "e2")))))
+  "Receive renders the newest pushed turn and acks every collected id."
+  (dsh-bridge-test--with-receive
+    (dsh-bridge-receive)
+    (should (equal dsh-bridge-test--receive-acked '((ids . ("e1" "e2")))))
     (with-current-buffer "*dsh-bridge-output*"
-      (should (equal (buffer-string) "newest"))
+      (let ((text (buffer-string))
+            (header (dsh-bridge--view-header-line)))
+        (should (string-match-p "first" text))
+        (should (string-match-p "newest" text))
+        (should (< (string-match "first" text) (string-match "newest" text)))
+        (should (string-match-p "Changed files: a.ts" text))
+        (should (string-match-p " s2" header))
+        (should (string-match-p "(1/1)" header))
+        (should (string-match-p "done" header))
+        (should-not (string-match-p "running" header)))
       (should (equal dsh-bridge--view-content-session "s2"))
-      (should (string-match-p " s2" (dsh-bridge--view-header-line)))
-      ;; A pushed message has no turn identity, so no time segment.
-      (should-not (string-match-p "done" (dsh-bridge--view-header-line)))
-      (should-not (string-match-p "running" (dsh-bridge--view-header-line))))))
+      (should (equal dsh-bridge--view-turn 2))
+      (should (eq dsh-bridge--view-browsing t))
+      (should-not dsh-bridge--view-follow))))
 
 (ert-deftest dsh-bridge-receive-multiple-messages-message ()
   "Several pending entries produce the honest 'received' message."
-  (let ((msg nil))
-    (cl-letf (((symbol-function 'dsh-bridge--request)
-               (lambda (method _path _payload)
-                 (cond ((equal method "GET") dsh-bridge-test--receive-response)
-                       (t (cons 200 (list (cons 'ok t)))))))
-              ((symbol-function 'message)
-               (lambda (&rest args) (setq msg (apply #'format args)))))
-      (dsh-bridge-receive))
-    (should (string-match-p "2 messages received" msg))))
+  (dsh-bridge-test--with-receive
+    (let (msg)
+      (cl-letf (((symbol-function 'message)
+                 (lambda (&rest args) (setq msg (apply #'format args)))))
+        (dsh-bridge-receive))
+      (should (string-match-p "2 messages received" msg)))))
 
 (ert-deftest dsh-bridge-receive-single-message-message ()
   "One pending entry produces the singular 'received' message."
-  (let ((msg nil))
-    (cl-letf (((symbol-function 'dsh-bridge--request)
-               (lambda (method _path _payload)
-                 (cond ((equal method "GET")
-                        (cons 200
-                              (list (cons 'entries
-                                          (list (list (cons 'id "e1")
-                                                      (cons 'sessionId "s1")
-                                                      (cons 'text "only")
-                                                      (cons 'ts 1000000)))))))
-                       (t (cons 200 (list (cons 'ok t)))))))
-              ((symbol-function 'message)
-               (lambda (&rest args) (setq msg (apply #'format args)))))
-      (dsh-bridge-receive))
-    (should (string-match-p "1 message received" msg))
-    (should-not (string-match-p "1 messages received" msg))))
+  (dsh-bridge-test--with-receive
+    (let ((dsh-bridge-test--receive-response
+           (cons 200
+                 (list (cons 'entries
+                             (list (list (cons 'id "e1")
+                                         (cons 'sessionId "s2")
+                                         (cons 'turn 2)
+                                         (cons 'ts 1000000)))))))
+          (msg nil))
+      (cl-letf (((symbol-function 'message)
+                 (lambda (&rest args) (setq msg (apply #'format args)))))
+        (dsh-bridge-receive))
+      (should (string-match-p "1 message received" msg))
+      (should-not (string-match-p "1 messages received" msg)))))
 
 (ert-deftest dsh-bridge-receive-overflow-warns ()
   "When the host reports outbox overflow, receive warns that it dropped
 older messages; without the flag there is no warning."
-  (let ((msgs nil))
-    (cl-letf (((symbol-function 'dsh-bridge--request)
-               (lambda (method _path _payload)
-                 (cond ((equal method "GET")
-                        (cons 200 (list (cons 'entries
-                                              (alist-get 'entries
-                                                         dsh-bridge-test--receive-response))
-                                        (cons 'overflowed t))))
-                       (t (cons 200 (list (cons 'ok t)))))))
-              ((symbol-function 'message)
-               (lambda (&rest args) (push (apply #'format args) msgs))))
-      (dsh-bridge-receive))
-    (should (seq-some (lambda (m) (string-match-p "old messages dropped" m))
-                      msgs))
-    ;; The summary still went out alongside the warning.
-    (should (seq-some (lambda (m) (string-match-p "messages received" m))
-                      msgs)))
-  (let ((msgs nil))
-    (cl-letf (((symbol-function 'dsh-bridge--request)
-               (lambda (method _path _payload)
-                 (cond ((equal method "GET") dsh-bridge-test--receive-response)
-                       (t (cons 200 (list (cons 'ok t)))))))
-              ((symbol-function 'message)
-               (lambda (&rest args) (push (apply #'format args) msgs))))
-      (dsh-bridge-receive))
-    (should-not (seq-some (lambda (m) (string-match-p "old messages dropped" m))
-                          msgs))))
+  (dsh-bridge-test--with-receive
+    (let ((dsh-bridge-test--receive-response
+           (cons 200
+                 (list (cons 'entries
+                             (alist-get 'entries dsh-bridge-test--receive-response))
+                       (cons 'overflowed t))))
+          (msgs nil))
+      (cl-letf (((symbol-function 'message)
+                 (lambda (&rest args) (push (apply #'format args) msgs))))
+        (dsh-bridge-receive))
+      (should (seq-some (lambda (m) (string-match-p "old messages dropped" m)) msgs))
+      (should (seq-some (lambda (m) (string-match-p "messages received" m)) msgs))))
+  (dsh-bridge-test--with-receive
+    (let ((msgs nil))
+      (cl-letf (((symbol-function 'message)
+                 (lambda (&rest args) (push (apply #'format args) msgs))))
+        (dsh-bridge-receive))
+      (should-not (seq-some (lambda (m) (string-match-p "old messages dropped" m))
+                            msgs)))))
 
 (ert-deftest dsh-bridge-receive-pops-by-default ()
   "With `dsh-bridge-receive-pop' (the default), receive selects the output
 buffer."
-  (let ((popped nil))
-    (cl-letf (((symbol-function 'dsh-bridge--request)
-               (lambda (method _path _payload)
-                 (cond ((equal method "GET") dsh-bridge-test--receive-response)
-                       (t (cons 200 (list (cons 'ok t)))))))
-              ((symbol-function 'pop-to-buffer) (lambda (&rest _) (setq popped t))))
-      (dsh-bridge-receive))
-    (should popped)))
+  (dsh-bridge-test--with-receive
+    (let ((popped nil))
+      (cl-letf (((symbol-function 'pop-to-buffer)
+                 (lambda (&rest _) (setq popped t))))
+        (dsh-bridge-receive))
+      (should popped))))
 
 (ert-deftest dsh-bridge-receive-does-not-pop-when-disabled ()
   "With `dsh-bridge-receive-pop' nil, receive fills the output buffer without
 selecting it."
-  (let ((popped nil)
-        (dsh-bridge-receive-pop nil))
-    (cl-letf (((symbol-function 'dsh-bridge--request)
-               (lambda (method _path _payload)
-                 (cond ((equal method "GET") dsh-bridge-test--receive-response)
-                       (t (cons 200 (list (cons 'ok t)))))))
-              ((symbol-function 'pop-to-buffer) (lambda (&rest _) (setq popped t))))
-      (dsh-bridge-receive))
-    (should (null popped))))
+  (dsh-bridge-test--with-receive
+    (let ((popped nil)
+          (dsh-bridge-receive-pop nil))
+      (cl-letf (((symbol-function 'pop-to-buffer)
+                 (lambda (&rest _) (setq popped t))))
+        (dsh-bridge-receive))
+      (should (null popped)))))
 
 (ert-deftest dsh-bridge-receive-nothing-pending ()
   "With nothing pending, receive says so and leaves the output alone."
-  (let ((msg nil))
-    (cl-letf (((symbol-function 'dsh-bridge--request)
-               (lambda (method _path _payload)
-                 (cons 200 (list (cons 'entries nil)))))
-              ((symbol-function 'message)
-               (lambda (&rest args) (setq msg (apply #'format args)))))
-      (dsh-bridge-receive))
-    (should (string-match-p "No messages from the DSH bridge." msg))))
+  (dsh-bridge-test--with-receive
+    (let ((dsh-bridge-test--receive-response
+           (cons 200 (list (cons 'entries nil))))
+          (msg nil))
+      (cl-letf (((symbol-function 'message)
+                 (lambda (&rest args) (setq msg (apply #'format args)))))
+        (dsh-bridge-receive))
+      (should (string-match-p "No messages from the DSH bridge." msg))
+      (should-not (get-buffer "*dsh-bridge-output*")))))
 
 (ert-deftest dsh-bridge-receive-sets-workspace-best-effort ()
-  "Receive points the output buffer at the session's workspace when known."
-  (let ((dsh-bridge--sessions-cache '(((id . "s2") (cwd . "/w/sess2") (live . t)))))
-    (cl-letf (((symbol-function 'dsh-bridge--request)
-               (lambda (method _path _payload)
-                 (cond ((equal method "GET") dsh-bridge-test--receive-response)
-                       (t (cons 200 (list (cons 'ok t))))))))
-      (dsh-bridge-receive))
+  "Receive points the output buffer at the workspace returned by `/turns'."
+  (dsh-bridge-test--with-receive
+    (dsh-bridge-receive)
     (with-current-buffer "*dsh-bridge-output*"
       (should (equal default-directory "/w/sess2/")))))
 
-(ert-deftest dsh-bridge-receive-missing-session-id-uses-buffer-session ()
-  "An outbox entry without a `sessionId' falls back to the current buffer's
-session and reports the missing id."
-  (let ((msgs nil))
-    (cl-letf (((symbol-function 'dsh-bridge--request)
-               (lambda (method _path _payload)
-                 (cond ((equal method "GET")
-                        (cons 200 (list (cons 'entries
-                                              (list (list (cons 'id "e1")
-                                                          (cons 'text "pushed")
-                                                          (cons 'ts 1000000)))))))
-                       (t (cons 200 (list (cons 'ok t)))))))
-              ((symbol-function 'message)
-               (lambda (&rest args) (push (apply #'format args) msgs))))
-      (with-current-buffer (get-buffer-create "*dsh-bridge-output*")
-        (dsh-bridge-view-mode)
-        (setq-local dsh-bridge--view-content-session "s9")
-        (dsh-bridge-receive)))
+(ert-deftest dsh-bridge-receive-open-turn-follows ()
+  "An open pushed turn enters turn-following state rather than browsing."
+  (dsh-bridge-test--with-receive
+    (let* ((open-turn '((turn . 2) (startedAt . 1000)
+                        (segments . (((text . "streaming")
+                                      (time . 1100) (step . 1))))))
+           (dsh-bridge-test--receive-turns-response
+            (dsh-bridge-test--receive-turns-response-for open-turn)))
+      (dsh-bridge-receive))
     (with-current-buffer "*dsh-bridge-output*"
-      (should (equal (buffer-string) "pushed"))
-      (should (equal dsh-bridge--view-content-session "s9")))
-    (should (seq-some (lambda (m) (string-match-p "without a session id" m)) msgs))
-    (kill-buffer "*dsh-bridge-output*")))
+      (should (eq dsh-bridge--view-follow t))
+      (should-not dsh-bridge--view-browsing)
+      (should (string-match-p "continuing" (buffer-string))))))
 
-(ert-deftest dsh-bridge-receive-missing-session-id-defaults-to-output ()
-  "With no session id and no buffer session, receive fills the default output
-buffer and reports the missing id."
-  (let ((msgs nil)
-        (dsh-bridge--sessions-cache nil))
-    (when (get-buffer "*dsh-bridge-output*")
-      (kill-buffer "*dsh-bridge-output*"))
-    (cl-letf (((symbol-function 'dsh-bridge--request)
-               (lambda (method _path _payload)
-                 (cond ((equal method "GET")
-                        (cons 200 (list (cons 'entries
-                                              (list (list (cons 'id "e1")
-                                                          (cons 'text "orphan")
-                                                          (cons 'ts 1000000)))))))
-                       (t (cons 200 (list (cons 'ok t)))))))
-              ((symbol-function 'message)
-               (lambda (&rest args) (push (apply #'format args) msgs))))
-      (with-temp-buffer
-        (dsh-bridge-receive)))
-    (with-current-buffer "*dsh-bridge-output*"
-      (should (equal (buffer-string) "orphan"))
-      (should (null dsh-bridge--view-content-session)))
-    (should (seq-some (lambda (m) (string-match-p "without a session id" m)) msgs))
-    (kill-buffer "*dsh-bridge-output*")))
+(ert-deftest dsh-bridge-receive-missing-turn-does-not-ack ()
+  "A pushed turn absent from `/turns' is diagnosed and left unacknowledged."
+  (dsh-bridge-test--with-receive
+    (let ((dsh-bridge-test--receive-turns-response
+           (dsh-bridge-test--receive-turns-response-for nil))
+          (msgs nil)
+          (popped nil))
+      (cl-letf (((symbol-function 'message)
+                 (lambda (&rest args) (push (apply #'format args) msgs)))
+                ((symbol-function 'pop-to-buffer)
+                 (lambda (&rest _) (setq popped t))))
+        (dsh-bridge-receive))
+      (should-not dsh-bridge-test--receive-acked)
+      (should-not popped)
+      (should-not (get-buffer "*dsh-bridge-output*"))
+      (should (seq-some (lambda (m) (string-match-p "turn 2 is not in" m)) msgs))
+      (should-not (seq-some (lambda (m) (string-match-p "messages received" m)) msgs)))))
+
+(ert-deftest dsh-bridge-receive-turns-failure-does-not-ack ()
+  "A failed `/turns' fetch leaves the collected entries unacknowledged."
+  (dsh-bridge-test--with-receive
+    (let ((dsh-bridge-test--receive-turns-response nil)
+          (msgs nil)
+          (popped nil))
+      (cl-letf (((symbol-function 'message)
+                 (lambda (&rest args) (push (apply #'format args) msgs)))
+                ((symbol-function 'pop-to-buffer)
+                 (lambda (&rest _) (setq popped t))))
+        (dsh-bridge-receive))
+      (should-not dsh-bridge-test--receive-acked)
+      (should-not popped)
+      (should-not (get-buffer "*dsh-bridge-output*"))
+      (should (seq-some (lambda (m) (string-match-p "failed to fetch turns" m)) msgs))
+      (should-not (seq-some (lambda (m) (string-match-p "messages received" m)) msgs)))))
+
+(ert-deftest dsh-bridge-receive-malformed-entry-does-not-ack ()
+  "An entry without a session id or numeric turn is diagnosed, not acked."
+  (dsh-bridge-test--with-receive
+    (dolist (entry (list (list (cons 'id "e1") (cons 'turn 2))
+                         (list (cons 'id "e1") (cons 'sessionId "s2"))))
+      (let ((dsh-bridge-test--receive-response
+             (cons 200 (list (cons 'entries (list entry)))))
+            (msgs nil))
+        (cl-letf (((symbol-function 'message)
+                   (lambda (&rest args) (push (apply #'format args) msgs))))
+          (dsh-bridge-receive))
+        (should-not dsh-bridge-test--receive-acked)
+        (should-not (get-buffer "*dsh-bridge-output*"))
+        (should (seq-some
+                 (lambda (m) (string-match-p "without a session id or turn number" m))
+                 msgs))
+        (should-not (seq-some (lambda (m) (string-match-p "messages received" m))
+                              msgs))))))
 
 ;;; Turn navigation (M-p / M-n in the output buffer)
 
@@ -2708,6 +2754,14 @@ turn ends cleanly after its last segment."
     (should (equal (dsh-bridge-test--view-turn-render aborted) "partial"))
     ;; nil renders empty.
     (should (equal (dsh-bridge-test--view-turn-render nil) ""))))
+
+(ert-deftest dsh-bridge-view-render-helpers-require-a-record ()
+  "The render helpers reject a non-record TURN.
+An empty view clears through `dsh-bridge--view-fill' itself, which never
+routes nil through them; a nil or non-record argument is a caller error."
+  (should-error (dsh-bridge--view-turn-body nil) :type 'error)
+  (should-error (dsh-bridge--view-turn-items 'new) :type 'error)
+  (should-error (dsh-bridge--view-turn-suffix nil "s1") :type 'error))
 
 (ert-deftest dsh-bridge-view-fill-append-preserves-point ()
   "Refilling a growing turn splices: point inside the earlier content
@@ -6030,8 +6084,8 @@ A turn in the same session leaves the recorded answer in place."
 
 (ert-deftest dsh-bridge-view-position ()
   "The view position is newest-first (k/n) over the session's turns, derived
-from the shown turn's number at rest and while browsing; content without a
-turn identity (a pushed message) or a turn no longer cached shows nothing."
+from the shown turn's number at rest and while browsing; an empty view or a
+turn no longer cached shows nothing."
   (let ((dsh-bridge--turns-cache (dsh-bridge-test--view-cache dsh-bridge-test--view-turns)))
     (with-temp-buffer
       (dsh-bridge-view-mode)
@@ -6046,8 +6100,8 @@ turn identity (a pushed message) or a turn no longer cached shows nothing."
       (should (equal (dsh-bridge--view-turn-position) " (1/3)"))
       (setq-local dsh-bridge--view-turn 10)
       (should (equal (dsh-bridge--view-turn-position) " (3/3)"))
-      ;; At rest on a turn no longer cached (e.g. after a compaction) or on raw
-      ;; pushed content: no indicator.
+      ;; At rest on a turn no longer cached (e.g. after a compaction) or on an
+      ;; empty view: no indicator.
       (setq-local dsh-bridge--view-browsing nil)
       (setq-local dsh-bridge--view-turn 999)
       (should (equal (dsh-bridge--view-turn-position) nil))
@@ -6061,8 +6115,8 @@ turn identity (a pushed message) or a turn no longer cached shows nothing."
 
 (ert-deftest dsh-bridge-view-header-provenance ()
   "The output header's time segment describes the displayed turn.
-A pushed message with no turn identity has none; a settled turn shows its
-end clock; an open turn shows its elapsed run."
+An empty view has none; a settled turn shows its end clock; an open turn
+shows its elapsed run."
   (let ((dsh-bridge--session-status nil)
         (dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t))))
         (dsh-bridge-status-indicator 'geometric))
@@ -8069,10 +8123,8 @@ state (\"turn 0\") and announces it."
         (should (string-match-p "Following the newest turn" msg)))
       (kill-buffer "*dsh-bridge-output*"))))
 
-(ert-deftest dsh-bridge-view-next-reply-from-rest-not-found ()
-  "M-n at rest reports no newer turns when the shown content has no turn
-identity (e.g. a pushed message that is not a committed turn segment), and
-leaves the buffer and browsing state untouched."
+(ert-deftest dsh-bridge-view-next-reply-from-empty-view ()
+  "M-n on an empty view reports no newer turns and leaves the buffer alone."
   (let ((dsh-bridge--turns-cache (dsh-bridge-test--view-cache dsh-bridge-test--view-turns))
         (msg nil))
     (cl-letf (((symbol-function 'dsh-bridge--request)
@@ -8081,17 +8133,15 @@ leaves the buffer and browsing state untouched."
                                  (cons 'turns dsh-bridge-test--view-turns)))))
               ((symbol-function 'message)
                (lambda (&rest args) (setq msg (apply #'format args)))))
-      (with-current-buffer (get-buffer-create "*dsh-bridge-output*")
+      (with-temp-buffer
         (dsh-bridge-view-mode)
         (setq-local dsh-bridge--view-content-session "s1")
-        (let ((inhibit-read-only t)) (erase-buffer) (insert "a pushed message"))
         (setq-local dsh-bridge--view-turn nil)
         (setq-local dsh-bridge--view-browsing nil)
         (dsh-bridge-view-next-reply)
-        (should (equal (buffer-string) "a pushed message"))
+        (should (equal (buffer-string) ""))
         (should (null dsh-bridge--view-browsing))
-        (should (string-match-p "no newer turns" msg)))
-      (kill-buffer "*dsh-bridge-output*"))))
+        (should (string-match-p "no newer turns" msg))))))
 
 (ert-deftest dsh-bridge-view-next-reply-auto-follows-at-newest ()
   "M-n onto the newest turn resumes following directly: browsing up from the
@@ -8269,13 +8319,13 @@ declares itself following (so the follow helper sees it)."
 (ert-deftest dsh-bridge-view-turn-time-label ()
   "The time segment describes the displayed turn, not the session.
 An open turn shows its elapsed run (and drives the ticker), a settled turn
-shows its end clock, and a pushed message with no turn shows nothing."
+shows its end clock, and an empty view shows nothing."
   ;; `float-time' is frozen so the rendered duration is exact.
   (cl-letf (((symbol-function 'float-time) (lambda (&rest _) 1065.0)))
     (with-temp-buffer
       (dsh-bridge-view-mode)
       (setq-local dsh-bridge--view-content-session "s1")
-      ;; No turn record: a pushed message carries no time segment.
+      ;; An empty view has no time segment.
       (should (null (dsh-bridge--view-turn-time-label "s1")))
       (should-not (dsh-bridge--view-running-duration-p))
       ;; An open turn times from its own startedAt, 65s before the frozen now.
@@ -11928,14 +11978,15 @@ the recorded body/tail lengths in step, leaving a mid-body point alone."
         (should (equal (plist-get prov :tail-length)
                        (length (dsh-bridge--view-turn-suffix two "s1"))))))))
 
-(ert-deftest dsh-bridge-view-changed-files-pushed-message ()
-  "A pushed message has no turn identity, so it never renders a footer."
-  (should (equal (dsh-bridge--view-turn-suffix nil "s1") ""))
-  (let ((dsh-bridge--turns-cache nil))
-    (with-temp-buffer
-      (dsh-bridge-view-mode)
-      (dsh-bridge--view-fill "s1" "pushed text")
-      (should (equal (buffer-string) "pushed text")))))
+(ert-deftest dsh-bridge-view-changed-files-pushed-turn ()
+  "A pushed turn renders the changed-files footer from its `/turns' record."
+  (dsh-bridge-test--with-receive
+    (let ((buf (dsh-bridge--display-received
+                (alist-get 'entries dsh-bridge-test--receive-response))))
+      (should buf)
+      (with-current-buffer buf
+        (should (equal dsh-bridge--view-turn 2))
+        (should (string-match-p "Changed files: a.ts" (buffer-string)))))))
 
 (ert-deftest dsh-bridge-turns-cache-files-field ()
   "The `/turns' JSON `files' field survives parsing and is stashed in the turn

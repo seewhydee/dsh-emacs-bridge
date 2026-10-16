@@ -20,7 +20,7 @@ import { Outbox, OUTBOX_DEFAULT_CAP, type OutboxEntry } from '../src/outbox.ts'
 let counter = 0
 function entry(overrides: Partial<OutboxEntry> = {}): OutboxEntry {
   counter += 1
-  return { id: `id-${counter}`, source: 'bridge', text: `text ${counter}`, ts: counter, ...overrides }
+  return { id: `id-${counter}`, sessionId: 's1', source: 'bridge', turn: counter, ts: counter, ...overrides }
 }
 
 describe('Outbox', () => {
@@ -38,8 +38,8 @@ describe('Outbox', () => {
     const outbox = new Outbox()
     outbox.deposit(entry({ id: 'a' }))
     const collected = outbox.collect().entries
-    collected[0]!.text = 'mutated'
-    expect(outbox.collect().entries[0]!.text).not.toBe('mutated')
+    collected[0]!.turn = 99
+    expect(outbox.collect().entries[0]!.turn).not.toBe(99)
   })
 
   it('evicts the oldest entry at capacity and reports the overflow', () => {

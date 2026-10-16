@@ -174,7 +174,7 @@ The following commands are available in a DSH-View buffer:
 * `B` — branch the shown turn into a new session.
 * `k` — stop the shown session's running turn.
 * `o` — compact the shown session's context history.
-* `i` — receive the latest "Send to Emacs" message (see below).
+* `i` — receive the latest "Send to Emacs" turn (see below).
 * `v` — show or hide the turn's tool calls and thinking summaries.
 * `D` — describe the current session.
 * `M-p`/`M-n` — cycle the current session's turns.
@@ -285,12 +285,13 @@ You can toggle plan mode, or set a session goal, with these commands:
 
 These commands are also available in the menu bar.
 
-### Sending text from DSH to Emacs
+### Sending replies from DSH to Emacs
 
-The DSH plugin adds a "Send to Emacs" button that lets you push
-specific assistant messages to Emacs.  This automatically pops to the
-DSH-View buffer in Emacs.  You can use `i` in the DSH-View buffer (or
-run `M-x dsh-bridge-receive`) to pull the last message pushed.
+The DSH plugin adds a "Send to Emacs" button to the DSH web interface,
+which lets you push assistant replies to Emacs.  A pushed turn
+automatically pops up in a DSH-View buffer in Emacs.  You can also
+visit the latest pushed turn using `i` in the DSH-View buffer, or run
+`M-x dsh-bridge-receive`.
 
 ## Security Matters
 

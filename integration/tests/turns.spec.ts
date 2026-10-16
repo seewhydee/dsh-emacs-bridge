@@ -1,12 +1,12 @@
-// dsh-emacs-bridge — integration spec: live turn fold, model parity, outbox.
+// dsh-emacs-bridge — integration spec: live turn fold and model parity.
 // Copyright (C) 2026  Chong Yidong <cyd@stupidchicken.com>
 //
 // Exercises host-side contracts that no other suite reaches: a real turn folded
 // into /turns (segments, running, epoch, incremental), model-selection parity
-// (a /model selection is visible in the mock's recorded GenerateOptions), the
-// bounded outbox round-trip, and target-resolution failure semantics (404
-// unknown id, 413 oversize body). Each test resets the mock and uses its own
-// session so the shared fixture stays deterministic.
+// (a /model selection is visible in the mock's recorded GenerateOptions), and
+// target-resolution failure semantics (404 unknown id, 413 oversize body).
+// Each test resets the mock and uses its own session so the shared fixture
+// stays deterministic.
 
 import { describe, it, expect, inject } from 'vitest'
 import {
@@ -87,28 +87,6 @@ describe('plugin surface against a live fixture', () => {
       const requests = await mockRequests(fixture)
       return requests.some((r) => r.purpose === undefined && r.model === 'mock-model-pro')
     })
-  }, 90000)
-
-  it('round-trips an outbox entry through deposit, collect, and ack', async () => {
-    const fixture = inject('fixture')
-    await post(fixture, '/mock-llm/reset', {})
-    const sessionId = await createSession(fixture)
-
-    const deposit = await post(fixture, '/dsh-bridge/outbox', {
-      sessionId, text: 'A DSH->Emacs note.', source: 'bridge',
-    })
-    expect(deposit.status).toBe(200)
-
-    const collected = await get(fixture, '/dsh-bridge/outbox')
-    const entry = collected.body.entries.find((e) => e.text === 'A DSH->Emacs note.')
-    expect(entry).toBeTruthy()
-    expect(entry.sessionId).toBe(sessionId)
-
-    const ack = await post(fixture, '/dsh-bridge/outbox/ack', { ids: [entry.id] })
-    expect(ack.status).toBe(200)
-
-    const after = await get(fixture, '/dsh-bridge/outbox')
-    expect(after.body.entries.find((e) => e.id === entry.id)).toBeUndefined()
   }, 90000)
 
   it('returns 404 for an unknown target id and rejects an oversize body', async () => {

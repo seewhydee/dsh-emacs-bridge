@@ -1,5 +1,5 @@
 // dsh-emacs-bridge — pure, dependency-free bounded outbox carrying DSH-side
-// text to Emacs. Kept import-free so Vitest exercises it directly.
+// turn references to Emacs. Kept import-free so Vitest exercises it directly.
 // Copyright (C) 2026  Chong Yidong <cyd@stupidchicken.com>
 //
 // This program is free software: you can redistribute it and/or modify
@@ -15,12 +15,12 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-/** One DSH→Emacs message. */
+/** One DSH→Emacs turn reference. */
 export interface OutboxEntry {
   id: string
-  sessionId?: string
+  sessionId: string
   source: string
-  text: string
+  turn: number
   ts: number
 }
 

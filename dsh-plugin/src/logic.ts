@@ -2027,25 +2027,24 @@ export function approvalResolvedMessage(
 }
 
 /**
- * The visible text of one durable assistant message, addressed by its message
- * id: the `assistant/message` event whose `message.id` matches, with its text
- * blocks concatenated. Returns undefined when no logged message carries that
- * id. This is the host-side replacement for the browser's chat-node walk the
- * "Send to Emacs" action used before the chat tree left `SessionSnapshot`.
+ * The turn of one visible durable assistant message, addressed by its message
+ * id. Walks the same current surface as `assistantTurns`, so a raw-log message
+ * hidden by compaction does not resolve to a turn `/turns` cannot serve.
+ * Returns undefined when no visible assistant message carries that id or the
+ * matching event has no numeric turn. This is the host-side translation the
+ * "Send to Emacs" action needs now that the chat tree left `SessionSnapshot`.
  */
-export function assistantTextForMessage(
-  events: readonly SessionEventLike[],
+export function assistantTurnForMessage(
+  log: SessionTurnLogLike,
   messageId: string,
-): string | undefined {
-  for (const event of events) {
+): number | undefined {
+  for (const seq of log.nodes) {
+    const event = log.events[seq]
     if (event?.type !== 'assistant/message') continue
-    const message = (event.data as { message?: unknown } | undefined)?.message as
-      { id?: unknown; content?: readonly MessageBlockLike[] } | undefined
+    const data = event.data as { turn?: unknown; message?: unknown } | undefined
+    const message = data?.message as { id?: unknown } | undefined
     if (message?.id !== messageId) continue
-    return (message.content ?? [])
-      .filter(block => block.type === 'text')
-      .map(block => block.text ?? '')
-      .join('')
+    return typeof data?.turn === 'number' ? data.turn : undefined
   }
   return undefined
 }

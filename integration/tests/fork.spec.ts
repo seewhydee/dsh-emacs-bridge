@@ -92,6 +92,7 @@ describe('branching a turn (POST /dsh-bridge/fork)', () => {
     // A hanging turn leaves the session's newest turn open: no turn/end to cut at.
     await scriptMock(fixture, [{ kind: 'hang' }])
     const sse = openSse(fixture, { timeoutMs: 10000 })
+    await sse.opened
     await post(fixture, '/dsh-bridge/send', { text: 'Never finish.', sessionId })
     await sse.waitFor('turn-start')
 
