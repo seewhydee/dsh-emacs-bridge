@@ -1754,32 +1754,17 @@ INITIAL, if non-nil, is the initial input."
       (message "A non-empty input is required."))
     str))
 
-;;; Target helpers
-
-(defun dsh-bridge--buffer-session (&optional buffer)
-  "The session id BUFFER is bound to, or nil.
-If BUFFER is nil, it defaults to the current buffer.  A DSH-Prompt
-buffer names its bound session (nil when it follows the pinned target),
-a DSH-View buffer the session whose content it shows, a DSH-Describe
-buffer the session it reports on, and a DSH-Sessions buffer the row at
-point.  This is the buffer's own binding alone; it never consults the
-pinned target."
-  (with-current-buffer (or buffer (current-buffer))
-    (cond
-     ((derived-mode-p 'dsh-bridge-prompt-mode) dsh-bridge--prompt-session)
-     ((derived-mode-p 'dsh-bridge-view-mode) dsh-bridge--view-content-session)
-     ((derived-mode-p 'dsh-bridge-describe-mode) dsh-bridge--describe-session)
-     ((derived-mode-p 'dsh-bridge-sessions-mode) (tabulated-list-get-id)))))
+;;; Session targeting
 
 (defun dsh-bridge--effective-session (&optional buffer nodefault require)
   "The session id BUFFER acts on, or nil for last-active.
 If BUFFER is nil, it defaults to the current buffer.
 
-If the buffer is bound to a DSH session (DSH-Prompt, DSH-View, or
-DSH-Describe buffer acting on a specific session), return the session
-id (a string).  Otherwise, fall back on `dsh-bridge-pinned-target'.
-Return nil if there is no explicit session target; a request may then
-leave the choice to the host, which resolves its last-active session.
+For a DSH-Prompt, DSH-View, or DSH-Describe buffer, this is the session
+it is currently bound to (nil if set to following the pinned target).
+For a DSH-Sessions buffer, this is the session at point, if any.
+If there is no such binding, fall back on `dsh-bridge-pinned-target';
+otherwise return nil.
 
 If NODEFAULT is non-nil, skip the pinned-target fallback.
 
@@ -1788,14 +1773,21 @@ If REQUIRE is non-nil, signal a `user-error' instead of returning nil.
 This function serves as the resolution path for helpers and internal
 callers.  User-facing session verbs consult the menu focus first, and
 fall back here if no menu is open."
-  (let ((session (dsh-bridge--buffer-session buffer)))
-    (unless (or session nodefault)
-      (setq session dsh-bridge-pinned-target))
-    (if (and require (null session))
-	(user-error "dsh-bridge: no session to act on")
-      session)))
-
-;;; Dispatcher's focus management
+  (with-current-buffer (or buffer (current-buffer))
+    (let ((session (cond
+		    ((derived-mode-p 'dsh-bridge-prompt-mode)
+		     dsh-bridge--prompt-session)
+		    ((derived-mode-p 'dsh-bridge-view-mode)
+		     dsh-bridge--view-content-session)
+		    ((derived-mode-p 'dsh-bridge-describe-mode)
+		     dsh-bridge--describe-session)
+		    ((derived-mode-p 'dsh-bridge-sessions-mode)
+		     (tabulated-list-get-id)))))
+      (unless (or session nodefault)
+	(setq session dsh-bridge-pinned-target))
+      (if (and require (null session))
+	  (user-error "dsh-bridge: no session to act on")
+	session))))
 
 ;; The focus is the session presented by the open `dsh-bridge' menu as
 ;; the target.  Session mutators use `dsh-bridge--confirmed-session'
@@ -1867,7 +1859,7 @@ last-active guess, in that order of precedence."
     (cond
      ((setq session dsh-bridge-pinned-target)
       (setq dsh-bridge--focus (cons session 'pinned)))
-     ((setq session (dsh-bridge--buffer-session buffer))
+     ((setq session (dsh-bridge--effective-session buffer t))
       (setq dsh-bridge--focus (cons session 'buffer)))
      (t
       (setq session (or (car-safe dsh-bridge--last-resolved-active)
