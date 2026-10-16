@@ -3088,16 +3088,23 @@ no terminal marker at all."
 	     "\n\n" "")
 	 (string-join (delq nil (list files furniture)) "\n\n"))))))
 
-(defun dsh-bridge--view-turn-renders-empty-p (turn session-id)
+(defun dsh-bridge--view-turn-renders-empty-p (turn)
   "Whether TURN would render an empty DSH-View body and suffix.
 An activity-only turn with `dsh-bridge--view-activity' nil and no changed
 files is the case: the host still serves a synthetic record for it, but this
 buffer has nothing to draw.  A caller refilling a view that already shows
 another turn skips such a record so the fill cannot blank the buffer.  An
-open turn is never empty: its running marker is terminal furniture."
+open turn is never empty: its running marker is terminal furniture, and the
+awaiting, approval, and answer notes attach only while it is open."
+  ;; Test the slots the rendering is built from instead of building it: the
+  ;; body joins the reply segments and the drawn activity, and the suffix
+  ;; joins the failure note and the changed-files footer.
   (and (consp turn)
-       (string-empty-p (dsh-bridge--view-turn-body turn))
-       (string-empty-p (dsh-bridge--view-turn-suffix turn session-id))))
+       (null (alist-get 'segments turn))
+       (not (and dsh-bridge--view-activity (alist-get 'activity turn)))
+       (null (alist-get 'failure turn))
+       (null (and dsh-bridge-view-changed-files (alist-get 'files turn)))
+       (not (dsh-bridge--view-turn-open-p turn))))
 
 (defun dsh-bridge--view-segment-key (segment)
   "The identity of SEGMENT: its `(STEP . TIME)' pair."
@@ -3462,7 +3469,7 @@ performing any further network request."
 		      (numberp dsh-bridge--view-turn)
 		      (>= turn dsh-bridge--view-turn)))
 	     ;; A record that renders nothing must not replace the view's content.
-	     (not (dsh-bridge--view-turn-renders-empty-p newest session-id))
+	     (not (dsh-bridge--view-turn-renders-empty-p newest))
 	     (dsh-bridge--view-fill session-id newest nil t t))))))
 
 (defun dsh-bridge--turns-changed (session-id)
@@ -8175,7 +8182,7 @@ preserving point.  A buffer showing an earlier turn is left alone."
 		;; A record with nothing to draw (an activity-only turn with the
 		;; toggle off and no changed files) must not blank the view.
 		(when (and newest
-			   (not (dsh-bridge--view-turn-renders-empty-p newest shown-id)))
+			   (not (dsh-bridge--view-turn-renders-empty-p newest)))
 		  (dsh-bridge--view-fill shown-id newest nil t t)))
 	       ;; A failed turn produced no reply and never will.
 	       ;; Unlike `blocked', it may have emitted no text or

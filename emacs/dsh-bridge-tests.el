@@ -3233,12 +3233,16 @@ than splice a tail under a body that is no longer there."
     (should (equal (dsh-bridge--view-literal "") ""))))
 
 (ert-deftest dsh-bridge-view-turn-renders-empty-p ()
-  "Only a textless, settled turn with activity off and no files is empty.
-The running marker and the changed-files footer both count as content, so a
-refill must still take a record that carries either."
+  "Only a settled turn with nothing to draw for this buffer is empty.
+That means no reply segments, no activity to draw, no failure note, and no
+changed-files footer.  The running marker and the footer both count as
+content, so a refill must still take a record that carries either.  An open
+turn stays non-empty whatever it is parked on, since its note only adds to
+the running marker that is already terminal furniture."
   (let ((blank (dsh-bridge-test--view-turn
                 2 2000000 nil 2000900 "completed" nil
                 (list (dsh-bridge-test--view-tool-call "read" "a.ts" "c1" 11 1 2000200))))
+        (bare (dsh-bridge-test--view-turn 3 3000000 nil 3000900 "completed"))
         (with-files (dsh-bridge-test--view-turn
                      2 2000000 nil 2000900 "completed"
                      (list (dsh-bridge-test--view-file "a.ts"))))
@@ -3248,13 +3252,29 @@ refill must still take a record that carries either."
     (with-temp-buffer
       (dsh-bridge-view-mode)
       (setq-local dsh-bridge--view-activity nil)
-      (should (dsh-bridge--view-turn-renders-empty-p blank "s1"))
-      (should-not (dsh-bridge--view-turn-renders-empty-p with-files "s1"))
-      (should-not (dsh-bridge--view-turn-renders-empty-p open "s1"))
-      (should-not (dsh-bridge--view-turn-renders-empty-p textual "s1"))
-      (should-not (dsh-bridge--view-turn-renders-empty-p nil "s1"))
+      (should (dsh-bridge--view-turn-renders-empty-p blank))
+      (should (dsh-bridge--view-turn-renders-empty-p bare))
+      (should-not (dsh-bridge--view-turn-renders-empty-p with-files))
+      (should-not (dsh-bridge--view-turn-renders-empty-p open))
+      (should-not (dsh-bridge--view-turn-renders-empty-p textual))
+      (should-not (dsh-bridge--view-turn-renders-empty-p nil))
       (setq-local dsh-bridge--view-activity t)
-      (should-not (dsh-bridge--view-turn-renders-empty-p blank "s1")))))
+      (should-not (dsh-bridge--view-turn-renders-empty-p blank))
+      ;; The toggle being on is not itself content: a record carrying no
+      ;; activity entry still draws nothing.
+      (should (dsh-bridge--view-turn-renders-empty-p bare))
+      ;; Parking an open turn on a query, an approval, or an answer echo
+      ;; does not make it empty.
+      (setq-local dsh-bridge--view-activity nil)
+      (let ((dsh-bridge--pending-questions (list (cons "s1" (cons "q1" nil)))))
+        (should-not (dsh-bridge--view-turn-renders-empty-p open)))
+      (let ((dsh-bridge--pending-approvals
+             (list (cons "s1" (list (cons "a1" (list :tool-name "Bash")))))))
+        (should-not (dsh-bridge--view-turn-renders-empty-p open)))
+      (let ((dsh-bridge-view-answer-echo t)
+            (dsh-bridge--view-answer-notes
+             (list (cons "s1" (list :baseline :unknown :text "yes")))))
+        (should-not (dsh-bridge--view-turn-renders-empty-p open))))))
 
 (ert-deftest dsh-bridge-view-failure-text ()
   "Known failure codes map to fixed display strings; unknown ones fall back
@@ -3293,8 +3313,8 @@ failure) and makes the record non-empty."
         (should (string-match-p "API key is invalid" text-suffix))
         (should (string-match-p "API key is invalid" empty-suffix))
         (should (string-match-p "failed" text-suffix)))
-      (should-not (dsh-bridge--view-turn-renders-empty-p failed-text "s1"))
-      (should-not (dsh-bridge--view-turn-renders-empty-p failed-empty "s1")))))
+      (should-not (dsh-bridge--view-turn-renders-empty-p failed-text))
+      (should-not (dsh-bridge--view-turn-renders-empty-p failed-empty)))))
 
 (ert-deftest dsh-bridge-turn-complete-refetch-error-note ()
   "A turn that fails with no text becomes an explicit terminal failure note.
