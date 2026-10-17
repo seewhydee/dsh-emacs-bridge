@@ -2532,24 +2532,48 @@ turn's sanitized failure alist `(code . message)'."
               (cons 'epoch 0)
               (cons 'incremental nil))))
 
-;; The package renders a turn's body and terminal suffix separately (the
-;; incremental fill needs them apart), so the whole-turn render the tests
-;; assert against is composed here from the production renderer.
+;; The package renders a turn's body and terminal suffix directly into the
+;; buffer, so the whole-turn render the tests assert against is produced the
+;; same way: insert the items, then insert the suffix.
+
+(defmacro dsh-bridge-test--with-render-buffer (&rest body)
+  "Evaluate BODY in a temp buffer in `dsh-bridge-view-mode'.
+The caller's `dsh-bridge--view-activity' is carried over, so the production
+renderers see the same state they would in the view."
+  `(let ((activity dsh-bridge--view-activity))
+     (with-temp-buffer
+       (dsh-bridge-view-mode)
+       (setq-local dsh-bridge--view-activity activity)
+       (let ((inhibit-read-only t))
+         ,@body))))
 
 (defun dsh-bridge-test--view-turn-body (turn)
   "The body of TURN, as the package renders it.
-Delegates to `dsh-bridge--view-turn-body' so the mirror cannot drift; callers
-exercising activity bind `dsh-bridge--view-activity' first."
-  (dsh-bridge--view-turn-body turn))
+Built through `dsh-bridge--view-insert' in a temp buffer."
+  (dsh-bridge-test--with-render-buffer
+    (dsh-bridge--view-insert (dsh-bridge--view-turn-items turn))
+    (buffer-string)))
+
+(defun dsh-bridge-test--view-turn-suffix (turn &optional session-id)
+  "The terminal suffix TURN appends to its body in SESSION-ID's view.
+The body is seeded first because the leading separator is decided from what
+the buffer already holds.  TURN may be `new' (an empty body)."
+  (dsh-bridge-test--with-render-buffer
+    (when (consp turn)
+      (dsh-bridge--view-insert (dsh-bridge--view-turn-items turn)))
+    (let ((start (point)))
+      (dsh-bridge--view-insert-suffix turn session-id)
+      (buffer-substring start (point)))))
 
 (defun dsh-bridge-test--view-turn-render (turn &optional session-id)
   "Buffer text for the whole TURN record, or \"\" for nil.
-A test-local composition of `dsh-bridge-test--view-turn-body' and
-`dsh-bridge--view-turn-suffix'."
+A test-local composition of the production body and suffix inserters."
   (if (null turn)
       ""
-    (concat (dsh-bridge-test--view-turn-body turn)
-            (dsh-bridge--view-turn-suffix turn session-id))))
+    (dsh-bridge-test--with-render-buffer
+      (dsh-bridge--view-insert (dsh-bridge--view-turn-items turn))
+      (dsh-bridge--view-insert-suffix turn session-id)
+      (buffer-string))))
 
 (defconst dsh-bridge-test--view-newest-rendered
   (dsh-bridge-test--view-turn-render (nth 0 dsh-bridge-test--view-turns)))
@@ -2780,9 +2804,9 @@ turn ends cleanly after its last segment."
   "The render helpers reject a non-record TURN.
 An empty view clears through `dsh-bridge--view-fill' itself, which never
 routes nil through them; a nil or non-record argument is a caller error."
-  (should-error (dsh-bridge--view-turn-body nil) :type 'error)
+  (should-error (dsh-bridge--view-turn-items nil) :type 'error)
   (should-error (dsh-bridge--view-turn-items 'new) :type 'error)
-  (should-error (dsh-bridge--view-turn-suffix nil "s1") :type 'error))
+  (should-error (dsh-bridge--view-insert-suffix nil "s1") :type 'error))
 
 (ert-deftest dsh-bridge-view-fill-append-preserves-point ()
   "Refilling a growing turn splices: point inside the earlier content
@@ -2849,9 +2873,11 @@ render."
                                      'dsh-bridge-turn-marker t)))))
 
 (ert-deftest dsh-bridge-view-fill-falls-back-on-divergence ()
-  "Every provenance mismatch rebuilds the whole body instead of splicing.
+  "Every recorded-identity mismatch rebuilds the whole body instead of splicing.
 A text marker planted in the body survives a splice and collapses to
-`point-min' on a rebuild, which distinguishes the two."
+`point-min' on a rebuild, which distinguishes the two.  The record holds no
+body length, so edits inside the body are not detected; a terminal suffix
+whose marker property does not reach `point-max' is."
   (let* ((seg1 (dsh-bridge-test--view-segment "first" 7001000 1))
          (seg2 (dsh-bridge-test--view-segment "second" 7002000 2))
          (one (dsh-bridge-test--view-turn 7 7000000 (list seg1)))
@@ -2894,12 +2920,12 @@ A text marker planted in the body survives a splice and collapses to
           (should (refill gap))
           (should (equal (marker-position probe) (point-min)))
           (set-marker probe nil))
-        ;; Buffer drift -> rebuild.
+        ;; A marker region that does not reach the end -> rebuild.
         (refill one)
         (let ((probe (copy-marker 3)))
           (let ((inhibit-read-only t))
-            (goto-char (point-min))
-            (delete-char 1))
+            (goto-char (point-max))
+            (insert "stray"))
           (should (refill two))
           (should (equal (marker-position probe) (point-min)))
           (set-marker probe nil))
@@ -3383,8 +3409,8 @@ failure) and makes the record non-empty."
     (with-temp-buffer
       (dsh-bridge-view-mode)
       (setq-local dsh-bridge--view-activity nil)
-      (let ((text-suffix (dsh-bridge--view-turn-suffix failed-text "s1"))
-            (empty-suffix (dsh-bridge--view-turn-suffix failed-empty "s1")))
+      (let ((text-suffix (dsh-bridge-test--view-turn-suffix failed-text "s1"))
+            (empty-suffix (dsh-bridge-test--view-turn-suffix failed-empty "s1")))
         (should (string-match-p "API key is invalid" text-suffix))
         (should (string-match-p "API key is invalid" empty-suffix))
         (should (string-match-p "failed" text-suffix)))
@@ -3534,17 +3560,13 @@ waiting placeholder clears it."
         (should (equal (plist-get prov :session) "s1"))
         (should (equal (plist-get prov :epoch) 0))
         (should (equal (plist-get prov :turn) 7))
-        (should (plist-get prov :open))
         (should (equal (plist-get prov :keys) '((1 . 7001000))))
-        (should (equal (plist-get prov :body-length) 5))
-        (should (> (plist-get prov :tail-length) 0)))
+        (should-not (plist-member prov :body-length))
+        (should-not (plist-member prov :tail-length)))
       (dsh-bridge--view-fill "s1" two nil t t)
       (let ((prov dsh-bridge--view-provenance))
         (should (equal (plist-get prov :keys)
-                       '((1 . 7001000) (2 . 7002000))))
-        (should (equal (plist-get prov :body-length)
-                       (length (dsh-bridge-test--view-turn-body two))))
-        (should (plist-get prov :open)))
+                       '((1 . 7001000) (2 . 7002000)))))
       ;; A waiting placeholder is not a reconcilable body.
       (dsh-bridge--view-waiting-fill "s1" 7)
       (should-not dsh-bridge--view-provenance))))
@@ -9422,7 +9444,7 @@ and the option being off all drop the note."
         (dsh-bridge--view-answer-note-record
          (list (list (cons 'id "q1") (cons 'selected ["Go"]))))
         (should (string-match-p "You answered"
-                                (dsh-bridge--view-turn-suffix 'new "s1"))))
+                                (dsh-bridge-test--view-turn-suffix 'new "s1"))))
       ;; The option suppresses the note entirely.
       (let ((dsh-bridge-view-answer-echo nil))
         (should (string-match-p "(continuing\\.\\.\\.)"
@@ -11931,18 +11953,20 @@ opt-out."
             (let ((button (button-at (match-beginning 0))))
               (should button)
               (should (equal (button-get button 'path) (cdr file)))))))
-      ;; A completed turn composes body + blank line + footer, and no marker.
+      ;; A completed turn composes body + blank line + footer, and the
+      ;; footer is terminal suffix too: the marker property bounds it so a
+      ;; later splice can replace it.
       (let ((render (dsh-bridge-test--view-turn-render changed "s1")))
         (should (equal render (concat "done\n\n" expected)))
-        (should-not (text-property-any 0 (length render)
-                                       'dsh-bridge-turn-marker t render)))
+        (should (text-property-any 0 (length render)
+                                   'dsh-bridge-turn-marker t render)))
       ;; No changes: no footer, and the completed turn renders cleanly.
       (should (null (dsh-bridge--view-changed-files plain)))
-      (should (equal (dsh-bridge--view-turn-suffix plain "s1") ""))
+      (should (equal (dsh-bridge-test--view-turn-suffix plain "s1") ""))
       ;; The option turns the footer off.
       (let ((dsh-bridge-view-changed-files nil))
         (should (null (dsh-bridge--view-changed-files changed)))
-        (should (equal (dsh-bridge--view-turn-suffix changed "s1") ""))))))
+        (should (equal (dsh-bridge-test--view-turn-suffix changed "s1") ""))))))
 
 (ert-deftest dsh-bridge-view-changed-files-open-turn-order ()
   "For an open turn the footer sits between the body and the terminal
@@ -11958,7 +11982,7 @@ pending (the note belongs to a later, open turn)."
       (dsh-bridge-view-mode)
       (setq-local dsh-bridge--view-content-session "s1")
       ;; Open turn: body, footer, marker.
-      (let ((suffix (dsh-bridge--view-turn-suffix open "s1")))
+      (let ((suffix (dsh-bridge-test--view-turn-suffix open "s1")))
         (should (equal (substring-no-properties suffix)
                        (concat "\n\n" footer "\n\n(continuing...)")))
         (should (text-property-any 0 (length suffix)
@@ -11966,7 +11990,7 @@ pending (the note belongs to a later, open turn)."
       ;; A pending question replaces only the marker, after the footer.
       (let ((dsh-bridge--pending-questions
              (dsh-bridge-test--pending-ask "s1" "Approve?")))
-        (let ((suffix (dsh-bridge--view-turn-suffix open "s1")))
+        (let ((suffix (dsh-bridge-test--view-turn-suffix open "s1")))
           (should (equal (substring-no-properties suffix)
                          (concat "\n\n" footer
                                  "\n\n(Awaiting response: press a to view and answer)")))
@@ -11976,7 +12000,7 @@ pending (the note belongs to a later, open turn)."
       ;; A completed turn drops the awaiting note but keeps the footer.
       (let ((dsh-bridge--pending-questions
              (dsh-bridge-test--pending-ask "s1" "Approve?")))
-        (should (equal (substring-no-properties (dsh-bridge--view-turn-suffix done "s1"))
+        (should (equal (substring-no-properties (dsh-bridge-test--view-turn-suffix done "s1"))
                        (concat "\n\n" footer)))))))
 
 (ert-deftest dsh-bridge-view-changed-files-buttons ()
@@ -12017,8 +12041,8 @@ footer's visit button resolves a relative path against it at click time."
       (should (equal opened "/tmp/dsh-session/src/a.ts")))))
 
 (ert-deftest dsh-bridge-view-changed-files-splice ()
-  "An incremental fill replaces the footer with the grown turn's list and keeps
-the recorded body/tail lengths in step, leaving a mid-body point alone."
+  "An incremental fill replaces the footer with the grown turn's list,
+leaving a mid-body point alone."
   (let* ((seg1 (dsh-bridge-test--view-segment "first" 7001000 1))
          (seg2 (dsh-bridge-test--view-segment "second" 7002000 2))
          (one (dsh-bridge-test--view-turn
@@ -12038,10 +12062,8 @@ the recorded body/tail lengths in step, leaving a mid-body point alone."
                      (dsh-bridge-test--view-turn-render two "s1")))
       (should (equal (point) 3))
       (let ((prov dsh-bridge--view-provenance))
-        (should (equal (plist-get prov :body-length)
-                       (length (dsh-bridge-test--view-turn-body two))))
-        (should (equal (plist-get prov :tail-length)
-                       (length (dsh-bridge--view-turn-suffix two "s1"))))))))
+        (should (equal (plist-get prov :keys)
+                       '((1 . 7001000) (2 . 7002000))))))))
 
 (ert-deftest dsh-bridge-view-changed-files-pushed-turn ()
   "A pushed turn renders the changed-files footer from its `/turns' record."

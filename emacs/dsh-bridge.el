@@ -2642,15 +2642,14 @@ The value, if non-nil, should be a plist keyed with:
 - `:session' (the session id)
 - `:epoch' (the turns-cache history epoch, a number or nil)
 - `:turn' (the turn number)
-- `:open' (whether the rendered turn was still running)
 - `:activity' (the `dsh-bridge--view-activity' state at render time)
 - `:keys' (oldest-first render-item identities: `(STEP . TIME)' for a
   segment, `(activity SEQ ORD)' for an activity line)
-- `:body-length' (characters of the rendered body)
-- `:tail-length' (characters of the terminal suffix)
 
 The `dsh-bridge--view-fill' function uses this record to splice newly
-rendered items in front of the recorded body end.")
+rendered items onto the body the buffer already holds; the terminal
+suffix is delimited in the buffer itself by the `dsh-bridge-turn-marker'
+text property.")
 
 (defvar dsh-bridge--view-ticker-timer nil
   "Repeating timer to repaint the DSH-View header, or nil.")
@@ -2681,18 +2680,15 @@ recognized by their absence."
 (defconst dsh-bridge--view-running-marker
   (propertize "(continuing...)"
 	      'face 'dsh-bridge-view-marker-face
-	      'font-lock-face 'dsh-bridge-view-marker-face
-	      'dsh-bridge-turn-marker t)
+	      'font-lock-face 'dsh-bridge-view-marker-face)
   "Terminal marker for a running turn in the DSH-View buffer.
 This string is displayed at the end of the DSH-View buffer if the turn
-is still running.  It must carry a `dsh-bridge-turn-marker' text
-property, which is used when filling the buffer with new replies.")
+is still running.")
 
 (defconst dsh-bridge--view-running-placeholder
   (propertize "(running...)"
 	      'face 'dsh-bridge-view-marker-face
 	      'font-lock-face 'dsh-bridge-view-marker-face
-	      'dsh-bridge-turn-marker t
 	      'dsh-bridge-running t)
   "Placeholder line for a DSH-View buffer that just started running.
 This is used in place of `dsh-bridge--view-running-marker' when a new
@@ -2719,7 +2715,6 @@ press %s to view and answer" count key)
 	(propertize body
 		    'face 'dsh-bridge-view-awaiting-face
 		    'font-lock-face 'dsh-bridge-view-awaiting-face
-		    'dsh-bridge-turn-marker t
 		    'dsh-bridge-awaiting t)))))
 
 (defun dsh-bridge--view-approval-note (session-id)
@@ -2739,7 +2734,6 @@ pending approval, return nil."
 	(propertize body
 		    'face 'dsh-bridge-view-awaiting-face
 		    'font-lock-face 'dsh-bridge-view-awaiting-face
-		    'dsh-bridge-turn-marker t
 		    'dsh-bridge-awaiting t)))))
 
 (defun dsh-bridge--view-answer-note-clear (session-id)
@@ -2781,7 +2775,6 @@ If SESSION-ID is nil, or no answer note is recorded for it, return nil."
 	  (propertize (concat "(" text " \u2014 continuing\u2026)")
 		      'face 'dsh-bridge-view-answered-face
 		      'font-lock-face 'dsh-bridge-view-answered-face
-		      'dsh-bridge-turn-marker t
 		      'dsh-bridge-answered t))))))
 
 (defun dsh-bridge--view-waiting-fill (session-id base &optional cwd)
@@ -2800,7 +2793,7 @@ turn-following state for the new turn."
   (setq-local dsh-bridge--view-follow t)
   (let ((inhibit-read-only t))
     (erase-buffer)
-    (insert (dsh-bridge--view-turn-suffix 'new session-id))
+    (dsh-bridge--view-insert-suffix 'new session-id)
     (goto-char (point-min)))
   (setq-local dsh-bridge--view-provenance nil) ; placeholder isn't content
   (setq header-line-format dsh-bridge--view-header-line-format)
@@ -2907,8 +2900,7 @@ full-trace command reads a thinking entry's `seq' and `ord' from it)."
   "The propertized one-line rendering of activity ENTRY.
 ENTRY is one host activity alist.  The line carries the `face' and
 `font-lock-face' text properties (the latter overriding Markdown's own
-fontification) and the `dsh-bridge-activity' property, never the terminal
-`dsh-bridge-turn-marker'."
+fontification) and the `dsh-bridge-activity' property."
   (let* ((kind (alist-get 'kind entry))
 	 (name (or (alist-get 'name entry) "tool"))
 	 (error-p (and (equal kind "tool-result")
@@ -3020,24 +3012,14 @@ other boundary a single newline."
    ((not (equal (nth 1 prev) (nth 1 next))) "\n\n")
    (t "\n")))
 
-(defun dsh-bridge--view-join-items (items)
-  "Concatenate render ITEMS, inserting their separators."
-  (let ((result "")
-	(prev nil))
-    (dolist (item items)
-      (setq result (concat result (dsh-bridge--view-item-separator prev item)
-			   (nth 2 item))
-	    prev item))
-    result))
-
-(defun dsh-bridge--view-turn-body (turn)
-  "The rendered body of turn record TURN, or \"\" when there is nothing.
-The body interleaves reply segments and (when `dsh-bridge--view-activity' is
-non-nil) activity lines per `dsh-bridge--view-turn-items'.  TURN must be a
-turn record; any other value is a caller error."
-  (if (consp turn)
-      (dsh-bridge--view-join-items (dsh-bridge--view-turn-items turn))
-    (error "dsh-bridge: --view-turn-body called with a non-record TURN")))
+(defun dsh-bridge--view-insert (items &optional prev)
+  "Insert render ITEMS into the current buffer, with their separators.
+PREV is the item already at the insertion point, if any: the separator
+before the first inserted item is computed from it, as for an append."
+  (dolist (item items)
+    (insert (dsh-bridge--view-item-separator prev item))
+    (insert (nth 2 item))
+    (setq prev item)))
 
 (defun dsh-bridge--failure-text (failure)
   "Return the display text for FAILURE.
@@ -3066,21 +3048,24 @@ mistaken for model text and satisfies the terminal-marker conventions."
     (when failure
       (propertize (format "(failed \u2014 %s)" (dsh-bridge--failure-text failure))
 		  'face 'dsh-bridge-view-marker-face
-		  'font-lock-face 'dsh-bridge-view-marker-face
-		  'dsh-bridge-turn-marker t))))
+		  'font-lock-face 'dsh-bridge-view-marker-face))))
 
-(defun dsh-bridge--view-turn-suffix (turn session-id)
-  "The terminal suffix of TURN for SESSION-ID's view.
-TURN is a turn record or `new' while a just-sent turn waits for its first
-committed reply; any other value is a caller error.
+(defun dsh-bridge--view-insert-suffix (turn session-id)
+  "Insert the terminal suffix of TURN for SESSION-ID's view.
+TURN is a turn record or `new' while a just-sent turn waits for its
+first committed reply; any other value is a caller error.
 
 The suffix is the changed-files footer (when TURN changed files), then
 the terminal marker indicating a failure, pending query or approval,
 answer acknowledgment, the running placeholder for a new turn, or the
 running marker for an open turn.  A completed turn with no failure has
-no terminal marker at all."
+no terminal marker at all.
+
+The inserted region is marked with the `dsh-bridge-turn-marker' text
+property, so an incremental fill can find and replace the suffix without
+recording its length."
   (unless (or (consp turn) (eq turn 'new))
-    (error "dsh-bridge: --view-turn-suffix called with a non-record TURN"))
+    (error "dsh-bridge: --view-insert-suffix called with a non-record TURN"))
   (let* ((completed (and (consp turn)
 			 (not (dsh-bridge--view-turn-open-p turn))))
 	 (files (dsh-bridge--view-changed-files turn))
@@ -3097,17 +3082,22 @@ no terminal marker at all."
 		     dsh-bridge--view-running-placeholder)
 		(and (consp turn)
 		     dsh-bridge--view-running-marker))))
-    (if (and (null files) (null furniture))
-	""
-      (concat
-       ;; A non-empty rendered body takes the blank-line separator; `new'
-       ;; and an empty body sit flush.  Ask the body itself, not the raw
-       ;; record slots: an activity-only turn's body is empty while the
-       ;; toggle is off, and a step-less record has no render items at all.
-       (if (and (consp turn)
-		(not (string-empty-p (dsh-bridge--view-turn-body turn))))
-	   "\n\n" "")
-       (string-join (delq nil (list files furniture)) "\n\n")))))
+    (when (or files furniture)
+      ;; Insert extra newlines into the suffix if necessary: a
+      ;; non-empty rendered body takes the blank-line separator,
+      ;; while `new' and an empty body sit flush.
+      (let ((old-point (point)))
+	(when (and (consp turn) (> (buffer-size) 0))
+	  (insert "\n\n"))
+	(when files
+	  (insert files)
+	  (if furniture (insert "\n\n")))
+	(if furniture (insert furniture))
+	;; Bound the whole suffix, not just the furniture: the leading
+	;; separator and the changed-files footer are replaced with it.
+	(when (> (point) old-point)
+	  (put-text-property old-point (point)
+			     'dsh-bridge-turn-marker t))))))
 
 (defun dsh-bridge--view-turn-renders-empty-p (turn)
   "Whether TURN would render an empty DSH-View body and suffix.
@@ -3131,38 +3121,16 @@ awaiting, approval, and answer notes attach only while it is open."
   "The identity of SEGMENT: its `(STEP . TIME)' pair."
   (cons (alist-get 'step segment) (alist-get 'time segment)))
 
-(defun dsh-bridge--view-keys-prefix-p (old new)
-  "Whether the render-item identity list OLD is a prefix of NEW."
-  (and (<= (length old) (length new))
-       (equal old (seq-take new (length old)))))
-
-(defun dsh-bridge--view-provenance-make (session-id epoch turn keys
-						    body-length tail-length)
+(defun dsh-bridge--view-provenance-make (session-id epoch turn keys)
   "A provenance plist for the body just rendered from TURN.
-KEYS is TURN's render-item identities, BODY-LENGTH and TAIL-LENGTH the
-character counts of the rendered body and terminal suffix.  The current
+KEYS is TURN's render-item identities.  The current
 `dsh-bridge--view-activity' is recorded so a toggle flip invalidates a
 recorded splice."
   (list :session session-id
 	:epoch epoch
 	:turn (and turn (alist-get 'turn turn))
-	:open (and turn (dsh-bridge--view-turn-open-p turn) t)
 	:activity dsh-bridge--view-activity
-	:keys keys
-	:body-length body-length
-	:tail-length tail-length))
-
-(defun dsh-bridge--view-provenance-intact-p (provenance)
-  "Whether the current DSH-View buffer still matches PROVENANCE.
-The buffer must have the recorded body plus suffix length, and an open
-turn must still carry its terminal line with `dsh-bridge-turn-marker'
-property."
-  (let ((body (plist-get provenance :body-length))
-	(tail (plist-get provenance :tail-length)))
-    (and (equal (buffer-size) (+ body tail))
-	 (or (not (plist-get provenance :open))
-	     (text-property-any (1+ body) (point-max)
-				'dsh-bridge-turn-marker t)))))
+	:keys keys))
 
 (defun dsh-bridge--view-turn-index (turns &optional turn)
   "Index of TURN (a number) in TURNS (newest first), or nil when absent.
@@ -4620,7 +4588,60 @@ entries were pending, only the latest is shown."
 	(when (alist-get 'overflowed alist)
 	  (message "dsh-bridge: old messages dropped (outbox overflow)")))))))
 
-(defun dsh-bridge--view-fill (session-id turn &optional cwd no-turns-refresh preserve-point)
+(defun dsh-bridge--view-splice-turn (session-id turn)
+  "Try to splice SESSION-ID's TURN into the current DSH-View buffer.
+If the splice can be performed, update `dsh-bridge--view-provenance' and
+return a non-nil value.  Otherwise, return nil."
+  (when (and session-id (consp turn))
+    ;; Check if we can splice: the buffer must hold a prefix of the
+    ;; new turn, with the same activity state.
+    (let* ((epoch (car (dsh-bridge--turns-cache-entry session-id)))
+	   (items (dsh-bridge--view-turn-items turn))
+	   (new-keys (mapcar #'car items))
+	   (prov dsh-bridge--view-provenance)
+	   ;; The suffix is delimited by its marker property, which the
+	   ;; insertion function puts over the whole suffix (separator,
+	   ;; changed-files footer, and furniture) up to `point-max'.  A
+	   ;; marker region that does not reach `point-max' is not ours to
+	   ;; replace: fall back to a full render.
+	   (suffix-start (previous-single-property-change
+			  (point-max) 'dsh-bridge-turn-marker))
+	   (suffix (and suffix-start
+			(get-text-property suffix-start
+					   'dsh-bridge-turn-marker))))
+      (when (and (numberp epoch)
+		 prov
+		 (equal (plist-get prov :session) session-id)
+		 (equal (plist-get prov :turn) (alist-get 'turn turn))
+		 (equal (plist-get prov :epoch) epoch)
+		 (eq (plist-get prov :activity) dsh-bridge--view-activity)
+		 (let ((old (plist-get prov :keys)))
+		   (and (<= (length old) (length new-keys))
+			(equal old (seq-take new-keys (length old)))))
+		 (or (null suffix-start) suffix))
+	;; All is ready: do the splice.
+	(let* ((rendered (length (plist-get prov :keys)))
+	       (new-items (nthcdr rendered items))
+	       (old-point (point))
+	       ;; Point at or beyond the suffix start sits on terminal
+	       ;; furniture; the splice replaces it, so carry point to the
+	       ;; new tail.  With no suffix, only the buffer end counts.
+	       (tail-p (>= old-point (if suffix suffix-start (point-max)))))
+	  (let ((inhibit-read-only t))
+	    (when suffix
+	      (delete-region suffix-start (point-max)))
+	    (save-excursion
+	      (goto-char (point-max))
+	      (dsh-bridge--view-insert
+	       new-items
+	       (and (> rendered 0) (nth (1- rendered) items)))
+	      (dsh-bridge--view-insert-suffix turn session-id)))
+	  (when tail-p (goto-char (point-max)))
+	  (setq-local dsh-bridge--view-provenance
+		      (dsh-bridge--view-provenance-make
+		       session-id epoch turn new-keys)))))))
+
+(defun dsh-bridge--view-fill (session-id turn &optional cwd no-turns-refresh splice)
   "Fill the current buffer with TURN as the shown content of SESSION-ID.
 The current buffer is put into `dsh-bridge-view-mode' if it is not
 already.  This function does no window-management.
@@ -4632,11 +4653,10 @@ CWD is the session's current working directory.
 
 NO-TURNS-REFRESH, if non-nil, means not to refresh the turn list.
 
-PRESERVE-POINT, if non-nil, means to try to splice any turn update in
-place, leaving point alone (or at the end of the buffer if there).
-However, if the turn's provenance record (`dsh-bridge--view-provenance')
-does not match the cached turn data, a full re-render must performed,
-and splicing in place is not possible."
+SPLICE, if non-nil, means to attempt to splice a turn update in place,
+leaving point alone (or at the end of the buffer if there).  However, if
+the turn's provenance record (`dsh-bridge--view-provenance') does not
+match the cached turn data, do a full re-render instead."
   (unless (derived-mode-p 'dsh-bridge-view-mode)
     (dsh-bridge-view-mode))
   (add-hook 'kill-buffer-hook #'dsh-bridge--view-ticker-ensure nil t)
@@ -4653,75 +4673,27 @@ and splicing in place is not possible."
   ;; Reset other DSH-View vars.
   (setq-local dsh-bridge--view-waiting nil)
   (setq-local dsh-bridge--view-browsing nil)
-  (setq-local dsh-bridge--view-turn
-	      (and (consp turn) (alist-get 'turn turn)))
+  (setq-local dsh-bridge--view-turn (alist-get 'turn turn))
   (dsh-bridge--apply-session-directory session-id cwd)
   ;; Fetch the turns data if necessary.
   (unless (or (null session-id) no-turns-refresh)
     (dsh-bridge--view-turns-refresh t))
-  (let* ((old-point (point))
-	 (epoch (car (dsh-bridge--turns-cache-entry session-id)))
-	 (record-p (consp turn))
-	 (items (and record-p (dsh-bridge--view-turn-items turn)))
-	 (new-keys (mapcar #'car items))
-	 (prov dsh-bridge--view-provenance)
-	 ;; Before splicing, verify that the buffer holds a prefix of
-	 ;; the new turn.  The history epoch must be equal, meaning
-	 ;; the turn can grew by appending items, and the activity
-	 ;; state must be the same.
-	 (splice (and preserve-point
-		      record-p
-		      (numberp epoch)
-		      prov
-		      (equal (plist-get prov :session) session-id)
-		      (equal (plist-get prov :turn) (alist-get 'turn turn))
-		      (equal (plist-get prov :epoch) epoch)
-		      (eq (plist-get prov :activity) dsh-bridge--view-activity)
-		      (dsh-bridge--view-keys-prefix-p
-		       (plist-get prov :keys) new-keys)
-		      (dsh-bridge--view-provenance-intact-p prov))))
-    (if splice
-	(let* ((old-body (plist-get prov :body-length))
-	       (rendered (length (plist-get prov :keys)))
-	       (delta (nthcdr rendered items))
-	       (delta-body (if (null delta)
-			       ""
-			     (concat (and (> rendered 0)
-					  (> old-body 0)
-					  (dsh-bridge--view-item-separator
-					   (nth (1- rendered) items)
-					   (car delta)))
-				     (dsh-bridge--view-join-items delta))))
-	       (new-body (+ old-body (length delta-body)))
-	       (new-suffix (dsh-bridge--view-turn-suffix turn session-id))
-	       ;; Point at or beyond the old body end sat on the tail; the
-	       ;; splice replaces that region, so carry it to the new tail.
-	       (tail-p (>= old-point (1+ old-body))))
-	  (let ((inhibit-read-only t))
-	    (save-excursion
-	      (goto-char (+ (point-min) old-body))
-	      (delete-region (point) (point-max))
-	      (insert delta-body new-suffix)))
-	  (when tail-p (goto-char (point-max)))
+  ;; Either splice in the update, or do fill from scratch.
+  (unless (and splice (dsh-bridge--view-splice-turn session-id turn))
+    (let ((inhibit-read-only t)
+	  (epoch (car (dsh-bridge--turns-cache-entry session-id))))
+      (erase-buffer)
+      (if (null turn)
+	  (setq-local dsh-bridge--view-provenance nil)
+	(let ((items (dsh-bridge--view-turn-items turn)))
+	  (dsh-bridge--view-insert items)
+	  (dsh-bridge--view-insert-suffix turn session-id)
 	  (setq-local dsh-bridge--view-provenance
 		      (dsh-bridge--view-provenance-make
-		       session-id epoch turn new-keys new-body
-		       (length new-suffix))))
-      (let* ((body (and record-p (dsh-bridge--view-turn-body turn)))
-	     (suffix (and record-p
-			  (dsh-bridge--view-turn-suffix turn session-id)))
-	     (new-text (concat (or body "") (or suffix ""))))
-	(let ((inhibit-read-only t))
-	  (erase-buffer)
-	  (insert new-text)
-	  (goto-char (if (and dsh-bridge--view-follow preserve-point)
-			 (point-max)
-		       (point-min))))
-	(setq-local dsh-bridge--view-provenance
-		    (and record-p
-			 (dsh-bridge--view-provenance-make
-			  session-id epoch turn new-keys
-			  (length (or body "")) (length (or suffix ""))))))))
+		       session-id epoch turn (mapcar #'car items)))))
+      (goto-char (if (and dsh-bridge--view-follow splice)
+		     (point-max)
+		   (point-min)))))
   (setq header-line-format dsh-bridge--view-header-line-format)
   (dsh-bridge--view-ticker-ensure))
 
@@ -4782,7 +4754,7 @@ no-op for sessions no view shows in either state."
 	;; No content yet: refresh the placeholder/note line in place.
 	(let ((inhibit-read-only t))
 	  (erase-buffer)
-	  (insert (dsh-bridge--view-turn-suffix 'new session-id))
+	  (dsh-bridge--view-insert-suffix 'new session-id)
 	  (goto-char (point-min)))
 	;; Rewritten outside `dsh-bridge--view-fill': nothing to reconcile.
 	(setq-local dsh-bridge--view-provenance nil)
@@ -8140,6 +8112,7 @@ the cache-only refresh."
 	       ("max-tokens" "stopped at token limit")
 	       (_ "ended")))))
 
+;; FIXME: unify with `dsh-bridge--view-insert-suffix'.
 (defun dsh-bridge--view-blocked-fill (session-id)
   "Render SESSION-ID's rejected (`blocked') turn as a terminal note."
   (dsh-bridge--view-fill session-id nil nil t)
