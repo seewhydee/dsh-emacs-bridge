@@ -2777,6 +2777,17 @@ If SESSION-ID is nil, or no answer note is recorded for it, return nil."
 		      'font-lock-face 'dsh-bridge-view-answered-face
 		      'dsh-bridge-answered t))))))
 
+(defun dsh-bridge--view-fill-suffix-only (session-id turn &optional cwd)
+  "Reset the current view to an empty body plus TURN's terminal suffix.
+TURN is `new' or `blocked'.  The buffer's mode, session directory, and
+header are initialized as by `dsh-bridge--view-fill', but no provenance
+is recorded: there is no turn record to reconcile the content against."
+  (dsh-bridge--view-fill session-id nil cwd t)
+  (let ((inhibit-read-only t))
+    (dsh-bridge--view-insert-suffix turn session-id))
+  (goto-char (point-min))
+  (setq-local dsh-bridge--view-provenance nil))
+
 (defun dsh-bridge--view-waiting-fill (session-id base &optional cwd)
   "Put the current DSH-View for SESSION-ID into the waiting state.
 BASE is the turn number *before* the send, or nil if there is no
@@ -2787,16 +2798,12 @@ awaiting note if a question is already pending), and then turns on
 turn-following state for the new turn."
   ;; The fill clears the waiting state and `dsh-bridge--view-turn';
   ;; reset both afterwards.
-  (dsh-bridge--view-fill session-id nil cwd t)
+  (dsh-bridge--view-fill-suffix-only session-id 'new cwd)
   (setq-local dsh-bridge--view-turn (1+ (or base 0)))
   (setq-local dsh-bridge--view-waiting t)
   (setq-local dsh-bridge--view-follow t)
-  (let ((inhibit-read-only t))
-    (erase-buffer)
-    (dsh-bridge--view-insert-suffix 'new session-id)
-    (goto-char (point-min)))
-  (setq-local dsh-bridge--view-provenance nil) ; placeholder isn't content
-  (setq header-line-format dsh-bridge--view-header-line-format)
+  ;; `view-fill' ensured the ticker before the waiting anchor existed; ask
+  ;; again now that the header's elapsed clock has something to time.
   (dsh-bridge--view-ticker-ensure))
 
 ;;; Changed files (the DSH-View footer)
@@ -2804,9 +2811,9 @@ turn-following state for the new turn."
 ;; The footer under a turn names the files the turn's tool calls successfully
 ;; changed.  The host's raw-log fold supplies the attribution with the turn
 ;; record (`GET /turns' `files', a list of `(path . op)' alists).  The footer
-;; is composed as a string in a temp buffer because `dsh-bridge--view-fill'
-;; inserts the suffix as text; text properties (including the button objects)
-;; survive `buffer-string'.
+;; is composed as a string in a temp buffer because the suffix inserter adds
+;; it as text; text properties (including the button objects) survive
+;; `buffer-string'.
 
 (defun dsh-bridge--button-visit (button)
   "Visit the filename specified by BUTTON's `path' property."
@@ -3050,28 +3057,44 @@ mistaken for model text and satisfies the terminal-marker conventions."
 		  'face 'dsh-bridge-view-marker-face
 		  'font-lock-face 'dsh-bridge-view-marker-face))))
 
+(defun dsh-bridge--view-blocked-note (session-id)
+  "The terminal DSH-View furniture line for a rejected (`blocked') turn.
+Names the archived cause when SESSION-ID is archived, else the generic
+rejection text.  Like `dsh-bridge--view-failure-note', the note is
+propertized as furniture, so it is never mistaken for model text."
+  (let ((session (dsh-bridge--session-for-id session-id)))
+    (propertize (if (eq (alist-get 'archived session) t)
+		    "(blocked \u2014 session is archived; unarchive it first)"
+		  "(blocked \u2014 host rejected and produced no reply)")
+		'face 'dsh-bridge-view-marker-face
+		'font-lock-face 'dsh-bridge-view-marker-face)))
+
 (defun dsh-bridge--view-insert-suffix (turn session-id)
   "Insert the terminal suffix of TURN for SESSION-ID's view.
-TURN is a turn record or `new' while a just-sent turn waits for its
-first committed reply; any other value is a caller error.
+TURN is a turn record, `new' while a just-sent turn waits for its first
+committed reply, or `blocked' for a rejected turn with no body to
+render; any other value is a caller error.
 
 The suffix is the changed-files footer (when TURN changed files), then
 the terminal marker indicating a failure, pending query or approval,
-answer acknowledgment, the running placeholder for a new turn, or the
-running marker for an open turn.  A completed turn with no failure has
-no terminal marker at all.
+answer acknowledgment, the running placeholder for a new turn, the
+running marker for an open turn, or the rejection note for `blocked'.
+A completed turn with no failure and no rejection has no terminal marker
+at all.
 
 The inserted region is marked with the `dsh-bridge-turn-marker' text
 property, so an incremental fill can find and replace the suffix without
 recording its length."
-  (unless (or (consp turn) (eq turn 'new))
+  (unless (or (consp turn) (memq turn '(new blocked)))
     (error "dsh-bridge: --view-insert-suffix called with a non-record TURN"))
   (let* ((completed (and (consp turn)
 			 (not (dsh-bridge--view-turn-open-p turn))))
 	 (files (dsh-bridge--view-changed-files turn))
-	 (furniture (dsh-bridge--view-failure-note turn)))
-    ;; Show the failure note regardless of the turn completion
-    ;; status.  Otherwise, check if the turn is parked on an
+	 (furniture (if (eq turn 'blocked)
+			(dsh-bridge--view-blocked-note session-id)
+		      (dsh-bridge--view-failure-note turn))))
+    ;; Show a failure or rejection note regardless of the turn
+    ;; completion status.  Otherwise, check if the turn is parked on an
     ;; awaiting or answered note, else the continuation marker.
     (unless (or completed furniture)
       (setq furniture
@@ -3109,7 +3132,10 @@ open turn is never empty: its running marker is terminal furniture, and the
 awaiting, approval, and answer notes attach only while it is open."
   ;; Test the slots the rendering is built from instead of building it: the
   ;; body joins the reply segments and the drawn activity, and the suffix
-  ;; joins the failure note and the changed-files footer.
+  ;; joins the failure note and the changed-files footer.  A `blocked' record
+  ;; with no activity is still empty here: its rejection note belongs to the
+  ;; waiting placeholder path (`dsh-bridge--view-blocked-fill'), not to a
+  ;; record fill.
   (and (consp turn)
        (null (alist-get 'segments turn))
        (not (and dsh-bridge--view-activity (alist-get 'activity turn)))
@@ -8112,26 +8138,18 @@ the cache-only refresh."
 	       ("max-tokens" "stopped at token limit")
 	       (_ "ended")))))
 
-;; FIXME: unify with `dsh-bridge--view-insert-suffix'.
-(defun dsh-bridge--view-blocked-fill (session-id)
-  "Render SESSION-ID's rejected (`blocked') turn as a terminal note."
-  (dsh-bridge--view-fill session-id nil nil t)
-  (setq-local dsh-bridge--view-turn nil)
-  (setq-local dsh-bridge--view-waiting nil)
-  (let* ((session (dsh-bridge--session-for-id session-id))
-	 (note (if (eq (alist-get 'archived session) t)
-		   "(blocked \u2014 session is archived; unarchive it first)"
-		 "(blocked \u2014 host rejected and produced no reply)")))
-    (let ((inhibit-read-only t))
-      (erase-buffer)
-      (insert (propertize note
-			  'face 'dsh-bridge-view-marker-face
-			  'font-lock-face 'dsh-bridge-view-marker-face
-			  'dsh-bridge-turn-marker t))
-      (goto-char (point-min))))
-  (setq-local dsh-bridge--view-provenance nil)
-  (setq header-line-format dsh-bridge--view-header-line-format)
-  (dsh-bridge--view-ticker-ensure))
+(defun dsh-bridge--view-blocked-fill (session-id &optional turn)
+  "Render SESSION-ID's rejected (`blocked') turn as a terminal note.
+TURN is the rejected turn number, defaulting to the current view's
+displayed turn.  Keep that number as the display anchor after the reset,
+so history navigation starts from the rejected turn rather than from an
+empty view."
+  (let ((rejected (or turn dsh-bridge--view-turn)))
+    (dsh-bridge--view-fill-suffix-only session-id 'blocked)
+    (setq-local dsh-bridge--view-turn rejected)
+    ;; `view-fill' ensured the ticker before the display anchor existed; ask
+    ;; again in case the cached record for this turn is still marked open.
+    (dsh-bridge--view-ticker-ensure)))
 
 (defun dsh-bridge--turn-complete-refetch (session-id &optional reason ended-turn failure)
   "Refill DSH-View buffers showing SESSION-ID's completed turn.
@@ -8238,7 +8256,7 @@ preserving point.  A buffer showing an earlier turn is left alone."
 			      (numberp dsh-bridge--view-turn)
 			      (= ended-turn dsh-bridge--view-turn))
 			 (null (dsh-bridge--view-turn-index turns))))
-		(dsh-bridge--view-blocked-fill shown-id))
+		(dsh-bridge--view-blocked-fill shown-id ended-turn))
 	       ;; Otherwise the content is not the new turn's (or
 	       ;; there is none): blank the view to idle.
 	       (t

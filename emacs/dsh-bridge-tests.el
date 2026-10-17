@@ -8779,7 +8779,12 @@ already reads idle."
     (with-current-buffer "*dsh-bridge-output*"
       (should (string-match-p "blocked" (buffer-string)))
       (should (null dsh-bridge--view-waiting))
-      (should (null dsh-bridge--view-turn)))
+      ;; The rejected turn stays the display anchor even though `/turns'
+      ;; does not hold it; navigation starts from it rather than an empty view.
+      (should (equal dsh-bridge--view-turn 3))
+      (should-not dsh-bridge--view-provenance)
+      (should (text-property-any (point-min) (point-max)
+                                 'dsh-bridge-turn-marker t)))
     (when (buffer-live-p (get-buffer "*dsh-bridge-output*"))
       (kill-buffer "*dsh-bridge-output*"))))
 
@@ -8818,7 +8823,8 @@ its activity lines."
         (should (string-match-p "blocked" (buffer-string)))
         (should-not (string-match-p "checking the gate" (buffer-string)))
         (should (null dsh-bridge--view-waiting))
-        (should (null dsh-bridge--view-turn)))
+        (should (equal dsh-bridge--view-turn 3))
+        (should-not dsh-bridge--view-provenance))
       ;; Toggle on: the same record fills and shows its activity lines.
       (with-current-buffer "*dsh-bridge-output*"
         (dsh-bridge--view-waiting-fill "s1" 2)
@@ -8917,9 +8923,42 @@ activity."
       (dsh-bridge--view-waiting-fill "s1" nil)
       (dsh-bridge--view-blocked-fill "s1")
       (should (string-match-p "archived" (buffer-string)))
-      (should (null dsh-bridge--view-waiting)))
+      (should (null dsh-bridge--view-waiting))
+      (should (equal dsh-bridge--view-turn 1))
+      (should-not dsh-bridge--view-provenance)
+      (should (text-property-any (point-min) (point-max)
+                                 'dsh-bridge-turn-marker t)))
     (when (buffer-live-p (get-buffer "*dsh-bridge-output*"))
       (kill-buffer "*dsh-bridge-output*"))))
+
+(ert-deftest dsh-bridge-view-blocked-fill-anchors-navigation ()
+  "M-p from a blocked note starts from the rejected turn, not an empty view.
+The rejected turn is absent from the cached list, so the existing
+\"number not in the list\" rule steps to the newest cached turn; a nil
+displayed turn would instead take the empty-view position and skip it."
+  (let* ((turns (list (dsh-bridge-test--view-turn
+                       2 2000000
+                       (list (dsh-bridge-test--view-segment "newest" 2001000 1))
+                       2009000)
+                      (dsh-bridge-test--view-turn
+                       1 1000000
+                       (list (dsh-bridge-test--view-segment "older" 1001000 1))
+                       1009000)))
+         (dsh-bridge--turns-cache (dsh-bridge-test--view-cache turns))
+         (dsh-bridge--session-status nil))
+    (with-current-buffer (get-buffer-create "*dsh-bridge-output*")
+      (dsh-bridge-view-mode)
+      (setq-local dsh-bridge--view-content-session "s1")
+      ;; The waiting view has sent turn 3; the rejected turn consumes it.
+      (dsh-bridge--view-waiting-fill "s1" 2)
+      (dsh-bridge--view-blocked-fill "s1")
+      (should (equal dsh-bridge--view-turn 3))
+      (cl-letf (((symbol-function 'dsh-bridge--view-turns-refresh)
+                 (lambda (&optional _) turns)))
+        (dsh-bridge-view-previous-reply))
+      (should (equal dsh-bridge--view-turn 2))
+      (should (string-match-p "newest" (buffer-string)))
+      (kill-buffer (current-buffer)))))
 
 (ert-deftest dsh-bridge-turn-complete-refetch-browsing-ended-turn ()
   "A browse parked on the turn that just ended drops its running marker.
