@@ -11621,6 +11621,50 @@ choice POSTs nothing."
       (dsh-bridge--approval-prompt "s1" "a1" (list :tool-name "bash" :detail nil)))
     (should-not posted)))
 
+(ert-deftest dsh-bridge-approval-answered-from-view-keeps-window ()
+  "Answering an approval prompted from the DSH-View leaves the view on screen.
+The approval prompt reads the minibuffer without switching buffers, so the
+exit after the decision runs with the view itself as the old buffer; it must
+not quit that window or bury the view."
+  (let ((config (current-window-configuration))
+        (view (get-buffer-create "*dsh-bridge-output*"))
+        (dsh-bridge-approval-answer 'all)
+        (dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t))))
+        (dsh-bridge--pending-approvals
+         (dsh-bridge-test--pending-approval-registry "s1" "a1"))
+        (dsh-bridge--view-answer-notes nil)
+        (dsh-bridge--turns-cache
+         (dsh-bridge-test--view-cache
+          (list (dsh-bridge-test--view-turn
+                 1 1000 (list (dsh-bridge-test--view-segment "reply" 1100 1)))))))
+    (unwind-protect
+        (progn
+          (with-current-buffer view
+            (dsh-bridge-view-mode)
+            (dsh-bridge--view-fill
+             "s1" (car (dsh-bridge--turns-cache-turns "s1")) nil t t))
+          (delete-other-windows)
+          (set-window-buffer (selected-window) view)
+          (set-buffer view)
+          (cl-letf (((symbol-function 'read-multiple-choice)
+                     (lambda (&rest _) '(?y "allow once" "desc")))
+                    ((symbol-function 'dsh-bridge--http)
+                     (lambda (&rest _) (list nil "{\"accepted\":true}" 200)))
+                    ((symbol-function 'dsh-bridge--status-event-render) #'ignore)
+                    ((symbol-function 'dsh-bridge--session-turns)
+                     (lambda (&rest _)
+                       (dsh-bridge-test--turns-response-alist
+                        (dsh-bridge--turns-cache-turns "s1")))))
+            (dsh-bridge--approval-prompt
+             "s1" "a1" (list :tool-name "bash" :reason "r" :detail nil)))
+          (should (buffer-live-p view))
+          (should (get-buffer-window view))
+          (should (eq (window-buffer) view))
+          (should (eq (current-buffer) view))
+          (should (= (length (window-list)) 1)))
+      (set-window-configuration config)
+      (when (buffer-live-p view) (kill-buffer view)))))
+
 (ert-deftest dsh-bridge-approval-decide-survives-raced-resolved-frame ()
   "The host's `approval-resolved' frame can outrun the decision POST's own
 response; the decision still reports its own outcome, exits to the view, and

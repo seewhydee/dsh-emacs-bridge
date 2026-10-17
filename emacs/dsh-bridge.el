@@ -3378,36 +3378,42 @@ to pop to the buffer using the same window.  Return the buffer."
 
 (defun dsh-bridge--exit-to-view (buffer &optional invoked-window)
   "Select DSH-View BUFFER after an explicit user action.
-Reuse a window already displaying BUFFER; otherwise display BUFFER in
-the selected window.  Return BUFFER.
+Return BUFFER.  If BUFFER is already current — an approval prompt reads
+the minibuffer without leaving the DSH-View — leave the window
+configuration and point untouched: there is nothing to dismiss, and the
+user is already where the continuation will appear.
 
-If INVOKED-WINDOW is non-nil, it specifies the window the action came
-from; if this window is displaying the buffer that was current when this
-function was invoked, quit it.	This ensures that the old buffer does
-not linger on screen.
+Otherwise reuse a window already displaying BUFFER, or display it in
+the selected window.  If INVOKED-WINDOW is non-nil, it specifies the
+window the action came from; if this window is displaying the buffer
+that was current when this function was invoked, quit it.  This ensures
+that the old buffer does not linger on screen.  Leave point at the end
+of BUFFER, so that following replies splice in above it.
 
-This function leaves point at the end of BUFFER, so that following
-replies splice in above it.    Only explicit user
-actions (sending a prompt, answering or declining a question) jump this
-way; an outcome learned from the host while the user did nothing (a
-question resolved elsewhere) is bannered in place."
-  (let* ((old (current-buffer))
-	 (old-window (or (and (window-live-p invoked-window)
-			      (eq (window-buffer invoked-window) old)
-			      invoked-window)
-			 (get-buffer-window old))))
-    ;; A `display-buffer' action list of two functions needs the inner
-    ;; list: `(FUNCTIONS . ALIST)' takes its car as the function list.
-    (pop-to-buffer buffer '((display-buffer-reuse-window display-buffer-same-window)))
-    (if (and old-window (window-live-p old-window)
-	     (eq (window-buffer old-window) old))
-	;; BUFFER kept its own window: dismiss the old buffer's window.
-	(quit-window nil old-window)
-      ;; The selected window now shows BUFFER; bury the old buffer.
-      (bury-buffer old))
-    (with-current-buffer buffer
-      (goto-char (point-max)))
-    buffer))
+Only explicit user actions (sending a prompt, answering or declining a
+question) jump this way; an outcome learned from the host while the user
+did nothing (a question resolved elsewhere) is bannered in place."
+  (if (eq (current-buffer) buffer)
+      ;; The action ran in the view itself.  Quitting its window here would
+      ;; bury the view the user is returning to.
+      buffer
+    (let* ((old (current-buffer))
+	   (old-window (or (and (window-live-p invoked-window)
+				(eq (window-buffer invoked-window) old)
+				invoked-window)
+			   (get-buffer-window old))))
+      ;; A `display-buffer' action list of two functions needs the inner
+      ;; list: `(FUNCTIONS . ALIST)' takes its car as the function list.
+      (pop-to-buffer buffer '((display-buffer-reuse-window display-buffer-same-window)))
+      (if (and old-window (window-live-p old-window)
+	       (eq (window-buffer old-window) old))
+	  ;; BUFFER kept its own window: dismiss the old buffer's window.
+	  (quit-window nil old-window)
+	;; The selected window now shows BUFFER; bury the old buffer.
+	(bury-buffer old))
+      (with-current-buffer buffer
+	(goto-char (point-max)))
+      buffer)))
 
 (defun dsh-bridge--session-turns (session-id)
   "Return SESSION-ID's parsed \"GET /turns\" response, or nil.
