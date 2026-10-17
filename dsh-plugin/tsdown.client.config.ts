@@ -5,11 +5,11 @@
 // wrapper, the externals, the purity gate, and the define substitutions in sync
 // with that preset (the contract is pre-release and the most likely thing to
 // drift on a dsh version bump). Three preset pieces are deliberately not
-// replicated: the CSS virtual-module plugins (this package has no stylesheets),
-// the tsc-sourcemap chaining/browserSourcePath (this build consumes src/
-// directly, not the harness's lib/types layout), and the chunk-aware banner and
-// `chunkFileNames` (this package emits a single entry chunk with no dynamic
-// imports, so the entry-only banner is the whole wrapper).
+// replicated: the CSS virtual-module and image-asset plugins (this package has
+// no stylesheets or image imports), the tsc-sourcemap chaining/browserSourcePath
+// (this build consumes src/ directly, not the harness's lib/types layout), and
+// the chunk-aware banner and `chunkFileNames` (this package emits a single entry
+// chunk with no dynamic imports, so the entry-only banner is the whole wrapper).
 import { readFileSync } from 'node:fs'
 import type { UserConfig } from 'tsdown'
 
@@ -22,6 +22,8 @@ const PLATFORM_MODULES = [
   'react-dom',
   'react-dom/client',
   '@deepseek-ai/cordis',
+  'zod',
+  '@tanstack/react-virtual',
   '@deepseek-ai/dsh-client-store',
   '@deepseek-ai/dsh-client-ui-slots',
   '@deepseek-ai/dsh-client-ui-primitives',

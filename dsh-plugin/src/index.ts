@@ -346,8 +346,13 @@ interface WebServerService {
     path: string
     handler: (req: IncomingMessage, res: ServerResponse) => void | Promise<void>
   }): () => void
-  /** The listening port (the OS-assigned value when config.port is 0). */
-  port: number
+  /**
+   * The bound listener's origin, such as `http://127.0.0.1:3080`. Optional: a
+   * host predating `getOrigin` exposes only `port`.
+   */
+  getOrigin?(): string
+  /** The listening port (the OS-assigned value when config.port is 0), undefined before `listen`. */
+  port: number | undefined
 }
 
 /** Minimal face of the `sessions` service: live sessions and detached surface replay. */
@@ -1330,8 +1335,15 @@ export function apply(ctx: Context, config?: Config): void {
     }
   }
 
-  /** Loopback base URL of the web server the plugin is mounted on (the /api RPC carrier). */
-  const webBaseUrl = `http://127.0.0.1:${webServer.port}`
+  /**
+   * Base URL of the web server the plugin is mounted on (the /api RPC carrier).
+   * Read lazily: the listener may bind after this plugin loads, so `port` can
+   * still be undefined at apply time. `getOrigin` is preferred because it
+   * reflects the actual bind address; the loopback fallback matches older hosts.
+   */
+  function webBaseUrl(): string {
+    return webServer.getOrigin?.() ?? `http://127.0.0.1:${String(webServer.port)}`
+  }
 
   /** The business result of one host RPC self-call. */
   type RpcResult = { ok: true; value: unknown } | { ok: false; error: { code: string; message: string } }
@@ -1359,7 +1371,7 @@ export function apply(ctx: Context, config?: Config): void {
    */
   async function ensureRpcCookie(connection: ConnectionService): Promise<string | undefined> {
     if (rpcCookie !== undefined) return rpcCookie
-    const response = await fetch(connection.authenticatedUrl(webBaseUrl), { redirect: 'manual' })
+    const response = await fetch(connection.authenticatedUrl(webBaseUrl()), { redirect: 'manual' })
     const cookies = typeof response.headers.getSetCookie === 'function'
       ? response.headers.getSetCookie()
       : [response.headers.get('set-cookie') ?? '']
@@ -1409,7 +1421,7 @@ export function apply(ctx: Context, config?: Config): void {
     }
     let response: Response
     try {
-      response = await fetch(`${webBaseUrl}/api/${method}`, {
+      response = await fetch(`${webBaseUrl()}/api/${method}`, {
         method: 'POST',
         headers: { 'content-type': 'application/json', cookie },
         body: rpcRequestFrame(method, rpcId, payload),

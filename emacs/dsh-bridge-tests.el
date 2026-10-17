@@ -166,6 +166,27 @@ into the (STATUS . ALIST) pair — through the real `--parse-response'."
                    (list '(:error "request timed out") nil nil)))
     (should (equal (dsh-bridge--request "GET" "/x" nil) (cons nil nil)))))
 
+(ert-deftest dsh-bridge-http-survives-dead-buffer-gc ()
+  "A response marked dead survives the buffer GC of a nested request.
+A 204 marks its buffer dead; `url-gc-dead-buffers' at the entry of any
+request started while the synchronous caller waits would collect it
+first.  The bridge suppresses that collection for the wait, parses the
+response, and returns its status and body."
+  (let ((buffer (dsh-bridge-test--mock-response 204 "")))
+    (unwind-protect
+        (cl-letf (((symbol-function 'url-retrieve-synchronously)
+                   (lambda (&rest _)
+                     (url-mark-buffer-as-dead buffer)
+                     ;; What a timer-driven nested request does at its entry.
+                     (url-gc-dead-buffers)
+                     buffer))
+                  ((symbol-function 'dsh-bridge--ensure-plugin) #'ignore)
+                  ((symbol-function 'dsh-bridge-notifications-start) #'ignore))
+          (should (equal (dsh-bridge--http "GET" "/x" nil)
+                         (list nil "" 204))))
+      (when (buffer-live-p buffer) (kill-buffer buffer))
+      (setq url-dead-buffer-list (delq buffer url-dead-buffer-list)))))
+
 (ert-deftest dsh-bridge-http-signaled-error-is-not-a-signal ()
   "A signaled retrieval error becomes an `:error' plist, and `--request'
 reports (nil . nil) instead of letting the signal escape."

@@ -34,8 +34,8 @@ live in AGENTS.md.
 
 Ordered by recommended sequence, but out-of-sequence implementation is
 acceptable based on user needs. Harness seams were last verified
-against DSH 0.2.1-alpha.2; the peer floor remains `^0.2.0-rc.1`, while
-the dev dependencies are set to `^0.2.1-alpha.2` (the two ranges are
+against DSH 0.2.1-alpha.5; the peer floor remains `^0.2.0-rc.1`, while
+the dev dependencies are set to `^0.2.1-alpha.5` (the two ranges are
 deliberately not in lockstep — the peers are the compatibility floor,
 the dev dependencies the verified build target).
 

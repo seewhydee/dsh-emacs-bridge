@@ -693,6 +693,29 @@ Each SESSION-ID is a session id string, and GOAL is the session report's
 goal alist.  An entry whose GOAL is nil is a known-absent section; an
 absent entry means the session has not been seeded.")
 
+;;; Synchronous HTTP
+
+(defun dsh-bridge--url-retrieve-synchronously (url)
+  "Retrieve URL synchronously and return its parsed (STATUS . BODY).
+This is `url-retrieve-synchronously' with `dsh-bridge-timeout', except
+that the response is parsed and its buffer killed here.  That matters
+because url.el marks a 204/4xx/5xx response buffer dead, and the
+`url-gc-dead-buffers' call at the start of any nested request can collect
+it before the caller gets to parse it; a timer-driven request may start
+while this one waits.  Dead-buffer collection is suppressed for the wait,
+so the response survives to be parsed."
+  (require 'url)
+  (let (buf response)
+    ;; The function cell is bound, not the dead-buffer list: the response is
+    ;; pushed onto that list after the request starts, so clearing the list
+    ;; would not protect it.
+    (cl-letf (((symbol-function 'url-gc-dead-buffers) #'ignore))
+      (setq buf (url-retrieve-synchronously url t nil dsh-bridge-timeout)))
+    (when (and buf (buffer-live-p buf))
+      (setq response (dsh-bridge--parse-response buf))
+      (kill-buffer buf))
+    response))
+
 ;;; DSH bridge status and plugin diagnosis
 
 (defvar dsh-bridge--bridge-status-cache nil
@@ -721,15 +744,13 @@ response means the route (and hence the plugin) is absent."
   (let* ((url-request-method "GET")
 	 (url-request-data nil)
 	 (url-request-extra-headers nil)
-	 (buf (ignore-errors
-		(url-retrieve-synchronously (concat dsh-bridge-url "/status")
-					    t nil dsh-bridge-timeout))))
-    (if (null buf)
+	 (response (ignore-errors
+		     (dsh-bridge--url-retrieve-synchronously
+		      (concat dsh-bridge-url "/status")))))
+    (if (null response)
 	'unreachable
-      (let* ((response (dsh-bridge--parse-response buf))
-	     (status (car response))
+      (let* ((status (car response))
 	     (alist (dsh-bridge--parse-json-body (cdr response))))
-	(kill-buffer buf)
 	(cond
 	 ((eq status 403) 'forbidden)
 	 ((and (eq status 200)
@@ -1447,23 +1468,21 @@ The return value is a list (URL-STATUS BODY HTTP-STATUS), where:
 	(url-request-data
 	 (and payload (encode-coding-string (json-encode payload) 'utf-8)))
 	(url-request-extra-headers (dsh-bridge--extra-headers payload)))
-    (let (buf err)
+    (let (response err)
       (condition-case e
-	  (setq buf (url-retrieve-synchronously (concat dsh-bridge-url path)
-						t nil dsh-bridge-timeout))
+	  (setq response (dsh-bridge--url-retrieve-synchronously
+			  (concat dsh-bridge-url path)))
 	(error (setq err e)))
       (cond
        (err
 	(dsh-bridge--note-request-failure)
 	`((:error ,(error-message-string err)) nil nil))
-       ((null buf)
+       ((null response)
 	(dsh-bridge--note-request-failure)
 	'((:error "request timed out") nil nil))
        (t
-	(let* ((response (dsh-bridge--parse-response buf))
-	       (http-status (car response))
-	       (body (cdr response)))
-	  (kill-buffer buf)
+	(let ((http-status (car response))
+	      (body (cdr response)))
 	  (when (memq http-status '(401 404))
 	    (dsh-bridge--note-request-failure))
 	  (list nil body http-status)))))))
