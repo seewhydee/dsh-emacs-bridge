@@ -5624,13 +5624,7 @@ answer; an already-resolved question is bannered in place."
 ;; The `a' (answer) key: one DWIM command for query and approval
 
 (defun dsh-bridge--answer-session (session)
-  "Handle any pending query or approval for SESSION.
-The caller names the session, so a dispatch that already resolved one
-(e.g. a DSH-Sessions row or the dispatcher's focus) does not have to
-make that session current.  Handling a query opens a DSH-Question
-buffer; handling an approval reads an answer with the minibuffer or
-shows the approval request, depending on `dsh-bridge-approval-answer'.
-If SESSION is parked on neither, report that nothing is pending."
+  "Handle any pending query or approval for SESSION."
   (let (query approval)
     (cond
      ((setq query (cdr (assoc session dsh-bridge--pending-questions)))
@@ -5651,16 +5645,11 @@ In a DSH-View, DSH-Prompt, or DSH-Describe buffer, act on the buffer's
 session; in a DSH-Sessions buffer, act on the session at point.  Do not
 use `dsh-bridge-pinned-target' as a fallback default.
 
-This command either handles a query or an approval, whichever the
-session is parked on (these are mutually exclusive).  Handling a query
-opens a DSH-Question buffer; handling an approval reads an answer with
-the minibuffer or shows the appproval request, depending on the value of
-`dsh-bridge-approval-answer'.  If there is no active query nor approval
-request, report that nothing is pending."
+Handling a query opens a DSH-Question buffer; handling an approval reads
+the answer with the minibuffer or merely shows the approval request,
+depending on `dsh-bridge-approval-answer'.  If SESSION is parked on
+neither, report that nothing is pending."
   (interactive)
-  ;; NODEFAULT plus REQUIRE: the pinned target is a mutation target,
-  ;; not an answer target.  Workflow via the transient menu is to go
-  ;; to the view buffer, then type "a".
   (dsh-bridge--answer-session (dsh-bridge--effective-session nil t t)))
 
 (defvar-keymap dsh-bridge-question-mode-map
@@ -7253,9 +7242,8 @@ change the pinned target session."
 
 (defun dsh-bridge--visit-session (id)
   "Do the next thing for session ID.
-This is the shared dispatch of `dsh-bridge-visit-session' (RET in a
-DSH-Sessions buffer) and `dsh-bridge--dispatcher-visit' (RET in the
-dispatcher).  The behavior is described on `dsh-bridge-visit-session'."
+This function implements the action of the `dsh-bridge-visit-session'
+and `dsh-bridge--dispatcher-visit' commands."
   (let ((session (dsh-bridge--session-for-id id)))
     (cond
      ((eq (alist-get 'archived session) t)
@@ -7300,7 +7288,9 @@ dispatcher).  The behavior is described on `dsh-bridge-visit-session'."
 	      (goto-char (point-max)))))))))))
 
 (defun dsh-bridge-visit-session ()
-  "Do the next thing for the session under point in a DSH-Sessions buffer.
+  "Visit the session under point in a DSH-Sessions buffer.
+Visiting means to do the next logical thing, based on the session state:
+
 - Waiting on an ask-user question or approval: open its answer buffer.
 - Running a turn: show the session's DSH-View in turn-following state,
   with point at the end, exactly as the prompt flow collects a reply.
@@ -7310,13 +7300,8 @@ dispatcher).  The behavior is described on `dsh-bridge-visit-session'."
   and the DSH-View goes to another window, else below the prompt,
   selecting the prompt.
 
-The session is resumed first when it is saved (cold).  The pinned target
-is not changed.
-
-An archived session is not runnable: it is not resumed, and this command
-says so instead of opening a prompt or view.  Use
-\\[dsh-bridge-unarchive-session] to restore it, or \\[dsh-bridge-peek-session]
-to read it."
+If the target session is archived, inform the user and do nothing else;
+the user must manually unarchive the session first."
   (interactive)
   (let ((id (dsh-bridge--session-at-point)))
     (if (null id)
@@ -8403,9 +8388,9 @@ user-confirmed, so the mutators may still act on it."
 	(setq dsh-bridge--focus (cons session 'cycled))))))
 
 (defun dsh-bridge--dispatcher-visit ()
-  "Visit the dispatcher's focus session, as RET does in a DSH-Sessions buffer.
-This opens whichever buffer the focus calls for -- an answer, a prompt,
-a view, or both."
+  "Visit the dispatcher's target session.
+Visiting means to do the next logical thing, depending on the session's
+state.  See `dsh-bridge-visit-session' for details."
   (interactive)
   (let ((session (dsh-bridge--focus-session)))
     (if (null session)
@@ -8461,25 +8446,16 @@ instead of trusting the cached one."
 			  (propertize "Send and Receive"
 				      'face 'transient-heading)))
    ("RET" dsh-bridge--dispatcher-visit
-    :description "visit this session")
+    :description "visit session")
    ("r" dsh-bridge-prompt
-    :description "open prompt buffer")
+    :description "  open prompt buffer")
    ("f" dsh-bridge-fetch
-    :description "fetch latest turn")]
-  ["Plan and Goal"
-   ("p" dsh-bridge-toggle-plan-mode
-    :description "toggle plan mode" :transient t)
-   ("G" dsh-bridge-set-goal
-    :description "set or edit the goal" :transient t)
-   ("A" dsh-bridge-toggle-goal
-    :description "pause/resume goal" :transient t)
-   ("X" dsh-bridge-clear-goal
-    :description "clear the goal" :transient t)]
+    :description "  fetch latest turn")]
   ["Sessions"
    ("D" dsh-bridge-describe-session
     :description "describe session")
    ("t" dsh-bridge--dispatcher-pin
-    :description "pin this session" :transient t)
+    :description "pin" :transient t)
    ("u" dsh-bridge--dispatcher-unpin
     :description "unpin" :transient t)
    ("k" dsh-bridge-stop-session
@@ -8490,12 +8466,21 @@ instead of trusting the cached one."
     :description "list sessions")
    ("+" dsh-bridge--dispatcher-create
     :description "create and pin session" :transient t)]
+  ["Plan and Goal"
+   ("p" dsh-bridge-toggle-plan-mode
+    :description "toggle plan mode" :transient t)
+   ("G" dsh-bridge-set-goal
+    :description "set/edit goal" :transient t)
+   ("A" dsh-bridge-toggle-goal
+    :description "pause/resume goal" :transient t)
+   ("X" dsh-bridge-clear-goal
+    :description "clear goal" :transient t)]
   ["Cycle and Quit"
    ("M-p" dsh-bridge--dispatcher-prev
-    :description "target older session" :transient t)
+    :description "cycle to older session" :transient t)
    ("M-n" dsh-bridge--dispatcher-next
-    :description "target newer session" :transient t)
-   ("q" transient-quit-one :description "quit")]
+    :description "cycle to newer session" :transient t)
+   ("q" transient-quit-one :description "  quit")]
   (interactive "P")
   (dsh-bridge--dispatcher-init arg)
   (transient-setup 'dsh-bridge))

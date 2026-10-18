@@ -107,13 +107,19 @@ Consider giving either or both a global keybinding, e.g.,
 The `M-x dsh-bridge` command opens a transient menu that prompts for
 the next command.  The menu's top line shows the session to be acted
 on (chosen based on your recent activity); you can cycle through
-available sessions with `M-p`/`M-n`.  The following commands are
-available from here:
+available sessions with `M-p`/`M-n`.
+
+Type `RET` to perform the default interaction on the session.  For
+example, if the session is running, this command opens a view buffer
+to show the replies; if the session is idle, it opens a prompt buffer
+as well as a view buffer (if there are replies).
+
+Here is a full list of commands are available from the transient menu:
 
 * `q` — exit the transient menu.
 * `M-p`/`M-n` — cycle through other sessions, ordered by age.
-* `RET` — visit the current session: do the next appropriate thing, as
-  `RET` does in the DSH-Sessions buffer.
+* `RET` — visit the session (e.g., open a prompt buffer and/or view
+  buffer for it).
 * `r` — open a buffer to type in a prompt.
 * `f` — fetch and display the latest set of replies.
 * `D` — describe the session.
@@ -136,9 +142,8 @@ the leftmost column, and the `S` (state) column shows each session's
 live status.  The following commands are available from here:
 
 * `q` — quit the window and bury the buffer.
-* `RET` — do the next appropriate thing for the session at point: if
-          running, view current replies; if waiting for a prompt, open
-          a prompt buffer; etc.
+* `RET` — visit the session at point (similar to `RET` in the
+  transient menu).
 * `r` — open a buffer to type a prompt for the session at point.
 * `f` — fetch and display the output from the session at point.
 * `a` — answer a pending user query for the session at point.
