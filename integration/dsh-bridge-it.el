@@ -702,12 +702,18 @@ the tag line."
 
 (defun dsh-bridge-it--turn-render (turn session-id)
   "Buffer text for the whole TURN record, or \"\" for nil.
-The production body renderer (which honors the buffer's activity toggle)
-composed with the suffix helper the incremental fill keeps separate."
+Insert TURN's items and then its terminal suffix, as the production fill
+does, in a temp DSH-View buffer carrying the caller's activity toggle."
   (if (null turn)
       ""
-    (concat (dsh-bridge--view-turn-body turn)
-            (dsh-bridge--view-turn-suffix turn session-id))))
+    (let ((activity dsh-bridge--view-activity))
+      (with-temp-buffer
+        (dsh-bridge-view-mode)
+        (setq-local dsh-bridge--view-activity activity)
+        (let ((inhibit-read-only t))
+          (dsh-bridge--view-insert (dsh-bridge--view-turn-items turn))
+          (dsh-bridge--view-insert-suffix turn session-id)
+          (buffer-string))))))
 
 (defun dsh-bridge-it--send-text (session-id text)
   "Send TEXT to SESSION-ID as a raw prompt through the real sender.
