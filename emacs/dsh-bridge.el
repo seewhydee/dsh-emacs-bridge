@@ -1843,6 +1843,23 @@ and must not target the wrong session accidentally."
 confirm or pin it first"))
      (t focus))))
 
+(defun dsh-bridge--session-for-command (prompt)
+  "Return the session an interactive session command should act on.
+With no prefix argument, this is `dsh-bridge--focus-session': the open
+dispatcher's focus, else the current buffer's effective session.
+
+With a prefix argument, the user chooses explicitly: a DSH-Sessions row
+at point wins without prompting, and otherwise the session id is read
+with PROMPT."
+  (cond
+   ((not current-prefix-arg)
+    (dsh-bridge--focus-session))
+   ((derived-mode-p 'dsh-bridge-sessions-mode)
+    (or (tabulated-list-get-id)
+	(dsh-bridge--read-session-id prompt)))
+   (t
+    (dsh-bridge--read-session-id prompt))))
+
 (defun dsh-bridge--dispatcher-init (force-fetch)
   "Initialize the state for the DSH bridge transient dispatcher.
 Seed the session roster first; a warm `dsh-bridge--sessions-cache' is
@@ -7240,73 +7257,74 @@ change the pinned target session."
 	;; `pop-to-buffer-same-window' takes no display action.
 	(pop-to-buffer-same-window (dsh-bridge--prompt-buffer id))))))
 
-(defun dsh-bridge--visit-session (id)
-  "Do the next thing for session ID.
-This function implements the action of the `dsh-bridge-visit-session'
-and `dsh-bridge--dispatcher-visit' commands."
-  (let ((session (dsh-bridge--session-for-id id)))
-    (cond
-     ((eq (alist-get 'archived session) t)
-      (message "Session \"%s\" is archived; unarchive it first."
-	       (dsh-bridge--session-label id nil nil t)))
-     ((or (assoc id dsh-bridge--pending-questions)
-	  (assoc id dsh-bridge--pending-approvals))
-      ;; The session is named here, so the answerer acts on it even when
-      ;; the dispatch came from the dispatcher.
-      (dsh-bridge--answer-session id))
-     (t
-      (dsh-bridge--ensure-session-live session)
-      (let* ((alist (dsh-bridge--session-turns id))
-	     (turns-pair (and alist (assq 'turns alist)))
-	     (turns (cdr-safe turns-pair))
-	     (running (eq (alist-get 'running alist) t)))
-	(cond
-	 ((null alist)) ; the request already echoed the error
-	 ((or running
-	      (and turns (dsh-bridge--view-turn-open-p (car-safe turns))))
-	  (dsh-bridge--show-session-view
-	   (dsh-bridge--view-for-session id alist)))
-	 ((null turns)
-	  (pop-to-buffer-same-window (dsh-bridge--prompt-buffer id)))
-	 ((eq dsh-bridge-session-default-visit-action 'prompt)
-	  (pop-to-buffer-same-window (dsh-bridge--prompt-buffer id)))
-	 ((eq dsh-bridge-session-default-visit-action 'view)
-	  (dsh-bridge--show-session-view (dsh-bridge--view-for-session id alist)))
-	 (t
-	  ;; `both': the prompt takes this window -- the one the
-	  ;; launcher occupied -- while the view goes to another window,
-	  ;; else below the prompt (see
-	  ;; `dsh-bridge-visit-both-display-action').
-	  (let ((view (dsh-bridge--view-for-session id alist))
-		(prompt-display (alist-get 'prompt
-					   dsh-bridge-visit-both-display-action))
-		(view-display (alist-get 'view
-					 dsh-bridge-visit-both-display-action)))
-	    (pop-to-buffer (dsh-bridge--prompt-buffer id) prompt-display)
-	    (display-buffer view view-display)
-	    (with-current-buffer view
-	      (goto-char (point-max)))))))))))
+(defun dsh-bridge-visit-session (&optional session-id)
+  "Visit a DSH session: do the next logical thing for it.
+SESSION-ID is the session to visit; interactively, use the dispatcher's
+focus when its menu is open, else the current buffer's effective
+session.  With a prefix argument, choose the session explicitly: the
+DSH-Sessions row at point when there is one, else prompt for a session
+id.
 
-(defun dsh-bridge-visit-session ()
-  "Visit the session under point in a DSH-Sessions buffer.
-Visiting means to do the next logical thing, based on the session state:
+Visiting means, depending on the session state:
 
 - Waiting on an ask-user question or approval: open its answer buffer.
 - Running a turn: show the session's DSH-View in turn-following state,
   with point at the end, exactly as the prompt flow collects a reply.
 - Idle with no output yet: open a prompt in the same window.
 - Idle with output: per `dsh-bridge-session-default-visit-action' -- by default
-  the prompt takes this window (the one the DSH-Sessions buffer occupied)
+  the prompt takes this window (the one the launcher occupied)
   and the DSH-View goes to another window, else below the prompt,
   selecting the prompt.
 
 If the target session is archived, inform the user and do nothing else;
 the user must manually unarchive the session first."
-  (interactive)
-  (let ((id (dsh-bridge--session-at-point)))
-    (if (null id)
-	(message "No session at point.")
-      (dsh-bridge--visit-session id))))
+  (interactive
+   (list (dsh-bridge--session-for-command "Visit session: ")))
+  (if (null session-id)
+      (message "No session to visit.")
+    (let ((session (dsh-bridge--session-for-id session-id)))
+      (cond
+       ((eq (alist-get 'archived session) t)
+	(message "Session \"%s\" is archived; unarchive it first."
+		 (dsh-bridge--session-label session-id nil nil t)))
+       ((or (assoc session-id dsh-bridge--pending-questions)
+	    (assoc session-id dsh-bridge--pending-approvals))
+	;; The session is named here, so the answerer acts on it even when
+	;; the dispatch came from the dispatcher.
+	(dsh-bridge--answer-session session-id))
+       (t
+	(dsh-bridge--ensure-session-live session)
+	(let* ((alist (dsh-bridge--session-turns session-id))
+	       (turns-pair (and alist (assq 'turns alist)))
+	       (turns (cdr-safe turns-pair))
+	       (running (eq (alist-get 'running alist) t)))
+	  (cond
+	   ((null alist)) ; the request already echoed the error
+	   ((or running
+		(and turns (dsh-bridge--view-turn-open-p (car-safe turns))))
+	    (dsh-bridge--show-session-view
+	     (dsh-bridge--view-for-session session-id alist)))
+	   ((null turns)
+	    (pop-to-buffer-same-window (dsh-bridge--prompt-buffer session-id)))
+	   ((eq dsh-bridge-session-default-visit-action 'prompt)
+	    (pop-to-buffer-same-window (dsh-bridge--prompt-buffer session-id)))
+	   ((eq dsh-bridge-session-default-visit-action 'view)
+	    (dsh-bridge--show-session-view
+	     (dsh-bridge--view-for-session session-id alist)))
+	   (t
+	    ;; `both': the prompt takes this window -- the one the
+	    ;; launcher occupied -- while the view goes to another window,
+	    ;; else below the prompt (see
+	    ;; `dsh-bridge-visit-both-display-action').
+	    (let ((view (dsh-bridge--view-for-session session-id alist))
+		  (prompt-display (alist-get 'prompt
+					     dsh-bridge-visit-both-display-action))
+		  (view-display (alist-get 'view
+					   dsh-bridge-visit-both-display-action)))
+	      (pop-to-buffer (dsh-bridge--prompt-buffer session-id) prompt-display)
+	      (display-buffer view view-display)
+	      (with-current-buffer view
+		(goto-char (point-max))))))))))))
 
 (defun dsh-bridge-pin-target-at-point ()
   "Pin the session at point as the bridge's target.
@@ -7925,16 +7943,12 @@ failure reason, never a fake zero."
 ;;;###autoload
 (defun dsh-bridge-describe-session (&optional session-id)
   "Show a read-only report for SESSION-ID.
-Interactively, use the DSH-Sessions row at point, else the buffer's
-effective session; with a prefix argument, prompt for any session id."
+Interactively, use the dispatcher's focus when its menu is open, else
+the current buffer's effective session.  With a prefix argument, choose
+the session explicitly: the DSH-Sessions row at point when there is one,
+else prompt for a session id."
   (interactive
-   (list (cond
-	  ((and current-prefix-arg (derived-mode-p 'dsh-bridge-sessions-mode))
-	   (or (tabulated-list-get-id)
-	       (dsh-bridge--read-session-id "Describe session: ")))
-	  (current-prefix-arg
-	   (dsh-bridge--read-session-id "Describe session: "))
-	  (t (dsh-bridge--focus-session)))))
+   (list (dsh-bridge--session-for-command "Describe session: ")))
   (let* ((result (let ((dsh-bridge-timeout dsh-bridge-describe-timeout))
 		   (dsh-bridge--request "GET" (dsh-bridge--path "/session" session-id) nil)))
 	 (status (car result))
@@ -8387,16 +8401,6 @@ user-confirmed, so the mutators may still act on it."
       (unless (eq (cdr dsh-bridge--focus) 'advisory)
 	(setq dsh-bridge--focus (cons session 'cycled))))))
 
-(defun dsh-bridge--dispatcher-visit ()
-  "Visit the dispatcher's target session.
-Visiting means to do the next logical thing, depending on the session's
-state.  See `dsh-bridge-visit-session' for details."
-  (interactive)
-  (let ((session (dsh-bridge--focus-session)))
-    (if (null session)
-	(message "No session to visit.")
-      (dsh-bridge--visit-session session))))
-
 (defun dsh-bridge--dispatcher-create ()
   "Create a titled session, pin it, and re-point the focus at it."
   (interactive)
@@ -8445,7 +8449,7 @@ instead of trusting the cached one."
 			  "\n\n"
 			  (propertize "Send and Receive"
 				      'face 'transient-heading)))
-   ("RET" dsh-bridge--dispatcher-visit
+   ("RET" dsh-bridge-visit-session
     :description "visit session")
    ("r" dsh-bridge-prompt
     :description "  open prompt buffer")

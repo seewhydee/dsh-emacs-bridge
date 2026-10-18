@@ -563,6 +563,61 @@ This keeps the session verbs usable in isolation."
         (setq-local dsh-bridge--prompt-session "s1")
         (should (equal (dsh-bridge--focus-session) "s2"))))))
 
+(ert-deftest dsh-bridge-session-for-command-without-prefix ()
+  "Without a prefix, the chooser reads the command's context.
+The open dispatcher's focus wins; otherwise the buffer's own session is
+used, so a command works the same inside and outside the menu."
+  (let ((dsh-bridge--focus nil)
+        (dsh-bridge-pinned-target nil))
+    (with-temp-buffer
+      (dsh-bridge-prompt-mode)
+      (setq-local dsh-bridge--prompt-session "s1")
+      (should (equal (dsh-bridge--session-for-command "Visit session: ") "s1")))
+    (let ((dsh-bridge--focus (cons "s2" 'cycled)))
+      (with-temp-buffer
+        (dsh-bridge-prompt-mode)
+        (setq-local dsh-bridge--prompt-session "s1")
+        (should (equal (dsh-bridge--session-for-command "Visit session: ")
+                       "s2"))))))
+
+(ert-deftest dsh-bridge-session-for-command-prefix-row-wins ()
+  "With a prefix argument, a DSH-Sessions row is chosen without prompting.
+A prefix in the sessions list therefore selects the row at point rather
+than the open menu's focus."
+  (let ((dsh-bridge--focus (cons "s2" 'cycled))
+        (dsh-bridge-pinned-target nil)
+        (current-prefix-arg '(4)))
+    (with-temp-buffer
+      (dsh-bridge-sessions-mode)
+      (let ((inhibit-read-only t))
+        (insert (propertize "row" 'tabulated-list-id "s1")))
+      (goto-char (point-min))
+      (cl-letf (((symbol-function 'dsh-bridge--read-session-id)
+                 (lambda (&rest _) (ert-fail "must not prompt for a row")))
+                ((symbol-function 'dsh-bridge--focus-session)
+                 (lambda (&rest _) (ert-fail "must not use the focus"))))
+        (should (equal (dsh-bridge--session-for-command "Visit session: ")
+                       "s1"))))))
+
+(ert-deftest dsh-bridge-session-for-command-prefix-prompts ()
+  "With a prefix argument and no row, the user is prompted for a session id.
+This holds in an empty DSH-Sessions buffer and outside the sessions list,
+where the menu focus is deliberately ignored."
+  (let ((dsh-bridge--focus (cons "s2" 'cycled))
+        (dsh-bridge-pinned-target nil)
+        (current-prefix-arg '(4))
+        (asked nil))
+    (cl-letf (((symbol-function 'dsh-bridge--read-session-id)
+               (lambda (prompt) (setq asked prompt) "s3")))
+      (with-temp-buffer
+        (dsh-bridge-sessions-mode)
+        (should (equal (dsh-bridge--session-for-command "Visit session: ")
+                       "s3")))
+      (should (equal asked "Visit session: "))
+      (with-temp-buffer
+        (should (equal (dsh-bridge--session-for-command "Visit session: ")
+                       "s3"))))))
+
 (ert-deftest dsh-bridge-dispatcher-cycle-snapshot ()
   "The cycle set is the non-archived roster, newest first.
 Live and cold sessions are both included; an archived row and a row with
@@ -798,25 +853,32 @@ buffer's own session."
   (with-temp-buffer
     (dsh-bridge-view-mode)
     (setq-local dsh-bridge--view-content-session "s1")
-    (let ((dsh-bridge--focus (cons "s2" 'advisory))
-          (visited nil))
-      (cl-letf (((symbol-function 'dsh-bridge--visit-session)
-                 (lambda (id) (setq visited id))))
-        (dsh-bridge--dispatcher-visit))
-      (should (equal visited "s2")))))
+    (let ((dsh-bridge--sessions-cache '(((id . "s2") (live . t))))
+          (dsh-bridge--focus (cons "s2" 'advisory))
+          (dsh-bridge--pending-questions nil)
+          (dsh-bridge--pending-approvals nil)
+          (prompted nil) (opened nil))
+      (cl-letf (((symbol-function 'dsh-bridge--ensure-session-live)
+                 (lambda (_id) t))
+                ((symbol-function 'dsh-bridge--session-turns)
+                 (lambda (_id) '((turns))))
+                ((symbol-function 'dsh-bridge--prompt-buffer)
+                 (lambda (id) (setq prompted id) 'prompt-buffer))
+                ((symbol-function 'pop-to-buffer-same-window)
+                 (lambda (buffer) (setq opened buffer))))
+        (call-interactively #'dsh-bridge-visit-session))
+      (should (equal prompted "s2"))
+      (should (eq opened 'prompt-buffer)))))
 
 (ert-deftest dsh-bridge-dispatcher-visit-without-a-focus ()
   "RET with no focus and no buffer binding reports and opens nothing."
   (with-temp-buffer
     (let ((dsh-bridge--focus nil)
           (dsh-bridge-pinned-target nil)
-          (visited nil) (msg nil))
-      (cl-letf (((symbol-function 'dsh-bridge--visit-session)
-                 (lambda (id) (setq visited id)))
-                ((symbol-function 'message)
+          (msg nil))
+      (cl-letf (((symbol-function 'message)
                  (lambda (&rest args) (setq msg (apply #'format args)))))
-        (dsh-bridge--dispatcher-visit))
-      (should-not visited)
+        (call-interactively #'dsh-bridge-visit-session))
       (should (string-match-p "No session to visit" msg)))))
 
 (ert-deftest dsh-bridge-dispatcher-visit-answers-for-the-focus ()
@@ -832,7 +894,7 @@ DSH-Sessions dispatch must not let that buffer choose the answer target."
           (answered nil))
       (cl-letf (((symbol-function 'dsh-bridge--answer-session)
                  (lambda (id) (setq answered id))))
-        (dsh-bridge--dispatcher-visit))
+        (call-interactively #'dsh-bridge-visit-session))
       (should (equal answered "s2")))))
 
 (ert-deftest dsh-bridge-dispatcher-pin-and-unpin-write-the-focus ()
@@ -3756,7 +3818,9 @@ The host's reason is what the user sees first."
 	(let ((inhibit-read-only t))
 	  (insert (propertize "row" 'tabulated-list-id id)))
 	(goto-char (point-min))
-	(dsh-bridge-visit-session)))
+	;; No menu is open, so the interactive choice is the row at point.
+	(let ((dsh-bridge--focus nil))
+	  (call-interactively #'dsh-bridge-visit-session))))
 
 (ert-deftest dsh-bridge-visit-session-pending-answers ()
   "A pending question sends RET to the answer buffer, before any resume/fetch."
@@ -4425,7 +4489,8 @@ The title carries no \"[archived]\" suffix; the glyph names the state."
         (let ((inhibit-read-only t))
           (insert (propertize "a1 row" 'tabulated-list-id "a1")))
         (goto-char (point-min))
-        (dsh-bridge-visit-session)))
+        (let ((dsh-bridge--focus nil))
+          (call-interactively #'dsh-bridge-visit-session))))
     (should-not opened)
     (should (string-match-p "archived" msg))))
 
@@ -5705,6 +5770,10 @@ send (`s'/`d'), and pin-by-title (`T') mnemonics stay gone."
   (dolist (key '("RET" "r" "f" "D" "t" "u" "k" "l" "+"
                  "p" "G" "A" "X" "M-p" "M-n"))
     (should (transient-get-suffix 'dsh-bridge key)))
+  ;; RET is the sessions list's own command, not a dispatcher-only copy.
+  (should (eq (plist-get (cdr (transient-get-suffix 'dsh-bridge "RET"))
+                         :command)
+              #'dsh-bridge-visit-session))
   ;; `transient-get-suffix' signals when the key is absent.
   (dolist (absent '("i" "S" "s" "d" "T"))
     (should-not (condition-case nil
