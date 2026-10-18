@@ -5623,6 +5623,28 @@ answer; an already-resolved question is bannered in place."
 
 ;; The `a' (answer) key: one DWIM command for query and approval
 
+(defun dsh-bridge--answer-session (session)
+  "Handle any pending query or approval for SESSION.
+The caller names the session, so a dispatch that already resolved one
+(e.g. a DSH-Sessions row or the dispatcher's focus) does not have to
+make that session current.  Handling a query opens a DSH-Question
+buffer; handling an approval reads an answer with the minibuffer or
+shows the approval request, depending on `dsh-bridge-approval-answer'.
+If SESSION is parked on neither, report that nothing is pending."
+  (let (query approval)
+    (cond
+     ((setq query (cdr (assoc session dsh-bridge--pending-questions)))
+      (pop-to-buffer
+       (dsh-bridge--question-buffer session (car query) (cdr query))))
+     ((setq approval (cadr (assoc session dsh-bridge--pending-approvals)))
+      (if (eq dsh-bridge-approval-answer 'notify-only)
+	  (progn
+	    (dsh-bridge--approval-show session (cdr approval))
+	    (message "Approval answering is disabled; use the web UI."))
+	(dsh-bridge--approval-prompt session (car approval) (cdr approval))))
+     (t
+      (message "No pending query or approval.")))))
+
 (defun dsh-bridge-answer ()
   "Handle any pending query or approval for the DSH session at hand.
 In a DSH-View, DSH-Prompt, or DSH-Describe buffer, act on the buffer's
@@ -5639,20 +5661,7 @@ request, report that nothing is pending."
   ;; NODEFAULT plus REQUIRE: the pinned target is a mutation target,
   ;; not an answer target.  Workflow via the transient menu is to go
   ;; to the view buffer, then type "a".
-  (let* ((session (dsh-bridge--effective-session nil t t))
-	 query approval)
-    (cond
-     ((setq query (cdr (assoc session dsh-bridge--pending-questions)))
-      (pop-to-buffer
-       (dsh-bridge--question-buffer session (car query) (cdr query))))
-     ((setq approval (cadr (assoc session dsh-bridge--pending-approvals)))
-      (if (eq dsh-bridge-approval-answer 'notify-only)
-	  (progn
-	    (dsh-bridge--approval-show session (cdr approval))
-	    (message "Approval answering is disabled; use the web UI."))
-	(dsh-bridge--approval-prompt session (car approval) (cdr approval))))
-     (t
-      (message "No pending query or approval.")))))
+  (dsh-bridge--answer-session (dsh-bridge--effective-session nil t t)))
 
 (defvar-keymap dsh-bridge-question-mode-map
   :parent special-mode-map
@@ -7242,39 +7251,21 @@ change the pinned target session."
 	;; `pop-to-buffer-same-window' takes no display action.
 	(pop-to-buffer-same-window (dsh-bridge--prompt-buffer id))))))
 
-(defun dsh-bridge-visit-session ()
-  "Do the next thing for the session under point in a DSH-Sessions buffer.
-- Waiting on an ask-user question or approval: open its answer buffer
-  (`dsh-bridge-answer' does the work for the row).
-- Running a turn: show the session's DSH-View in turn-following state,
-  with point at the end, exactly as the prompt flow collects a reply.
-- Idle with no output yet: open a prompt in the same window.
-- Idle with output: per `dsh-bridge-session-default-visit-action' -- by default
-  the prompt takes this window (the one the DSH-Sessions buffer occupied)
-  and the DSH-View goes to another window, else below the prompt,
-  selecting the prompt.
-
-The session is resumed first when it is saved (cold).  The pinned target
-is not changed.
-
-An archived session is not runnable: it is not resumed, and this command
-says so instead of opening a prompt or view.  Use
-\\[dsh-bridge-unarchive-session] to restore it, or \\[dsh-bridge-peek-session]
-to read it."
-  (interactive)
-  (let ((id (dsh-bridge--session-at-point))
-	session)
+(defun dsh-bridge--visit-session (id)
+  "Do the next thing for session ID.
+This is the shared dispatch of `dsh-bridge-visit-session' (RET in a
+DSH-Sessions buffer) and `dsh-bridge--dispatcher-visit' (RET in the
+dispatcher).  The behavior is described on `dsh-bridge-visit-session'."
+  (let ((session (dsh-bridge--session-for-id id)))
     (cond
-     ((null id)
-      (message "No session at point."))
-     ((progn (setq session (dsh-bridge--session-for-id id))
-	     (eq (alist-get 'archived session) t))
+     ((eq (alist-get 'archived session) t)
       (message "Session \"%s\" is archived; unarchive it first."
 	       (dsh-bridge--session-label id nil nil t)))
      ((or (assoc id dsh-bridge--pending-questions)
 	  (assoc id dsh-bridge--pending-approvals))
-      ;; `dsh-bridge-answer' resolves the row's session itself.
-      (dsh-bridge-answer))
+      ;; The session is named here, so the answerer acts on it even when
+      ;; the dispatch came from the dispatcher.
+      (dsh-bridge--answer-session id))
      (t
       (dsh-bridge--ensure-session-live session)
       (let* ((alist (dsh-bridge--session-turns id))
@@ -7295,8 +7286,8 @@ to read it."
 	  (dsh-bridge--show-session-view (dsh-bridge--view-for-session id alist)))
 	 (t
 	  ;; `both': the prompt takes this window -- the one the
-	  ;; DSH-Sessions buffer occupied -- while the view goes to
-	  ;; another window, else below the prompt (see
+	  ;; launcher occupied -- while the view goes to another window,
+	  ;; else below the prompt (see
 	  ;; `dsh-bridge-visit-both-display-action').
 	  (let ((view (dsh-bridge--view-for-session id alist))
 		(prompt-display (alist-get 'prompt
@@ -7307,6 +7298,30 @@ to read it."
 	    (display-buffer view view-display)
 	    (with-current-buffer view
 	      (goto-char (point-max)))))))))))
+
+(defun dsh-bridge-visit-session ()
+  "Do the next thing for the session under point in a DSH-Sessions buffer.
+- Waiting on an ask-user question or approval: open its answer buffer.
+- Running a turn: show the session's DSH-View in turn-following state,
+  with point at the end, exactly as the prompt flow collects a reply.
+- Idle with no output yet: open a prompt in the same window.
+- Idle with output: per `dsh-bridge-session-default-visit-action' -- by default
+  the prompt takes this window (the one the DSH-Sessions buffer occupied)
+  and the DSH-View goes to another window, else below the prompt,
+  selecting the prompt.
+
+The session is resumed first when it is saved (cold).  The pinned target
+is not changed.
+
+An archived session is not runnable: it is not resumed, and this command
+says so instead of opening a prompt or view.  Use
+\\[dsh-bridge-unarchive-session] to restore it, or \\[dsh-bridge-peek-session]
+to read it."
+  (interactive)
+  (let ((id (dsh-bridge--session-at-point)))
+    (if (null id)
+	(message "No session at point.")
+      (dsh-bridge--visit-session id))))
 
 (defun dsh-bridge-pin-target-at-point ()
   "Pin the session at point as the bridge's target.
@@ -8387,13 +8402,15 @@ user-confirmed, so the mutators may still act on it."
       (unless (eq (cdr dsh-bridge--focus) 'advisory)
 	(setq dsh-bridge--focus (cons session 'cycled))))))
 
-(defun dsh-bridge--dispatcher-pin-by-title ()
-  "Pin a session chosen by title, and re-point the focus at it."
+(defun dsh-bridge--dispatcher-visit ()
+  "Visit the dispatcher's focus session, as RET does in a DSH-Sessions buffer.
+This opens whichever buffer the focus calls for -- an answer, a prompt,
+a view, or both."
   (interactive)
-  (let ((session (dsh-bridge--read-session-id "Pin target: ")))
-    (when session
-      (dsh-bridge-pin-target session)
-      (setq dsh-bridge--focus (cons session 'pinned)))))
+  (let ((session (dsh-bridge--focus-session)))
+    (if (null session)
+	(message "No session to visit.")
+      (dsh-bridge--visit-session session))))
 
 (defun dsh-bridge--dispatcher-create ()
   "Create a titled session, pin it, and re-point the focus at it."
@@ -8429,7 +8446,7 @@ advisory focus: the guess is not a mutation target until you confirm it
 by cycling or pinning.
 
 The menu stays open after keys that operate on the shown session.  Only
-keys that open another buffer (r, f, D, l), and q, leave the menu.
+keys that open another buffer (RET, r, f, D, l), and q, leave the menu.
 
 With a prefix argument, re-fetch the session roster before painting,
 instead of trusting the cached one."
@@ -8443,6 +8460,8 @@ instead of trusting the cached one."
 			  "\n\n"
 			  (propertize "Send and Receive"
 				      'face 'transient-heading)))
+   ("RET" dsh-bridge--dispatcher-visit
+    :description "visit this session")
    ("r" dsh-bridge-prompt
     :description "open prompt buffer")
    ("f" dsh-bridge-fetch
@@ -8463,8 +8482,6 @@ instead of trusting the cached one."
     :description "pin this session" :transient t)
    ("u" dsh-bridge--dispatcher-unpin
     :description "unpin" :transient t)
-   ("T" dsh-bridge--dispatcher-pin-by-title
-    :description "pin by title" :transient t)
    ("k" dsh-bridge-stop-session
     :description "stop running session" :transient t)
    ("o" dsh-bridge-compact-session

@@ -790,6 +790,51 @@ A menu opened in session Y's buffer while focused on X reads X."
       (should (string-match-p "sessionId=s2" fetch-path))
       (should (string-match-p "sessionId=s2" describe-path)))))
 
+(ert-deftest dsh-bridge-dispatcher-visit-addresses-the-focus ()
+  "RET visits the menu focus, even an advisory guess.
+Visiting is a read, so it does not require the confirmation the
+session-state mutators demand, and the focus wins over the invoking
+buffer's own session."
+  (with-temp-buffer
+    (dsh-bridge-view-mode)
+    (setq-local dsh-bridge--view-content-session "s1")
+    (let ((dsh-bridge--focus (cons "s2" 'advisory))
+          (visited nil))
+      (cl-letf (((symbol-function 'dsh-bridge--visit-session)
+                 (lambda (id) (setq visited id))))
+        (dsh-bridge--dispatcher-visit))
+      (should (equal visited "s2")))))
+
+(ert-deftest dsh-bridge-dispatcher-visit-without-a-focus ()
+  "RET with no focus and no buffer binding reports and opens nothing."
+  (with-temp-buffer
+    (let ((dsh-bridge--focus nil)
+          (dsh-bridge-pinned-target nil)
+          (visited nil) (msg nil))
+      (cl-letf (((symbol-function 'dsh-bridge--visit-session)
+                 (lambda (id) (setq visited id)))
+                ((symbol-function 'message)
+                 (lambda (&rest args) (setq msg (apply #'format args)))))
+        (dsh-bridge--dispatcher-visit))
+      (should-not visited)
+      (should (string-match-p "No session to visit" msg)))))
+
+(ert-deftest dsh-bridge-dispatcher-visit-answers-for-the-focus ()
+  "RET's answer step names the focus, not the invoking buffer's session.
+The dispatcher runs while another buffer is current, so sharing the
+DSH-Sessions dispatch must not let that buffer choose the answer target."
+  (with-temp-buffer
+    (dsh-bridge-view-mode)
+    (setq-local dsh-bridge--view-content-session "s1")
+    (let ((dsh-bridge--sessions-cache '(((id . "s2") (live . t))))
+          (dsh-bridge--focus (cons "s2" 'cycled))
+          (dsh-bridge--pending-questions (dsh-bridge-test--pending-ask "s2" "Q?"))
+          (answered nil))
+      (cl-letf (((symbol-function 'dsh-bridge--answer-session)
+                 (lambda (id) (setq answered id))))
+        (dsh-bridge--dispatcher-visit))
+      (should (equal answered "s2")))))
+
 (ert-deftest dsh-bridge-dispatcher-pin-and-unpin-write-the-focus ()
   "Pin and unpin re-point the focus record so the header follows.
 Pinning an advisory guess is allowed; unpinning leaves the pinned session
@@ -803,17 +848,10 @@ as an explicitly confirmed focus."
     (dsh-bridge--dispatcher-pin)
     (should (equal dsh-bridge-pinned-target "s1"))
     (should (eq (cdr dsh-bridge--focus) 'pinned))
-    ;; A pinned menu cannot cycle, but T moves the pin.
-    (cl-letf (((symbol-function 'dsh-bridge--read-session-id)
-               (lambda (&rest _) "s2")))
-      (dsh-bridge--dispatcher-pin-by-title))
-    (should (equal dsh-bridge-pinned-target "s2"))
-    (should (equal (car dsh-bridge--focus) "s2"))
-    (should (eq (cdr dsh-bridge--focus) 'pinned))
     ;; Unpin: the name stays the focus, now explicitly confirmed.
     (dsh-bridge--dispatcher-unpin)
     (should (null dsh-bridge-pinned-target))
-    (should (equal (car dsh-bridge--focus) "s2"))))
+    (should (equal (car dsh-bridge--focus) "s1"))))
 
 (ert-deftest dsh-bridge-dispatcher-create-pins-and-focuses ()
   "`+' pins the created session and re-points the focus at it."
@@ -846,8 +884,8 @@ A plain suffix exits on Emacs 31.1's transient, so no key that acts on
 the shown session may be left plain: the header has to show the result
 and the next key has to act on it again.  Only the keys that open
 another buffer keep the default, which exits."
-  (let ((stays '("M-p" "M-n" "t" "u" "T" "+" "k" "o" "p" "G" "A" "X"))
-        (leaves '("r" "f" "D" "l")))
+  (let ((stays '("M-p" "M-n" "t" "u" "+" "k" "o" "p" "G" "A" "X"))
+        (leaves '("RET" "r" "f" "D" "l")))
     ;; The layout carries the declaration.
     (dolist (key stays)
       (should (eq (plist-get (cdr (transient-get-suffix 'dsh-bridge key))
@@ -3724,13 +3762,14 @@ The host's reason is what the user sees first."
   "A pending question sends RET to the answer buffer, before any resume/fetch."
   (let ((answered nil) (ensured nil) (fetched nil)
 	(dsh-bridge--pending-questions (dsh-bridge-test--pending-ask "s1" "Q?")))
-	(cl-letf (((symbol-function 'dsh-bridge-answer) (lambda () (setq answered t)))
+	(cl-letf (((symbol-function 'dsh-bridge--answer-session)
+		   (lambda (id) (setq answered id)))
 			  ((symbol-function 'dsh-bridge--ensure-session-live)
 			   (lambda (_id) (setq ensured t) t))
 			  ((symbol-function 'dsh-bridge--session-turns)
 			   (lambda (_id) (setq fetched t) nil)))
 	  (dsh-bridge-test--visit-session "s1"))
-	(should answered)
+	(should (equal answered "s1"))
 	(should-not ensured)
 	(should-not fetched)))
 
@@ -5660,14 +5699,14 @@ until the dispatcher actually runs."
 (ert-deftest dsh-bridge-dispatcher-suffixes ()
   "The dispatcher's key set is the intended one.
 The prefix's literal groups are the only source of truth, so the
-expected keys live here: reply/open is `r', targeting lives on `t'/`u',
-and the retired inbox (`i'), select (`S'), and region/buffer send
-(`s'/`d') mnemonics stay gone."
-  (dolist (key '("r" "f" "D" "t" "u" "T" "k" "l" "+"
+expected keys live here: visiting is RET, reply/open is `r', targeting
+lives on `t'/`u', and the retired inbox (`i'), select (`S'), region/buffer
+send (`s'/`d'), and pin-by-title (`T') mnemonics stay gone."
+  (dolist (key '("RET" "r" "f" "D" "t" "u" "k" "l" "+"
                  "p" "G" "A" "X" "M-p" "M-n"))
     (should (transient-get-suffix 'dsh-bridge key)))
   ;; `transient-get-suffix' signals when the key is absent.
-  (dolist (absent '("i" "S" "s" "d"))
+  (dolist (absent '("i" "S" "s" "d" "T"))
     (should-not (condition-case nil
                     (progn (transient-get-suffix 'dsh-bridge absent) t)
                   (error nil)))))
@@ -11852,13 +11891,14 @@ approval; an unbound buffer refuses, so the union is never guessed at."
   (let ((approved nil) (ensured nil) (fetched nil)
         (dsh-bridge--pending-approvals
          (dsh-bridge-test--pending-approval-registry "s1" "a1")))
-    (cl-letf (((symbol-function 'dsh-bridge-answer) (lambda () (setq approved t)))
+    (cl-letf (((symbol-function 'dsh-bridge--answer-session)
+               (lambda (id) (setq approved id)))
               ((symbol-function 'dsh-bridge--ensure-session-live)
                (lambda (_id) (setq ensured t) t))
               ((symbol-function 'dsh-bridge--session-turns)
                (lambda (_id) (setq fetched t) nil)))
       (dsh-bridge-test--visit-session "s1"))
-    (should approved)
+    (should (equal approved "s1"))
     (should-not ensured)
     (should-not fetched)))
 

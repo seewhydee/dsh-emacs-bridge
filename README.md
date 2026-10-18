@@ -112,11 +112,12 @@ available from here:
 
 * `q` — exit the transient menu.
 * `M-p`/`M-n` — cycle through other sessions, ordered by age.
+* `RET` — visit the current session: do the next appropriate thing, as
+  `RET` does in the DSH-Sessions buffer.
 * `r` — open a buffer to type in a prompt.
 * `f` — fetch and display the latest set of replies.
 * `D` — describe the session.
 * `t` — pin the current session as the target.
-* `T` — prompt for a session by title, and pin it.
 * `u` — unpin the currently-pinned session.
 * `k` — stop the running session.
 * `o` — compact the session's context history.
