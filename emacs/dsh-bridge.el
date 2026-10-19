@@ -7143,7 +7143,7 @@ Archived sessions are hidden unless `dsh-bridge--sessions-archived-p' (or
 (easy-menu-define dsh-bridge-sessions-menu dsh-bridge-sessions-mode-map
   "Menu bar menu for the `*dsh-bridge-sessions*' buffer."
   `("DSH Bridge"
-    ["Visit Session (Next Thing)" dsh-bridge-visit-session
+    ["Visit Session" dsh-bridge-visit-session
      :help "Answer the pending question, watch the running turn, or open the view/prompt"]
     ["Open Prompt" dsh-bridge-open-session
      :help "Bind the prompt buffer to the session under point and open it"]
