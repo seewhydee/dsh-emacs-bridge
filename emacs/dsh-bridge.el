@@ -2548,7 +2548,6 @@ the visited file (not the buffer text) is attached."
     (unless file (user-error "No file to attach"))
     (dsh-bridge-attach-file (list file))))
 
-;;;###autoload
 (defun dsh-bridge-clear-attachments ()
   "Remove every attachment tag line from this DSH-Prompt buffer."
   (interactive)
@@ -4373,7 +4372,6 @@ STEER."
      ((eq dsh-bridge-send-while-running 'steer) 'steer)
      (t (dsh-bridge--busy-send-choice)))))
 
-;;;###autoload
 (defun dsh-bridge-send-and-exit (&optional steer)
   "Send a DSH-Prompt buffer as a prompt, then bury it and switch away.
 This command must be called in a DSH-Prompt buffer.  It always sends the
@@ -4532,7 +4530,6 @@ invoked from.  SENT-AT, if non-nil, is the ms-epoch the prompt was sent;
        (dsh-bridge--after-prompt-view sent-session-id sent-at)
        window))))
 
-;;;###autoload
 (defun dsh-bridge-fetch (&optional session-id same-window)
   "Fetch the latest DSH turn and show it in a DSH-View buffer.
 The session is the effective session of the current buffer; with a
@@ -6083,7 +6080,6 @@ Models are picked from the host's live catalog via `completing-read'."
 	  (dsh-bridge--select-model-apply session-id provider
 					  (alist-get 'id entry) effort))))))
 
-;;;###autoload
 (defun dsh-bridge--prompt-buffer (session-id)
   "Prepare and return a DSH-Prompt buffer for SESSION-ID.
 SESSION-ID is a session id string, or nil for the last-active session.
@@ -6125,7 +6121,6 @@ Discard it? "))
       (dsh-bridge-set-prompt-session session-id))
     buffer))
 
-;;;###autoload
 (defun dsh-bridge-prompt ()
   "Pop to a DSH-Prompt buffer to compose a prompt.
 The DSH session for the prompt is determined by how this command is
@@ -6187,7 +6182,6 @@ On failure the host's error is echoed and nil is returned."
 		   "failed to branch the turn"))
       nil)))
 
-;;;###autoload
 (defun dsh-bridge-fork-turn ()
   "Branch the shown turn into a new session, then open the child.
 The child inherits the conversation through the shown turn and the agent
@@ -6849,7 +6843,6 @@ follows the pin.  This function does not fetch or refresh the roster."
 	(dsh-bridge--apply-session-directory
 	 (dsh-bridge--effective-session buf) nil buf)))))
 
-;;;###autoload
 (defun dsh-bridge-pin-target (session-id)
   "Set the DSH bridge's pinned target session to SESSION-ID.
 SESSION-ID must be a session id string.  If called interactively, prompt
@@ -7926,7 +7919,6 @@ failure reason, never a fake zero."
 	(dsh-bridge-fetch id)
       (message "No DSH session for this buffer."))))
 
-;;;###autoload
 (defun dsh-bridge-describe-session-at-mouse (event)
   "Describe the session named by the clicked header-line label in EVENT."
   (interactive "e")
@@ -7940,7 +7932,6 @@ failure reason, never a fake zero."
 				     (car string-pos)))))
     (if id (dsh-bridge-describe-session id))))
 
-;;;###autoload
 (defun dsh-bridge-describe-session (&optional session-id)
   "Show a read-only report for SESSION-ID.
 Interactively, use the dispatcher's focus when its menu is open, else
