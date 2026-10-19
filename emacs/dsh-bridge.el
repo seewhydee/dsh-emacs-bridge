@@ -958,11 +958,11 @@ for it still shows the asking glyph, which outranks it."
 	      ('emoji
 	       (pcase state
 		 ('asking "💬") ('idle "🟢") ('running "🟡")
-		 ('archived "⭕") (_ "?")))
+		 ('archived "⭕") (_ "⚪")))
 	      ('geometric
 	       (pcase state
 		 ('asking "▲") ('idle "●")  ('running "■")
-		 ('archived "◎") (_ "?")))
+		 ('archived "◎") (_ "○")))
 	      (_
 	       (pcase state
 		 ('asking "A") ('idle "I")  ('running "R")
