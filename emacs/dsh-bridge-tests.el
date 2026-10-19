@@ -428,7 +428,7 @@ cycle set, and provenance is never rendered."
     ;; A focus outside the cycle snapshot (pinned from outside the roster)
     ;; shows its label without a position; its status is simply unknown.
     (let ((dsh-bridge--focus '("s9" . pinned)))
-      (should (string-equal (dsh-bridge--dispatcher-header) " ? s9 [pinned]")))
+      (should (string-equal (dsh-bridge--dispatcher-header) " ○ s9 [pinned]")))
     ;; With indicator style `none' there is no glyph, hence no leading space
     ;; -- for an unpinned focus either.
     (let ((dsh-bridge-status-indicator 'none)
@@ -4124,7 +4124,7 @@ not a request, so no resume is attempted."
         ;; Status cell (index 1): the state glyph — filled square for running
         ;; (amber), `?' for saved (no live agent).
         (should (equal (aref live-cells 1) "■"))
-        (should (equal (aref saved-cells 1) "?"))
+        (should (equal (aref saved-cells 1) "○"))
         ;; Session name (index 2): the pinned session's title is bold-faced,
         ;; an ordinary title takes the default session face.
         (should (equal (aref live-cells 2) "First live"))
@@ -5168,9 +5168,9 @@ a filled circle for an idle live session, a filled square for a running one,
         (dsh-bridge-status-indicator 'geometric))
     (should (string= (dsh-bridge--status-glyph "s-run") "■"))
     (should (string= (dsh-bridge--status-glyph "s-idle") "●"))
-    (should (string= (dsh-bridge--status-glyph "s-cold") "?"))
+    (should (string= (dsh-bridge--status-glyph "s-cold") "○"))
     (should (string= (dsh-bridge--status-glyph "s-arch") "◎"))
-    (should (string= (dsh-bridge--status-glyph "s-unknown") "?"))))
+    (should (string= (dsh-bridge--status-glyph "s-unknown") "○"))))
 
 (ert-deftest dsh-bridge-status-glyph-archived-styles ()
   "An archived session reads as archived under every indicator style.
@@ -6102,7 +6102,7 @@ a tracked `idle' keeps the cold row's `unknown'."
   (let ((dsh-bridge--session-status nil)
         (dsh-bridge--sessions-cache nil)
         (dsh-bridge-status-indicator 'geometric))
-    (should (string= (dsh-bridge--status-glyph nil) "?"))
+    (should (string= (dsh-bridge--status-glyph nil) "○"))
     (dsh-bridge--status-set "s1" 'idle)
     (should (string= (dsh-bridge--status-glyph "s1") "●"))
     (dsh-bridge--status-set "s1" 'running)
