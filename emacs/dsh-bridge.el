@@ -3025,13 +3025,18 @@ turn record; any other value is a caller error."
 (defun dsh-bridge--view-item-separator (prev next)
   "The separator between the render items PREV and NEXT.
 Either may be nil at the body's edges.  Two adjacent reply segments keep
-`dsh-bridge--view-segment-divider'; a step boundary takes a blank line; any
+`dsh-bridge--view-segment-divider'.  A reply segment next to anything else
+takes a blank line, so the model's text is its own paragraph rather than a
+continuation of an activity line.  A step boundary takes a blank line; any
 other boundary a single newline."
   (cond
    ((or (null prev) (null next)) "")
    ((and (dsh-bridge--view-segment-item-p prev)
 	 (dsh-bridge--view-segment-item-p next))
     dsh-bridge--view-segment-divider)
+   ((or (dsh-bridge--view-segment-item-p prev)
+	(dsh-bridge--view-segment-item-p next))
+    "\n\n")
    ((not (equal (nth 1 prev) (nth 1 next))) "\n\n")
    (t "\n")))
 

@@ -3047,9 +3047,9 @@ whose marker property does not reach `point-max' is."
 
 (ert-deftest dsh-bridge-view-activity-render-order ()
   "Activity weaves between segments per step: thinking, text, then tools.
-A step boundary is a blank line; the `---' divider survives only between
-adjacent segments, so activity-off rendering is byte-identical to the old
-segment join."
+A segment's edge and a step boundary take a blank line, so model text is its
+own paragraph; the `---' divider survives only between adjacent segments, so
+activity-off rendering is byte-identical to the old segment join."
   (let ((turn (dsh-bridge-test--view-turn
                 7 7000000
                 (list (dsh-bridge-test--view-segment "answer one" 7001000 1)
@@ -3068,12 +3068,12 @@ segment join."
       ;; holds whether the view derives from `gfm-view-mode' or not (a
       ;; load-time choice depending on markdown-mode's presence).
       (should (equal (dsh-bridge-test--view-turn-body turn)
-                     (concat "\u22ef thinking: " (dsh-bridge--view-literal "think one") "\n"
-                             "answer one\n"
+                     (concat "\u22ef thinking: " (dsh-bridge--view-literal "think one") "\n\n"
+                             "answer one\n\n"
                              "\u2192 read " (dsh-bridge--view-literal "src/a.ts") "\n"
                              "\u2713 read\n\n"
-                             "\u22ef thinking: " (dsh-bridge--view-literal "think two") "\n"
-                             "answer two\n"
+                             "\u22ef thinking: " (dsh-bridge--view-literal "think two") "\n\n"
+                             "answer two\n\n"
                              "\u2192 edit " (dsh-bridge--view-literal "src/a.ts") "\n"
                              "\u2717 edit (error)"))))
     (with-temp-buffer
@@ -3103,16 +3103,19 @@ either: dropping one would vanish reply text."
                      "part one\n\n---\npart two\n\n---\nnext step")))))
 
 (ert-deftest dsh-bridge-view-item-separator-rules ()
-  "Segments keep the divider; a step boundary takes a blank line."
+  "A segment's edge takes a blank line; a step boundary takes one too."
   (let ((seg-a (dsh-bridge--view-segment-item (dsh-bridge-test--view-segment "a" 1000 1)))
         (seg-b (dsh-bridge--view-segment-item (dsh-bridge-test--view-segment "b" 2000 2)))
         (act-a (dsh-bridge--view-activity-item (dsh-bridge-test--view-thinking "t" 5 0 1 1000)))
+        (act-a2 (dsh-bridge--view-activity-item
+                 (dsh-bridge-test--view-tool-call "x" "y" "c" 7 1 1000)))
         (act-b (dsh-bridge--view-activity-item
                 (dsh-bridge-test--view-tool-call "x" "y" "c" 6 2 1000))))
     (should (equal (dsh-bridge--view-item-separator seg-a seg-b)
                    dsh-bridge--view-segment-divider))
-    (should (equal (dsh-bridge--view-item-separator seg-a act-a) "\n"))
-    (should (equal (dsh-bridge--view-item-separator act-a seg-a) "\n"))
+    (should (equal (dsh-bridge--view-item-separator seg-a act-a) "\n\n"))
+    (should (equal (dsh-bridge--view-item-separator act-a seg-a) "\n\n"))
+    (should (equal (dsh-bridge--view-item-separator act-a act-a2) "\n"))
     (should (equal (dsh-bridge--view-item-separator act-a act-b) "\n\n"))
     (should (equal (dsh-bridge--view-item-separator nil seg-a) ""))))
 
