@@ -476,7 +476,7 @@ These notes indicate the answers you gave to mid-turn queries."
 Used for tool calls and for tool results that succeeded."
   :group 'dsh-bridge)
 
-(defface dsh-bridge-view-activity-thinking-face
+(defface dsh-bridge-view-thinking-face
   '((t :inherit (dsh-bridge-view-activity-face italic)))
   "Face for thinking-summary lines in DSH-View buffers."
   :group 'dsh-bridge)
@@ -1095,7 +1095,7 @@ Currently supported events are:
   was committed mid-turn; the frame's `turn' names the turn that grew).
 - `activity-changed': refresh the turn cache and refill following views when
   any live view of the session renders activity (a tool call, a tool result,
-  or a reasoning block was committed mid-turn); ignored otherwise, since the
+  or a thinking summary was committed mid-turn); ignored otherwise, since the
   frames are only a nudge and activity is not displayed in that case.
 - `context': update `dsh-bridge--session-context' and re-render header
   lines reporting that data.
@@ -2655,17 +2655,16 @@ another session.  Toggled by `\\[dsh-bridge-view-toggle-activity]'.")
   "How this DSH-View buffer was last rendered, or nil if unknown.
 The value, if non-nil, should be a plist keyed with:
 
-- `:session' (the session id)
-- `:epoch' (the turns-cache history epoch, a number or nil)
-- `:turn' (the turn number)
-- `:activity' (the `dsh-bridge--view-activity' state at render time)
-- `:keys' (oldest-first render-item identities: `(STEP . TIME)' for a
-  segment, `(activity SEQ ORD)' for an activity line)
+- `:session': the session id.
+- `:epoch': the turns-cache history epoch, a number or nil.
+- `:turn': the turn number.
+- `:activity': the `dsh-bridge--view-activity' state at render time.
+- `:length': the number of items already rendered.
+- `:first', `:last': the identities of the first and last rendered
+  items, used to detect a displaced window cheaply.
 
-The `dsh-bridge--view-fill' function uses this record to splice newly
-rendered items onto the body the buffer already holds; the terminal
-suffix is delimited in the buffer itself by the `dsh-bridge-turn-marker'
-text property.")
+The `dsh-bridge--view-fill' function uses this record to splice new
+content into the DSH-View buffer.")
 
 (defvar dsh-bridge--view-ticker-timer nil
   "Repeating timer to repaint the DSH-View header, or nil.")
@@ -2676,10 +2675,8 @@ text property.")
 
 (defvar dsh-bridge--view-segment-divider "\n\n---\n"
   "Text between two segments of the same turn in DSH-View buffers.
-The default consists of (i) two newlines, (ii) a Markdown divider
-\"---\", and (iii) one newline.	 In `gfm-view-mode', (ii) is rendered as
-a full-width line followed by a newline, so the divider appears as a
-full-width line separated by single blank lines above and below.")
+In `gfm-view-mode', the Markdown divider \"---\" is rendered as a
+full-width line followed by a newline.")
 
 (defun dsh-bridge--view-turn-open-p (turn)
   "Whether TURN is still open (running): no end facts recorded yet.
@@ -2859,18 +2856,22 @@ visits the file."
 
 ;;; Turn activity (the DSH-View process stream)
 
-;; The host folds a session's tool calls, their results, and one-line thinking
-;; summaries into each turn record's `activity' slot, summary-only: the full
-;; reasoning text never leaves the host.  A view interleaves those lines with
-;; the turn's reply segments when `dsh-bridge--view-activity' is non-nil.  The
-;; render order and the separator rules live in `dsh-bridge--view-turn-items'
-;; and `dsh-bridge--view-item-separator'; the render-item keys they produce are
-;; what the incremental splice proves its prefix against.
+;; If `dsh-bridge--view-activity' is non-nil, the DSH-View buffer
+;; interleaves reply segments with activity lines: tool calls, their
+;; results, and thinking summaries.  To update it incrementally, we
+;; build an ordered list of items (`dsh-bridge--view-turn-items') and
+;; iterate through it, adding lines (reply segments, thinking
+;; summaries, new tool calls) or settling an earlier call line in place
+;; (tool-call result).  The line's step is kept in the
+;; `dsh-bridge-activity-step' property so the next separator can tell a
+;; same-step pair from a step boundary; the `dsh-bridge-activity'
+;; property stores the thinking summary's (SEQ . ORD) identity, a call's
+;; callId string (the key a result settles by), or a
+;; `(tool-result . CALLID)' marker on an unpaired result, which a callId
+;; search never matches.
 
 (defconst dsh-bridge--view-thinking-prefix "\u22ef thinking: "
-  "Prefix of a thinking-summary activity line.
-The leading glyph is load-bearing: `gfm-view-mode' parses a line that starts
-with `word:' as YAML metadata and fontifies it as a metadata key.")
+  "Prefix of a thinking-summary activity line.")
 
 (defconst dsh-bridge--view-tool-call-prefix "\u2192 "
   "Prefix of a tool-call activity line.")
@@ -2893,161 +2894,271 @@ with `word:' as YAML metadata and fontifies it as a metadata key.")
     longest))
 
 (defun dsh-bridge--view-literal (text)
-  "TEXT protected from Markdown interpretation by a CommonMark code span.
-Returns TEXT unchanged outside a `gfm-view-mode' buffer or when TEXT is empty
-(callers already omit an absent summary).  Markdown hides a span's fence
-characters and treats its content literally, so a summary's asterisks,
-underscores, backticks, brackets, and angle brackets reach the display
-verbatim; the read-only view filters the hidden fences out of copy and kill
-through `filter-buffer-substring-function'."
+  "Return a form of TEXT displaying as literal text in a DSH-View buffer.
+If TEXT is not a string, it is replaced by an empty string.  Then, it is
+first passed through `string-trim'.  Finally, if the current buffer is
+in `gfm-view-mode', the text is expressed as a CommonMark code span to
+protect it from further Markdown interpretation."
+  (setq text (if (stringp text) (string-trim text) ""))
   (if (or (not (derived-mode-p 'gfm-view-mode))
 	  (string-empty-p text))
       text
-    (let* ((fence (make-string (1+ (dsh-bridge--longest-backtick-run text)) ?`))
+    (let* ((nbackticks (dsh-bridge--longest-backtick-run text))
+	   (fence (make-string (1+ nbackticks) ?`))
 	   (pad (if (or (string-prefix-p "`" text)
 			(string-suffix-p "`" text))
 		    " " "")))
       (concat fence pad text pad fence))))
 
-(defun dsh-bridge--view-activity-property (entry)
-  "The `dsh-bridge-activity' property value identifying activity ENTRY.
-The property is the hook for locating an activity line's record (the deferred
-full-trace command reads a thinking entry's `seq' and `ord' from it)."
-  (let ((kind (alist-get 'kind entry)))
-    (if (equal kind "thinking")
-	(list :kind 'thinking :seq (alist-get 'seq entry) :ord (alist-get 'ord entry))
-      (list :kind (if (equal kind "tool-result") 'tool-result 'tool-call)
-	    :call-id (alist-get 'callId entry)))))
-
-(defun dsh-bridge--view-activity-line (entry)
-  "The propertized one-line rendering of activity ENTRY.
-ENTRY is one host activity alist.  The line carries the `face' and
-`font-lock-face' text properties (the latter overriding Markdown's own
-fontification) and the `dsh-bridge-activity' property."
-  (let* ((kind (alist-get 'kind entry))
-	 (name (or (alist-get 'name entry) "tool"))
-	 (error-p (and (equal kind "tool-result")
-		       (eq (alist-get 'isError entry) t)))
-	 (face (cond ((equal kind "thinking") 'dsh-bridge-view-activity-thinking-face)
-		     (error-p 'dsh-bridge-view-activity-error-face)
-		     (t 'dsh-bridge-view-activity-face)))
-	 (text (cond
-		((equal kind "thinking")
-		 (concat dsh-bridge--view-thinking-prefix
-			 (dsh-bridge--view-literal (or (alist-get 'summary entry) ""))))
-		((equal kind "tool-call")
-		 (let ((summary (or (alist-get 'summary entry) "")))
-		   (concat dsh-bridge--view-tool-call-prefix name
-			   (if (or (string-empty-p summary)
-				   (equal summary name))
-			       ""
-			     (concat " " (dsh-bridge--view-literal summary))))))
-		((equal kind "tool-result")
-		 (concat (if error-p
-			     dsh-bridge--view-tool-error-prefix
-			   dsh-bridge--view-tool-ok-prefix)
-			 name
-			 (if error-p " (error)" "")))
-		(t ""))))
-    (propertize text
-		'face face
-		'font-lock-face face
-		'dsh-bridge-activity (dsh-bridge--view-activity-property entry))))
-
-(defun dsh-bridge--view-activity-item (entry)
-  "The render item of activity ENTRY: (KEY STEP TEXT).
-KEY is the entry's `(activity SEQ ORD)' identity."
-  (list (list 'activity (alist-get 'seq entry) (alist-get 'ord entry))
-	(alist-get 'step entry)
-	(dsh-bridge--view-activity-line entry)))
-
-(defun dsh-bridge--view-segment-item (segment)
-  "The render item of reply SEGMENT: (KEY STEP TEXT).
-TEXT drops any surrounding padding produced by the model.  The host
-serves the text verbatim, and it can end with one or two newlines
-depending on the model; this function normalizes it."
+(defun dsh-bridge--view-segment-text (segment)
+  "The display text of reply SEGMENT, with model padding normalized.
+The host serves committed reply text verbatim, and a model commonly ends
+a step with one or two newlines.  Drop trailing whitespace and any
+leading blank lines, but keep the first content line's indentation."
   (let ((text (string-trim-right (or (alist-get 'text segment) ""))))
     (when (string-match "\\`\\(?:[ \t\r]*\n\\)+" text)
       (setq text (substring text (match-end 0))))
-    (list (dsh-bridge--view-segment-key segment)
-	  (alist-get 'step segment)
-	  text)))
+    text))
 
-(defun dsh-bridge--view-segment-item-p (item)
-  "Whether render ITEM is a reply segment.
-A segment's key is its `(STEP . TIME)' identity; an activity line's key is
-the list `(activity SEQ ORD)'."
-  (not (eq (car-safe (car item)) 'activity)))
+(defun dsh-bridge--view-activity-separator (step)
+  "The separator before an activity line at STEP at the body's end.
+A reply segment's edge and a step boundary take a blank line; two
+activity lines of the same step are adjacent.  The preceding line is
+recognized by its `dsh-bridge-activity' property, and its step by
+`dsh-bridge-activity-step'."
+  (cond
+   ((= (point) (point-min)) "")
+   ((not (get-text-property (1- (point)) 'dsh-bridge-activity)) "\n\n")
+   ((equal (get-text-property (1- (point)) 'dsh-bridge-activity-step) step)
+    "\n")
+   (t "\n\n")))
+
+(defun dsh-bridge--view-insert-segment (segment)
+  "Insert the text for reply SEGMENT, with appropriate padding.
+Normalize the model's padding (trailing whitespace and leading blank
+lines) and insert appropriate newline(s) based on any preceding entry.
+If preceded by another reply segment, use
+`dsh-bridge--view-segment-divider' as the separator."
+  (let ((text (dsh-bridge--view-segment-text segment)))
+    (unless (string-empty-p text)
+      (cond ((= (point) (point-min))) ; no preceding content
+	    ((get-text-property (1- (point)) 'dsh-bridge-activity)
+	     (insert "\n\n"))
+	    (t
+	     (insert dsh-bridge--view-segment-divider)))
+      (insert text))))
+
+(defun dsh-bridge--view-insert-thinking (activity)
+  "Insert the text for thinking ACTIVITY in the DSH-View buffer.
+Set the `face' and `font-lock-face' text properties to
+`dsh-bridge-view-thinking-face', and set the `dsh-bridge-activity'
+property to the thinking block's (SEQ . ORD) identity."
+  (insert (dsh-bridge--view-activity-separator (alist-get 'step activity)))
+  (let ((start (point))
+	(text (dsh-bridge--view-literal (alist-get 'summary activity)))
+	(key (cons (alist-get 'seq activity) (alist-get 'ord activity)))
+	(step (alist-get 'step activity)))
+    (insert dsh-bridge--view-thinking-prefix text)
+    (add-text-properties start (point)
+			 `(face dsh-bridge-view-thinking-face
+			   font-lock-face dsh-bridge-view-thinking-face
+			   dsh-bridge-activity ,key
+			   dsh-bridge-activity-step ,step))))
+
+(defun dsh-bridge--view-insert-tool-line (activity &optional unpaired)
+  "Insert the line for the tool-call or tool-result ACTIVITY.
+UNPAIRED non-nil means ACTIVITY is a result whose call line is absent:
+insert it as a settled line of its own, using the result's name and no
+summary.
+
+The inserted text has `face' and `font-lock-face' set to
+`dsh-bridge-view-activity-error-face' if ACTIVITY records an error, else
+`dsh-bridge-view-activity-face'.  A call line's `dsh-bridge-activity'
+property is its `callId', so a later result can find and settle it; an
+unpaired result stores `(tool-result . CALLID)' instead, which no
+callId search matches.  The line's step is recorded in
+`dsh-bridge-activity-step' for separator decisions."
+  (insert (dsh-bridge--view-activity-separator (alist-get 'step activity)))
+  (let* ((err (eq (alist-get 'isError activity) t))
+	 (prefix (cond (err dsh-bridge--view-tool-error-prefix)
+		       (unpaired dsh-bridge--view-tool-ok-prefix)
+		       (t dsh-bridge--view-tool-call-prefix)))
+	 (face (if err
+		   'dsh-bridge-view-activity-error-face
+		 'dsh-bridge-view-activity-face))
+	 (name (dsh-bridge--view-literal (alist-get 'name activity)))
+	 (summary (if unpaired
+		      ""
+		    (dsh-bridge--view-literal (alist-get 'summary activity))))
+	 (id (alist-get 'callId activity))
+	 (step (alist-get 'step activity))
+	 (key (cond (unpaired (cons 'tool-result id))
+		    ((stringp id) id)
+		    (t (cons 'tool-call id))))
+	 (start (point)))
+    (insert prefix (if (string-empty-p name) "tool" name))
+    (unless (or (string-empty-p summary) (equal summary name))
+      (insert " " summary))
+    (when err (insert " (error)"))
+    (add-text-properties start (point)
+			 `(face ,face font-lock-face ,face
+			   dsh-bridge-activity ,key
+			   dsh-bridge-activity-step ,step))
+    (when err
+      (put-text-property start (point) 'dsh-bridge-activity-error t))))
+
+(defun dsh-bridge--view-settle-span (start end err)
+  "Rewrite the tool line spanning START..END as settled by ERR.
+Change only the prefix glyph, the error suffix, and the face, so the
+line keeps its name, summary, and identity property.  Return non-nil
+when the span begins with a tool prefix."
+  (let ((inhibit-read-only t))
+    (save-excursion
+      (goto-char start)
+      (let ((old (char-after start)))
+	(when (memq old '(?\u2192 ?\u2713 ?\u2717))
+	  (subst-char-in-region start (1+ start) old
+				(if err ?\u2717 ?\u2713) t)
+	  (let ((had-error (get-text-property
+			    start 'dsh-bridge-activity-error)))
+	    (goto-char end)
+	    ;; Trust the property, but verify the text before deleting: a
+	    ;; manual edit could have removed the suffix.
+	    (when (and had-error
+		       (>= (- end start) (length " (error)"))
+		       (string-suffix-p
+			" (error)"
+			(buffer-substring-no-properties
+			 (- end (length " (error)")) end)))
+	      (delete-region (- end (length " (error)")) end))
+	    (when err (insert " (error)"))
+	    (let ((new-end (point))
+		  (face (if err
+			    'dsh-bridge-view-activity-error-face
+			  'dsh-bridge-view-activity-face)))
+	      (add-text-properties
+	       start new-end
+	       (list 'face face
+		     'font-lock-face face
+		     'dsh-bridge-activity
+		     (get-text-property start 'dsh-bridge-activity)
+		     'dsh-bridge-activity-step
+		     (get-text-property start 'dsh-bridge-activity-step)))
+	      (if err
+		  (put-text-property start new-end
+				     'dsh-bridge-activity-error t)
+		(remove-text-properties
+		 start new-end
+		 '(dsh-bridge-activity-error nil)))
+	      t)))))))
+
+(defun dsh-bridge--view-result-spliceable-p (item prefix)
+  "Whether result ITEM can be applied with PREFIX already rendered.
+A result whose call item is in PREFIX must find its call line in the
+buffer; otherwise the body has diverged from the recorded prefix and
+the fill must rebuild.  Results whose call is new (or absent) may settle
+during the render or stand alone."
+  (or (not (eq (car item) 'tool-result))
+      (let* ((id (alist-get 'callId (cdr item)))
+	     (call-in-prefix
+	      (seq-find (lambda (candidate)
+			  (and (eq (car candidate) 'tool-call)
+			       (equal (alist-get 'callId (cdr candidate))
+				      id)))
+			prefix)))
+	(or (not call-in-prefix)
+	    (and (stringp id)
+		 (not (string-empty-p id))
+		 (save-excursion
+		   (goto-char (point-min))
+		   (and (text-property-search-forward
+			 'dsh-bridge-activity id #'equal)
+			t)))))))
+
+(defun dsh-bridge--view-splice-settleable-p (items nold)
+  "Whether the splice's new suffix can be applied to the current body.
+A result whose call item is in the already-rendered prefix must have a
+call line in the buffer; otherwise the buffer has diverged from ITEMS
+and the fill must rebuild.  Results whose call is new (or absent) are
+allowed to settle during the render or stand alone."
+  (let ((prefix (seq-take items nold)))
+    (seq-every-p (lambda (item)
+		   (dsh-bridge--view-result-spliceable-p item prefix))
+		 (nthcdr nold items))))
+
+(defun dsh-bridge--view-handle-tool-result (activity)
+  "Handle the tool-call result described by ACTIVITY.
+Settle the matching call line when one is already rendered; otherwise
+insert the result as a standalone line rather than dropping it.  The
+line keeps its own name and summary; only its prefix glyph, error
+suffix, and face change, so a second result can settle it again."
+  (let* ((id (alist-get 'callId activity))
+	 (err (eq (alist-get 'isError activity) t))
+	 (match (and (stringp id)
+		     (not (string-empty-p id))
+		     (save-excursion
+		       (goto-char (point-min))
+		       (text-property-search-forward
+			'dsh-bridge-activity id #'equal)))))
+    (unless (and match
+		 (dsh-bridge--view-settle-span
+		  (prop-match-beginning match)
+		  (prop-match-end match)
+		  err))
+      (dsh-bridge--view-insert-tool-line activity t))))
+
+(defun dsh-bridge--view-render (items)
+  "Render ITEMS into the current DSH-View buffer.
+Each entry in ITEMS must have the form (KIND . CONTENT), describing a
+reply segment or turn activity (see `dsh-bridge--view-turn-items').
+New content is inserted at the end of the buffer, and this function
+leaves point there."
+  (goto-char (point-max))
+  (let ((handlers '((segment . dsh-bridge--view-insert-segment)
+		    (thinking . dsh-bridge--view-insert-thinking)
+		    (tool-call . dsh-bridge--view-insert-tool-line)
+		    (tool-result . dsh-bridge--view-handle-tool-result))))
+    (dolist (item items)
+      (let ((fun (cdr (assq (car item) handlers))))
+	(if fun (funcall fun (cdr item))))
+      ;; Settling an earlier line restores point there; the next item's
+      ;; separator must still be chosen at the body's end.
+      (goto-char (point-max)))))
 
 (defun dsh-bridge--view-turn-items (turn)
-  "The ordered render items of turn record TURN.
-Each item is (KEY STEP TEXT).  Items follow the turn-activity render order:
-for each harness step ascending, the step's thinking entries, then its reply
-segments (every segment the host sent, in that order), then its remaining
-activity entries (tool calls and results), each group in the order the host
-folded it.  Activity items are omitted while `dsh-bridge--view-activity' is
-nil, so the item list is then exactly the segment list.  TURN must be a
-turn record; any other value is a caller error."
+  "Ordered list of items to show for turn record TURN.
+Each entry in the list describes a reply segment or activity (thinking
+summary, tool-call, or tool-call result).  Its form is (KIND . CONTENT),
+where KIND is `segment', `thinking', `tool-call', or `tool-result', and
+CONTENT is the alist from the turn record.  Within a step, thinking
+summaries come first, then reply segments, then the remaining activity,
+each group in host order.  Activity is omitted when
+`dsh-bridge--view-activity' is nil.  TURN must be a turn record; any
+other value is a caller error."
   (unless (consp turn)
     (error "dsh-bridge: --view-turn-items called with a non-record TURN"))
-  (let ((steps nil)
-	(segments-by-step nil)
-	(thinking-by-step nil)
-	(other-by-step nil))
+  (let ((items nil))
     (dolist (segment (alist-get 'segments turn))
       (let ((step (alist-get 'step segment)))
 	(when (numberp step)
-	  (unless (memql step steps) (push step steps))
-	  (push (cons step segment) segments-by-step))))
-    (dolist (entry (and dsh-bridge--view-activity (alist-get 'activity turn)))
-      (let ((step (alist-get 'step entry)))
-	(when (numberp step)
-	  (unless (memql step steps) (push step steps))
-	  (if (equal (alist-get 'kind entry) "thinking")
-	      (push (cons step entry) thinking-by-step)
-	    (push (cons step entry) other-by-step)))))
-    (setq segments-by-step (nreverse segments-by-step)
-	  thinking-by-step (nreverse thinking-by-step)
-	  other-by-step (nreverse other-by-step))
-    (let ((items nil))
-      (dolist (step (sort steps #'<))
-	(dolist (pair thinking-by-step)
-	  (when (equal (car pair) step)
-	    (push (dsh-bridge--view-activity-item (cdr pair)) items)))
-	(dolist (pair segments-by-step)
-	  (when (equal (car pair) step)
-	    (push (dsh-bridge--view-segment-item (cdr pair)) items)))
-	(dolist (pair other-by-step)
-	  (when (equal (car pair) step)
-	    (push (dsh-bridge--view-activity-item (cdr pair)) items))))
-      (nreverse items))))
-
-(defun dsh-bridge--view-item-separator (prev next)
-  "The separator between the render items PREV and NEXT.
-Either may be nil at the body's edges.  Two adjacent reply segments keep
-`dsh-bridge--view-segment-divider'.  A reply segment next to anything else
-takes a blank line, so the model's text is its own paragraph rather than a
-continuation of an activity line.  A step boundary takes a blank line; any
-other boundary a single newline."
-  (cond
-   ((or (null prev) (null next)) "")
-   ((and (dsh-bridge--view-segment-item-p prev)
-	 (dsh-bridge--view-segment-item-p next))
-    dsh-bridge--view-segment-divider)
-   ((or (dsh-bridge--view-segment-item-p prev)
-	(dsh-bridge--view-segment-item-p next))
-    "\n\n")
-   ((not (equal (nth 1 prev) (nth 1 next))) "\n\n")
-   (t "\n")))
-
-(defun dsh-bridge--view-insert (items &optional prev)
-  "Insert render ITEMS into the current buffer, with their separators.
-PREV is the item already at the insertion point, if any: the separator
-before the first inserted item is computed from it, as for an append."
-  (dolist (item items)
-    (insert (dsh-bridge--view-item-separator prev item))
-    (insert (nth 2 item))
-    (setq prev item)))
+	  (push (list step 1 (cons 'segment segment)) items))))
+    (when dsh-bridge--view-activity
+      (dolist (entry (alist-get 'activity turn))
+	(let* ((step (alist-get 'step entry))
+	       (kind (let ((kind (alist-get 'kind entry)))
+		       (if (symbolp kind) kind (and kind (intern kind)))))
+	       (rank (if (eq kind 'thinking) 0 2)))
+	  (when (and (numberp step)
+		     (memq kind '(thinking tool-call tool-result)))
+	    (push (list step rank (cons kind entry)) items)))))
+    ;; `push' reversed the host order of each group; restore it, then
+    ;; use the stable sort for step and group rank.
+    (mapcar #'caddr
+	    (sort (nreverse items)
+		  (lambda (a b)
+		    (or (< (car a) (car b))
+			(and (= (car a) (car b))
+			     (< (nth 1 a) (nth 1 b)))))))))
 
 (defun dsh-bridge--failure-text (failure)
   "Return the display text for FAILURE.
@@ -3168,16 +3279,34 @@ awaiting, approval, and answer notes attach only while it is open."
   "The identity of SEGMENT: its `(STEP . TIME)' pair."
   (cons (alist-get 'step segment) (alist-get 'time segment)))
 
-(defun dsh-bridge--view-provenance-make (session-id epoch turn keys)
-  "A provenance plist for the body just rendered from TURN.
-KEYS is TURN's render-item identities.  The current
+(defun dsh-bridge--view-item-key (item)
+  "The identity of render ITEM `(KIND . CONTENT)'.
+Segments use their `(STEP . TIME)' pair; activity uses its kind and
+sequence identity.  Only the boundary items' keys are recorded and
+compared, so this is cheap to call on every fill."
+  (let ((kind (car item))
+	(entry (cdr item)))
+    (cond ((eq kind 'segment)
+	   (dsh-bridge--view-segment-key entry))
+	  ((eq kind 'thinking)
+	   (list 'thinking
+		 (alist-get 'seq entry)
+		 (alist-get 'ord entry)))
+	  (t
+	   (cons kind (alist-get 'callId entry))))))
+
+(defun dsh-bridge--view-provenance-make (session-id epoch turn items)
+  "A provenance plist for the body just rendered from ITEMS at TURN.
+ITEMS is the rendered item list.  The current
 `dsh-bridge--view-activity' is recorded so a toggle flip invalidates a
 recorded splice."
   (list :session session-id
 	:epoch epoch
 	:turn (and turn (alist-get 'turn turn))
 	:activity dsh-bridge--view-activity
-	:keys keys))
+	:length (length items)
+	:first (and items (dsh-bridge--view-item-key (car items)))
+	:last (and items (dsh-bridge--view-item-key (car (last items))))))
 
 (defun dsh-bridge--view-turn-index (turns &optional turn)
   "Index of TURN (a number) in TURNS (newest first), or nil when absent.
@@ -4633,58 +4762,79 @@ entries were pending, only the latest is shown."
 	(when (alist-get 'overflowed alist)
 	  (message "dsh-bridge: old messages dropped (outbox overflow)")))))))
 
-(defun dsh-bridge--view-splice-turn (session-id turn)
-  "Try to splice SESSION-ID's TURN into the current DSH-View buffer.
-If the splice can be performed, update `dsh-bridge--view-provenance' and
-return a non-nil value.  Otherwise, return nil."
-  (when (and session-id (consp turn))
+(defun dsh-bridge--view-splice-turn (session-id turn epoch items)
+  "Try to splice new content into the current DSH-View buffer.
+SESSION-ID is the session id, TURN is the turn record, EPOCH is the
+turn's cached epoch, and ITEMS is a list of items to be shown (in the
+format of `dsh-bridge--view-turn-items').  Some of ITEMS may already be
+present in the buffer.
+
+Return t if the splice was performed, and nil if it was abandoned: the
+session, turn, epoch, or activity toggle differs from the recorded
+provenance; the recorded length is not a prefix of ITEMS; a boundary
+identity differs; or a result whose call is already rendered has no
+call line to settle."
+  (when (and session-id (consp turn) (numberp epoch))
     ;; Check if we can splice: the buffer must hold a prefix of the
     ;; new turn, with the same activity state.
-    (let* ((epoch (car (dsh-bridge--turns-cache-entry session-id)))
-	   (items (dsh-bridge--view-turn-items turn))
-	   (new-keys (mapcar #'car items))
-	   (prov dsh-bridge--view-provenance)
-	   ;; The suffix is delimited by its marker property, which the
-	   ;; insertion function puts over the whole suffix (separator,
-	   ;; changed-files footer, and furniture) up to `point-max'.  A
-	   ;; marker region that does not reach `point-max' is not ours to
-	   ;; replace: fall back to a full render.
-	   (suffix-start (previous-single-property-change
-			  (point-max) 'dsh-bridge-turn-marker))
+    (let* ((prov dsh-bridge--view-provenance)
+	   ;; If any suffix exists, it should be demarcated by a
+	   ;; non-nil `dsh-bridge-turn-marker' property (covering the
+	   ;; separator, changed-files list, and furniture text),
+	   ;; extending up to point-max.
+	   ;; `previous-single-property-change' returns nil when the
+	   ;; property starts at `point-min' and runs to the end, so
+	   ;; recognize that case explicitly.
+	   (suffix-start
+	    (or (previous-single-property-change
+		 (point-max) 'dsh-bridge-turn-marker)
+		(and (> (point-max) (point-min))
+		     (get-text-property (point-min)
+					'dsh-bridge-turn-marker)
+		     (point-min))))
 	   (suffix (and suffix-start
 			(get-text-property suffix-start
-					   'dsh-bridge-turn-marker))))
-      (when (and (numberp epoch)
-		 prov
+					   'dsh-bridge-turn-marker)))
+	   (nold (plist-get prov :length))
+	   ;; Total length is implied by ITEMS; the boundary identities
+	   ;; below detect a displaced window.
+	   (nnew (length items)))
+      (when (and prov
+		 (natnump nold)
 		 (equal (plist-get prov :session) session-id)
 		 (equal (plist-get prov :turn) (alist-get 'turn turn))
 		 (equal (plist-get prov :epoch) epoch)
 		 (eq (plist-get prov :activity) dsh-bridge--view-activity)
-		 (let ((old (plist-get prov :keys)))
-		   (and (<= (length old) (length new-keys))
-			(equal old (seq-take new-keys (length old)))))
+		 (<= nold nnew)
+		 ;; The host's bounded activity window can drop entries from
+		 ;; the front while the count stays the same; compare the
+		 ;; boundary identities so a displaced window rebuilds.
+		 (or (= nold 0)
+		     (and (equal (plist-get prov :first)
+				 (dsh-bridge--view-item-key (car items)))
+			  (equal (plist-get prov :last)
+				 (dsh-bridge--view-item-key
+				  (nth (1- nold) items)))))
+		 (dsh-bridge--view-splice-settleable-p items nold)
 		 (or (null suffix-start) suffix))
-	;; All is ready: do the splice.
-	(let* ((rendered (length (plist-get prov :keys)))
-	       (new-items (nthcdr rendered items))
-	       (old-point (point))
-	       ;; Point at or beyond the suffix start sits on terminal
-	       ;; furniture; the splice replaces it, so carry point to the
-	       ;; new tail.  With no suffix, only the buffer end counts.
-	       (tail-p (>= old-point (if suffix suffix-start (point-max)))))
+	;; Ready: do the splice.
+	(let (tail-p)
 	  (let ((inhibit-read-only t))
-	    (when suffix
-	      (delete-region suffix-start (point-max)))
+	    ;; Delete the suffix.  If point was in the suffix (or
+	    ;; after, at point-max), this leaves it at point-max.
+	    (if suffix (delete-region suffix-start (point-max)))
+	    (setq tail-p (= (point) (point-max)))
+	    ;; Append the new items and reinsert the suffix at the end,
+	    ;; all under `inhibit-read-only' and inside the excursion so
+	    ;; point is restored after.
 	    (save-excursion
-	      (goto-char (point-max))
-	      (dsh-bridge--view-insert
-	       new-items
-	       (and (> rendered 0) (nth (1- rendered) items)))
+	      (dsh-bridge--view-render (nthcdr nold items))
 	      (dsh-bridge--view-insert-suffix turn session-id)))
-	  (when tail-p (goto-char (point-max)))
 	  (setq-local dsh-bridge--view-provenance
-		      (dsh-bridge--view-provenance-make
-		       session-id epoch turn new-keys)))))))
+		      (dsh-bridge--view-provenance-make session-id
+							epoch turn items))
+	  (if tail-p (goto-char (point-max)))
+	  t)))))
 
 (defun dsh-bridge--view-fill (session-id turn &optional cwd no-turns-refresh splice)
   "Fill the current buffer with TURN as the shown content of SESSION-ID.
@@ -4723,19 +4873,22 @@ match the cached turn data, do a full re-render instead."
   ;; Fetch the turns data if necessary.
   (unless (or (null session-id) no-turns-refresh)
     (dsh-bridge--view-turns-refresh t))
-  ;; Either splice in the update, or do fill from scratch.
-  (unless (and splice (dsh-bridge--view-splice-turn session-id turn))
-    (let ((inhibit-read-only t)
-	  (epoch (car (dsh-bridge--turns-cache-entry session-id))))
-      (erase-buffer)
-      (if (null turn)
-	  (setq-local dsh-bridge--view-provenance nil)
-	(let ((items (dsh-bridge--view-turn-items turn)))
-	  (dsh-bridge--view-insert items)
+  (let ((items (and turn (dsh-bridge--view-turn-items turn)))
+	(epoch (car (dsh-bridge--turns-cache-entry session-id))))
+    ;; Either splice in the update...
+    (unless (and splice
+		 (dsh-bridge--view-splice-turn session-id turn
+					       epoch items))
+      ;; ... or fill from scratch.
+      (let ((inhibit-read-only t))
+	(erase-buffer)
+	(if (null turn)
+	    (setq-local dsh-bridge--view-provenance nil)
+	  (dsh-bridge--view-render items)
 	  (dsh-bridge--view-insert-suffix turn session-id)
 	  (setq-local dsh-bridge--view-provenance
 		      (dsh-bridge--view-provenance-make
-		       session-id epoch turn (mapcar #'car items)))))
+		       session-id epoch turn items))))
       (goto-char (if (and dsh-bridge--view-follow splice)
 		     (point-max)
 		   (point-min)))))

@@ -702,8 +702,9 @@ the tag line."
 
 (defun dsh-bridge-it--turn-render (turn session-id)
   "Buffer text for the whole TURN record, or \"\" for nil.
-Insert TURN's items and then its terminal suffix, as the production fill
-does, in a temp DSH-View buffer carrying the caller's activity toggle."
+Apply TURN's render items and then its terminal suffix, as the production
+fill does, in a temp DSH-View buffer carrying the caller's activity
+toggle."
   (if (null turn)
       ""
     (let ((activity dsh-bridge--view-activity))
@@ -711,7 +712,7 @@ does, in a temp DSH-View buffer carrying the caller's activity toggle."
         (dsh-bridge-view-mode)
         (setq-local dsh-bridge--view-activity activity)
         (let ((inhibit-read-only t))
-          (dsh-bridge--view-insert (dsh-bridge--view-turn-items turn))
+          (dsh-bridge--view-render (dsh-bridge--view-turn-items turn))
           (dsh-bridge--view-insert-suffix turn session-id)
           (buffer-string))))))
 
@@ -790,7 +791,7 @@ provenance against the live `/turns' epoch and `(step . time)' segments."
           (should (numberp (plist-get prov :epoch)))
           (should (equal (plist-get prov :epoch)
                          (car (dsh-bridge--turns-cache-entry session-id))))
-          (should (equal (length (plist-get prov :keys)) 1)))
+          (should (equal (plist-get prov :length) 1)))
         ;; Plant a marker inside the rendered body; a rebuild collapses it.
         (setq probe (copy-marker (+ (point-min) 4))))
       (dsh-bridge-it--answer-pending session-id "Go")
@@ -805,17 +806,18 @@ provenance against the live `/turns' epoch and `(step . time)' segments."
                30000))
       (with-current-buffer (dsh-bridge-it--view session-id)
         (let* ((record (car (dsh-bridge--turns-cache-turns session-id)))
+               (keys (mapcar (lambda (seg)
+                               (cons (alist-get 'step seg)
+                                     (alist-get 'time seg)))
+                             (alist-get 'segments record)))
                (prov dsh-bridge--view-provenance))
           ;; Byte-identical to the reference render of the live record.
           (should (equal (buffer-string)
                          (dsh-bridge-it--turn-render record session-id)))
-          (should (equal (plist-get prov :keys)
-                         (mapcar (lambda (seg)
-                                   (cons (alist-get 'step seg)
-                                         (alist-get 'time seg)))
-                                 (alist-get 'segments record))))
+          (should (equal (plist-get prov :length) (length keys)))
+          (should (equal (plist-get prov :first) (car keys)))
+          (should (equal (plist-get prov :last) (car (last keys))))
           (should-not (plist-get prov :open))
-          (should (equal (length (plist-get prov :keys)) 2))
           (should (equal (point) (point-max)))
           ;; The body was never rewritten: the planted marker stayed put.
           (should (equal (marker-position probe) 5))
@@ -1091,10 +1093,11 @@ then with) the activity lines."
           (let ((record (car (dsh-bridge--turns-cache-turns session-id))))
             (should (null (alist-get 'segments record)))
             (should (alist-get 'activity record)))
-          ;; The recorded provenance keys lead with the activity item, so a
-          ;; later splice of the answer text extends that prefix.
-          (should (eq (car-safe (car (plist-get dsh-bridge--view-provenance :keys)))
-                      'activity))))
+          ;; The recorded provenance's leading identity is the activity
+          ;; item, so a later splice of the answer text extends that prefix.
+          (should (memq (car-safe
+                         (plist-get dsh-bridge--view-provenance :first))
+                        '(thinking tool-call tool-result)))))
       (dsh-bridge-it--answer-pending session-id "Go")
       (should (dsh-bridge-it--wait
                (lambda ()

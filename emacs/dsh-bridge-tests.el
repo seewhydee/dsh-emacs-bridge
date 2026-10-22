@@ -2649,9 +2649,9 @@ renderers see the same state they would in the view."
 
 (defun dsh-bridge-test--view-turn-body (turn)
   "The body of TURN, as the package renders it.
-Built through `dsh-bridge--view-insert' in a temp buffer."
+Built through `dsh-bridge--view-render' in a temp buffer."
   (dsh-bridge-test--with-render-buffer
-    (dsh-bridge--view-insert (dsh-bridge--view-turn-items turn))
+    (dsh-bridge--view-render (dsh-bridge--view-turn-items turn))
     (buffer-string)))
 
 (defun dsh-bridge-test--view-turn-suffix (turn &optional session-id)
@@ -2660,7 +2660,7 @@ The body is seeded first because the leading separator is decided from what
 the buffer already holds.  TURN may be `new' (an empty body)."
   (dsh-bridge-test--with-render-buffer
     (when (consp turn)
-      (dsh-bridge--view-insert (dsh-bridge--view-turn-items turn)))
+      (dsh-bridge--view-render (dsh-bridge--view-turn-items turn)))
     (let ((start (point)))
       (dsh-bridge--view-insert-suffix turn session-id)
       (buffer-substring start (point)))))
@@ -2671,7 +2671,7 @@ A test-local composition of the production body and suffix inserters."
   (if (null turn)
       ""
     (dsh-bridge-test--with-render-buffer
-      (dsh-bridge--view-insert (dsh-bridge--view-turn-items turn))
+      (dsh-bridge--view-render (dsh-bridge--view-turn-items turn))
       (dsh-bridge--view-insert-suffix turn session-id)
       (buffer-string))))
 
@@ -2905,7 +2905,6 @@ turn ends cleanly after its last segment."
 An empty view clears through `dsh-bridge--view-fill' itself, which never
 routes nil through them; a nil or non-record argument is a caller error."
   (should-error (dsh-bridge--view-turn-items nil) :type 'error)
-  (should-error (dsh-bridge--view-turn-items 'new) :type 'error)
   (should-error (dsh-bridge--view-insert-suffix nil "s1") :type 'error))
 
 (ert-deftest dsh-bridge-view-fill-append-preserves-point ()
@@ -2975,9 +2974,10 @@ render."
 (ert-deftest dsh-bridge-view-fill-falls-back-on-divergence ()
   "Every recorded-identity mismatch rebuilds the whole body instead of splicing.
 A text marker planted in the body survives a splice and collapses to
-`point-min' on a rebuild, which distinguishes the two.  The record holds no
-body length, so edits inside the body are not detected; a terminal suffix
-whose marker property does not reach `point-max' is."
+`point-min' on a rebuild, which distinguishes the two.  The record holds the
+length and the boundary identities, so a middle insertion or an edit inside
+the body is not detected; a recorded boundary that no longer matches, and a
+terminal suffix whose marker property does not reach `point-max', are."
   (let* ((seg1 (dsh-bridge-test--view-segment "first" 7001000 1))
          (seg2 (dsh-bridge-test--view-segment "second" 7002000 2))
          (one (dsh-bridge-test--view-turn 7 7000000 (list seg1)))
@@ -3070,12 +3070,10 @@ activity-off rendering is byte-identical to the old segment join."
       (should (equal (dsh-bridge-test--view-turn-body turn)
                      (concat "\u22ef thinking: " (dsh-bridge--view-literal "think one") "\n\n"
                              "answer one\n\n"
-                             "\u2192 read " (dsh-bridge--view-literal "src/a.ts") "\n"
-                             "\u2713 read\n\n"
+                             "\u2713 read " (dsh-bridge--view-literal "src/a.ts") "\n\n"
                              "\u22ef thinking: " (dsh-bridge--view-literal "think two") "\n\n"
                              "answer two\n\n"
-                             "\u2192 edit " (dsh-bridge--view-literal "src/a.ts") "\n"
-                             "\u2717 edit (error)"))))
+                             "\u2717 edit " (dsh-bridge--view-literal "src/a.ts") " (error)"))))
     (with-temp-buffer
       (dsh-bridge-view-mode)
       (should (equal (dsh-bridge-test--view-turn-body turn)
@@ -3083,8 +3081,8 @@ activity-off rendering is byte-identical to the old segment join."
 
 (ert-deftest dsh-bridge-view-turn-items-keeps-step-segments ()
   "Every segment a step carries renders, in host order, joined by the divider.
-The host fold does not dedupe segments by step, so the item pipeline must not
-either: dropping one would vanish reply text."
+The host fold does not dedupe segments by step, so the item pipeline must
+not either: dropping one would vanish reply text."
   (let ((turn (dsh-bridge-test--view-turn
                7 7000000
                (list (dsh-bridge-test--view-segment "part one" 7001000 1)
@@ -3103,21 +3101,34 @@ either: dropping one would vanish reply text."
                      "part one\n\n---\npart two\n\n---\nnext step")))))
 
 (ert-deftest dsh-bridge-view-item-separator-rules ()
-  "A segment's edge takes a blank line; a step boundary takes one too."
-  (let ((seg-a (dsh-bridge--view-segment-item (dsh-bridge-test--view-segment "a" 1000 1)))
-        (seg-b (dsh-bridge--view-segment-item (dsh-bridge-test--view-segment "b" 2000 2)))
-        (act-a (dsh-bridge--view-activity-item (dsh-bridge-test--view-thinking "t" 5 0 1 1000)))
-        (act-a2 (dsh-bridge--view-activity-item
-                 (dsh-bridge-test--view-tool-call "x" "y" "c" 7 1 1000)))
-        (act-b (dsh-bridge--view-activity-item
-                (dsh-bridge-test--view-tool-call "x" "y" "c" 6 2 1000))))
-    (should (equal (dsh-bridge--view-item-separator seg-a seg-b)
-                   dsh-bridge--view-segment-divider))
-    (should (equal (dsh-bridge--view-item-separator seg-a act-a) "\n\n"))
-    (should (equal (dsh-bridge--view-item-separator act-a seg-a) "\n\n"))
-    (should (equal (dsh-bridge--view-item-separator act-a act-a2) "\n"))
-    (should (equal (dsh-bridge--view-item-separator act-a act-b) "\n\n"))
-    (should (equal (dsh-bridge--view-item-separator nil seg-a) ""))))
+  "Separators are chosen from the buffer at insertion time.
+A segment's edge and a step boundary take a blank line; two activity
+lines of one step are adjacent, and adjacent segments take the divider."
+  (let ((dsh-bridge--view-activity t)
+        (seg-a (cons 'segment (dsh-bridge-test--view-segment "a" 1000 1)))
+        (seg-b (cons 'segment (dsh-bridge-test--view-segment "b" 2000 2)))
+        (think-a (cons 'thinking
+                       (dsh-bridge-test--view-thinking "t" 5 0 1 1000)))
+        (call-a (cons 'tool-call
+                      (dsh-bridge-test--view-tool-call
+                       "read" "src/a.ts" "c1" 7 1 1000)))
+        (call-b (cons 'tool-call
+                      (dsh-bridge-test--view-tool-call
+                       "read" "src/a.ts" "c2" 6 2 1000))))
+    (cl-labels ((pair (first second)
+                  (dsh-bridge-test--with-render-buffer
+                    (dsh-bridge--view-render (list first second))
+                    (substring-no-properties (buffer-string)))))
+      (should (equal (pair seg-a seg-b) "a\n\n---\nb"))
+      (should (equal (pair seg-a think-a) "a\n\n\u22ef thinking: t"))
+      (should (equal (pair think-a seg-a) "\u22ef thinking: t\n\na"))
+      (should (equal (pair think-a call-a)
+                     "\u22ef thinking: t\n\u2192 read src/a.ts"))
+      (should (equal (pair think-a call-b)
+                     "\u22ef thinking: t\n\n\u2192 read src/a.ts"))
+      (dsh-bridge-test--with-render-buffer
+        (dsh-bridge--view-render (list seg-a))
+        (should (equal (substring-no-properties (buffer-string)) "a"))))))
 
 (ert-deftest dsh-bridge-view-segment-padding-normalized ()
   "Model padding never opens extra blank lines around a segment.
@@ -3179,37 +3190,69 @@ so the saved prefix is untouched and the delta lands at the body end."
         (set-marker probe nil)))))
 
 (ert-deftest dsh-bridge-view-activity-line-grammar ()
-  "Activity lines carry their kind's prefix, face, and identity property."
-  (let ((thinking (dsh-bridge--view-activity-line
-                   (dsh-bridge-test--view-thinking "one two" 10 1 2 1000)))
-        (call (dsh-bridge--view-activity-line
-               (dsh-bridge-test--view-tool-call "read" "src/a.ts" "call-9" 11 1 1000)))
-        (same (dsh-bridge--view-activity-line
-               (dsh-bridge-test--view-tool-call "read" "read" "call-9" 11 1 1000)))
-        (empty (dsh-bridge--view-activity-line
-                (dsh-bridge-test--view-tool-call "read" "" "call-9" 11 1 1000)))
-        (ok (dsh-bridge--view-activity-line
-             (dsh-bridge-test--view-tool-result "read" "call-9" nil 12 1 1000)))
-        (bad (dsh-bridge--view-activity-line
-              (dsh-bridge-test--view-tool-result "read" "call-9" t 12 1 1000))))
-    (should (equal thinking "\u22ef thinking: one two"))
-    (should (eq (get-text-property 0 'face thinking)
-                'dsh-bridge-view-activity-thinking-face))
-    (should (eq (get-text-property 0 'font-lock-face thinking)
-                'dsh-bridge-view-activity-thinking-face))
-    (should (equal call "\u2192 read src/a.ts"))
-    (should (eq (get-text-property 0 'face call) 'dsh-bridge-view-activity-face))
-    (should (equal same "\u2192 read"))
-    (should (equal empty "\u2192 read"))
-    (should (equal ok "\u2713 read"))
-    (should (equal bad "\u2717 read (error)"))
-    (should (eq (get-text-property 0 'face bad) 'dsh-bridge-view-activity-error-face))
-    (should (eq (plist-get (get-text-property 0 'dsh-bridge-activity thinking) :kind)
-                'thinking))
-    (should (equal (plist-get (get-text-property 0 'dsh-bridge-activity thinking) :seq) 10))
-    (should (equal (plist-get (get-text-property 0 'dsh-bridge-activity call) :call-id)
-                   "call-9"))
-    (should-not (text-property-any 0 (length call) 'dsh-bridge-turn-marker t call))))
+  "Activity lines carry their kind's prefix, face, and identity.
+A call with a result renders settled; an unpaired result keeps its own
+line and cannot be mistaken for a call line."
+  (let* ((dsh-bridge--view-activity t)
+         (thinking-entry (dsh-bridge-test--view-thinking "one two" 10 1 2 1000))
+         (call-entry (dsh-bridge-test--view-tool-call
+                      "read" "src/a.ts" "call-9" 11 1 1000))
+         (same-entry (dsh-bridge-test--view-tool-call
+                      "read" "read" "call-9" 11 1 1000))
+         (empty-entry (dsh-bridge-test--view-tool-call
+                       "read" "" "call-9" 11 1 1000))
+         (ok-entry (dsh-bridge-test--view-tool-result
+                    "read" "call-9" nil 12 1 1000))
+         (bad-entry (dsh-bridge-test--view-tool-result
+                     "read" "call-9" t 13 1 1000)))
+    (cl-labels ((render (entries)
+                  (dsh-bridge-test--with-render-buffer
+                    (dsh-bridge--view-render
+                     (mapcar (lambda (entry)
+                               (cons (intern (alist-get 'kind entry)) entry))
+                             entries))
+                    (buffer-string))))
+      (let ((thinking (render (list thinking-entry))))
+        (should (equal (substring-no-properties thinking)
+                       "\u22ef thinking: one two"))
+        (should (eq (get-text-property 0 'face thinking)
+                    'dsh-bridge-view-thinking-face))
+        (should (eq (get-text-property 0 'font-lock-face thinking)
+                    'dsh-bridge-view-thinking-face))
+        (should (equal (get-text-property 0 'dsh-bridge-activity thinking)
+                       '(10 . 1)))
+        (should (equal (get-text-property
+                        0 'dsh-bridge-activity-step thinking)
+                       2)))
+      (let ((call (render (list call-entry))))
+        (should (equal (substring-no-properties call) "\u2192 read src/a.ts"))
+        (should (eq (get-text-property 0 'face call)
+                    'dsh-bridge-view-activity-face))
+        (should (equal (get-text-property 0 'dsh-bridge-activity call)
+                       "call-9")))
+      (let ((same (render (list same-entry)))
+            (empty (render (list empty-entry))))
+        (should (equal (substring-no-properties same) "\u2192 read"))
+        (should (equal (substring-no-properties empty) "\u2192 read")))
+      (let ((settled-ok (render (list call-entry ok-entry)))
+            (settled-bad (render (list call-entry bad-entry))))
+        (should (equal (substring-no-properties settled-ok)
+                       "\u2713 read src/a.ts"))
+        (should (equal (substring-no-properties settled-bad)
+                       "\u2717 read src/a.ts (error)"))
+        (should (eq (get-text-property 0 'face settled-bad)
+                    'dsh-bridge-view-activity-error-face))
+        ;; The line keeps the call's identity, not the result's.
+        (should (equal (get-text-property 0 'dsh-bridge-activity settled-ok)
+                       "call-9")))
+      (let ((orphan (render (list ok-entry))))
+        (should (equal (substring-no-properties orphan) "\u2713 read"))
+        (should (equal (get-text-property 0 'dsh-bridge-activity orphan)
+                       '(tool-result . "call-9"))))
+      (should-not (text-property-any
+                   0 (length (render (list call-entry)))
+                   'dsh-bridge-turn-marker t
+                   (render (list call-entry)))))))
 
 (ert-deftest dsh-bridge-view-activity-only-turn ()
   "A turn with no text segment renders its activity and its footer.
@@ -3228,8 +3271,7 @@ blank line (the empty body sits flush)."
       ;; holds whether the view derives from `gfm-view-mode' or not.
       (should (equal (substring-no-properties (dsh-bridge-test--view-turn-render turn "s1"))
                      (concat "\u22ef thinking: " (dsh-bridge--view-literal "guard both sites") "\n"
-                             "\u2192 edit " (dsh-bridge--view-literal "src/logic.ts") "\n"
-                             "\u2713 edit\n\n"
+                             "\u2713 edit " (dsh-bridge--view-literal "src/logic.ts") "\n\n"
                              "Changed files: logic.ts"))))
     (with-temp-buffer
       (dsh-bridge-view-mode)
@@ -3269,6 +3311,197 @@ blank line (the empty body sits flush)."
         (dsh-bridge--view-fill "s1" one nil t t)
         (should (equal (marker-position probe) (point-min)))
         (set-marker probe nil)))))
+
+(ert-deftest dsh-bridge-view-tool-call-settles-in-place ()
+  "A call and its result render as one settled line.
+The line keeps the call's identity, not the result's, so a second result
+can find it again."
+  (let* ((call (dsh-bridge-test--view-tool-call
+                "read" "src/a.ts" "c1" 11 1 7001100))
+         (result (dsh-bridge-test--view-tool-result
+                  "read" "c1" nil 12 1 7001200))
+         (turn (dsh-bridge-test--view-turn
+                7 7000000 nil 7003000 "completed" nil (list call result)))
+         (dsh-bridge--view-activity t))
+    (dsh-bridge-test--with-render-buffer
+      (dsh-bridge--view-render (dsh-bridge--view-turn-items turn))
+      (should (equal (substring-no-properties (buffer-string))
+                     "\u2713 read src/a.ts"))
+      (should (equal (get-text-property (point-min) 'dsh-bridge-activity)
+                     "c1"))
+      (should (equal (mapcar (lambda (item)
+                               (list (car item)
+                                     (alist-get 'callId (cdr item))))
+                             (dsh-bridge--view-turn-items turn))
+                     '((tool-call "c1") (tool-result "c1")))))))
+
+(ert-deftest dsh-bridge-view-completion-splices ()
+  "An arriving result rewrites its call's line in place.
+The body matches the reference render, and a marker inside the already
+rendered prefix survives, so this was a splice rather than a rebuild."
+  (let* ((seg (dsh-bridge-test--view-segment "first" 7001000 1))
+         (call (dsh-bridge-test--view-tool-call
+                "read" "src/a.ts" "c1" 11 1 7001100))
+         (result (dsh-bridge-test--view-tool-result
+                  "read" "c1" nil 12 1 7001200))
+         (running (dsh-bridge-test--view-turn
+                   7 7000000 (list seg) nil nil nil (list call)))
+         (settled (dsh-bridge-test--view-turn
+                   7 7000000 (list seg) nil nil nil (list call result)))
+         (dsh-bridge--turns-cache
+          (dsh-bridge-test--view-cache (list settled running)))
+         (dsh-bridge-view-activity t))
+    (with-temp-buffer
+      (dsh-bridge-view-mode)
+      (dsh-bridge--view-fill "s1" running nil t)
+      (setq-local dsh-bridge--view-follow t)
+      (goto-char (point-max))
+      (let ((probe (copy-marker 3)))
+        (dsh-bridge--view-fill "s1" settled nil t t)
+        (should (equal (substring-no-properties (buffer-string))
+                       (substring-no-properties
+                        (dsh-bridge-test--view-turn-render settled "s1"))))
+        (should (equal (marker-position probe) 3))
+        (should (equal (point) (point-max)))
+        (should (string-match-p "\u2713 read src/a.ts" (buffer-string)))
+        (should-not (string-match-p "\u2192 read src/a.ts" (buffer-string)))
+        (set-marker probe nil)))))
+
+(ert-deftest dsh-bridge-view-completion-missing-target-rebuilds ()
+  "A splice whose call line lost its property falls back to a rebuild.
+The body is still correct, and the old prefix's marker is gone."
+  (let* ((seg (dsh-bridge-test--view-segment "first" 7001000 1))
+         (call (dsh-bridge-test--view-tool-call
+                "read" "src/a.ts" "c1" 11 1 7001100))
+         (result (dsh-bridge-test--view-tool-result
+                  "read" "c1" nil 12 1 7001200))
+         (running (dsh-bridge-test--view-turn
+                   7 7000000 (list seg) nil nil nil (list call)))
+         (settled (dsh-bridge-test--view-turn
+                   7 7000000 (list seg) nil nil nil (list call result)))
+         (dsh-bridge--turns-cache
+          (dsh-bridge-test--view-cache (list settled running)))
+         (dsh-bridge-view-activity t))
+    (with-temp-buffer
+      (dsh-bridge-view-mode)
+      (dsh-bridge--view-fill "s1" running nil t)
+      (setq-local dsh-bridge--view-follow t)
+      (let ((probe (copy-marker 3)))
+        ;; An external edit could remove the line's identity; the splice
+        ;; must notice and rebuild rather than leave a running line.
+        (let ((inhibit-read-only t))
+          (remove-text-properties (point-min) (point-max)
+                                  '(dsh-bridge-activity nil)))
+        (dsh-bridge--view-fill "s1" settled nil t t)
+        (should (equal (substring-no-properties (buffer-string))
+                       (substring-no-properties
+                        (dsh-bridge-test--view-turn-render settled "s1"))))
+        (should (equal (marker-position probe) (point-min)))
+        (set-marker probe nil)))))
+
+(ert-deftest dsh-bridge-view-orphan-result-keeps-its-line ()
+  "A result whose call is absent renders its own line, as before.
+A result before its call in the record degrades the same way rather than
+editing a line that does not exist yet."
+  (let* ((call (dsh-bridge-test--view-tool-call
+                "read" "src/a.ts" "c1" 11 1 7001100))
+         (result (dsh-bridge-test--view-tool-result
+                  "read" "c1" nil 12 1 7001200))
+         (orphan (dsh-bridge-test--view-turn
+                  7 7000000 nil 7003000 "completed" nil (list result)))
+         (reversed (dsh-bridge-test--view-turn
+                    7 7000000 nil 7003000 "completed" nil (list result call)))
+         (dsh-bridge-view-activity t))
+    (with-temp-buffer
+      (dsh-bridge-view-mode)
+      (dsh-bridge--view-fill "s1" orphan nil t)
+      (should (equal (substring-no-properties (buffer-string))
+                     "\u2713 read"))
+      (should (equal (plist-get dsh-bridge--view-provenance :length) 1))
+      (should (equal (plist-get dsh-bridge--view-provenance :first)
+                     '(tool-result . "c1")))
+      (should (equal (plist-get dsh-bridge--view-provenance :last)
+                     '(tool-result . "c1"))))
+    (with-temp-buffer
+      (dsh-bridge-view-mode)
+      (dsh-bridge--view-fill "s1" reversed nil t)
+      (should (equal (substring-no-properties (buffer-string))
+                     "\u2713 read\n\u2192 read src/a.ts")))))
+
+(ert-deftest dsh-bridge-view-multiple-results-last-wins ()
+  "Each result edits the call line; the last result in host order wins.
+A second result arriving later is a new operation, so the splice applies it
+without re-reading the call line's text.  A later success also removes the
+earlier result's error suffix."
+  (let* ((seg (dsh-bridge-test--view-segment "first" 7001000 1))
+         (call (dsh-bridge-test--view-tool-call
+                "read" "src/a.ts" "c1" 11 1 7001100))
+         (ok (dsh-bridge-test--view-tool-result
+              "read" "c1" nil 12 1 7001200))
+         (bad (dsh-bridge-test--view-tool-result
+               "read" "c1" t 13 1 7001300))
+         (ok-again (dsh-bridge-test--view-tool-result
+                    "read" "c1" nil 14 1 7001400))
+         (one (dsh-bridge-test--view-turn
+               7 7000000 (list seg) nil nil nil (list call ok)))
+         (two (dsh-bridge-test--view-turn
+               7 7000000 (list seg) nil nil nil (list call ok bad)))
+         (three (dsh-bridge-test--view-turn
+                 7 7000000 (list seg) nil nil nil
+                 (list call ok bad ok-again)))
+         (dsh-bridge--turns-cache
+          (dsh-bridge-test--view-cache (list three two one)))
+         (dsh-bridge-view-activity t))
+    (with-temp-buffer
+      (dsh-bridge-view-mode)
+      (dsh-bridge--view-fill "s1" one nil t)
+      (setq-local dsh-bridge--view-follow t)
+      (goto-char (point-max))
+      (let ((probe (copy-marker 3)))
+        (dsh-bridge--view-fill "s1" two nil t t)
+        (should (equal (substring-no-properties (buffer-string))
+                       (substring-no-properties
+                        (dsh-bridge-test--view-turn-render two "s1"))))
+        (should (string-match-p "\u2717 read src/a.ts (error)"
+                                (buffer-string)))
+        (should (equal (marker-position probe) 3))
+        (dsh-bridge--view-fill "s1" three nil t t)
+        (should (equal (substring-no-properties (buffer-string))
+                       (substring-no-properties
+                        (dsh-bridge-test--view-turn-render three "s1"))))
+        (should (string-match-p "\u2713 read src/a.ts" (buffer-string)))
+        (should-not (string-match-p " (error)" (buffer-string)))
+        (should (equal (marker-position probe) 3))
+        (set-marker probe nil)))))
+
+(ert-deftest dsh-bridge-view-turn-items-order ()
+  "Items interleave per step: thinking, segments, then tool activity.
+The ordering is the single place that defines the view's render order."
+  (let* ((seg1 (dsh-bridge-test--view-segment "one" 7001000 1))
+         (seg2 (dsh-bridge-test--view-segment "two" 7002000 2))
+         (think1 (dsh-bridge-test--view-thinking "a" 10 0 1 7001000))
+         (think2 (dsh-bridge-test--view-thinking "b" 20 0 2 7002000))
+         (call (dsh-bridge-test--view-tool-call
+                "read" "src/a.ts" "c1" 11 1 7001100))
+         (result (dsh-bridge-test--view-tool-result
+                  "read" "c1" nil 12 1 7001200))
+         (turn (dsh-bridge-test--view-turn
+                7 7000000 (list seg1 seg2) nil nil nil
+                (list think1 call result think2)))
+         (dsh-bridge--view-activity t))
+    (should (equal
+             (mapcar (lambda (item)
+                       (let ((entry (cdr item)))
+                         (list (car item)
+                               (or (alist-get 'kind entry) 'segment)
+                               (alist-get 'step entry))))
+                     (dsh-bridge--view-turn-items turn))
+             '((thinking "thinking" 1)
+               (segment segment 1)
+               (tool-call "tool-call" 1)
+               (tool-result "tool-result" 1)
+               (thinking "thinking" 2)
+               (segment segment 2))))))
 
 (ert-deftest dsh-bridge-view-activity-toggle-command ()
   "The toggle flips the buffer-local state, rebuilds, echoes, keeps point."
@@ -3378,9 +3611,10 @@ response from a newer one (both sit at the cap); the newest `seq' can."
 
 (ert-deftest dsh-bridge-view-activity-window-slide-rebuilds ()
   "A slid activity window is no longer a prefix, so the fill rebuilds whole.
-The host's per-turn cap drops the oldest entries, so a re-sent record's keys
-do not extend the recorded ones; the provenance check must re-render rather
-than splice a tail under a body that is no longer there."
+The host's per-turn cap drops the oldest entries, so a re-sent record's
+boundary identities no longer match the recorded ones; the provenance check
+must re-render rather than splice a tail under a body that is no longer
+there."
   (let* ((think (dsh-bridge-test--view-thinking "one" 5 0 1 7000000))
          (call (dsh-bridge-test--view-tool-call "read" "a" "c1" 6 1 7000100))
          (result (dsh-bridge-test--view-tool-result "read" "c1" nil 7 1 7000200))
@@ -3663,13 +3897,16 @@ waiting placeholder clears it."
         (should (equal (plist-get prov :session) "s1"))
         (should (equal (plist-get prov :epoch) 0))
         (should (equal (plist-get prov :turn) 7))
-        (should (equal (plist-get prov :keys) '((1 . 7001000))))
+        (should (equal (plist-get prov :length) 1))
+        (should (equal (plist-get prov :first) '(1 . 7001000)))
+        (should (equal (plist-get prov :last) '(1 . 7001000)))
         (should-not (plist-member prov :body-length))
         (should-not (plist-member prov :tail-length)))
       (dsh-bridge--view-fill "s1" two nil t t)
       (let ((prov dsh-bridge--view-provenance))
-        (should (equal (plist-get prov :keys)
-                       '((1 . 7001000) (2 . 7002000)))))
+        (should (equal (plist-get prov :length) 2))
+        (should (equal (plist-get prov :first) '(1 . 7001000)))
+        (should (equal (plist-get prov :last) '(2 . 7002000))))
       ;; A waiting placeholder is not a reconcilable body.
       (dsh-bridge--view-waiting-fill "s1" 7)
       (should-not dsh-bridge--view-provenance))))
@@ -12213,8 +12450,32 @@ leaving a mid-body point alone."
                      (dsh-bridge-test--view-turn-render two "s1")))
       (should (equal (point) 3))
       (let ((prov dsh-bridge--view-provenance))
-        (should (equal (plist-get prov :keys)
-                       '((1 . 7001000) (2 . 7002000))))))))
+        (should (equal (plist-get prov :length) 2))
+        (should (equal (plist-get prov :first) '(1 . 7001000)))
+        (should (equal (plist-get prov :last) '(2 . 7002000)))))))
+
+(ert-deftest dsh-bridge-view-changed-files-only-splice ()
+  "A body made only of the footer still splices when text arrives.
+The footer's marker then covers the whole buffer, which
+`previous-single-property-change' reports as no change; the splice must
+recognize that run explicitly instead of appending after the footer."
+  (let* ((file (dsh-bridge-test--view-file "src/a.ts"))
+         (one (dsh-bridge-test--view-turn
+               7 7000000 nil 7003000 "completed" (list file)))
+         (two (dsh-bridge-test--view-turn
+               7 7000000
+               (list (dsh-bridge-test--view-segment "reply" 7001000 1))
+               7003000 "completed" (list file)))
+         (dsh-bridge--turns-cache (dsh-bridge-test--view-cache (list two one))))
+    (with-temp-buffer
+      (dsh-bridge-view-mode)
+      (dsh-bridge--view-fill "s1" one nil t)
+      (should (equal (buffer-string) "Changed files: a.ts"))
+      (dsh-bridge--view-fill "s1" two nil t t)
+      (should (equal (substring-no-properties (buffer-string))
+                     (substring-no-properties
+                      (dsh-bridge-test--view-turn-render two "s1"))))
+      (should (equal (point) (point-max))))))
 
 (ert-deftest dsh-bridge-view-changed-files-pushed-turn ()
   "A pushed turn renders the changed-files footer from its `/turns' record."

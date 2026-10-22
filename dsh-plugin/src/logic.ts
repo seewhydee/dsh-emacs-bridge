@@ -810,7 +810,7 @@ export function changedFiles(
 /** Maximum activity entries retained for one turn. Once the cap is reached the
  * oldest entries are dropped, so the newest activity — the part a view
  * following a live turn is watching — always remains. */
-export const MAX_ACTIVITY_ENTRIES_PER_TURN = 60
+export const MAX_ACTIVITY_ENTRIES_PER_TURN = 500
 
 /** Maximum activity-bearing turns retained, newest first. Older turns get no
  * activity (a retention window, deliberately silent rather than reported). */

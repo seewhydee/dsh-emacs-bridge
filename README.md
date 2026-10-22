@@ -198,8 +198,8 @@ the replies are font-locked as GitHub-Flavored Markdown.
 
 By default, a DSH-View buffer shows only the assistant's replies.
 Type `v` (`dsh-bridge-view-toggle-activity`) to toggle viewing other
-activity reports in the buffer, including tool calls, tool call
-results, and reasoning block summaries.
+activity reports in the buffer, including tool calls and reasoning
+block summaries.
 
 #### Agent queries and approval requests
 
@@ -312,7 +312,7 @@ session logs, answer queries and approval requests, etc.).
 
 Request bodies are capped at 1 MiB, and messages waiting for Emacs sit
 in a bounded outbox.  The turn activity reporter, `/turns`, carries at
-most 60 of the latest activity entries per turn, and activity for at
+most 500 of the latest activity entries per turn, and activity for at
 most the newest 40 turns.  At present, reasoning activity is only
 shown as one-line summaries; the full text stays in DSH.
 
