@@ -448,21 +448,20 @@ In that case, the approval must be handled via the DSH web interface."
   :group 'dsh-bridge)
 
 (defface dsh-bridge-view-marker-face
-  '((t :inherit shadow :italic t))
+  '((t :inherit font-lock-builtin-face))
   "Face for the turn-running markers in DSH-View buffers."
   :group 'dsh-bridge)
 
 (defface dsh-bridge-view-awaiting-face
-  '((t :inherit bold :foreground "orange"))
+  '((t :inherit warning))
   "Face for \"Awaiting response\" notes in DSH-View buffers.
 Such a note is shown whenever the session is waiting for your answers(s)
 to its queries before proceeding."
   :group 'dsh-bridge)
 
 (defface dsh-bridge-view-answered-face
-  '((t :inherit shadow :italic t))
-  "Face for \"You answered…\" notes in DSH-View buffers.
-These notes indicate the answers you gave to mid-turn queries."
+  '((t :inherit success))
+  "Face for \"You answered\" notes in DSH-View buffers."
   :group 'dsh-bridge)
 
 (defface dsh-bridge-view-changed-label-face
@@ -472,12 +471,16 @@ These notes indicate the answers you gave to mid-turn queries."
 
 (defface dsh-bridge-view-activity-face
   '((t :inherit shadow))
-  "Face for turn-activity lines in DSH-View buffers.
-Used for tool calls and for tool results that succeeded."
+  "Face for turn-activity indicators in DSH-View buffers."
+  :group 'dsh-bridge)
+
+(defface dsh-bridge-view-tool-call-face
+  '((t :inherit font-lock-doc-face))
+  "Face for the contents of turn-activity lines in DSH-View buffers."
   :group 'dsh-bridge)
 
 (defface dsh-bridge-view-thinking-face
-  '((t :inherit (dsh-bridge-view-activity-face italic)))
+  '((t :inherit font-lock-comment-face))
   "Face for thinking-summary lines in DSH-View buffers."
   :group 'dsh-bridge)
 
@@ -2673,7 +2676,7 @@ content into the DSH-View buffer.")
   '(:eval (dsh-bridge--view-header-line (dsh-bridge--header-window-width)))
   "Value of `header-line-format' in DSH-View buffers.")
 
-(defvar dsh-bridge--view-segment-divider "\n\n---\n"
+(defvar dsh-bridge--view-segment-divider "---\n"
   "Text between two segments of the same turn in DSH-View buffers.
 In `gfm-view-mode', the Markdown divider \"---\" is rendered as a
 full-width line followed by a newline.")
@@ -2685,24 +2688,23 @@ recognized by their absence."
   (not (or (alist-get 'endedAt turn)
 	   (alist-get 'reason turn))))
 
-;; In this and other marker strings, we assign both the `face' and
-;; `font-lock-face' text properties.  The former applies when Font
-;; Lock mode is off, and the latter overrides the standard
-;; fontification when Font lock mode is on.
+;; Indicator text inserted into DSH-View buffers is given both `face'
+;; and `font-lock-face' text properties.  The former works when Font
+;; Lock mode is inactive (e.g., Markdown mode not installed), and the
+;; latter overrides standard fontification when Font lock mode is on.
+
+(defun dsh-bridge--fontify (str face)
+  "Return STR with `face' and `font-lock-face' properties set to FACE."
+  (propertize str 'face face 'font-lock-face face))
 
 (defconst dsh-bridge--view-running-marker
-  (propertize "(continuing...)"
-	      'face 'dsh-bridge-view-marker-face
-	      'font-lock-face 'dsh-bridge-view-marker-face)
+  (dsh-bridge--fontify "(continuing...)" 'dsh-bridge-view-marker-face)
   "Terminal marker for a running turn in the DSH-View buffer.
 This string is displayed at the end of the DSH-View buffer if the turn
 is still running.")
 
 (defconst dsh-bridge--view-running-placeholder
-  (propertize "(running...)"
-	      'face 'dsh-bridge-view-marker-face
-	      'font-lock-face 'dsh-bridge-view-marker-face
-	      'dsh-bridge-running t)
+  (dsh-bridge--fontify "(running...)" 'dsh-bridge-view-marker-face)
   "Placeholder line for a DSH-View buffer that just started running.
 This is used in place of `dsh-bridge--view-running-marker' when a new
 turn has just been started, but the first reply has not yet arrived.")
@@ -2723,12 +2725,7 @@ query, return nil."
 press %s to view and answer" count key)
 		     (format "(Awaiting response: press %s to view and answer)"
 			     key))))
-	;; Apply both `face' and `font-lock-face' text properties; the
-	;; latter prevents clobbering by Font Lock mode.
-	(propertize body
-		    'face 'dsh-bridge-view-awaiting-face
-		    'font-lock-face 'dsh-bridge-view-awaiting-face
-		    'dsh-bridge-awaiting t)))))
+	(dsh-bridge--fontify body 'dsh-bridge-view-awaiting-face)))))
 
 (defun dsh-bridge--view-approval-note (session-id)
   "DSH-View marker line for a pending approval for SESSION-ID, or nil.
@@ -2742,12 +2739,7 @@ pending approval, return nil."
 	     (key (substitute-command-keys "\\[dsh-bridge-answer]"))
 	     (body (format "(Awaiting approval for %s: press %s to review)"
 			   tool key)))
-	;; Apply both `face' and `font-lock-face' text properties; the
-	;; latter prevents clobbering by Font Lock mode.
-	(propertize body
-		    'face 'dsh-bridge-view-awaiting-face
-		    'font-lock-face 'dsh-bridge-view-awaiting-face
-		    'dsh-bridge-awaiting t)))))
+	(dsh-bridge--fontify body 'dsh-bridge-view-awaiting-face)))))
 
 (defun dsh-bridge--view-answer-note-clear (session-id)
   "Retire SESSION-ID's answered note, if one is recorded."
@@ -2785,10 +2777,8 @@ If SESSION-ID is nil, or no answer note is recorded for it, return nil."
 				  (dsh-bridge--view-segment-key last)))))
 	    (setq text (plist-get note :text)))))
 	(when text
-	  (propertize (concat "(" text " \u2014 continuing\u2026)")
-		      'face 'dsh-bridge-view-answered-face
-		      'font-lock-face 'dsh-bridge-view-answered-face
-		      'dsh-bridge-answered t))))))
+	  (dsh-bridge--fontify (concat "(" text " \u2014 continuing\u2026)")
+			       'dsh-bridge-view-answered-face))))))
 
 (defun dsh-bridge--view-fill-suffix-only (session-id turn &optional cwd)
   "Reset the current view to an empty body plus TURN's terminal suffix.
@@ -2842,9 +2832,8 @@ visits the file."
     (let ((files (alist-get 'files turn)))
       (when files
 	(with-temp-buffer
-	  (insert (propertize "Changed files:"
-			      'face 'dsh-bridge-view-changed-label-face
-			      'font-lock-face 'dsh-bridge-view-changed-label-face))
+	  (insert (dsh-bridge--fontify "Changed files:"
+				       'dsh-bridge-view-changed-label-face))
 	  (dolist (file files)
 	    (let ((path (alist-get 'path file)))
 	      (insert " ")
@@ -2857,30 +2846,49 @@ visits the file."
 ;;; Turn activity (the DSH-View process stream)
 
 ;; If `dsh-bridge--view-activity' is non-nil, the DSH-View buffer
-;; interleaves reply segments with activity lines: tool calls, their
+;; interleaves reply segments with activity lines: tool-calls, their
 ;; results, and thinking summaries.  To update it incrementally, we
 ;; build an ordered list of items (`dsh-bridge--view-turn-items') and
 ;; iterate through it, adding lines (reply segments, thinking
-;; summaries, new tool calls) or settling an earlier call line in place
-;; (tool-call result).  The line's step is kept in the
-;; `dsh-bridge-activity-step' property so the next separator can tell a
-;; same-step pair from a step boundary; the `dsh-bridge-activity'
-;; property stores the thinking summary's (SEQ . ORD) identity, a call's
-;; callId string (the key a result settles by), or a
-;; `(tool-result . CALLID)' marker on an unpaired result, which a callId
-;; search never matches.
+;; summaries, new tool-calls) or settling an earlier call line in
+;; place (tool-call result).
 
-(defconst dsh-bridge--view-thinking-prefix "\u22ef thinking: "
+;; Each item (reply segment or activity) is printed into the buffer
+;; starting from the beginning of a line, trimmed of starting/ending
+;; whitespace.  A reply segment is followed by a blank line (\n\n),
+;; and an activity line is followed by one \n -- this ensures that the
+;; next item (if any) is ready to be printed at point-max.  Before
+;; printing a segment, we insert an additional newline (if preceded by
+;; an activity line) or `dsh-bridge--view-segment-divider' (if
+;; preceded by another segment).  Each activity line is assigned a
+;; `dsh-bridge-activity' property, up to and including its terminal
+;; newline; its value is the thinking summary's (SEQ . ORD) identity,
+;; a call's callId string, or a `(tool-result . CALLID)' marker on an
+;; unpaired tool-call result.
+
+(defconst dsh-bridge--view-thinking-prefix
+  (dsh-bridge--fontify "\u22ef thinking: " 'dsh-bridge-view-activity-face)
   "Prefix of a thinking-summary activity line.")
 
-(defconst dsh-bridge--view-tool-call-prefix "\u2192 "
-  "Prefix of a tool-call activity line.")
+(defconst dsh-bridge--view-tool-call-prefix
+  (dsh-bridge--fontify "\u2192 " 'dsh-bridge-view-activity-face)
+  "Prefix on a tool-call activity line.")
 
-(defconst dsh-bridge--view-tool-ok-prefix "\u2713 "
-  "Prefix of a successful tool-result activity line.")
+(defconst dsh-bridge--view-tool-ok-prefix
+  (dsh-bridge--fontify "\u2713 " 'dsh-bridge-view-activity-face)
+  "Prefix on a successful tool-result activity line.")
 
-(defconst dsh-bridge--view-tool-error-prefix "\u2717 "
-  "Prefix of a failed tool-result activity line.")
+(defconst dsh-bridge--view-tool-error-prefix
+  (dsh-bridge--fontify "\u2717 "
+				'dsh-bridge-view-activity-error-face)
+  "Prefix on a failed tool-result activity line.")
+
+(defconst dsh-bridge--view-tool-prefix-regexp
+  (concat "^\\(" (regexp-quote dsh-bridge--view-tool-call-prefix)
+	  "\\|"  (regexp-quote dsh-bridge--view-tool-ok-prefix)
+	  "\\|"  (regexp-quote dsh-bridge--view-tool-error-prefix)
+	  "\\)")
+  "Regexp matching the prefix of a tool activity line.")
 
 (defun dsh-bridge--longest-backtick-run (text)
   "The length of the longest run of backticks in TEXT."
@@ -2910,60 +2918,35 @@ protect it from further Markdown interpretation."
 		    " " "")))
       (concat fence pad text pad fence))))
 
-(defun dsh-bridge--view-segment-text (segment)
-  "The display text of reply SEGMENT, with model padding normalized.
-The host serves committed reply text verbatim, and a model commonly ends
-a step with one or two newlines.  Drop trailing whitespace and any
-leading blank lines, but keep the first content line's indentation."
-  (let ((text (string-trim-right (or (alist-get 'text segment) ""))))
-    (when (string-match "\\`\\(?:[ \t\r]*\n\\)+" text)
-      (setq text (substring text (match-end 0))))
-    text))
-
-(defun dsh-bridge--view-activity-separator (step)
-  "The separator before an activity line at STEP at the body's end.
-A reply segment's edge and a step boundary take a blank line; two
-activity lines of the same step are adjacent.  The preceding line is
-recognized by its `dsh-bridge-activity' property, and its step by
-`dsh-bridge-activity-step'."
-  (cond
-   ((= (point) (point-min)) "")
-   ((not (get-text-property (1- (point)) 'dsh-bridge-activity)) "\n\n")
-   ((equal (get-text-property (1- (point)) 'dsh-bridge-activity-step) step)
-    "\n")
-   (t "\n\n")))
-
 (defun dsh-bridge--view-insert-segment (segment)
-  "Insert the text for reply SEGMENT, with appropriate padding.
-Normalize the model's padding (trailing whitespace and leading blank
-lines) and insert appropriate newline(s) based on any preceding entry.
-If preceded by another reply segment, use
-`dsh-bridge--view-segment-divider' as the separator."
-  (let ((text (dsh-bridge--view-segment-text segment)))
+  "Insert the text for reply SEGMENT.
+The text offered by the model is trimmed of trailing/leading whitespace,
+including blank lines.  If there is nothing left, do nothing; otherwise,
+proceed to insert an optional separator (if there is preceding content),
+then the trimmed text, followed by two newlines (i.e., a blank line)."
+  (let ((text (string-trim (or (alist-get 'text segment) ""))))
     (unless (string-empty-p text)
-      (cond ((= (point) (point-min))) ; no preceding content
+      ;; No separator at point-min, else form a blank line after
+      ;; previous activity line, else the inter-segment divider.
+      (cond ((= (point) (point-min)))
 	    ((get-text-property (1- (point)) 'dsh-bridge-activity)
-	     (insert "\n\n"))
+	     (insert "\n"))
 	    (t
 	     (insert dsh-bridge--view-segment-divider)))
-      (insert text))))
+      (insert text "\n\n"))))
 
 (defun dsh-bridge--view-insert-thinking (activity)
   "Insert the text for thinking ACTIVITY in the DSH-View buffer.
-Set the `face' and `font-lock-face' text properties to
-`dsh-bridge-view-thinking-face', and set the `dsh-bridge-activity'
-property to the thinking block's (SEQ . ORD) identity."
-  (insert (dsh-bridge--view-activity-separator (alist-get 'step activity)))
+The summary uses `dsh-bridge-view-thinking-face'; the prefix uses
+`dsh-bridge-view-activity-face'.  The line's `dsh-bridge-activity'
+property is the thinking block's (SEQ . ORD) identity."
   (let ((start (point))
 	(text (dsh-bridge--view-literal (alist-get 'summary activity)))
-	(key (cons (alist-get 'seq activity) (alist-get 'ord activity)))
-	(step (alist-get 'step activity)))
-    (insert dsh-bridge--view-thinking-prefix text)
-    (add-text-properties start (point)
-			 `(face dsh-bridge-view-thinking-face
-			   font-lock-face dsh-bridge-view-thinking-face
-			   dsh-bridge-activity ,key
-			   dsh-bridge-activity-step ,step))))
+	(key (cons (alist-get 'seq activity) (alist-get 'ord activity))))
+    (insert dsh-bridge--view-thinking-prefix
+	    (dsh-bridge--fontify text 'dsh-bridge-view-thinking-face)
+	    "\n")
+    (add-text-properties start (point) `(dsh-bridge-activity ,key))))
 
 (defun dsh-bridge--view-insert-tool-line (activity &optional unpaired)
   "Insert the line for the tool-call or tool-result ACTIVITY.
@@ -2971,86 +2954,38 @@ UNPAIRED non-nil means ACTIVITY is a result whose call line is absent:
 insert it as a settled line of its own, using the result's name and no
 summary.
 
-The inserted text has `face' and `font-lock-face' set to
-`dsh-bridge-view-activity-error-face' if ACTIVITY records an error, else
-`dsh-bridge-view-activity-face'.  A call line's `dsh-bridge-activity'
-property is its `callId', so a later result can find and settle it; an
-unpaired result stores `(tool-result . CALLID)' instead, which no
-callId search matches.  The line's step is recorded in
-`dsh-bridge-activity-step' for separator decisions."
-  (insert (dsh-bridge--view-activity-separator (alist-get 'step activity)))
+The prefix and name use `dsh-bridge-view-activity-error-face' if
+ACTIVITY records an error, else `dsh-bridge-view-activity-face'; the
+summary uses `dsh-bridge-view-tool-call-face'.  A call line's
+`dsh-bridge-activity' property is its `callId', so a later result can
+find and settle it; an unpaired result stores `(tool-result . CALLID)'
+instead, which no callId search matches.  The property spans the line's
+terminal newline."
   (let* ((err (eq (alist-get 'isError activity) t))
-	 (prefix (cond (err dsh-bridge--view-tool-error-prefix)
-		       (unpaired dsh-bridge--view-tool-ok-prefix)
-		       (t dsh-bridge--view-tool-call-prefix)))
 	 (face (if err
 		   'dsh-bridge-view-activity-error-face
 		 'dsh-bridge-view-activity-face))
-	 (name (dsh-bridge--view-literal (alist-get 'name activity)))
-	 (summary (if unpaired
-		      ""
-		    (dsh-bridge--view-literal (alist-get 'summary activity))))
+	 (name (let ((name (alist-get 'name activity)))
+		 (if (or (not (stringp name)) (string-empty-p name))
+		     "tool"
+		   name)))
+	 (body (if unpaired
+		   ""
+		 (dsh-bridge--view-literal (alist-get 'summary activity))))
 	 (id (alist-get 'callId activity))
-	 (step (alist-get 'step activity))
 	 (key (cond (unpaired (cons 'tool-result id))
 		    ((stringp id) id)
 		    (t (cons 'tool-call id))))
 	 (start (point)))
-    (insert prefix (if (string-empty-p name) "tool" name))
-    (unless (or (string-empty-p summary) (equal summary name))
-      (insert " " summary))
-    (when err (insert " (error)"))
-    (add-text-properties start (point)
-			 `(face ,face font-lock-face ,face
-			   dsh-bridge-activity ,key
-			   dsh-bridge-activity-step ,step))
-    (when err
-      (put-text-property start (point) 'dsh-bridge-activity-error t))))
-
-(defun dsh-bridge--view-settle-span (start end err)
-  "Rewrite the tool line spanning START..END as settled by ERR.
-Change only the prefix glyph, the error suffix, and the face, so the
-line keeps its name, summary, and identity property.  Return non-nil
-when the span begins with a tool prefix."
-  (let ((inhibit-read-only t))
-    (save-excursion
-      (goto-char start)
-      (let ((old (char-after start)))
-	(when (memq old '(?\u2192 ?\u2713 ?\u2717))
-	  (subst-char-in-region start (1+ start) old
-				(if err ?\u2717 ?\u2713) t)
-	  (let ((had-error (get-text-property
-			    start 'dsh-bridge-activity-error)))
-	    (goto-char end)
-	    ;; Trust the property, but verify the text before deleting: a
-	    ;; manual edit could have removed the suffix.
-	    (when (and had-error
-		       (>= (- end start) (length " (error)"))
-		       (string-suffix-p
-			" (error)"
-			(buffer-substring-no-properties
-			 (- end (length " (error)")) end)))
-	      (delete-region (- end (length " (error)")) end))
-	    (when err (insert " (error)"))
-	    (let ((new-end (point))
-		  (face (if err
-			    'dsh-bridge-view-activity-error-face
-			  'dsh-bridge-view-activity-face)))
-	      (add-text-properties
-	       start new-end
-	       (list 'face face
-		     'font-lock-face face
-		     'dsh-bridge-activity
-		     (get-text-property start 'dsh-bridge-activity)
-		     'dsh-bridge-activity-step
-		     (get-text-property start 'dsh-bridge-activity-step)))
-	      (if err
-		  (put-text-property start new-end
-				     'dsh-bridge-activity-error t)
-		(remove-text-properties
-		 start new-end
-		 '(dsh-bridge-activity-error nil)))
-	      t)))))))
+    (insert (cond (err dsh-bridge--view-tool-error-prefix)
+		  (unpaired dsh-bridge--view-tool-ok-prefix)
+		  (t dsh-bridge--view-tool-call-prefix))
+	    (dsh-bridge--fontify name face))
+    (unless (or (string-empty-p body) (equal body name))
+      (insert " "
+	      (dsh-bridge--fontify body 'dsh-bridge-view-tool-call-face)))
+    (insert "\n")
+    (add-text-properties start (point) `(dsh-bridge-activity ,key))))
 
 (defun dsh-bridge--view-result-spliceable-p (item prefix)
   "Whether result ITEM can be applied with PREFIX already rendered.
@@ -3090,8 +3025,8 @@ allowed to settle during the render or stand alone."
   "Handle the tool-call result described by ACTIVITY.
 Settle the matching call line when one is already rendered; otherwise
 insert the result as a standalone line rather than dropping it.  The
-line keeps its own name and summary; only its prefix glyph, error
-suffix, and face change, so a second result can settle it again."
+line keeps its own name and summary; only its prefix glyph and face
+change, so a second result can settle it again."
   (let* ((id (alist-get 'callId activity))
 	 (err (eq (alist-get 'isError activity) t))
 	 (match (and (stringp id)
@@ -3099,12 +3034,23 @@ suffix, and face change, so a second result can settle it again."
 		     (save-excursion
 		       (goto-char (point-min))
 		       (text-property-search-forward
-			'dsh-bridge-activity id #'equal)))))
-    (unless (and match
-		 (dsh-bridge--view-settle-span
-		  (prop-match-beginning match)
-		  (prop-match-end match)
-		  err))
+			'dsh-bridge-activity id #'equal))))
+	 (start (and match (prop-match-beginning match))))
+    (if (and start
+	     (save-excursion
+	       (goto-char start)
+	       (looking-at dsh-bridge--view-tool-prefix-regexp)))
+	(let ((key (get-text-property start 'dsh-bridge-activity))
+	      (inhibit-read-only t))
+	  (save-excursion
+	    (goto-char start)
+	    (replace-match (if err
+			       dsh-bridge--view-tool-error-prefix
+			     dsh-bridge--view-tool-ok-prefix))
+	    (add-text-properties start (point)
+				 (list 'dsh-bridge-activity key)))
+	  t)
+      ;; If we couldn't update, draw a standalone activity line.
       (dsh-bridge--view-insert-tool-line activity t))))
 
 (defun dsh-bridge--view-render (items)
@@ -3185,21 +3131,34 @@ the note is parenthesized and propertized as furniture, so it is never
 mistaken for model text and satisfies the terminal-marker conventions."
   (let ((failure (and (consp turn) (alist-get 'failure turn))))
     (when failure
-      (propertize (format "(failed \u2014 %s)" (dsh-bridge--failure-text failure))
-		  'face 'dsh-bridge-view-marker-face
-		  'font-lock-face 'dsh-bridge-view-marker-face))))
+      (dsh-bridge--fontify (format "(failed \u2014 %s)"
+				   (dsh-bridge--failure-text failure))
+			   'dsh-bridge-view-marker-face))))
 
 (defun dsh-bridge--view-blocked-note (session-id)
   "The terminal DSH-View furniture line for a rejected (`blocked') turn.
 Names the archived cause when SESSION-ID is archived, else the generic
 rejection text.  Like `dsh-bridge--view-failure-note', the note is
 propertized as furniture, so it is never mistaken for model text."
-  (let ((session (dsh-bridge--session-for-id session-id)))
-    (propertize (if (eq (alist-get 'archived session) t)
-		    "(blocked \u2014 session is archived; unarchive it first)"
-		  "(blocked \u2014 host rejected and produced no reply)")
-		'face 'dsh-bridge-view-marker-face
-		'font-lock-face 'dsh-bridge-view-marker-face)))
+  (let* ((session (dsh-bridge--session-for-id session-id))
+	 (text (if (eq (alist-get 'archived session) t)
+		   "(blocked: session is archived; unarchive it first)"
+		 "(blocked: host rejected and produced no reply)")))
+    (dsh-bridge--fontify text 'dsh-bridge-view-marker-face)))
+
+(defun dsh-bridge--view-body-suffix-separator ()
+  "Newlines needed between the rendered body and a terminal suffix.
+The item protocol leaves a single newline after an activity line and a
+blank line after a reply segment, so add only the newlines that the
+protocol did not already provide."
+  (cond
+   ((= (point) (point-min)) "")
+   ((not (eq (char-before) ?\n)) "\n\n")
+   ((get-text-property (1- (point)) 'dsh-bridge-activity) "\n")
+   ((and (> (point) (1+ (point-min)))
+	 (eq (char-before (1- (point))) ?\n))
+    "")
+   (t "\n")))
 
 (defun dsh-bridge--view-insert-suffix (turn session-id)
   "Insert the terminal suffix of TURN for SESSION-ID's view.
@@ -3238,12 +3197,10 @@ recording its length."
 		(and (consp turn)
 		     dsh-bridge--view-running-marker))))
     (when (or files furniture)
-      ;; Insert extra newlines into the suffix if necessary: a
-      ;; non-empty rendered body takes the blank-line separator,
-      ;; while `new' and an empty body sit flush.
+      ;; The body already ends at the start of a line under the item
+      ;; protocol; add only the extra newlines the suffix needs.
       (let ((old-point (point)))
-	(when (and (consp turn) (> (buffer-size) 0))
-	  (insert "\n\n"))
+	(insert (dsh-bridge--view-body-suffix-separator))
 	(when files
 	  (insert files)
 	  (if furniture (insert "\n\n")))
@@ -5166,7 +5123,7 @@ there is nothing to cache."
 (defun dsh-bridge--question-fontify-detail-1 (detail)
   "Fontify DETAIL with `gfm-view-mode' in a temporary buffer and return it."
   ;; Font Lock leaves each character with both `face' and
-  ;; `font-lock-face', and the copied string keeps both as-is.	The
+  ;; `font-lock-face', and the copied string keeps both as-is.  The
   ;; question buffer uses only `face'; the latter is inert.
   (with-temp-buffer
     (insert detail)

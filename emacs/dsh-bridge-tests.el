@@ -1487,7 +1487,7 @@ current buffer has no session of its own."
     (let ((buf (get-buffer "*dsh-bridge-output*")))
       (should buf)
       (with-current-buffer buf
-        (should (equal (buffer-string) "reply text"))
+        (should (equal (buffer-string) "reply text\n\n"))
         (should (eq major-mode 'dsh-bridge-view-mode))
         (should buffer-read-only)
         (should (equal dsh-bridge--view-content-session "s1"))
@@ -1509,7 +1509,7 @@ not the pinned target."
                           200))))
       (dsh-bridge-fetch "s2"))
     (with-current-buffer "*dsh-bridge-output*"
-      (should (equal (buffer-string) "other reply"))
+      (should (equal (buffer-string) "other reply\n\n"))
       (should (equal dsh-bridge--view-content-session "s2"))
       (should (string-match-p " s2" (dsh-bridge--view-header-line)))
       (should-not (string-match-p " s1" (dsh-bridge--view-header-line)))
@@ -1571,7 +1571,7 @@ then grows in place as further segments commit."
                           200))))
       (dsh-bridge-fetch))
     (with-current-buffer "*dsh-bridge-output*"
-      (should (equal (buffer-string) "final reply"))
+      (should (equal (buffer-string) "final reply\n\n"))
       (should (null dsh-bridge--view-follow)))
     (kill-buffer "*dsh-bridge-output*")))
 
@@ -1650,7 +1650,7 @@ not opened and no guessed target is used."
       (dsh-bridge-fetch))
     (with-current-buffer "*dsh-bridge-output*"
       (should (equal default-directory "/w/sess1/"))
-      (should (equal (buffer-string) "reply")))
+      (should (equal (buffer-string) "reply\n\n")))
     (kill-buffer "*dsh-bridge-output*")))
 
 ;;; The prompt buffer: session binding, header, history
@@ -2860,7 +2860,7 @@ and the view is bound to the fetched turn's number."
         (setq-local dsh-bridge--view-browsing t))
       (dsh-bridge-fetch)
       (with-current-buffer "*dsh-bridge-output*"
-        (should (equal (buffer-string) "fresh"))
+        (should (equal (buffer-string) "fresh\n\n"))
         (should (null dsh-bridge--view-browsing))
         (should (equal dsh-bridge--view-turn 2)))
       (kill-buffer "*dsh-bridge-output*"))))
@@ -2868,7 +2868,7 @@ and the view is bound to the fetched turn's number."
 (ert-deftest dsh-bridge-view-turn-render-dividers ()
   "A turn renders its segments joined by GFM horizontal-rule dividers.  A
 running turn ends with the propertized `(continuing...)' marker; a completed
-turn ends cleanly after its last segment."
+turn ends after its last segment's trailing blank line."
   (let ((multi (dsh-bridge-test--view-turn 30 3000000
                 (list (dsh-bridge-test--view-segment "a" 3000500 1)
                       (dsh-bridge-test--view-segment "b" 3001000 2))
@@ -2883,8 +2883,10 @@ turn ends cleanly after its last segment."
                   5001000 "aborted"))
         (marker dsh-bridge--view-running-marker))
     ;; Two segments, completed: rule-only boundary, no label, no footer.
-    (should (equal (dsh-bridge-test--view-turn-render multi) "a\n\n---\nb"))
-    ;; A running turn ends with the marker after its last segment.
+    (should (equal (dsh-bridge-test--view-turn-render multi)
+                   "a\n\n---\nb\n\n"))
+    ;; A running turn ends with the marker after its last segment's blank
+    ;; line.
     (should (equal (dsh-bridge-test--view-turn-render open)
                    (concat "growing\n\n" marker)))
     (should (equal (dsh-bridge-test--view-turn-render open-multi)
@@ -2896,7 +2898,7 @@ turn ends cleanly after its last segment."
       (should (eq (get-text-property 0 'face marker)
                   'dsh-bridge-view-marker-face)))
     ;; A completed turn — even an abnormal one — ends cleanly.
-    (should (equal (dsh-bridge-test--view-turn-render aborted) "partial"))
+    (should (equal (dsh-bridge-test--view-turn-render aborted) "partial\n\n"))
     ;; nil renders empty.
     (should (equal (dsh-bridge-test--view-turn-render nil) ""))))
 
@@ -3047,9 +3049,9 @@ terminal suffix whose marker property does not reach `point-max', are."
 
 (ert-deftest dsh-bridge-view-activity-render-order ()
   "Activity weaves between segments per step: thinking, text, then tools.
-A segment's edge and a step boundary take a blank line, so model text is its
-own paragraph; the `---' divider survives only between adjacent segments, so
-activity-off rendering is byte-identical to the old segment join."
+A segment's edge takes a blank line; consecutive activity lines are
+adjacent; the `---' divider survives only between adjacent segments.
+Every item leaves the buffer ready for the next one."
   (let ((turn (dsh-bridge-test--view-turn
                 7 7000000
                 (list (dsh-bridge-test--view-segment "answer one" 7001000 1)
@@ -3070,14 +3072,14 @@ activity-off rendering is byte-identical to the old segment join."
       (should (equal (dsh-bridge-test--view-turn-body turn)
                      (concat "\u22ef thinking: " (dsh-bridge--view-literal "think one") "\n\n"
                              "answer one\n\n"
-                             "\u2713 read " (dsh-bridge--view-literal "src/a.ts") "\n\n"
+                             "\u2713 read " (dsh-bridge--view-literal "src/a.ts") "\n"
                              "\u22ef thinking: " (dsh-bridge--view-literal "think two") "\n\n"
                              "answer two\n\n"
-                             "\u2717 edit " (dsh-bridge--view-literal "src/a.ts") " (error)"))))
+                             "\u2717 edit " (dsh-bridge--view-literal "src/a.ts") "\n"))))
     (with-temp-buffer
       (dsh-bridge-view-mode)
       (should (equal (dsh-bridge-test--view-turn-body turn)
-                     "answer one\n\n---\nanswer two")))))
+                     "answer one\n\n---\nanswer two\n\n")))))
 
 (ert-deftest dsh-bridge-view-turn-items-keeps-step-segments ()
   "Every segment a step carries renders, in host order, joined by the divider.
@@ -3092,18 +3094,19 @@ not either: dropping one would vanish reply text."
     (with-temp-buffer
       (dsh-bridge-view-mode)
       (should (equal (dsh-bridge-test--view-turn-body turn)
-                     "part one\n\n---\npart two\n\n---\nnext step")))
+                     "part one\n\n---\npart two\n\n---\nnext step\n\n")))
     (with-temp-buffer
       (dsh-bridge-view-mode)
       (setq-local dsh-bridge--view-activity t)
       (should (equal (length (dsh-bridge--view-turn-items turn)) 3))
       (should (equal (dsh-bridge-test--view-turn-body turn)
-                     "part one\n\n---\npart two\n\n---\nnext step")))))
+                     "part one\n\n---\npart two\n\n---\nnext step\n\n")))))
 
 (ert-deftest dsh-bridge-view-item-separator-rules ()
   "Separators are chosen from the buffer at insertion time.
-A segment's edge and a step boundary take a blank line; two activity
-lines of one step are adjacent, and adjacent segments take the divider."
+A segment's edge takes a blank line; consecutive activity lines are
+adjacent, and adjacent segments take the divider.  Each item leaves the
+buffer ready for the next one."
   (let ((dsh-bridge--view-activity t)
         (seg-a (cons 'segment (dsh-bridge-test--view-segment "a" 1000 1)))
         (seg-b (cons 'segment (dsh-bridge-test--view-segment "b" 2000 2)))
@@ -3119,24 +3122,22 @@ lines of one step are adjacent, and adjacent segments take the divider."
                   (dsh-bridge-test--with-render-buffer
                     (dsh-bridge--view-render (list first second))
                     (substring-no-properties (buffer-string)))))
-      (should (equal (pair seg-a seg-b) "a\n\n---\nb"))
-      (should (equal (pair seg-a think-a) "a\n\n\u22ef thinking: t"))
-      (should (equal (pair think-a seg-a) "\u22ef thinking: t\n\na"))
+      (should (equal (pair seg-a seg-b) "a\n\n---\nb\n\n"))
+      (should (equal (pair seg-a think-a) "a\n\n\u22ef thinking: t\n"))
+      (should (equal (pair think-a seg-a) "\u22ef thinking: t\n\na\n\n"))
       (should (equal (pair think-a call-a)
-                     "\u22ef thinking: t\n\u2192 read src/a.ts"))
+                     "\u22ef thinking: t\n\u2192 read src/a.ts\n"))
       (should (equal (pair think-a call-b)
-                     "\u22ef thinking: t\n\n\u2192 read src/a.ts"))
+                     "\u22ef thinking: t\n\u2192 read src/a.ts\n"))
       (dsh-bridge-test--with-render-buffer
         (dsh-bridge--view-render (list seg-a))
-        (should (equal (substring-no-properties (buffer-string)) "a"))))))
+        (should (equal (substring-no-properties (buffer-string)) "a\n\n"))))))
 
 (ert-deftest dsh-bridge-view-segment-padding-normalized ()
-  "Model padding never opens extra blank lines around a segment.
+  "A segment's model padding is trimmed, not stacked onto the separator.
 The host serves committed reply text verbatim, and a real model commonly
-ends a step with a newline or a whole blank line; joined as-is, that
-padding would stack on the separator's own newlines.  Exactly the
-separator's spacing must survive regardless, while the first content
-line's indentation stays."
+ends a step with a newline or a whole blank line; the renderer trims the
+text and supplies exactly the item protocol's spacing."
   (dolist (pad '("\n" "\n\n" "\n\n\n" "  \n\n" "\r\n\r\n"))
     (let ((turn (dsh-bridge-test--view-turn
                  1 1000000
@@ -3146,8 +3147,8 @@ line's indentation stays."
       (with-temp-buffer
         (dsh-bridge-view-mode)
         (should (equal (dsh-bridge-test--view-turn-body turn)
-                       "head\n\n---\ntail")))))
-  ;; Indentation of the first content line is content, not padding.
+                       "head\n\n---\ntail\n\n")))))
+  ;; Leading whitespace counts as padding and is trimmed with the rest.
   (with-temp-buffer
     (dsh-bridge-view-mode)
     (should (equal (dsh-bridge-test--view-turn-body
@@ -3155,7 +3156,7 @@ line's indentation stays."
                      1 1000000
                      (list (dsh-bridge-test--view-segment "    code\n" 1000100 1))
                      1000300))
-                   "    code")))
+                   "code\n\n")))
   ;; A trailing blank line no longer widens the gap before an open turn's
   ;; terminal marker either.
   (with-temp-buffer
@@ -3214,39 +3215,46 @@ line and cannot be mistaken for a call line."
                     (buffer-string))))
       (let ((thinking (render (list thinking-entry))))
         (should (equal (substring-no-properties thinking)
-                       "\u22ef thinking: one two"))
+                       "\u22ef thinking: one two\n"))
         (should (eq (get-text-property 0 'face thinking)
+                    'dsh-bridge-view-activity-face))
+        (should (eq (get-text-property
+                     (length dsh-bridge--view-thinking-prefix)
+                     'face thinking)
                     'dsh-bridge-view-thinking-face))
-        (should (eq (get-text-property 0 'font-lock-face thinking)
+        (should (eq (get-text-property
+                     (length dsh-bridge--view-thinking-prefix)
+                     'font-lock-face thinking)
                     'dsh-bridge-view-thinking-face))
         (should (equal (get-text-property 0 'dsh-bridge-activity thinking)
                        '(10 . 1)))
+        ;; The identity property spans the terminal newline.
         (should (equal (get-text-property
-                        0 'dsh-bridge-activity-step thinking)
-                       2)))
+                        (1- (length thinking)) 'dsh-bridge-activity thinking)
+                       '(10 . 1))))
       (let ((call (render (list call-entry))))
-        (should (equal (substring-no-properties call) "\u2192 read src/a.ts"))
+        (should (equal (substring-no-properties call) "\u2192 read src/a.ts\n"))
         (should (eq (get-text-property 0 'face call)
                     'dsh-bridge-view-activity-face))
         (should (equal (get-text-property 0 'dsh-bridge-activity call)
                        "call-9")))
       (let ((same (render (list same-entry)))
             (empty (render (list empty-entry))))
-        (should (equal (substring-no-properties same) "\u2192 read"))
-        (should (equal (substring-no-properties empty) "\u2192 read")))
+        (should (equal (substring-no-properties same) "\u2192 read\n"))
+        (should (equal (substring-no-properties empty) "\u2192 read\n")))
       (let ((settled-ok (render (list call-entry ok-entry)))
             (settled-bad (render (list call-entry bad-entry))))
         (should (equal (substring-no-properties settled-ok)
-                       "\u2713 read src/a.ts"))
+                       "\u2713 read src/a.ts\n"))
         (should (equal (substring-no-properties settled-bad)
-                       "\u2717 read src/a.ts (error)"))
+                       "\u2717 read src/a.ts\n"))
         (should (eq (get-text-property 0 'face settled-bad)
                     'dsh-bridge-view-activity-error-face))
         ;; The line keeps the call's identity, not the result's.
         (should (equal (get-text-property 0 'dsh-bridge-activity settled-ok)
                        "call-9")))
       (let ((orphan (render (list ok-entry))))
-        (should (equal (substring-no-properties orphan) "\u2713 read"))
+        (should (equal (substring-no-properties orphan) "\u2713 read\n"))
         (should (equal (get-text-property 0 'dsh-bridge-activity orphan)
                        '(tool-result . "call-9"))))
       (should-not (text-property-any
@@ -3326,7 +3334,7 @@ can find it again."
     (dsh-bridge-test--with-render-buffer
       (dsh-bridge--view-render (dsh-bridge--view-turn-items turn))
       (should (equal (substring-no-properties (buffer-string))
-                     "\u2713 read src/a.ts"))
+                     "\u2713 read src/a.ts\n"))
       (should (equal (get-text-property (point-min) 'dsh-bridge-activity)
                      "c1"))
       (should (equal (mapcar (lambda (item)
@@ -3416,7 +3424,7 @@ editing a line that does not exist yet."
       (dsh-bridge-view-mode)
       (dsh-bridge--view-fill "s1" orphan nil t)
       (should (equal (substring-no-properties (buffer-string))
-                     "\u2713 read"))
+                     "\u2713 read\n"))
       (should (equal (plist-get dsh-bridge--view-provenance :length) 1))
       (should (equal (plist-get dsh-bridge--view-provenance :first)
                      '(tool-result . "c1")))
@@ -3426,13 +3434,13 @@ editing a line that does not exist yet."
       (dsh-bridge-view-mode)
       (dsh-bridge--view-fill "s1" reversed nil t)
       (should (equal (substring-no-properties (buffer-string))
-                     "\u2713 read\n\u2192 read src/a.ts")))))
+                     "\u2713 read\n\u2192 read src/a.ts\n")))))
 
 (ert-deftest dsh-bridge-view-multiple-results-last-wins ()
   "Each result edits the call line; the last result in host order wins.
 A second result arriving later is a new operation, so the splice applies it
-without re-reading the call line's text.  A later success also removes the
-earlier result's error suffix."
+without re-reading the call line's text.  A later success also replaces the
+earlier error prefix and face."
   (let* ((seg (dsh-bridge-test--view-segment "first" 7001000 1))
          (call (dsh-bridge-test--view-tool-call
                 "read" "src/a.ts" "c1" 11 1 7001100))
@@ -3462,7 +3470,7 @@ earlier result's error suffix."
         (should (equal (substring-no-properties (buffer-string))
                        (substring-no-properties
                         (dsh-bridge-test--view-turn-render two "s1"))))
-        (should (string-match-p "\u2717 read src/a.ts (error)"
+        (should (string-match-p "\u2717 read src/a.ts"
                                 (buffer-string)))
         (should (equal (marker-position probe) 3))
         (dsh-bridge--view-fill "s1" three nil t t)
@@ -7303,7 +7311,7 @@ caller level by `dsh-bridge-view-follow-refill-waiting-gate' and
       ;; The placeholder is propertized furniture.
       (should (equal (buffer-string) dsh-bridge--view-running-placeholder))
       (should (text-property-any (point-min) (point-max)
-                                 'dsh-bridge-running t))
+                                 'face 'dsh-bridge-view-marker-face))
       (should (eq dsh-bridge--view-waiting t))
       (should (equal dsh-bridge--view-turn 3))
       (should (eq dsh-bridge--view-follow t))
@@ -7345,7 +7353,7 @@ commits any text.  Resolving the question restores the placeholder."
       (should (string-match-p "Awaiting response: press a" (buffer-string)))
       (should-not (string-match-p "(running\\.\\.\\.)" (buffer-string)))
       (should (text-property-any (point-min) (point-max)
-                                 'dsh-bridge-awaiting t)))
+                                 'face 'dsh-bridge-view-awaiting-face)))
     ;; No pending question: back to the plain placeholder.
     (let ((dsh-bridge--pending-questions nil))
       (dsh-bridge--view-await-refresh "s1"))
@@ -9030,7 +9038,7 @@ once for all of them."
       (dolist (b '("*dsh-bridge-output*" "*dsh-bridge-output-2*"))
         (with-current-buffer b
           ;; The completed turn renders with its closing elapsed divider.
-          (should (equal (buffer-string) "new")))))
+          (should (equal (buffer-string) "new\n\n")))))
     (dolist (b '("*dsh-bridge-output*" "*dsh-bridge-output-2*"))
       (when (buffer-live-p (get-buffer b))
         (kill-buffer b)))))
@@ -9063,7 +9071,7 @@ the reply replaces the `(running...)' placeholder and the waiting state ends."
       (should (= calls 1))
       (with-current-buffer "*dsh-bridge-output*"
         ;; Turn 3 is newer than the pre-send turn 2: accepted.
-        (should (equal (buffer-string) "the reply"))
+        (should (equal (buffer-string) "the reply\n\n"))
         (should (equal dsh-bridge--view-turn 3))
         (should (null dsh-bridge--view-waiting))))
     (when (buffer-live-p (get-buffer "*dsh-bridge-output*"))
@@ -9340,7 +9348,7 @@ browse state and point are all preserved."
               ((symbol-function 'dsh-bridge--apply-session-directory) #'ignore))
       (dsh-bridge--turn-complete-refetch "s1"))
     (with-current-buffer "*dsh-bridge-output*"
-      (should (equal (buffer-string) "the reply"))
+      (should (equal (buffer-string) "the reply\n\n"))
       (should dsh-bridge--view-browsing)
       (should (null dsh-bridge--view-follow))
       (should (= (point) 4)))
@@ -9376,7 +9384,7 @@ Refreshing it would yank the reader to the completing turn."
               ((symbol-function 'dsh-bridge--apply-session-directory) #'ignore))
       (dsh-bridge--turn-complete-refetch "s1"))
     (with-current-buffer "*dsh-bridge-output*"
-      (should (equal (buffer-string) "older"))
+      (should (equal (buffer-string) "older\n\n"))
       (should dsh-bridge--view-browsing)
       (should (equal dsh-bridge--view-turn 2)))
     (when (buffer-live-p (get-buffer "*dsh-bridge-output*"))
@@ -9725,7 +9733,7 @@ drops the tail."
           (should-not (string-match-p "Approve this plan?" rendered))
           (should-not (string-match-p "(continuing\\.\\.\\.)" rendered))
           (should (text-property-any 0 (length rendered)
-                                     'dsh-bridge-awaiting t rendered)))
+                                     'face 'dsh-bridge-view-awaiting-face rendered)))
         ;; The same turn without a pending ask keeps the continuing marker.
         (let ((dsh-bridge--pending-questions nil))
           (should (string-match-p "(continuing\\.\\.\\.)"
@@ -9733,7 +9741,7 @@ drops the tail."
       ;; A completed turn shows no tail even while a question is pending.
       (let ((dsh-bridge--pending-questions
              (dsh-bridge-test--pending-ask "s1" "Approve this plan?")))
-        (should (equal (dsh-bridge-test--view-turn-render done "s1") "progress"))))))
+        (should (equal (dsh-bridge-test--view-turn-render done "s1") "progress\n\n"))))))
 
 (ert-deftest dsh-bridge-view-awaiting-note-variants ()
   "The awaiting note names the answer key and, for a batch, the question count;
@@ -9815,7 +9823,7 @@ and the option being off all drop the note."
         (should (string-match-p "continuing…" rendered))
         (should-not (string-match-p "(continuing\\.\\.\\.)" rendered))
         (should (text-property-any 0 (length rendered)
-                                   'dsh-bridge-answered t rendered))
+                                   'face 'dsh-bridge-view-answered-face rendered))
         (should (text-property-any 0 (length rendered)
                                    'dsh-bridge-turn-marker t rendered)))
       ;; The recorded segment baseline retires the note on its own, with no
@@ -9824,7 +9832,7 @@ and the option being off all drop the note."
         (should-not (string-match-p "You answered" rendered))
         (should (string-match-p "(continuing\\.\\.\\.)" rendered)))
       ;; A completed turn ends cleanly, note or not.
-      (should (equal (dsh-bridge-test--view-turn-render done "s1") "progress"))
+      (should (equal (dsh-bridge-test--view-turn-render done "s1") "progress\n\n"))
       ;; A note recorded before any segment existed shows in the waiting
       ;; placeholder slot, where the turn list has nothing to match against.
       (let ((dsh-bridge--turns-cache nil))
@@ -12232,8 +12240,8 @@ binding; completion drops the tail."
           (should (string-match-p "Awaiting approval for bash: press a to review" rendered))
           (should-not (string-match-p "(continuing\\.\\.\\.)" rendered))
           (should (text-property-any 0 (length rendered)
-                                     'dsh-bridge-awaiting t rendered)))
-        (should (equal (dsh-bridge-test--view-turn-render done "s1") "progress"))))))
+                                     'face 'dsh-bridge-view-awaiting-face rendered)))
+        (should (equal (dsh-bridge-test--view-turn-render done "s1") "progress\n\n"))))))
 
 (ert-deftest dsh-bridge-view-awaiting-approval-frames-refresh-tail ()
   "An `approval' frame flips a following view's running marker to the approval
@@ -12372,7 +12380,7 @@ pending (the note belongs to a later, open turn)."
       ;; Open turn: body, footer, marker.
       (let ((suffix (dsh-bridge-test--view-turn-suffix open "s1")))
         (should (equal (substring-no-properties suffix)
-                       (concat "\n\n" footer "\n\n(continuing...)")))
+                       (concat footer "\n\n(continuing...)")))
         (should (text-property-any 0 (length suffix)
                                    'dsh-bridge-turn-marker t suffix)))
       ;; A pending question replaces only the marker, after the footer.
@@ -12380,16 +12388,16 @@ pending (the note belongs to a later, open turn)."
              (dsh-bridge-test--pending-ask "s1" "Approve?")))
         (let ((suffix (dsh-bridge-test--view-turn-suffix open "s1")))
           (should (equal (substring-no-properties suffix)
-                         (concat "\n\n" footer
+                         (concat footer
                                  "\n\n(Awaiting response: press a to view and answer)")))
           (should (text-property-any 0 (length suffix)
-                                     'dsh-bridge-awaiting t suffix))
+                                     'face 'dsh-bridge-view-awaiting-face suffix))
           (should-not (string-match-p "(continuing" suffix))))
       ;; A completed turn drops the awaiting note but keeps the footer.
       (let ((dsh-bridge--pending-questions
              (dsh-bridge-test--pending-ask "s1" "Approve?")))
         (should (equal (substring-no-properties (dsh-bridge-test--view-turn-suffix done "s1"))
-                       (concat "\n\n" footer)))))))
+                       footer))))))
 
 (ert-deftest dsh-bridge-view-changed-files-buttons ()
   "The footer's button visits the file named by its `path' property."

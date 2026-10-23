@@ -875,7 +875,7 @@ instead of the bare `(continuing...)' marker, which is what explains the wait."
           (should (string-match-p "You answered “Go”" (buffer-string)))
           (should-not (string-match-p "(continuing\\.\\.\\.)" (buffer-string)))
           (should (text-property-any (point-min) (point-max)
-                                     'dsh-bridge-answered t)))
+                                     'face 'dsh-bridge-view-answered-face)))
         (when (dsh-bridge--question-find-buffer question-id)
           (kill-buffer (dsh-bridge--question-find-buffer question-id)))))))
 
