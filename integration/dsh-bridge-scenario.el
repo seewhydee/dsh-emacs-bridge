@@ -29,7 +29,6 @@
 ;;; Code:
 
 (require 'json)
-(require 'cl-lib)
 
 ;; This file's directory, captured AT LOAD TIME: `load-file-name' and
 ;; `buffer-file-name' are unreliable (or nil) when a command runs later, so

@@ -69,7 +69,6 @@
 (require 'seq)
 (require 'json)
 (require 'transient)
-(require 'cl-lib)
 (require 'button)
 (require 'help-mode)
 
@@ -702,18 +701,24 @@ absent entry means the session has not been seeded.")
   "Retrieve URL synchronously and return its parsed (STATUS . BODY).
 This is `url-retrieve-synchronously' with `dsh-bridge-timeout', except
 that the response is parsed and its buffer killed here.  That matters
-because url.el marks a 204/4xx/5xx response buffer dead, and the
-`url-gc-dead-buffers' call at the start of any nested request can collect
-it before the caller gets to parse it; a timer-driven request may start
-while this one waits.  Dead-buffer collection is suppressed for the wait,
-so the response survives to be parsed."
+because url.el queues a 204 No Content response buffer for collection via
+`url-mark-buffer-as-dead', and the `url-gc-dead-buffers' call at the start
+of any nested request can collect it before the caller gets to parse it; a
+timer-driven request may start while this one waits.  Dead-buffer
+collection is suppressed for the wait, so the response survives to be
+parsed."
   (require 'url)
-  (let (buf response)
+  (let ((buf nil)
+	(response nil)
+	(gc-dead-buffers (symbol-function 'url-gc-dead-buffers)))
     ;; The function cell is bound, not the dead-buffer list: the response is
     ;; pushed onto that list after the request starts, so clearing the list
     ;; would not protect it.
-    (cl-letf (((symbol-function 'url-gc-dead-buffers) #'ignore))
-      (setq buf (url-retrieve-synchronously url t nil dsh-bridge-timeout)))
+    (unwind-protect
+	(progn
+	  (fset 'url-gc-dead-buffers #'ignore)
+	  (setq buf (url-retrieve-synchronously url t nil dsh-bridge-timeout)))
+      (fset 'url-gc-dead-buffers gc-dead-buffers))
     (when (and buf (buffer-live-p buf))
       (setq response (dsh-bridge--parse-response buf))
       (kill-buffer buf))
@@ -5215,7 +5220,7 @@ custom row's trailing newline: a patch deletes exactly what this re-inserts."
   (let ((start (point))
 	(i 0))
     (dolist (opt (alist-get 'options question))
-      (cl-incf i)
+      (setq i (1+ i))
       (let* ((label (or (alist-get 'label opt) ""))
 	     (desc (alist-get 'description opt))
 	     (marked (member label selected))
@@ -5326,7 +5331,7 @@ custom row's trailing newline: a patch deletes exactly what this re-inserts."
 	      (skipped (member qid dsh-bridge--question-skipped))
 	      (block-start (point)))
 	 (when (> n 0) (insert "\n"))
-	 (cl-incf n)
+	 (setq n (1+ n))
 	 (dsh-bridge--insert (format "Question %d of %d" n total)
 			     'dsh-bridge-question-furniture-face)
 	 (when skipped
