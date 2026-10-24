@@ -2,9 +2,10 @@
 // Copyright (C) 2026  Chong Yidong <cyd@stupidchicken.com>
 //
 // Drives POST /dsh-bridge/fork against the shared live fixture and the real
-// sessionController service seam: the /turns `endSeq` anchor, the child's
-// lineage and inherited prefix, the atSeq-omitted fallback, and the failure
-// taxonomy (unknown source, bad argument, an anchor that pins an open turn).
+// sessionController service seam: the /turns `endSeq` anchor, the route's
+// parent identity and the child's inherited prefix, the atSeq-omitted
+// fallback, and the failure taxonomy (unknown source, bad argument, an anchor
+// that pins an open turn).
 // Each test uses its own session so the shared fixture stays deterministic.
 
 import { describe, it, expect, inject } from 'vitest'
@@ -26,7 +27,7 @@ async function runTextTurn(fixture, sessionId, text = 'The reply.') {
 }
 
 describe('branching a turn (POST /dsh-bridge/fork)', () => {
-  it('forks the shown turn at its endSeq and exposes the child lineage', async () => {
+  it('forks the shown turn at its endSeq and seeds the child', async () => {
     const fixture = inject('fixture')
     await post(fixture, '/mock-llm/reset', {})
     const sessionId = await createSession(fixture)
@@ -48,11 +49,13 @@ describe('branching a turn (POST /dsh-bridge/fork)', () => {
     expect(forked.body.atSeq).toBe(newest.endSeq)
     const childId = forked.body.sessionId
 
-    // The child is a seeded, ordinary session under the source.
+    // The child is a seeded, ordinary session. Ordinary forks are independent
+    // of source lineage — the source is named only by this route's own
+    // `parentSessionId`; `parentSession` is reserved for subagent creators.
+    // (A historical fork header may still carry the old field.)
     const report = await get(fixture, `/dsh-bridge/session?sessionId=${childId}`)
     expect(report.status).toBe(200)
     expect(report.body.live).toBe(true)
-    expect(report.body.parentSession).toBe(sessionId)
     expect(report.body.isSeeded).toBe(true)
 
     // It is on the live roster.

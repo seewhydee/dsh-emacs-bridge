@@ -78,8 +78,7 @@ describe('plugin surface against a live fixture', () => {
     expect(sel.status).toBe(200)
     expect(sel.body.selected.model).toBe('mock-model-pro')
 
-    // The switch is durable and the bridge's live selection ref follows it:
-    // the next main-turn call runs on the picked model.
+    // The switch is durable and takes effect on the next main-turn call.
     await scriptMock(fixture, [{ kind: 'text', text: 'switched' }])
     const sent = await post(fixture, '/dsh-bridge/send', { text: 'after switch', sessionId })
     expect(sent.status).toBe(200)

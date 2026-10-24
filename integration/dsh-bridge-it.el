@@ -304,8 +304,11 @@ fixture-booting tests can share one Emacs process."
 (ert-deftest dsh-bridge-it-fork-turn ()
   "The live-Emacs seat of branching: `B' forks the shown turn into a child.
 Drives the real command against the live fixture: fetch a session with one
-completed turn, fork from its view, and prove the new child carries the
-source as `parentSession' with `isSeeded' set."
+completed turn, fork from its view, and prove the new child is seeded from
+that source.  Ordinary forks are independent of source lineage — the source
+is named only by the fork route's own response, while a historical fork
+header may still carry `parentSession' — so `isSeeded' is the durable fact
+the report still carries."
   (dsh-bridge-it--with-fixture
     (dsh-bridge-it--script-mock
      (vector (list :kind "text" :text "Branch this.")))
@@ -328,7 +331,8 @@ source as `parentSession' with `isSeeded' set."
         (let* ((result (dsh-bridge--request
                         "GET" (dsh-bridge--path "/session" child) nil))
                (report (cdr result)))
-          (should (equal (alist-get 'parentSession report) session-id))
+          ;; `parentSession' may still be present on a historical fork header,
+          ;; but the current harness omits it for ordinary forks.
           (should (eq (alist-get 'isSeeded report) t)))))))
 
 (ert-deftest dsh-bridge-it-ask-user ()
@@ -700,6 +704,21 @@ the tag line."
   (let ((buffer (dsh-bridge-it--view session-id)))
     (and buffer (buffer-local-value 'dsh-bridge--view-provenance buffer))))
 
+(defun dsh-bridge-it--view-settled-p (session-id)
+  "Whether SESSION-ID's newest cached turn is closed and its view agrees.
+Both facts update on their own frames: the segment append can land before
+the completion fill that removes the open-turn marker.  This predicate is
+for a turn with no changed files and no terminal furniture, whose completed
+view therefore carries no `dsh-bridge-turn-marker' suffix."
+  (let ((record (car (dsh-bridge--turns-cache-turns session-id)))
+	(buffer (dsh-bridge-it--view session-id)))
+    (and record
+	 buffer
+	 (not (dsh-bridge--view-turn-open-p record))
+	 (with-current-buffer buffer
+	   (not (text-property-any (point-min) (point-max)
+				   'dsh-bridge-turn-marker t))))))
+
 (defun dsh-bridge-it--turn-render (turn session-id)
   "Buffer text for the whole TURN record, or \"\" for nil.
 Apply TURN's render items and then its terminal suffix, as the production
@@ -798,11 +817,10 @@ provenance against the live `/turns' epoch and `(step . time)' segments."
       ;; The turn resumes, commits its second segment, and completes.
       (should (dsh-bridge-it--wait
                (lambda ()
-                 (let ((text (dsh-bridge-it--view-text session-id))
-                       (prov (dsh-bridge-it--view-provenance session-id)))
+                 (let ((text (dsh-bridge-it--view-text session-id)))
                    (and text
                         (string-match-p "Second segment\\." text)
-                        (null (plist-get prov :open)))))
+                        (dsh-bridge-it--view-settled-p session-id))))
                30000))
       (with-current-buffer (dsh-bridge-it--view session-id)
         (let* ((record (car (dsh-bridge--turns-cache-turns session-id)))
@@ -817,7 +835,7 @@ provenance against the live `/turns' epoch and `(step . time)' segments."
           (should (equal (plist-get prov :length) (length keys)))
           (should (equal (plist-get prov :first) (car keys)))
           (should (equal (plist-get prov :last) (car (last keys))))
-          (should-not (plist-get prov :open))
+          (should-not (dsh-bridge--view-turn-open-p record))
           (should (equal (point) (point-max)))
           ;; The body was never rewritten: the planted marker stayed put.
           (should (equal (marker-position probe) 5))
@@ -897,11 +915,10 @@ collapses, and the view lands at the new turn's tail."
       (dsh-bridge-it--prompt-send session-id "One.")
       (should (dsh-bridge-it--wait
                (lambda ()
-                 (let ((text (dsh-bridge-it--view-text session-id))
-                       (prov (dsh-bridge-it--view-provenance session-id)))
+                 (let ((text (dsh-bridge-it--view-text session-id)))
                    (and text
                         (string-match-p "Turn one\\." text)
-                        (null (plist-get prov :open)))))
+                        (dsh-bridge-it--view-settled-p session-id))))
                30000))
       (with-current-buffer (dsh-bridge-it--view session-id)
         (should (equal (plist-get dsh-bridge--view-provenance :turn) 1))
@@ -917,8 +934,8 @@ collapses, and the view lands at the new turn's tail."
                        (prov (dsh-bridge-it--view-provenance session-id)))
                    (and text
                         (string-match-p "Turn two\\." text)
-                        (null (plist-get prov :open))
-                        (equal (plist-get prov :turn) 2))))
+                        (equal (plist-get prov :turn) 2)
+                        (dsh-bridge-it--view-settled-p session-id))))
                30000))
       (with-current-buffer (dsh-bridge-it--view session-id)
         (let* ((record (car (dsh-bridge--turns-cache-turns session-id)))
@@ -1101,11 +1118,10 @@ then with) the activity lines."
       (dsh-bridge-it--answer-pending session-id "Go")
       (should (dsh-bridge-it--wait
                (lambda ()
-                 (let ((text (dsh-bridge-it--view-text session-id))
-                       (prov (dsh-bridge-it--view-provenance session-id)))
+                 (let ((text (dsh-bridge-it--view-text session-id)))
                    (and text
                         (string-match-p "Finished after the answer\\." text)
-                        (null (plist-get prov :open)))))
+                        (dsh-bridge-it--view-settled-p session-id))))
                30000))
       (with-current-buffer (dsh-bridge-it--view session-id)
         (let ((record (car (dsh-bridge--turns-cache-turns session-id))))

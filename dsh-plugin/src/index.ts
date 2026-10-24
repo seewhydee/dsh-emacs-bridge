@@ -438,8 +438,7 @@ interface ProjectionCacheService {
  */
 interface SessionProjectionRegistryService {
   onChanged(listener: (session: Session, key: string, value: unknown, seq: number) => void): () => void
-  snapshot(session: Session): ProjectionSnapshotLike
-  stateOf(session: Session, key: string): unknown
+  snapshot(session: Session, keys?: readonly string[]): ProjectionSnapshotLike
 }
 
 /** Minimal face of one `sessionQuery.observeSession` lease. */
@@ -1542,19 +1541,22 @@ export function apply(ctx: Context, config?: Config): void {
   /**
    * The selection ref installed into a bridge-composed agent. The tiers mirror
    * the session controller's own ref, read LIVE from the durable
-   * `modelSelection` projection state so a mid-session switch (the
-   * `model/selection` event `session/selectModel` appends) takes effect on the
-   * agent's next step: the pending pick, else the last used route, else the
-   * install-time default. A profile without the projection registry serves the
-   * static default snapshot.
+   * `modelSelection` projection's wire view (`next` is the pending pick, else
+   * the last used route) so a mid-session switch (the `model/selection` event
+   * `session/selectModel` appends) takes effect on the agent's next step;
+   * otherwise the install-time default. A profile without the projection
+   * registry serves the static default snapshot.
+   *
+   * The wire view, not the registry's deprecated internal `stateOf`, is the
+   * supported read face.
    */
   function bridgeSelectionRef(agent: Agent, fallback: ModelSelection): ModelSelectionRef {
     return {
       get current(): ModelSelection | undefined {
         const registry = ctx.get('sessionProjections') as SessionProjectionRegistryService | undefined
-        const state = registry?.stateOf(agent.session, 'modelSelection') as
-          { pending?: ModelSelection | null; lastUsed?: ModelSelection | null } | undefined
-        return state?.pending ?? state?.lastUsed ?? fallback
+        const view = registry?.snapshot(agent.session, ['modelSelection']).values.modelSelection as
+          { next?: ModelSelection | null } | undefined
+        return view?.next ?? fallback
       },
       assembled: undefined,
     }
