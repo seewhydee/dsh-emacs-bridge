@@ -16,7 +16,7 @@
 ;; along with this program.	 If not, see <https://www.gnu.org/licenses/>.
 
 ;; Author: Chong Yidong <cyd@stupidchicken.com>
-;; Version: 0.19.1
+;; Version: 0.19.2
 ;; Package-Requires: ((emacs "29.1"))
 ;; Keywords: tools, convenience
 
@@ -74,7 +74,7 @@
 
 ;;; Common utility functions/variables
 
-(defconst dsh-bridge-version "0.19.1"
+(defconst dsh-bridge-version "0.19.2"
   "Version string for the DSH-Bridge package.
 This should match the version reported by the running DSH plugin.")
 
