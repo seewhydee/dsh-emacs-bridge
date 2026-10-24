@@ -1,0 +1,4 @@
+;; -*- no-byte-compile: t -*-
+(define-package "dsh-bridge" "@VERSION@"
+  "Connect Emacs to a DeepSeek Harness session."
+  '((emacs "29.1")))

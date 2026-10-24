@@ -3433,7 +3433,7 @@ response, and has a different format from the session alists stored in
 - `sessionId' (string, required): the session the response describes.
 - `turns' (list, optional): the turn records, newest first, each having
   the form of an alist.
-- `epoch' (number, optional): a ms timestamp.
+- `epoch' (number, optional): the surface's replacement-generation count.
 - `running' (boolean, optional): whether the agent is mid-turn.	 Its
   presence (not truthiness) seeds the status tracker.
 - `title' (string, optional) and `cwd' (string, optional): display title
@@ -8529,6 +8529,14 @@ user-confirmed, so the mutators may still act on it."
       (dsh-bridge--dispatcher-cycle-init)
       (setq dsh-bridge--focus (cons session 'pinned)))))
 
+;; The optional inspector's dispatcher suffix is inert: this autoload form
+;; defines the command without loading `dsh-bridge-extras'.  A manual
+;; source-tree user therefore gets the suffix as soon as the baseline library
+;; loads, and a packaged install also carries it in the generated autoloads.
+;;;###autoload
+(autoload 'dsh-bridge-extras-inspect-turn "dsh-bridge-extras"
+  "Inspect complete committed detail for one DSH turn." t)
+
 ;; An autoload cookie on the `transient-define-prefix' form itself would make
 ;; `loaddefs-generate' copy that form verbatim into the package's autoloads
 ;; file, where it signals `void-function transient-define-prefix' on any
@@ -8575,6 +8583,8 @@ instead of trusting the cached one."
   ["Sessions"
    ("D" dsh-bridge-describe-session
     :description "describe session")
+   ("I" dsh-bridge-extras-inspect-turn
+    :description "inspect turn details")
    ("t" dsh-bridge--dispatcher-pin
     :description "pin" :transient t)
    ("u" dsh-bridge--dispatcher-unpin

@@ -27,7 +27,7 @@
     "lib/index.js",
     "lib/client.js",
     "cordis.patch.yml",
-    "emacs/dsh-bridge.el"
+    "emacs"
   ],
   "dsh": {
     "bundle": {
@@ -38,7 +38,7 @@
     }
   },
   "scripts": {
-    "build": "tsdown && tsdown --config tsdown.client.config.ts",
+    "build": "node scripts/stage-emacs.mjs && tsdown && tsdown --config tsdown.client.config.ts",
     "prepack": "node scripts/prepack.mjs",
     "test": "vitest run"
   },
@@ -64,5 +64,8 @@
     "@deepseek-ai/schemastery": "^3.18.5",
     "tsdown": "^0.22.2",
     "vitest": "^4.1.8"
+  },
+  "dependencies": {
+    "diff": "^9.0.0"
   }
 }

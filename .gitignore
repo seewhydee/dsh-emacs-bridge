@@ -4,6 +4,9 @@
 node_modules
 lib/
 
+# A workspace-local pnpm store (used when the user store is outside the sandbox).
+.pnpm-store/
+
 # Dependency lockfile: a publishable plugin/library — consumers resolve their
 # own deps and never use a transitive dependency's lockfile.
 pnpm-lock.yaml
@@ -19,6 +22,7 @@ pnpm-lock.yaml
 /dsh-bridge-*.tar
 /dsh-plugin/dsh-emacs-bridge-*.tgz
 /dsh-plugin/emacs/
+/dsh-plugin/.emacs-stage-*/
 
 # Working plan files (not part of the committed repo).
 phase-*.md

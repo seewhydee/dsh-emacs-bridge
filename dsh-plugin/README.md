@@ -11,8 +11,9 @@ dsh plugin --profile web add dsh-emacs-bridge
 ```
 
 Then open DSH's **Plugins** page, click the `dsh-emacs-bridge` entry, and use
-**Install Emacs package** to install the `dsh-bridge.el` this package carries
-into your Emacs.  The plugin and the Emacs package are released in lockstep and
+**Install Emacs package** to install the multi-file `dsh-bridge` Emacs package
+this plugin carries (the baseline library plus the optional
+`dsh-bridge-extras` inspector) into your Emacs.  The plugin and the Emacs package are released in lockstep and
 must be the same version, so upgrade both halves together.
 
 Overview, manual and offline installation, usage, and the permissions this

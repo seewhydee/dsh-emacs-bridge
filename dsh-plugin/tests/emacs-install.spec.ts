@@ -28,7 +28,7 @@ import {
   emacsVersionMeetsFloor,
   normalizeEmacsCommand,
   parseEmacsVersionOutput,
-  resolveBundledElisp,
+  resolveBundledEmacsPackage,
 } from '../src/logic.ts'
 
 describe('normalizeEmacsCommand', () => {
@@ -111,14 +111,14 @@ describe('buildEmacsStatusForm', () => {
 })
 
 describe('buildEmacsInstallForm', () => {
-  it('builds the fixed install form with a prin1-quoted path', () => {
-    expect(buildEmacsInstallForm('/opt/dsh/emacs/dsh-bridge.el')).toBe(
-      `(progn (require 'package) (package-install-file "/opt/dsh/emacs/dsh-bridge.el"))`)
+  it('builds the fixed install form with a prin1-quoted package directory', () => {
+    expect(buildEmacsInstallForm('/opt/dsh/emacs/dsh-bridge-0.19.2')).toBe(
+      `(progn (require 'package) (package-install-file "/opt/dsh/emacs/dsh-bridge-0.19.2"))`)
   })
 
   it('quotes a path with spaces, quotes, and backslashes', () => {
-    expect(buildEmacsInstallForm('/opt/my "dsh"/emacs/dsh-bridge.el')).toBe(
-      `(progn (require 'package) (package-install-file "/opt/my \\"dsh\\"/emacs/dsh-bridge.el"))`)
+    expect(buildEmacsInstallForm('/opt/my "dsh"/emacs/dsh-bridge-0.19.2')).toBe(
+      `(progn (require 'package) (package-install-file "/opt/my \\"dsh\\"/emacs/dsh-bridge-0.19.2"))`)
   })
 })
 
@@ -196,52 +196,57 @@ describe('classifyEmacsProbeOutput', () => {
   })
 })
 
-describe('resolveBundledElisp', () => {
+describe('resolveBundledEmacsPackage', () => {
   const dirs: string[] = []
 
   function makeDir(): string {
-    const dir = mkdtempSync(join(tmpdir(), 'dsh-bundled-elisp-'))
+    const dir = mkdtempSync(join(tmpdir(), 'dsh-bundled-package-'))
     dirs.push(dir)
     return dir
   }
 
-  function placeElisp(dir: string): string {
-    const emacsDir = join(dir, 'emacs')
-    mkdirSync(emacsDir, { recursive: true })
-    const file = join(emacsDir, 'dsh-bridge.el')
-    writeFileSync(file, ';;; dsh-bridge.el\n')
-    return file
+  function placeLeaf(packageDir: string, version = '0.19.2', files = ['dsh-bridge.el', 'dsh-bridge-extras.el', 'dsh-bridge-pkg.el']): string {
+    const leaf = join(packageDir, 'emacs', `dsh-bridge-${version}`)
+    mkdirSync(leaf, { recursive: true })
+    for (const name of files) writeFileSync(join(leaf, name), `;;; ${name}\n`)
+    return leaf
   }
 
   afterEach(() => {
     while (dirs.length > 0) rmSync(dirs.pop() as string, { recursive: true, force: true })
   })
 
-  it('finds the packed-tarball layout (emacs/ inside the package)', () => {
+  it('resolves the versioned staged leaf inside the package', () => {
     const packageDir = makeDir()
-    const file = placeElisp(packageDir)
-    expect(resolveBundledElisp(packageDir)).toBe(file)
+    const leaf = placeLeaf(packageDir)
+    expect(resolveBundledEmacsPackage(packageDir, '0.19.2')).toBe(leaf)
   })
 
-  it('finds the source-checkout layout (../emacs/ beside the package)', () => {
+  it('requires the exact version, never a stale leaf', () => {
+    const packageDir = makeDir()
+    placeLeaf(packageDir, '0.19.1')
+    expect(resolveBundledEmacsPackage(packageDir, '0.19.2')).toBeNull()
+  })
+
+  it('rejects an incomplete leaf', () => {
+    const packageDir = makeDir()
+    placeLeaf(packageDir, '0.19.2', ['dsh-bridge.el'])
+    expect(resolveBundledEmacsPackage(packageDir, '0.19.2')).toBeNull()
+  })
+
+  it('never falls back to the raw source directory', () => {
     const checkout = makeDir()
-    const file = placeElisp(checkout)
+    // An unbuilt checkout has emacs/dsh-bridge.el but no staged versioned leaf.
+    const emacsDir = join(checkout, 'emacs')
+    mkdirSync(emacsDir)
+    writeFileSync(join(emacsDir, 'dsh-bridge.el'), ';;; dsh-bridge.el\n')
     const packageDir = join(checkout, 'dsh-plugin')
     mkdirSync(packageDir)
-    expect(resolveBundledElisp(packageDir)).toBe(file)
+    expect(resolveBundledEmacsPackage(packageDir, '0.19.2')).toBeNull()
   })
 
-  it('prefers the in-package candidate when both exist', () => {
-    const checkout = makeDir()
-    placeElisp(checkout)
-    const packageDir = join(checkout, 'dsh-plugin')
-    mkdirSync(packageDir)
-    const inPackage = placeElisp(packageDir)
-    expect(resolveBundledElisp(packageDir)).toBe(inPackage)
-  })
-
-  it('returns null when neither candidate exists', () => {
-    expect(resolveBundledElisp(makeDir())).toBeNull()
+  it('returns null for a blank version or a missing package', () => {
+    expect(resolveBundledEmacsPackage(makeDir(), '')).toBeNull()
   })
 })
 

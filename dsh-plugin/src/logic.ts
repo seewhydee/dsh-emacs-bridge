@@ -2894,6 +2894,1168 @@ export class KeyedSerial {
   }
 }
 
+
+// ---- Turn-detail inspector (the /details/* routes) ------------------------
+//
+// The detail routes are the optional inspector's read side.  Unlike `/turns`
+// (which reduces every trajectory fact to a one-line summary), they return the
+// committed raw material: complete reasoning text, exact tool arguments and
+// result content, and the durable per-call diff fragments attached by `write`
+// and `edit`.  Everything here is pure and bounded; `index.ts` only resolves a
+// session, materializes one log, and serializes these results.
+//
+// Visibility is per entry, not per turn.  A compaction replacement can split a
+// turn: one assistant message survives while another is shadowed.  The
+// inspector exposes only entries whose own source seq is on the *current*
+// surface, with two log-only rules for tool calls (they never become surface
+// nodes): a call is visible when a current result settles it, or when it is
+// still unsettled in an open turn.  A call whose result was shadowed is not
+// resurrected merely because the call event remains in the log.
+
+/** Maximum index entries retained for one turn.  The newest entries win, so a
+ * live turn's most recent activity is always listed; the index reports how
+ * many older entries it dropped. */
+export const MAX_DETAIL_ENTRIES = 2000
+
+/** Maximum file changes listed for one tool result. */
+export const MAX_DETAIL_FILE_CHANGES = 50
+
+/** Maximum fragments retained for one file change. */
+export const MAX_DETAIL_FILE_FRAGMENTS = 200
+
+/** Maximum UTF-8 bytes served by one detail page. */
+export const DETAIL_PAGE_BYTES = 65536
+
+/** One durable applied-diff fragment, exactly as the producing tool recorded
+ * it: no original-file line positions and no final-newline marker. */
+export interface DetailFileFragment {
+  oldText: string | null
+  newText: string
+}
+
+/** How a recognized mutation's durable diff record classifies. */
+export type DetailDiffStatus = 'applied' | 'create' | 'empty' | 'none' | 'unavailable'
+
+/** One file a tool result changed, with its durable fragments. */
+export interface DetailFileChange {
+  /** Recorded canonical path when the producer supplied one, else the
+   * argument-derived path spelling. */
+  path: string
+  /** Absolute path resolved at the call, or at an orphan result's own event. */
+  absolute: string
+  /** Whether `path` is producer-recorded or inferred by the bridge. */
+  pathSource: 'recorded' | 'inferred'
+  /** Effective working directory at that event; absent when the session never
+   * named one. */
+  cwd?: string
+  /** The recorded `write` operation, when the producer recorded one.  Never
+   * inferred from the tool name. */
+  operation?: 'create' | 'update'
+  status: DetailDiffStatus
+  /** Retained applied fragments; empty for every status except `applied`. */
+  fragments: DetailFileFragment[]
+  /** Total durable fragments, including any dropped by the retention bound. */
+  totalFragments: number
+  /** How many durable fragments the retention bound dropped. */
+  droppedFragments: number
+}
+
+/** One file-change summary in the index: no diff text. */
+export interface DetailFileSummary {
+  path: string
+  absolute: string
+  pathSource: 'recorded' | 'inferred'
+  cwd?: string
+  operation?: 'create' | 'update'
+  status: DetailDiffStatus
+  /** Total durable fragments, not merely the retained prefix. */
+  fragmentCount: number
+  retainedFragmentCount: number
+  droppedFragments: number
+  fragmentsTruncated: boolean
+}
+
+/** One reasoning block in the index. */
+export interface DetailThinkingEntry {
+  kind: 'thinking'
+  seq: number
+  ord: number
+  time: number
+  step: number
+  summary: string
+}
+
+/** One tool call in the index. */
+export interface DetailToolCallEntry {
+  kind: 'tool-call'
+  seq: number
+  time: number
+  step: number
+  callId: string
+  name: string
+  summary: string
+  /** `settled` when a current result pairs with the call; `pending` when the
+   * call has no result yet and the turn is open. */
+  settlement: 'settled' | 'pending'
+}
+
+/** One tool result in the index. */
+export interface DetailToolResultEntry {
+  kind: 'tool-result'
+  seq: number
+  time: number
+  step: number
+  callId: string
+  name: string
+  /** `settled` when the call event exists (even if the call itself is not
+   * visible); `orphan` when no call event names it. */
+  settlement: 'settled' | 'orphan'
+  isError: boolean
+  /** The paired call's one-line detail, or the empty string for an orphan. */
+  summary: string
+  files?: DetailFileSummary[]
+  /** Durable file count and retention outcome when file changes are present. */
+  totalFiles?: number
+  droppedFiles?: number
+  filesTruncated?: boolean
+}
+
+/** One index record; file changes ride their owning result entry. */
+export type DetailIndexEntry = DetailThinkingEntry | DetailToolCallEntry | DetailToolResultEntry
+
+/** One turn's bounded, summary-only detail index. */
+export interface TurnDetailIndex {
+  sessionId: string
+  turn: number
+  /** Surface replacement-generation count: the observation identity's epoch. */
+  epoch: number
+  /** Terminal log cursor (one past the last event) at observation time. */
+  cursor: number
+  /** The session's effective working directory at observation time. */
+  cwd?: string
+  open: boolean
+  startedAt?: number
+  endedAt?: number
+  reason?: string
+  failure?: TurnFailure
+  entries: DetailIndexEntry[]
+  /** Whether a bound dropped older entries from `entries`. */
+  truncated: boolean
+  /** How many entries the bound dropped. */
+  droppedEntries: number
+  /** The smallest seq retained when truncated; detail reads for a lower seq
+   * are stale-by-truncation, not unknown. */
+  truncatedFromSeq?: number
+}
+
+/** The index/entry query kinds. */
+export type DetailEntryKind = 'thinking' | 'tool-call' | 'tool-result' | 'file-diff'
+
+/** A validated turn-index request. */
+export interface DetailTurnRequest {
+  sessionId: string
+  turn: number | 'latest'
+}
+
+/** A validated entry request. */
+export interface DetailEntryRequest {
+  sessionId: string
+  turn: number
+  epoch: number
+  cursor: number
+  kind: DetailEntryKind
+  seq: number
+  ord?: number
+  byteOffset: number
+}
+
+/** The minimal query accessor shared by URLSearchParams and test fixtures. */
+export interface DetailQueryParams {
+  getAll(name: string): string[]
+}
+
+/** A successful or failed query parse. */
+export type DetailQueryParse<T> =
+  | { ok: true; request: T }
+  | { ok: false; error: string }
+
+/** One query parameter, rejecting a repeated name. */
+function singleQueryParam(params: DetailQueryParams, name: string): { value?: string; error?: string } {
+  const values = params.getAll(name)
+  if (values.length > 1) return { error: `${name} must be a single value` }
+  return values.length === 0 ? {} : { value: values[0] }
+}
+
+/** Parse a non-negative safe integer, or null. */
+function queryInteger(value: string | undefined): number | null {
+  if (value === undefined || !/^\d+$/.test(value)) return null
+  const parsed = Number(value)
+  return Number.isSafeInteger(parsed) ? parsed : null
+}
+
+/** Parse a required non-negative-integer parameter. */
+function requiredInteger(params: DetailQueryParams, name: string): { value?: number; error?: string } {
+  const single = singleQueryParam(params, name)
+  if (single.error !== undefined) return { error: single.error }
+  if (single.value === undefined) return { error: `${name} is required` }
+  const value = queryInteger(single.value)
+  return value === null ? { error: `${name} must be a non-negative integer` } : { value }
+}
+
+/** Parse the mandatory session id: one non-empty string. */
+function requiredSessionId(params: DetailQueryParams): { value?: string; error?: string } {
+  const single = singleQueryParam(params, 'sessionId')
+  if (single.error !== undefined) return { error: single.error }
+  if (single.value === undefined || single.value === '') {
+    return { error: 'sessionId must be a single non-empty string' }
+  }
+  return { value: single.value }
+}
+
+/**
+ * Parse `GET /details/turn` query parameters.  `sessionId` is mandatory;
+ * `turn` is a non-negative integer or the literal `latest`.
+ */
+export function parseDetailTurnQuery(params: DetailQueryParams): DetailQueryParse<DetailTurnRequest> {
+  const session = requiredSessionId(params)
+  if (session.error !== undefined) return { ok: false, error: session.error }
+  const turnSingle = singleQueryParam(params, 'turn')
+  if (turnSingle.error !== undefined) return { ok: false, error: turnSingle.error }
+  if (turnSingle.value === undefined) return { ok: false, error: 'turn is required' }
+  if (turnSingle.value === 'latest') {
+    return { ok: true, request: { sessionId: session.value as string, turn: 'latest' } }
+  }
+  const turn = queryInteger(turnSingle.value)
+  if (turn === null) return { ok: false, error: 'turn must be a non-negative integer or latest' }
+  return { ok: true, request: { sessionId: session.value as string, turn } }
+}
+
+/**
+ * Parse `GET /details/entry` query parameters.  `ord` is mandatory for
+ * `thinking` and rejected for every other kind; `byteOffset` is optional and
+ * defaults to zero.
+ */
+export function parseDetailEntryQuery(params: DetailQueryParams): DetailQueryParse<DetailEntryRequest> {
+  const session = requiredSessionId(params)
+  if (session.error !== undefined) return { ok: false, error: session.error }
+  const turn = requiredInteger(params, 'turn')
+  if (turn.error !== undefined) return { ok: false, error: turn.error }
+  const epoch = requiredInteger(params, 'epoch')
+  if (epoch.error !== undefined) return { ok: false, error: epoch.error }
+  const cursor = requiredInteger(params, 'cursor')
+  if (cursor.error !== undefined) return { ok: false, error: cursor.error }
+  const seq = requiredInteger(params, 'seq')
+  if (seq.error !== undefined) return { ok: false, error: seq.error }
+  const kindSingle = singleQueryParam(params, 'kind')
+  if (kindSingle.error !== undefined) return { ok: false, error: kindSingle.error }
+  const kind = kindSingle.value
+  if (kind !== 'thinking' && kind !== 'tool-call' && kind !== 'tool-result' && kind !== 'file-diff') {
+    return { ok: false, error: 'kind must be thinking, tool-call, tool-result, or file-diff' }
+  }
+  const ordSingle = singleQueryParam(params, 'ord')
+  if (ordSingle.error !== undefined) return { ok: false, error: ordSingle.error }
+  let ord: number | undefined
+  if (kind === 'thinking') {
+    if (ordSingle.value === undefined) return { ok: false, error: 'ord is required for thinking' }
+    const parsed = queryInteger(ordSingle.value)
+    if (parsed === null) return { ok: false, error: 'ord must be a non-negative integer' }
+    ord = parsed
+  } else if (ordSingle.value !== undefined) {
+    return { ok: false, error: 'ord is only valid for thinking' }
+  }
+  let byteOffset = 0
+  const offsetSingle = singleQueryParam(params, 'byteOffset')
+  if (offsetSingle.error !== undefined) return { ok: false, error: offsetSingle.error }
+  if (offsetSingle.value !== undefined) {
+    const parsed = queryInteger(offsetSingle.value)
+    if (parsed === null) return { ok: false, error: 'byteOffset must be a non-negative integer' }
+    byteOffset = parsed
+  }
+  return {
+    ok: true,
+    request: {
+      sessionId: session.value as string,
+      turn: turn.value as number,
+      epoch: epoch.value as number,
+      cursor: cursor.value as number,
+      kind,
+      seq: seq.value as number,
+      ...ord === undefined ? {} : { ord },
+      byteOffset,
+    },
+  }
+}
+
+/** One UTF-8-safe slice of a larger text. */
+export interface Utf8Page {
+  text: string
+  byteOffset: number
+  nextByteOffset: number
+  totalBytes: number
+  hasMore: boolean
+}
+
+/**
+ * Slice TEXT to at most MAX-BYTES UTF-8 bytes starting at byte OFFSET.
+ *
+ * OFFSET counts UTF-8 bytes, never UTF-16 code units: a split is always on a
+ * code-point boundary, so a page can never cut a surrogate pair.  A non-zero
+ * offset that falls inside a code point is rejected (null) rather than
+ * rounded: offsets come from a previous page's `nextByteOffset`, so a
+ * misaligned one is a malformed request, not a client preference.
+ */
+export function utf8Page(text: string, offset = 0, maxBytes = DETAIL_PAGE_BYTES): Utf8Page | null {
+  if (!Number.isSafeInteger(offset) || offset < 0 || !Number.isSafeInteger(maxBytes) || maxBytes <= 0) {
+    return null
+  }
+  const totalBytes = Buffer.byteLength(text, 'utf8')
+  if (offset > totalBytes) return null
+  if (offset === totalBytes) {
+    return { text: '', byteOffset: offset, nextByteOffset: totalBytes, totalBytes, hasMore: false }
+  }
+  let index = 0
+  let bytes = 0
+  // Walk code points until the requested starting byte offset is reached.
+  for (const ch of text) {
+    const size = Buffer.byteLength(ch, 'utf8')
+    if (bytes === offset) break
+    if (bytes > offset) return null
+    bytes += size
+    index += ch.length
+  }
+  if (bytes !== offset) return null
+  let used = 0
+  let end = index
+  while (end < text.length) {
+    const ch = text.codePointAt(end) as number
+    const width = ch > 0xffff ? 2 : 1
+    const piece = text.slice(end, end + width)
+    const size = Buffer.byteLength(piece, 'utf8')
+    if (used + size > maxBytes) {
+      // A page budget smaller than one code point must still make progress;
+      // return that single code point rather than an empty page at the same
+      // offset (which would make a client's load-more loop forever).
+      if (used === 0) {
+        used = size
+        end += width
+      }
+      break
+    }
+    used += size
+    end += width
+  }
+  return {
+    text: text.slice(index, end),
+    byteOffset: offset,
+    nextByteOffset: offset + used,
+    totalBytes,
+    hasMore: offset + used < totalBytes,
+  }
+}
+
+/** One projected non-text result content block.  The projection is a strict
+ * allowlist: an image or file block contributes its display metadata, never
+ * its opaque attachment id or any bytes. */
+export interface DetailResultBlock {
+  type: string
+  mediaType?: string
+  bytes?: number
+  width?: number
+  height?: number
+  name?: string
+}
+
+/** Result content: text joined for display, plus non-text blocks. */
+export interface DetailResultContent {
+  text: string
+  blocks: DetailResultBlock[]
+  textBlocks: number
+  omittedBlocks: number
+}
+
+/** Project a tool result's content blocks through the inspector allowlist. */
+function projectResultContent(content: unknown): DetailResultContent {
+  const texts: string[] = []
+  const blocks: DetailResultBlock[] = []
+  let textBlocks = 0
+  let omittedBlocks = 0
+  if (Array.isArray(content)) {
+    for (const block of content) {
+      if (!isRecord(block)) {
+        omittedBlocks += 1
+        continue
+      }
+      if (block.type === 'text' && typeof block.text === 'string') {
+        texts.push(block.text)
+        textBlocks += 1
+        continue
+      }
+      if (block.type === 'image' || block.type === 'file') {
+        const attachment = isRecord(block.attachment) ? block.attachment : undefined
+        if (attachment === undefined) {
+          omittedBlocks += 1
+          continue
+        }
+        const projected: DetailResultBlock = { type: block.type }
+        for (const key of ['mediaType', 'bytes', 'width', 'height', 'name'] as const) {
+          const value = attachment[key]
+          if (key === 'mediaType' || key === 'name') {
+            if (typeof value === 'string' && value !== '') projected[key] = value
+          } else if (typeof value === 'number' && Number.isFinite(value)) {
+            projected[key] = value
+          }
+        }
+        blocks.push(projected)
+        continue
+      }
+      omittedBlocks += 1
+      blocks.push({ type: typeof block.type === 'string' ? block.type : 'unknown' })
+    }
+  }
+  return { text: texts.join('\n'), blocks, textBlocks, omittedBlocks }
+}
+
+/** One sanitized structured tool error.  AUTH diagnostics are suppressed
+ * exactly as turn failures are: the reason may echo a preserved credential. */
+export interface DetailToolError {
+  name?: string
+  code?: string
+  reason?: string
+}
+
+/** Project the tool result's optional `error` field. */
+function projectToolError(value: unknown): DetailToolError | undefined {
+  if (!isRecord(value)) return undefined
+  const code = typeof value.code === 'string' ? value.code : undefined
+  const name = typeof value.name === 'string' ? value.name : undefined
+  const reason = typeof value.reason === 'string' ? value.reason : undefined
+  if (code === undefined && name === undefined && reason === undefined) return undefined
+  const suppress = code === 'AUTH' || name === 'AUTH'
+  return {
+    ...name === undefined ? {} : { name },
+    ...code === undefined ? {} : { code },
+    ...reason === undefined || suppress ? {} : { reason },
+  }
+}
+
+/** One visible reasoning block plus its complete committed text. */
+export interface DetailThinkingDetail {
+  kind: 'thinking'
+  seq: number
+  ord: number
+  time: number
+  step: number
+  text: string
+}
+
+/** One visible tool call's complete arguments. */
+export interface DetailToolCallDetail {
+  kind: 'tool-call'
+  seq: number
+  time: number
+  step: number
+  callId: string
+  name: string
+  arguments: string
+}
+
+/** One visible tool result's complete content. */
+export interface DetailToolResultDetail {
+  kind: 'tool-result'
+  seq: number
+  time: number
+  step: number
+  callId: string
+  name: string
+  isError: boolean
+  content: DetailResultContent
+  error?: DetailToolError
+  files?: DetailFileSummary[]
+  totalFiles?: number
+  droppedFiles?: number
+  filesTruncated?: boolean
+}
+
+/** One visible result's durable per-call diff detail. */
+export interface DetailFileDiffDetail {
+  kind: 'file-diff'
+  seq: number
+  callId: string
+  name: string
+  files: DetailFileChange[]
+  totalFiles: number
+  droppedFiles: number
+  filesTruncated: boolean
+}
+
+/** The validated entry payload union. */
+export type DetailEntry =
+  | DetailThinkingDetail
+  | DetailToolCallDetail
+  | DetailToolResultDetail
+  | DetailFileDiffDetail
+
+/** The outcome of one entry selection. */
+export type DetailEntryResult =
+  | { ok: true; entry: DetailEntry }
+  | { ok: false; status: 404 | 409; reason: string; message: string }
+
+/** One tool call fact in the fold, with the directory in effect at the call. */
+interface DetailCallFact {
+  seq: number
+  time: number
+  step: number
+  callId: string
+  name: string
+  arguments: string
+  cwd?: string
+}
+
+/** A result's retained files and their durable retention counts. */
+interface DetailResultFiles {
+  files: DetailFileChange[]
+  totalFiles: number
+  droppedFiles: number
+}
+
+/** One tool result fact in the fold. */
+interface DetailResultFact extends DetailResultFiles {
+  seq: number
+  time: number
+  step: number
+  callId: string
+  name: string
+  isError: boolean
+  content: DetailResultContent
+  error?: DetailToolError
+}
+
+/** One turn's complete entry fold, before the index-entry bound. */
+interface DetailFold {
+  turn: number
+  open: boolean
+  startedAt?: number
+  endedAt?: number
+  reason?: string
+  failure?: TurnFailure
+  visible: boolean
+  entries: DetailIndexEntry[]
+  /** Complete file-change records keyed by their owning result seq. */
+  filesByResult: Map<number, DetailResultFiles>
+  /** Tool calls by call id (target turn only). */
+  calls: Map<string, DetailCallFact>
+  /** Tool result seqs by call id (target turn only). */
+  resultSeqsByCall: Map<string, number[]>
+}
+
+/** The event at SEQ, or undefined when the log is sparse. */
+function eventAtSeq(events: readonly SessionEventLike[], seq: number): SessionEventLike | undefined {
+  const direct = events[seq] as SessionEventLike | undefined
+  if (direct !== undefined && (direct.seq === undefined || direct.seq === seq)) return direct
+  return events.find(event => event.seq === seq)
+}
+
+/** The event's log seq, falling back to its array position. */
+function seqOf(event: SessionEventLike, index: number): number {
+  return typeof event.seq === 'number' ? event.seq : index
+}
+
+/** The event's numeric turn, if it carries one. */
+function eventTurn(event: SessionEventLike): number | undefined {
+  if (!isRecord(event.data)) return undefined
+  const turn = event.data.turn
+  return typeof turn === 'number' && Number.isSafeInteger(turn) ? turn : undefined
+}
+
+/** The tool-role message of one `tool/result` event. */
+function resultMessage(event: SessionEventLike): Record<string, unknown> | undefined {
+  const data = isRecord(event.data) ? event.data : undefined
+  const message = data?.message
+  return isRecord(message) ? message : undefined
+}
+
+/** The result's call id, read exactly as the changed-files fold reads it. */
+function resultCallId(event: SessionEventLike): string | undefined {
+  const message = resultMessage(event)
+  if (message === undefined) return undefined
+  const source = message.source
+  if (isRecord(source) && typeof source.callId === 'string') return source.callId
+  return typeof message.toolCallId === 'string' ? message.toolCallId : undefined
+}
+
+/** Whether VALUE is a valid persisted file-diff fragment. */
+function validFileDiff(value: unknown): value is DetailFileFragment & { path: string } {
+  if (!isRecord(value)) return false
+  return typeof value.path === 'string'
+    && (value.oldText === null || typeof value.oldText === 'string')
+    && typeof value.newText === 'string'
+}
+
+/** Resolve a path against a base directory, keeping it verbatim without one. */
+function resolvePath(base: string | undefined, path: string): string {
+  if (isAbsolute(path)) return path
+  return base === undefined || base === '' ? path : resolve(base, path)
+}
+
+/**
+ * Derive one successful mutation result's file changes from its durable
+ * `meta`.  The classification matrix is the route contract:
+ *
+ * - `applied`: a valid non-empty `diffs` array;
+ * - `create`: `operation: 'create'` with an empty `diffs` array;
+ * - `empty`: a valid empty `diffs` array without the create classification;
+ * - `none`: no durable applied-diff presentation (notably `str_replace_editor`);
+ * - `unavailable`: a `diffs` key that is not a valid non-empty fragment list.
+ */
+function resultFileChanges(
+  event: SessionEventLike,
+  call: DetailCallFact | undefined,
+  resultCwd: string | undefined,
+): DetailResultFiles {
+  const none: DetailResultFiles = { files: [], totalFiles: 0, droppedFiles: 0 }
+  const one = (file: DetailFileChange): DetailResultFiles => ({
+    files: [file], totalFiles: 1, droppedFiles: 0,
+  })
+  // A recognized mutation's call supplies the argument-derived fallback path.
+  // An orphan result has no call to recognize, but its producer-recorded
+  // `meta.diffs` / `meta.path` is independent evidence and still belongs to the
+  // result's seq; expose it rather than hiding a real applied change.
+  const mutation = call === undefined ? null : mutationCall(call.name, call.arguments)
+  if (call !== undefined && mutation === null) return none
+  const message = resultMessage(event)
+  if (message?.isError === true) return none
+  const data = isRecord(event.data) ? event.data : undefined
+  const meta = data?.meta
+  const metaRecord = isRecord(meta) ? meta : undefined
+  if (call === undefined && metaRecord === undefined) return none
+  const recordedPath = typeof metaRecord?.path === 'string' && metaRecord.path !== ''
+    ? metaRecord.path
+    : undefined
+  const operation = metaRecord?.operation === 'create' || metaRecord?.operation === 'update'
+    ? metaRecord.operation
+    : undefined
+  const cwd = call?.cwd ?? resultCwd
+  const base = (path: string, recorded: boolean): DetailFileChange => ({
+    path,
+    absolute: resolvePath(cwd, path),
+    pathSource: recorded ? 'recorded' : 'inferred',
+    ...cwd === undefined ? {} : { cwd },
+    ...operation === undefined ? {} : { operation },
+    status: 'none',
+    fragments: [],
+    totalFragments: 0,
+    droppedFragments: 0,
+  })
+
+  // A present but non-object `meta` cannot be decoded as the producer's
+  // durable diff record; do not silently downgrade it to `none`.
+  if (meta !== undefined && metaRecord === undefined) {
+    const path = recordedPath ?? mutation?.path
+    return path === undefined ? none : one({ ...base(path, recordedPath !== undefined), status: 'unavailable' })
+  }
+  if (metaRecord !== undefined && 'diffs' in metaRecord) {
+    const diffs = metaRecord.diffs
+    if (!Array.isArray(diffs) || !diffs.every(validFileDiff)) {
+      const firstPath = Array.isArray(diffs)
+        ? diffs.find(value => isRecord(value) && typeof value.path === 'string') as { path?: string } | undefined
+        : undefined
+      const path = recordedPath ?? mutation?.path ?? firstPath?.path
+      return path === undefined ? none : one({ ...base(path, recordedPath !== undefined), status: 'unavailable' })
+    }
+    if (diffs.length === 0) {
+      const path = recordedPath ?? mutation?.path
+      return path === undefined ? none : one({
+        ...base(path, recordedPath !== undefined),
+        status: operation === 'create' ? 'create' : 'empty',
+      })
+    }
+    // The producer stamps every hunk with the applied path; group hunks that
+    // name the same file while preserving file order.
+    const byPath = new Map<string, DetailFileFragment[]>()
+    for (const diff of diffs as (DetailFileFragment & { path: string })[]) {
+      const path = recordedPath ?? diff.path
+      const list = byPath.get(path)
+      const fragment = { oldText: diff.oldText, newText: diff.newText }
+      if (list === undefined) byPath.set(path, [fragment])
+      else list.push(fragment)
+    }
+    const changes: DetailFileChange[] = []
+    for (const [path, fragments] of byPath) {
+      const retained = fragments.slice(0, MAX_DETAIL_FILE_FRAGMENTS)
+      changes.push({
+        ...base(path, true),
+        status: 'applied',
+        fragments: retained,
+        totalFragments: fragments.length,
+        droppedFragments: fragments.length - retained.length,
+      })
+      if (changes.length >= MAX_DETAIL_FILE_CHANGES) break
+    }
+    return {
+      files: changes,
+      totalFiles: byPath.size,
+      droppedFiles: byPath.size - changes.length,
+    }
+  }
+  // No durable applied-diff presentation.  A recognized mutation can still
+  // expose its argument-derived path as `none`; an orphan result with nothing
+  // producer-recorded contributes no file entry.
+  const path = recordedPath ?? mutation?.path
+  return path === undefined ? none : one({ ...base(path, recordedPath !== undefined), status: 'none' })
+}
+
+/** A file-change summary projected from a retained record. */
+function fileSummary(file: DetailFileChange): DetailFileSummary {
+  return {
+    path: file.path,
+    absolute: file.absolute,
+    pathSource: file.pathSource,
+    ...file.cwd === undefined ? {} : { cwd: file.cwd },
+    ...file.operation === undefined ? {} : { operation: file.operation },
+    status: file.status,
+    fragmentCount: file.totalFragments,
+    retainedFragmentCount: file.fragments.length,
+    droppedFragments: file.droppedFragments,
+    fragmentsTruncated: file.droppedFragments > 0,
+  }
+}
+
+/** One immutable turn observation's shared index/entry projection. */
+export interface TurnDetailProjection {
+  index: TurnDetailIndex | null
+  fold: DetailFold | null
+}
+
+/** Fold one turn once so its index and entry reads share visibility and files. */
+export function buildTurnDetailProjection(args: {
+  sessionId: string
+  turn: number
+  events: readonly SessionEventLike[]
+  surfaceSeqs: ReadonlySet<number>
+  epoch: number
+  cursor: number
+  boundaries: TurnBoundaries
+  headerCwd?: string
+  cwd?: string
+}): TurnDetailProjection {
+  const fold = foldTurnDetail(args.events, args.surfaceSeqs, args.turn, args.boundaries, args.headerCwd)
+  if (fold === null || !fold.visible) return { index: null, fold }
+  const all = fold.entries
+  const dropped = Math.max(0, all.length - MAX_DETAIL_ENTRIES)
+  const entries = dropped === 0 ? all : all.slice(dropped)
+  return {
+    fold,
+    index: {
+      sessionId: args.sessionId,
+      turn: fold.turn,
+      epoch: args.epoch,
+      cursor: args.cursor,
+      ...args.cwd === undefined ? {} : { cwd: args.cwd },
+      open: fold.open,
+      ...fold.startedAt === undefined ? {} : { startedAt: fold.startedAt },
+      ...fold.endedAt === undefined ? {} : { endedAt: fold.endedAt },
+      ...fold.reason === undefined ? {} : { reason: fold.reason },
+      ...fold.failure === undefined ? {} : { failure: fold.failure },
+      entries,
+      truncated: dropped > 0,
+      droppedEntries: dropped,
+      ...dropped === 0 || entries[0] === undefined ? {} : { truncatedFromSeq: entries[0].seq },
+    },
+  }
+}
+
+/** Fold one turn's bounded detail index. */
+export function buildTurnDetailIndex(args: Parameters<typeof buildTurnDetailProjection>[0]): TurnDetailIndex | null {
+  return buildTurnDetailProjection(args).index
+}
+
+/**
+ * The visible turns of one observation, ascending.  Used by `turn=latest`:
+ * the newest visible turn is selected without resuming anything.  A turn is
+ * visible when a current assistant reasoning block or tool result produces an
+ * entry, when an open turn has an unsettled tool call (a log-only fact that
+ * never becomes a surface node), or when it ended in a terminal failure (the
+ * same failure-only synthesis `/turns` performs).
+ */
+export function visibleDetailTurns(
+  events: readonly SessionEventLike[],
+  surfaceSeqs: ReadonlySet<number>,
+  boundaries: TurnBoundaries,
+): number[] {
+  const turns = new Set<number>()
+  const settled = new Set<string>()
+  const calls: { callId: string; turn: number }[] = []
+  for (let index = 0; index < events.length; index += 1) {
+    const event = events[index]
+    if (event === undefined) continue
+    const seq = seqOf(event, index)
+    const turn = eventTurn(event)
+    const data = isRecord(event.data) ? event.data : undefined
+    if (turn !== undefined && surfaceSeqs.has(seq) && typeof data?.step === 'number') {
+      if (event.type === 'tool/result') {
+        turns.add(turn)
+      } else if (event.type === 'assistant/message') {
+        const message = data.message
+        const content = isRecord(message) && Array.isArray(message.content) ? message.content : []
+        if (content.some(block => isRecord(block) && block.type === 'reasoning'
+          && typeof block.text === 'string' && block.text.trim() !== '')) {
+          turns.add(turn)
+        }
+      }
+    }
+    if (event.type === 'tool/result') {
+      const callId = resultCallId(event)
+      if (callId !== undefined) settled.add(callId)
+    } else if (event.type === 'tool/call') {
+      const call = toolCallFact(event)
+      if (call !== null && typeof data?.step === 'number') {
+        calls.push({ callId: call.callId, turn: call.turn })
+      }
+    }
+  }
+  for (const call of calls) {
+    if (!settled.has(call.callId) && !boundaries.ends.has(call.turn)) turns.add(call.turn)
+  }
+  for (const [turn, end] of boundaries.ends) {
+    if (end.failure !== undefined) turns.add(turn)
+  }
+  return [...turns].sort((a, b) => a - b)
+}
+
+/** Fold one turn's complete detail, or null when the turn has no events. */
+function foldTurnDetail(
+  events: readonly SessionEventLike[],
+  surfaceSeqs: ReadonlySet<number>,
+  turn: number,
+  boundaries: TurnBoundaries,
+  sessionCwd: string | undefined,
+): DetailFold | null {
+  const open = !boundaries.ends.has(turn)
+  const calls = new Map<string, DetailCallFact>()
+  const resultSeqsByCall = new Map<string, number[]>()
+  const results = new Map<number, DetailResultFact>()
+  const reasoning: DetailThinkingEntry[] = []
+  const entries: DetailIndexEntry[] = []
+  const filesByResult = new Map<number, DetailResultFiles>()
+  const resultCwds = new Map<number, string | undefined>()
+  let currentCwd = sessionCwd
+  let sawTurn = false
+
+  // First pass: mutation calls (with the directory in effect at the call) and
+  // the result seqs that settle them.  Log order is the call's order.
+  for (let index = 0; index < events.length; index += 1) {
+    const event = events[index]
+    if (event === undefined) continue
+    if (event.type === 'working-directory/change') {
+      const next = (event.data as { cwd?: unknown } | undefined)?.cwd
+      if (typeof next === 'string' && next !== '') currentCwd = next
+      continue
+    }
+    if (event.type === 'tool/call') {
+      const call = toolCallFact(event)
+      if (call === null || call.turn !== turn) continue
+      sawTurn = true
+      const step = isRecord(event.data) && typeof event.data.step === 'number' ? event.data.step : undefined
+      if (step === undefined) continue
+      calls.set(call.callId, {
+        seq: seqOf(event, index),
+        time: event.time,
+        step,
+        callId: call.callId,
+        name: call.name,
+        arguments: call.arguments,
+        ...currentCwd === undefined ? {} : { cwd: currentCwd },
+      })
+      continue
+    }
+    if (event.type === 'tool/result') {
+      const data = isRecord(event.data) ? event.data : undefined
+      const resultTurn = data?.turn
+      if (resultTurn !== turn || typeof resultTurn !== 'number') continue
+      sawTurn = true
+      const seq = seqOf(event, index)
+      resultCwds.set(seq, currentCwd)
+      const callId = resultCallId(event)
+      if (callId === undefined) continue
+      const seqs = resultSeqsByCall.get(callId)
+      if (seqs === undefined) resultSeqsByCall.set(callId, [seq])
+      else seqs.push(seq)
+      continue
+    }
+    if (turn === eventTurn(event)) sawTurn = true
+  }
+  if (!sawTurn) return null
+
+  // Second pass: the detail-producing surface events of this turn, in log order.
+  for (let index = 0; index < events.length; index += 1) {
+    const event = events[index]
+    if (event === undefined) continue
+    const seq = seqOf(event, index)
+    if (eventTurn(event) !== turn) continue
+    if (event.type === 'assistant/message') {
+      if (!surfaceSeqs.has(seq)) continue
+      const data = isRecord(event.data) ? event.data : undefined
+      const step = data?.step
+      if (typeof step !== 'number') continue
+      const message = data?.message
+      const content = isRecord(message) && Array.isArray(message.content) ? message.content : undefined
+      if (content === undefined) continue
+      let ord = 0
+      for (const block of content) {
+        if (!isRecord(block) || block.type !== 'reasoning') continue
+        const blockOrd = ord
+        ord += 1
+        const text = typeof block.text === 'string' ? block.text : undefined
+        if (text === undefined || text.trim() === '') continue
+        reasoning.push({
+          kind: 'thinking',
+          seq,
+          ord: blockOrd,
+          time: event.time,
+          step,
+          summary: activityThinkingSummary(text),
+        })
+      }
+      continue
+    }
+    if (event.type !== 'tool/result') continue
+    if (!surfaceSeqs.has(seq)) continue
+    const data = isRecord(event.data) ? event.data : undefined
+    const step = data?.step
+    if (typeof step !== 'number') continue
+    const callId = resultCallId(event) ?? ''
+    const message = resultMessage(event)
+    const isError = message?.isError === true
+    const call = calls.get(callId)
+    const content = projectResultContent(message?.content)
+    const error = projectToolError(data?.error)
+    const fileChanges = resultFileChanges(event, call, resultCwds.get(seq))
+    if (fileChanges.files.length > 0) filesByResult.set(seq, fileChanges)
+    results.set(seq, {
+      seq,
+      time: event.time,
+      step,
+      callId,
+      name: call?.name ?? 'tool',
+      isError,
+      content,
+      ...error === undefined ? {} : { error },
+      ...fileChanges,
+    })
+  }
+
+  // A call is visible with a current detail-producing result; an unsettled call
+  // only while its turn is open.  Shadowed or malformed results settle nothing.
+  for (const call of calls.values()) {
+    const resultSeqs = resultSeqsByCall.get(call.callId)
+    const settled = resultSeqs !== undefined && resultSeqs.some(seq => results.has(seq))
+    if (!settled && !(resultSeqs === undefined && open)) continue
+    entries.push({
+      kind: 'tool-call',
+      seq: call.seq,
+      time: call.time,
+      step: call.step,
+      callId: call.callId,
+      name: call.name,
+      summary: activityToolDetail(call.name, call.arguments),
+      settlement: settled ? 'settled' : 'pending',
+    })
+  }
+
+  for (const result of results.values()) {
+    const summaries = result.files.map(fileSummary)
+    const call = calls.get(result.callId)
+    entries.push({
+      kind: 'tool-result',
+      seq: result.seq,
+      time: result.time,
+      step: result.step,
+      callId: result.callId,
+      name: result.name,
+      settlement: call === undefined ? 'orphan' : 'settled',
+      isError: result.isError,
+      summary: call === undefined ? '' : activityToolDetail(call.name, call.arguments),
+      ...summaries.length === 0 ? {} : {
+        files: summaries,
+        totalFiles: result.totalFiles,
+        droppedFiles: result.droppedFiles,
+        filesTruncated: result.droppedFiles > 0,
+      },
+    })
+  }
+
+  entries.push(...reasoning)
+  // Log order; a reasoning block's ord breaks ties within one event.  Tool
+  // calls, results, and messages never share a seq, so the tie-break is only
+  // the one case that can: multiple reasoning blocks.
+  entries.sort((a, b) => a.seq - b.seq || (a.kind === 'thinking' && b.kind === 'thinking' ? a.ord - b.ord : 0))
+
+  const end = boundaries.ends.get(turn)
+  const visible = entries.length > 0 || end?.failure !== undefined
+  return {
+    turn,
+    open,
+    ...boundaries.starts.has(turn) ? { startedAt: boundaries.starts.get(turn) } : {},
+    ...end === undefined ? {} : { endedAt: end.time },
+    ...end?.reason === undefined ? {} : { reason: end.reason },
+    ...end?.failure === undefined ? {} : { failure: end.failure },
+    visible,
+    entries,
+    filesByResult,
+    calls,
+    resultSeqsByCall,
+  }
+}
+
+/**
+ * Select one detail entry from an observed log, applying the same per-entry
+ * visibility rules as the index.  A stale observation never selects: the
+ * caller checks the epoch/cursor first, so this function's 409s are about
+ * visibility (the entry was shadowed or truncated), not observation age.
+ */
+export function buildTurnDetailEntry(args: {
+  turn: number
+  events: readonly SessionEventLike[]
+  surfaceSeqs: ReadonlySet<number>
+  boundaries: TurnBoundaries
+  headerCwd?: string
+  kind: DetailEntryKind
+  seq: number
+  ord?: number
+  projection?: TurnDetailProjection
+}): DetailEntryResult {
+  const fold = args.projection === undefined
+    ? foldTurnDetail(args.events, args.surfaceSeqs, args.turn, args.boundaries, args.headerCwd)
+    : args.projection.fold
+  if (fold === null) {
+    return { ok: false, status: 404, reason: 'no-visible-turn', message: `turn ${args.turn} has no entries` }
+  }
+  const event = eventAtSeq(args.events, args.seq)
+  if (event === undefined || eventTurn(event) !== args.turn) {
+    return { ok: false, status: 404, reason: 'unknown-entry', message: `no entry at seq ${args.seq} in turn ${args.turn}` }
+  }
+  const notVisible: DetailEntryResult = {
+    ok: false, status: 409, reason: 'not-visible', message: `entry ${args.seq} is no longer visible`,
+  }
+  const expectedType = args.kind === 'thinking' ? 'assistant/message'
+    : args.kind === 'tool-call' ? 'tool/call' : 'tool/result'
+  if (event.type !== expectedType) {
+    return { ok: false, status: 404, reason: 'unknown-entry', message: `seq ${args.seq} is not a ${args.kind}` }
+  }
+  const matches = (entry: DetailIndexEntry): boolean => {
+    if (args.kind === 'thinking') {
+      return entry.kind === 'thinking' && entry.seq === args.seq && entry.ord === args.ord
+    }
+    if (args.kind === 'file-diff') {
+      return entry.kind === 'tool-result' && entry.seq === args.seq && entry.files !== undefined
+    }
+    return entry.kind === args.kind && entry.seq === args.seq
+  }
+  // Every kind needs the exact index identity, not merely a plausible source
+  // event.  This also rejects blank reasoning and malformed current entries.
+  if (!fold.entries.some(matches)) {
+    if (args.kind === 'thinking' && fold.entries.some(entry =>
+      entry.kind === 'thinking' && entry.seq === args.seq)) {
+      return { ok: false, status: 404, reason: 'unknown-ordinal', message: `no reasoning block ${args.ord}` }
+    }
+    return notVisible
+  }
+  // An entry the index's bound dropped is not unknown: it was visible, but the
+  // inspector never saw it.  409 (rather than 404) tells Emacs to refresh.
+  if (fold.entries.length > MAX_DETAIL_ENTRIES
+    && !fold.entries.slice(-MAX_DETAIL_ENTRIES).some(matches)) {
+    return { ok: false, status: 409, reason: 'truncated', message: `entry ${args.seq} was dropped from the index` }
+  }
+  if (args.kind === 'thinking') {
+    if (event.type !== 'assistant/message' || !args.surfaceSeqs.has(args.seq)) return notVisible
+    const data = isRecord(event.data) ? event.data : undefined
+    const message = data?.message
+    const content = isRecord(message) && Array.isArray(message.content) ? message.content : undefined
+    if (content === undefined) {
+      return { ok: false, status: 404, reason: 'unknown-entry', message: 'message has no content' }
+    }
+    const blocks = content.filter((block): block is Record<string, unknown> => isRecord(block) && block.type === 'reasoning')
+    const ord = args.ord as number
+    const block = blocks[ord]
+    if (block === undefined || typeof block.text !== 'string') {
+      return { ok: false, status: 404, reason: 'unknown-ordinal', message: `no reasoning block ${ord}` }
+    }
+    const step = data?.step
+    if (typeof step !== 'number') return notVisible
+    return {
+      ok: true,
+      entry: {
+        kind: 'thinking', seq: args.seq, ord, time: event.time, step, text: block.text,
+      },
+    }
+  }
+  if (args.kind === 'tool-call') {
+    if (event.type !== 'tool/call') {
+      return { ok: false, status: 404, reason: 'unknown-entry', message: `seq ${args.seq} is not a tool call` }
+    }
+    const call = fold.calls.get(toolCallFact(event)?.callId ?? '')
+    if (call === undefined || call.seq !== args.seq) return notVisible
+    if (!fold.entries.some(entry => entry.kind === 'tool-call' && entry.seq === args.seq)) return notVisible
+    return {
+      ok: true,
+      entry: {
+        kind: 'tool-call', seq: call.seq, time: call.time, step: call.step,
+        callId: call.callId, name: call.name, arguments: call.arguments,
+      },
+    }
+  }
+  if (args.kind === 'tool-result') {
+    if (event.type !== 'tool/result') {
+      return { ok: false, status: 404, reason: 'unknown-entry', message: `seq ${args.seq} is not a tool result` }
+    }
+    if (!args.surfaceSeqs.has(args.seq)) return notVisible
+    // The complete result is re-derived here so its content and error travel
+    // with the call name; the fold's index entry is only the visibility gate.
+    const data = isRecord(event.data) ? event.data : undefined
+    const step = data?.step
+    const callId = resultCallId(event) ?? ''
+    const message = resultMessage(event)
+    if (typeof step !== 'number') return notVisible
+    const call = fold.calls.get(callId)
+    const fileChanges = fold.filesByResult.get(args.seq)
+    const files = fileChanges?.files.map(fileSummary)
+    const error = projectToolError(data?.error)
+    return {
+      ok: true,
+      entry: {
+        kind: 'tool-result', seq: args.seq, time: event.time, step, callId,
+        name: call?.name ?? 'tool',
+        isError: message?.isError === true,
+        content: projectResultContent(message?.content),
+        ...error === undefined ? {} : { error },
+        ...files === undefined ? {} : {
+          files,
+          totalFiles: fileChanges.totalFiles,
+          droppedFiles: fileChanges.droppedFiles,
+          filesTruncated: fileChanges.droppedFiles > 0,
+        },
+      },
+    }
+  }
+  if (!args.surfaceSeqs.has(args.seq)) return notVisible
+  const fileChanges = fold.filesByResult.get(args.seq)
+  if (fileChanges === undefined) {
+    return { ok: false, status: 404, reason: 'not-a-mutation', message: `result ${args.seq} has no durable file changes` }
+  }
+  const callId = resultCallId(event) ?? ''
+  return {
+    ok: true,
+    entry: {
+      kind: 'file-diff', seq: args.seq, callId,
+      name: fold.calls.get(callId)?.name ?? 'tool',
+      files: fileChanges.files,
+      totalFiles: fileChanges.totalFiles,
+      droppedFiles: fileChanges.droppedFiles,
+      filesTruncated: fileChanges.droppedFiles > 0,
+    },
+  }
+}
+
 // ---- Emacs batch install (the /emacs and /emacs/install routes) ----
 
 /** The Emacs command with every fallback applied: a spawn-ready argv. */
@@ -3094,21 +4256,32 @@ export function classifyEmacsProbeOutput(text: string): EmacsProbeState | null {
 }
 
 /**
- * The bundled `dsh-bridge.el`, or null. Two layouts: `emacs/` inside the
- * installed package (the packed tarball), then `../emacs/` (the source
- * checkout of a `link:` install, where the package directory is
- * `dsh-plugin/`). A missing file is a broken installation — the caller must
- * refuse, never run Emacs against it.
+ * The staged Emacs package directory, or null. Both installation surfaces
+ * consume the same versioned multi-file leaf:
+ *
+ *   emacs/dsh-bridge-<version>/
+ *     dsh-bridge.el
+ *     dsh-bridge-extras.el
+ *     dsh-bridge-pkg.el
+ *
+ * Inside the packed plugin the leaf sits under the package's own `emacs/`; a
+ * `link:` development install gets the identical leaf because the plugin's
+ * build staging helper (`scripts/stage-emacs.mjs`) creates it there.  The raw
+ * source directory is deliberately never accepted: package.el needs the
+ * descriptor, and installing unbuilt sources would bypass the versioned leaf's
+ * authority.  A missing or incomplete leaf is a broken installation — the
+ * caller must refuse, never run Emacs against it.
+ *
+ * @param packageDir - the installed plugin package root.
+ * @param version - the package version whose leaf to resolve.
+ * @returns the leaf directory, or null when it is absent or incomplete.
  */
-export function resolveBundledElisp(packageDir: string): string | null {
-  const candidates = [
-    join(packageDir, 'emacs', 'dsh-bridge.el'),
-    join(packageDir, '..', 'emacs', 'dsh-bridge.el'),
-  ]
-  for (const candidate of candidates) {
-    if (existsSync(candidate)) return candidate
-  }
-  return null
+export function resolveBundledEmacsPackage(packageDir: string, version: string): string | null {
+  if (version === '') return null
+  const candidate = join(packageDir, 'emacs', `dsh-bridge-${version}`)
+  const required = ['dsh-bridge.el', 'dsh-bridge-extras.el', 'dsh-bridge-pkg.el']
+  if (!required.every(name => existsSync(join(candidate, name)))) return null
+  return candidate
 }
 
 /** The settled outcome of one Emacs subprocess run; `runEmacs` never throws. */

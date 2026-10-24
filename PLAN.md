@@ -30,6 +30,48 @@ Plugins-page card. MELPA/ELPA publication is a non-goal: their date-based
 versions fight the exact-version lockstep the two halves verify. Release steps
 live in AGENTS.md.
 
+## Turn detail inspector (implemented, optional)
+
+The optional `dsh-bridge-extras` companion adds a separate read-only inspector
+rather than expandable regions in DSH-View. The baseline's provenance/splice
+contract is the reason: full reasoning, arguments, result bodies, and diff text
+arrive lazily and at arbitrary sizes, so putting them in the view body would
+turn one splice rule into a variable-shape body the view cannot prove. A
+separate buffer can re-render freely and preserve only disclosure identities.
+
+The host side keeps the same split. `/turns` stays summary-only (its newest-40
+turn/newest-500 entry activity window is a view stream, not an archive). The
+`/details/turn` index is a bounded, summary-only projection of one turn;
+`/details/entry` serves one selected entry's complete text, paginated on UTF-8
+byte boundaries. Both take an explicit session id and never call
+`resolveTarget()`, so reading a cold or archived session never resumes it.
+`turn=latest` is the one discovery operation and returns a concrete number.
+
+Compaction makes turn-level visibility wrong: it can shadow one assistant
+message while leaving another event in the same turn current. The fold therefore
+classifies every reasoning block, result, and call against the current surface
+seq set. Log-only tool calls have their own rule: a call is visible when a
+current result settles it, or while it is unsettled in an open turn. Calls whose
+only results were shadowed stay hidden rather than being resurrected from the
+log.
+
+The index and entry response carry an observation identity: the numeric
+surface `replaceGeneration` and the terminal log cursor. An entry read with a
+stale pair is a 409 carrying the fresh pair, which lets Emacs refresh the index
+instead of mistaking a routine refresh for a missing route (generic 404
+handling). The same 409 covers an entry that became shadowed or was dropped by
+the index truncation bound.
+
+Per-call file changes are honest about provenance. `write` and `edit` results
+carry durable `meta.diffs` fragments (and `write` a recorded `operation` and
+canonical `path`); `str_replace_editor` has only a call-time presentation, so it
+is `none`, not an inferred applied diff. The display diff module (`detail.ts`,
+the only place that imports `diff`) renders bounded, fragment-relative text;
+it never fabricates absolute hunk positions or final-newline markers, and the
+inspector never offers patch application from it. Whole-turn workspace review
+(`workspaceChanges`) remains a later phase because its recorders are live-only
+and cannot be replayed cold.
+
 ## New Feature Candidates
 
 Ordered by recommended sequence, but out-of-sequence implementation is

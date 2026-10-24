@@ -257,3 +257,68 @@ describe('cold (persisted-only) session listing', () => {
     }
   }, 240000)
 })
+
+
+describe('cold (persisted-only) turn detail', () => {
+  it('serves numeric and latest detail without resuming, then stays cold', async () => {
+    const dshHome = mkdtempSync(join(tmpdir(), 'dsh-bridge-cold-details-'))
+    const workspace = mkdtempSync(join(tmpdir(), 'dsh-bridge-cold-details-work-'))
+    let first
+    let second
+    try {
+      first = await launch({ dshHome, timeoutMs: 120000 })
+      const marker = `COLD-DETAIL-${process.pid}-${Date.now()}`
+      await scriptMock(first, [{
+        kind: 'reasoning',
+        text: `Cold reasoning.\n\n${marker}: complete committed text.`,
+        toolCall: {
+          name: 'write',
+          arguments: { file_path: 'cold-detail.txt', content: 'cold\n' },
+        },
+      }, { kind: 'text', text: 'Cold turn done.' }])
+      const sessionId = await createSession(first, workspace)
+      const sse = openSse(first, { timeoutMs: 20000 })
+      try {
+        const sent = await post(first, '/dsh-bridge/send', { text: 'Write it.', sessionId })
+        expect(sent.status, JSON.stringify(sent.body)).toBe(200)
+        await sse.waitFor('turn-complete', 30000, frame => frame.sessionId === sessionId)
+      } finally {
+        sse.close()
+      }
+      // Archived state persists with the workspace registry; a cold archived
+      // session is still a read target for the detail routes.
+      const archived = await post(first, '/dsh-bridge/sessions/archive', { sessionId })
+      expect(archived.status, JSON.stringify(archived.body)).toBe(200)
+      await first.kill()
+      first = undefined
+
+      second = await launch({ dshHome, timeoutMs: 120000 })
+      const latest = await get(second, `/dsh-bridge/details/turn?sessionId=${sessionId}&turn=latest`)
+      expect(latest.status, JSON.stringify(latest.body)).toBe(200)
+      expect(latest.body.entries.some(entry => entry.kind === 'thinking')).toBe(true)
+      const numeric = await get(second,
+        `/dsh-bridge/details/turn?sessionId=${sessionId}&turn=${latest.body.turn}`)
+      expect(numeric.status, JSON.stringify(numeric.body)).toBe(200)
+      expect(numeric.body.turn).toBe(latest.body.turn)
+
+      const thinking = latest.body.entries.find(entry => entry.kind === 'thinking')
+      const entry = await get(second,
+        `/dsh-bridge/details/entry?sessionId=${sessionId}&turn=${latest.body.turn}`
+        + `&epoch=${latest.body.epoch}&cursor=${latest.body.cursor}`
+        + `&kind=thinking&seq=${thinking.seq}&ord=${thinking.ord}`)
+      expect(entry.status, JSON.stringify(entry.body)).toBe(200)
+      expect(entry.body.text).toContain(marker)
+
+      // The read-only detail path must not have resumed the session, and the
+      // archived cold row stays archived.
+      const rows = (await get(second, '/dsh-bridge/sessions')).body.sessions
+      expect(rows.find(row => row.id === sessionId)?.live).toBe(false)
+      expect(rows.find(row => row.id === sessionId)?.archived).toBe(true)
+    } finally {
+      if (first !== undefined) await first.kill()
+      if (second !== undefined) await second.kill()
+      rmSync(dshHome, { recursive: true, force: true })
+      rmSync(workspace, { recursive: true, force: true })
+    }
+  }, 240000)
+})
