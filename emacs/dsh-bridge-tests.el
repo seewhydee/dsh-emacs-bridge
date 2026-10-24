@@ -5233,7 +5233,7 @@ would otherwise leave point on the row that held the line before."
          (new '((id . "s-new") (title . "New") (live . t) (lastActive . 2000)
                 (cwd . "/a") (workspace . "WS"))))
     (cl-letf (((symbol-function 'dsh-bridge--read-workspace)
-               (lambda (_prompt) "w1"))
+               (lambda (_prompt _session-id) "w1"))
               ((symbol-function 'dsh-bridge--request)
                (lambda (_method path _payload)
                  (if (equal path "/sessions/create")
@@ -5261,7 +5261,7 @@ there is nothing to select, and the invoking buffer is left alone."
     (kill-buffer "*dsh-bridge-sessions*"))
   (let ((dsh-bridge-pinned-target nil))
     (cl-letf (((symbol-function 'dsh-bridge--read-workspace)
-               (lambda (_prompt) "w1"))
+               (lambda (_prompt _session-id) "w1"))
               ((symbol-function 'dsh-bridge--request)
                (lambda (_method path _payload)
                  (if (equal path "/sessions/create")
@@ -5329,23 +5329,133 @@ RET then has no default to accept, so it is refused."
              '(((id . "s1") (workspace . "WS gone") (workspaceId . "w-gone")))))
 	(should-error (dsh-bridge-create-session) :type 'user-error)))))
 
-(ert-deftest dsh-bridge-workspace-default-verifies-roster ()
-  "The default is the effective session's workspace, when the fresh roster has
-it.  A cached id the roster no longer knows yields no default."
-  (let ((roster '(((id . "w9") (title . "WS X") (path . "/x")))))
-    (let ((dsh-bridge--sessions-cache
-           '(((id . "s1") (workspace . "WS X") (workspaceId . "w9"))))
-          (dsh-bridge-pinned-target "s1"))
-      (should (equal (alist-get 'id (dsh-bridge--workspace-default roster)) "w9")))
-    ;; A workspace archived (or otherwise gone) is not offered.
-    (let ((dsh-bridge--sessions-cache
-           '(((id . "s1") (workspace . "WS gone") (workspaceId . "w-gone"))))
-          (dsh-bridge-pinned-target "s1"))
-      (should-not (dsh-bridge--workspace-default roster)))
-    ;; No effective session: no default.
-    (let ((dsh-bridge--sessions-cache nil)
-          (dsh-bridge-pinned-target nil))
-      (should-not (dsh-bridge--workspace-default roster)))))
+(ert-deftest dsh-bridge-create-session-default-from-dispatcher-focus ()
+  "The dispatcher's focus supplies the default workspace.
+Even an advisory focus -- the menu's last-active guess -- does, so opening
+the dispatcher in an unrelated buffer and pressing `+' offers the workspace
+of the session the header names rather than no default at all."
+  (let ((called nil) (seen-prompt nil))
+    (cl-letf (((symbol-function 'dsh-bridge--fetch-sessions) (lambda () nil))
+              ((symbol-function 'dsh-bridge--request)
+               (lambda (method path payload)
+                 (push (list method path payload) called)
+                 (if (equal path "/workspaces")
+                     (cons 200
+                           (list (cons 'workspaces
+                                       (list (list (cons 'id "w1") (cons 'title "WS A")
+                                                   (cons 'path "/a"))
+                                             (list (cons 'id "w2") (cons 'title "WS B")
+                                                   (cons 'path "/b"))))))
+                   (cons 201 (list (cons 'sessionId "s-new"))))))
+              ((symbol-function 'completing-read)
+               (lambda (prompt &rest _rest)
+                 (setq seen-prompt prompt)
+                 "")))
+      (let ((dsh-bridge--sessions-cache
+             '(((id . "s1") (live . t) (lastActive . 20)
+                (workspace . "WS A") (workspaceId . "w1"))
+               ((id . "s2") (live . t) (lastActive . 10)
+                (workspace . "WS B") (workspaceId . "w2"))))
+            (dsh-bridge--focus '("s2" . advisory))
+            (dsh-bridge-pinned-target nil))
+        (dsh-bridge-create-session)))
+    (should (string-match-p "WS B" seen-prompt))
+    (let ((create (cadr (assoc "/sessions/create"
+                               (mapcar (lambda (c) (list (cadr c) c)) called)))))
+      (should create)
+      (should (equal (cdr (assoc 'workspaceId (caddr create))) "w2"))
+      (should-not (assoc 'path (caddr create))))))
+
+(ert-deftest dsh-bridge-create-session-default-from-sessions-point ()
+  "In the DSH-Sessions buffer, the row at point supplies the default.
+With no menu open, the pinned target is only the fallback for a buffer that
+names no session at point; a visible row is the user's choice."
+  (when (get-buffer "*dsh-bridge-sessions*")
+    (kill-buffer "*dsh-bridge-sessions*"))
+  (let* ((called nil) (seen-prompt nil)
+         (cache '(((id . "s1") (title . "One") (live . t) (lastActive . 10)
+                   (cwd . "/a") (workspace . "WS A") (workspaceId . "w1"))
+                  ((id . "s2") (title . "Two") (live . t) (lastActive . 20)
+                   (cwd . "/b") (workspace . "WS B") (workspaceId . "w2")))))
+    (cl-letf (((symbol-function 'dsh-bridge--fetch-sessions)
+               (lambda () (cons 200 cache)))
+              ((symbol-function 'dsh-bridge--request)
+               (lambda (method path payload)
+                 (push (list method path payload) called)
+                 (if (equal path "/workspaces")
+                     (cons 200
+                           (list (cons 'workspaces
+                                       (list (list (cons 'id "w1") (cons 'title "WS A")
+                                                   (cons 'path "/a"))
+                                             (list (cons 'id "w2") (cons 'title "WS B")
+                                                   (cons 'path "/b"))))))
+                   (cons 201 (list (cons 'sessionId "s-new"))))))
+              ((symbol-function 'completing-read)
+               (lambda (prompt &rest _rest)
+                 (setq seen-prompt prompt)
+                 "")))
+      (with-current-buffer (get-buffer-create "*dsh-bridge-sessions*")
+        (dsh-bridge-sessions-mode)
+        (dsh-bridge--sessions-fill cache)
+        (should (dsh-bridge--sessions-goto-id "s2"))
+        (let ((dsh-bridge--sessions-cache cache)
+              (dsh-bridge--focus nil)
+              (dsh-bridge-pinned-target "s1"))
+          (dsh-bridge-create-session))))
+    (when (get-buffer "*dsh-bridge-sessions*")
+      (kill-buffer "*dsh-bridge-sessions*"))
+    (should (string-match-p "WS B" seen-prompt))
+    (let ((create (cadr (assoc "/sessions/create"
+                               (mapcar (lambda (c) (list (cadr c) c)) called)))))
+      (should create)
+      (should (equal (cdr (assoc 'workspaceId (caddr create))) "w2"))
+      (should-not (assoc 'path (caddr create))))))
+
+(ert-deftest dsh-bridge-read-workspace-default-verifies-roster ()
+  "An empty answer accepts SESSION-ID's workspace while the fresh roster has
+it.  A cached id the roster no longer knows, or a nil session id, leaves
+no default to accept."
+  (let* ((roster '(((id . "w9") (title . "WS X") (path . "/x"))))
+         (seen-prompt nil))
+    (cl-letf (((symbol-function 'dsh-bridge--get-workspaces) (lambda () roster))
+              ((symbol-function 'read-directory-name)
+               (lambda (&rest _)
+                 (ert-fail "empty input reached the directory prompt")))
+              ((symbol-function 'completing-read)
+               (lambda (prompt &rest _)
+                 (setq seen-prompt prompt)
+                 "")))
+      ;; The cached workspace is still in the roster: accept its id, and
+      ;; show the roster's current label rather than the stale cache.
+      (let ((dsh-bridge--sessions-cache
+             '(((id . "s1") (workspace . "old name") (workspaceId . "w9")))))
+        (should (equal (dsh-bridge--read-workspace "Workspace" "s1") "w9"))
+        (should (string-match-p "WS X" seen-prompt)))
+      ;; The cached workspace is gone from the roster: no default.
+      (let ((dsh-bridge--sessions-cache
+             '(((id . "s1") (workspace . "WS gone") (workspaceId . "w-gone")))))
+        (should-error (dsh-bridge--read-workspace "Workspace" "s1")
+                      :type 'user-error))
+      ;; A session the cache no longer holds, or no session at all: no default.
+      (let ((dsh-bridge--sessions-cache nil))
+        (should-error (dsh-bridge--read-workspace "Workspace" "s1")
+                      :type 'user-error)
+        (should-error (dsh-bridge--read-workspace "Workspace" nil)
+                      :type 'user-error)))))
+
+(ert-deftest dsh-bridge-read-workspace-whitespace-accepts-default ()
+  "Whitespace-only input counts as empty input, so it accepts the default.
+`completing-read' returns the raw minibuffer text, which must be trimmed
+before the empty-input branch."
+  (let ((dsh-bridge--sessions-cache
+         '(((id . "s1") (workspace . "WS B") (workspaceId . "w2"))))
+        (roster '(((id . "w2") (title . "WS B") (path . "/b")))))
+    (cl-letf (((symbol-function 'dsh-bridge--get-workspaces) (lambda () roster))
+              ((symbol-function 'completing-read) (lambda (&rest _) "   "))
+              ((symbol-function 'read-directory-name)
+               (lambda (&rest _)
+                 (ert-fail "whitespace-only input reached the directory prompt"))))
+      (should (equal (dsh-bridge--read-workspace "Workspace" "s1") "w2")))))
 
 (ert-deftest dsh-bridge-read-workspace-return-shapes ()
   "`dsh-bridge--read-workspace' returns an existing workspace's id, or a
@@ -5353,17 +5463,15 @@ it.  A cached id the roster no longer knows yields no default."
   (let ((workspaces '(((id . "w1") (title . "WS A") (path . "/a"))
                       ((id . "w2") (title . "WS B") (path . "/b")))))
     (cl-letf (((symbol-function 'dsh-bridge--get-workspaces) (lambda () workspaces))
-              ((symbol-function 'dsh-bridge--effective-session)
-               (lambda (&optional _buffer _nodefault) nil))
               ((symbol-function 'read-directory-name) (lambda (&rest _) "/new"))
               ((symbol-function 'file-directory-p)
                (lambda (dir) (equal dir "/new"))))
       ;; An existing workspace is addressed by id.
       (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) "WS B")))
-	(should (equal (dsh-bridge--read-workspace "Workspace") "w2")))
+	(should (equal (dsh-bridge--read-workspace "Workspace" nil) "w2")))
       ;; An unknown name is a new workspace, whose directory is read.
       (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) "Fresh WS")))
-	(should (equal (dsh-bridge--read-workspace "Workspace")
+	(should (equal (dsh-bridge--read-workspace "Workspace" nil)
                        (cons "/new" "Fresh WS"))))
       ;; Duplicate titles resolve with a second, path-annotated prompt.
       (let ((dups (append workspaces '(((id . "w3") (title . "WS B") (path . "/c"))))))
@@ -5371,7 +5479,7 @@ it.  A cached id the roster no longer knows yields no default."
                   ((symbol-function 'completing-read)
                    (lambda (prompt &rest _)
                      (if (string-match-p "Which" prompt) "WS B — /c" "WS B"))))
-          (should (equal (dsh-bridge--read-workspace "Workspace") "w3")))))))
+          (should (equal (dsh-bridge--read-workspace "Workspace" nil) "w3")))))))
 
 (ert-deftest dsh-bridge-create-session-new-workspace-always-prompts-directory ()
   "A new workspace name always prompts for the workspace directory.

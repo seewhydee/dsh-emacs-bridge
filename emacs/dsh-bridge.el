@@ -2101,65 +2101,66 @@ Signal an error if the retrieval fails."
 		 "failed to list workspaces")))
     (alist-get 'workspaces (cdr result))))
 
-(defun dsh-bridge--workspace-default (workspaces)
-  "Return the default workspace for a new session, or nil.
-The default is the workspace of the buffer's effective session, but only
-when the freshly fetched roster WORKSPACES still contains it.  A cached
-workspace id the roster no longer knows (archived or removed elsewhere) is
-dropped, and the roster's own entry supplies the label, so a rename
-performed elsewhere is shown."
-  (let* ((session (dsh-bridge--effective-session))
-	 (row (and session (dsh-bridge--session-for-id session)))
-	 (id (and row (alist-get 'workspaceId row))))
-    (and id
-	 (seq-find (lambda (w) (equal (alist-get 'id w) id)) workspaces))))
-
-(defun dsh-bridge--read-workspace (prompt)
+(defun dsh-bridge--read-workspace (prompt session-id)
   "Read a DSH workspace from the minibuffer, prompting with PROMPT.
-PROMPT should not include the final colon and space.
-Return the id of an existing workspace, or (PATH . TITLE) for a new one.
-The roster is fetched fresh from the DSH bridge.
+This function fetches a fresh copy of the workspace roster from the DSH
+bridge.  The PROMPT string should not include the final colon and space.
+SESSION-ID is the id for a reference session whose workspace is offered
+as the default, or nil to offer none.  Return the id of an existing
+workspace, or (PATH . TITLE) if the user specifies a new workspace.
 
 Completion candidates are the names of existing workspaces, falling back
-on their paths.	 The default is the workspace for the effective session.
-If the chosen name is shared by more than one workspace, prompt again to
-disambiguate (see `dsh-bridge--read-ambiguous-workspace').  A name that
-matches no workspace names a new one, whose directory is then read."
+on their paths.  An empty or whitespace-only answer accepts the default
+when one is available, and is rejected otherwise.  If the user enters a
+workspace name shared by more than one existing workspace, prompt again
+to disambiguate (see `dsh-bridge--read-ambiguous-workspace').  If the
+user enters a non-existing workspace name, prompt again for a directory
+for the new workspace."
   (let* ((workspaces (dsh-bridge--get-workspaces))
 	 (choices (mapcar (lambda (w)
-			    (cons (or (alist-get 'title w) (alist-get 'path w)) w))
+			    (cons (or (alist-get 'title w)
+				      (alist-get 'path w))
+				  w))
 			  workspaces))
-	 (default (dsh-bridge--workspace-default workspaces))
-	 (default-id (alist-get 'id default))
-	 (default-label (or (alist-get 'title default)
-			    (alist-get 'path default)))
-	 (answer (completing-read
-		  (if default-label
-		      (format "%s (default %s): " prompt
-			      (truncate-string-to-width default-label 40 nil nil "…"))
-		    (format "%s: " prompt))
-		  choices))
+	 ;; Try offering a default: the workspace for the dispatcher's
+	 ;; focus, or the session at point in a DSH-Sessions buffer.
+	 (row (and session-id (dsh-bridge--session-for-id session-id)))
+	 (ref-id (and row (alist-get 'workspaceId row)))
+	 (default (and ref-id
+		       (seq-find (lambda (w) (equal (alist-get 'id w) ref-id))
+				 workspaces)))
+	 (def-id (alist-get 'id default))
+	 (label (or (alist-get 'title default)
+		    (alist-get 'path default)))
+	 (def-label (and label
+			 (truncate-string-to-width label 40 nil nil "...")))
+	 (answer (completing-read (format-prompt prompt def-label)
+				  choices))
 	 (trimmed (string-trim answer))
 	 (matches (and (not (string-empty-p trimmed))
 		       (seq-filter (lambda (w)
 				     (or (equal (alist-get 'title w) trimmed)
 					 (equal (alist-get 'path w) trimmed)))
 				   workspaces))))
+    ;; As workspace labels can be ambiguous, we use `completing-read'
+    ;; in a non-standard way: omit its DEF argument, and if the user
+    ;; submits empty input, map that to the default workspace ID.
     (cond
      ((string-empty-p trimmed)
-      (or default-id (user-error "A workspace name is required")))
+      (or def-id (user-error "A workspace name is required")))
+     ;; If there's one exact match, return it.
      ((= (length matches) 1) (alist-get 'id (car matches)))
+     ;; If there are multiple matches, disambiguate.
      ((> (length matches) 1)
       (dsh-bridge--read-ambiguous-workspace trimmed matches))
+     ;; If the user supplied a non-empty but non-existent workspace
+     ;; name, that's a new workspace: read the directory for it.
      (t
-      ;; A name the roster does not have is a new workspace.  Read its
-      ;; directory, defaulting to the default workspace's directory.
-      (let* ((answer-dir
-	      (read-directory-name
-	       "New workspace directory: "
-	       (or (alist-get 'path default) default-directory)))
-	     (path (and answer-dir (expand-file-name answer-dir))))
-	(unless (and path (file-directory-p path))
+      (let* ((dir (read-directory-name "Directory for new workspace: "
+				       (or (alist-get 'path default)
+					   default-directory)))
+	     (path (expand-file-name dir)))
+	(unless (file-directory-p path)
 	  (user-error "Directory does not exist"))
 	(cons path trimmed))))))
 
@@ -7559,16 +7560,21 @@ archive.  Archiving is reversible with \\[dsh-bridge-unarchive-session]."
 
 (defun dsh-bridge-create-session (&optional set-title)
   "Create a new DSH session in an existing or new workspace.
-Prompt for a workspace, then create a session in it.  If the user names a
-workspace that does not exist, prompt for a working directory and create a
-new workspace with that name.  Return the id of the new session.
+Prompt for a workspace, defaulting to the workspace of the session this
+command is acting on: the open dispatcher's focus, else the current
+buffer's effective session (for a DSH-Sessions buffer, the session at
+point).  Then create a session in it.  If the user names a workspace
+that does not exist, prompt for a working directory and create a new
+workspace with that name.  Return the id of the new session.
 
 With a prefix argument, or if SET-TITLE is non-nil, read a required title
 before creating the session, rather than leaving the session untitled.
 This does not change the pinned target; the dispatcher's `+' key calls
 this command with SET-TITLE and then pins what it created."
   (interactive "P")
-  (let* ((workspace (dsh-bridge--read-workspace "Workspace for new session"))
+  (let* ((default-session (dsh-bridge--focus-session))
+	 (workspace (dsh-bridge--read-workspace
+		     "Workspace for new session" default-session))
 	 (title (and set-title (dsh-bridge--read-nonempty "Session title")))
 	 (payload (append
 		   (if (stringp workspace)
