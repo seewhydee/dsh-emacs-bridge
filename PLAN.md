@@ -76,10 +76,13 @@ and cannot be replayed cold.
 
 Ordered by recommended sequence, but out-of-sequence implementation is
 acceptable based on user needs. Harness seams were last verified
-against DSH 0.2.1-rc.3; the peer floor remains `^0.2.0-rc.1`, while
-the dev dependencies are set to `^0.2.1-rc.3` (the two ranges are
+against DSH 0.2.2-alpha.2; the peer floor remains `^0.2.0-rc.1`, while
+the dev dependencies are set to `^0.2.2-alpha.2` (the two ranges are
 deliberately not in lockstep — the peers are the compatibility floor,
-the dev dependencies the verified build target).
+the dev dependencies the verified build target). The model-selection
+install seam spans two host generations: before 0.2.2-alpha.2 the
+bridge passes its selection ref, and from that release the Agent owns
+the selection and ignores the extra argument.
 
 Note: the in the versioning caret locks the minor, so `^0.2.0-rc.1` is
 `>=0.2.0-rc.1 <0.3.0` and admits every 0.2 prerelease while refusing

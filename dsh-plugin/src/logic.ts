@@ -1805,13 +1805,24 @@ export function compactionFrame(args: {
 /**
  * Minimal structural face of one `ask_user_question` item, enough to rebroadcast
  * it to Emacs. Mirrors `@deepseek-ai/dsh-user-questions`'s wire type, which the
- * `user-questions/request` waterfall carries verbatim; `intent` is only present
- * for a plan-review decision.
+ * `user-questions/request` waterfall carries verbatim. An `intent` marks a
+ * structured question whose answer is a fixed action label: `plan-review` for a
+ * plan approval, `approval` for a fixed permission decision. The frame forwards
+ * the whole intent verbatim; Emacs decides how much of it to present.
  */
 export interface AskUserQuestionOptionLike {
   label: string
   description?: string
 }
+
+/**
+ * The structured-question markers the bridge recognizes. This is the minimal
+ * face the frame builder needs; any further fields the harness attaches are
+ * forwarded verbatim with the rest of the question.
+ */
+export type AskUserQuestionIntentLike =
+  | { kind: 'plan-review'; approve: string }
+  | { kind: 'approval'; approve: string; reject: string; always?: string }
 
 export interface AskUserQuestionItemLike {
   id: string
@@ -1820,7 +1831,7 @@ export interface AskUserQuestionItemLike {
   header?: string
   options?: readonly AskUserQuestionOptionLike[]
   multiSelect?: boolean
-  intent?: { kind: 'plan-review'; approve: string }
+  intent?: AskUserQuestionIntentLike
 }
 
 /** One answer the human returns for a question. */

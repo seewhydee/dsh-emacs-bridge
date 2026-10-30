@@ -201,7 +201,7 @@ import { basename, dirname, isAbsolute, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { Context, Volatile } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
-import type { Agent, AgentOptions, ModelSelection, ModelSelectionRef } from '@deepseek-ai/dsh-agent'
+import type { Agent, AgentOptions, ModelSelection } from '@deepseek-ai/dsh-agent'
 import { installModelSelection } from '@deepseek-ai/dsh-agent'
 import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
 import { createUserMessage, type ContentBlock } from '@deepseek-ai/dsh-llm'
@@ -531,6 +531,28 @@ interface WorkspaceEntityService {
 interface AgentDefaultModelService {
   currentSelection(): ModelSelection
 }
+
+/**
+ * Minimal face of the selection ref `installModelSelection` accepted as its
+ * second argument before DSH 0.2.2-alpha.2. Hosts from that release own the
+ * selection on the Agent (`agent.model`) and declare a one-parameter install,
+ * so the ref is passed positionally only for the older hosts this package's
+ * peer range still admits.
+ */
+interface ModelSelectionRefLike {
+  get current(): ModelSelection | undefined
+  assembled: ModelSelection | undefined
+}
+
+/**
+ * `installModelSelection` across host generations: hosts before DSH
+ * 0.2.2-alpha.2 need the selection ref to apply a durable pick, while newer
+ * hosts record the pick on the Agent and ignore the extra argument. The cast
+ * is the seam that keeps one call site working on both.
+ */
+type InstallModelSelection = (agentCtx: Context, selection?: ModelSelectionRefLike) => () => void
+
+const installSelection = installModelSelection as InstallModelSelection
 
 /**
  * Minimal face of one agent's preset-isolate `planMode` controller, as read
@@ -1576,18 +1598,20 @@ export function apply(ctx: Context, config?: Config): void {
   }
 
   /**
-   * The selection ref installed into a bridge-composed agent. The tiers mirror
-   * the session controller's own ref, read LIVE from the durable
-   * `modelSelection` projection's wire view (`next` is the pending pick, else
-   * the last used route) so a mid-session switch (the `model/selection` event
-   * `session/selectModel` appends) takes effect on the agent's next step;
-   * otherwise the install-time default. A profile without the projection
-   * registry serves the static default snapshot.
+   * The selection ref handed to hosts before DSH 0.2.2-alpha.2, which apply it
+   * as the agent's step selection. Its tiers mirror the session controller's
+   * old ref: read LIVE from the durable `modelSelection` projection's wire view
+   * (`next` is the pending pick, else the last used route) so a mid-session
+   * switch (the `model/selection` event `session/selectModel` appends) takes
+   * effect on the agent's next step; otherwise the install-time default. A
+   * profile without the projection registry serves the static default
+   * snapshot. Newer hosts drive the same pick through `agent.model` and never
+   * read this ref, but the install call still passes it.
    *
    * The wire view, not the registry's deprecated internal `stateOf`, is the
    * supported read face.
    */
-  function bridgeSelectionRef(agent: Agent, fallback: ModelSelection): ModelSelectionRef {
+  function bridgeSelectionRef(agent: Agent, fallback: ModelSelection): ModelSelectionRefLike {
     return {
       get current(): ModelSelection | undefined {
         const registry = ctx.get('sessionProjections') as SessionProjectionRegistryService | undefined
@@ -1626,7 +1650,7 @@ export function apply(ctx: Context, config?: Config): void {
       return {
         agentOptions,
         setup: (agentCtx: Context, agent: Agent) => {
-          installModelSelection(agent.ctx, bridgeSelectionRef(agent, selection))
+          installSelection(agent.ctx, bridgeSelectionRef(agent, selection))
           return Promise.resolve()
         },
       }
@@ -1636,7 +1660,7 @@ export function apply(ctx: Context, config?: Config): void {
       agentOptions,
       agentPreset: resolvedId,
       setup: async (agentCtx: Context, agent: Agent) => {
-        installModelSelection(agent.ctx, bridgeSelectionRef(agent, selection))
+        installSelection(agent.ctx, bridgeSelectionRef(agent, selection))
         await presets.mount(agentCtx, resolvedId)
       },
     }
