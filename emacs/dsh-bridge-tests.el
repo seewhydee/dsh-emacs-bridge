@@ -3852,27 +3852,70 @@ Declined: non-file URLs, plain links with no line, unknown fragments."
       (should (null line)))))
 
 (ert-deftest dsh-bridge-view-enter-follows-link ()
-  "RET follows the link at point, and otherwise defers to the parent RET."
+  "RET follows a Markdown link and refuses an ordinary reply line."
   (with-temp-buffer
     (dsh-bridge-view-mode)
-    (let ((followed nil)
-          (entered nil))
+    (let ((followed nil))
       (cl-letf (((symbol-function 'markdown-follow-thing-at-point)
                  (lambda (_arg) (setq followed t)))
-                ((symbol-function 'markdown-enter-key)
-                 (lambda () (setq entered t)))
                 ((symbol-function 'markdown-link-p) (lambda () t))
                 ((symbol-function 'markdown-wiki-link-p) (lambda () nil))
                 ((symbol-function 'markdown-link-at-pos) (lambda (&rest _) nil)))
         (dsh-bridge-view-enter)
         (should followed)
-        (should-not entered)
-        (setq followed nil)
-        ;; Away from a link the parent's RET runs.
         (cl-letf (((symbol-function 'markdown-link-p) (lambda () nil)))
-          (dsh-bridge-view-enter)
-          (should-not followed)
-          (should entered))))))
+          (should-error (dsh-bridge-view-enter) :type 'user-error))))))
+
+(ert-deftest dsh-bridge-view-enter-visits-changed-file ()
+  "RET activates a changed-file button before considering inspection."
+  (with-temp-buffer
+    (dsh-bridge-view-mode)
+    (let ((inhibit-read-only t)
+          (visited nil))
+      (insert-text-button "file.el" 'path "/w/file.el"
+                          'action #'dsh-bridge--button-visit)
+      (goto-char (point-min))
+      (cl-letf (((symbol-function 'find-file)
+                 (lambda (path &optional _wildcards) (setq visited path))))
+        (dsh-bridge-view-enter))
+      (should (equal visited "/w/file.el")))))
+
+(ert-deftest dsh-bridge-view-enter-answers-active-note ()
+  "RET on a live query or approval note invokes the ordinary answer command."
+  (with-temp-buffer
+    (dsh-bridge-view-mode)
+    (let ((inhibit-read-only t)
+          (answered nil))
+      (insert (propertize "Awaiting response" 'dsh-bridge-view-answer t))
+      (goto-char (point-max))
+      (cl-letf (((symbol-function 'dsh-bridge-answer)
+                 (lambda () (interactive) (setq answered t))))
+        (dsh-bridge-view-enter))
+      (should answered))))
+
+(ert-deftest dsh-bridge-view-enter-navigates-table ()
+  "RET keeps Markdown table navigation ahead of item inspection."
+  (with-temp-buffer
+    (dsh-bridge-view-mode)
+    (let ((entered nil))
+      (cl-letf (((symbol-function 'markdown-table-at-point-p) (lambda () t))
+                ((symbol-function 'markdown-enter-key)
+                 (lambda () (setq entered t))))
+        (dsh-bridge-view-enter))
+      (should entered))))
+
+(ert-deftest dsh-bridge-view-enter-inspects-activity-item ()
+  "RET inspects only the activity identity on the current line."
+  (with-temp-buffer
+    (dsh-bridge-view-mode)
+    (let ((inhibit-read-only t)
+          (inspected nil))
+      (insert (propertize "thinking\n" 'dsh-bridge-activity '(4 . 0)))
+      (goto-char (point-min))
+      (cl-letf (((symbol-function 'dsh-bridge-extras-inspect-item)
+                 (lambda () (interactive) (setq inspected t))))
+        (dsh-bridge-view-enter))
+      (should inspected))))
 
 (ert-deftest dsh-bridge-view-follow-link-hook-installed ()
   "A DSH-View buffer registers the file-link hook buffer-locally.
@@ -6131,7 +6174,7 @@ send (`s'/`d'), and pin-by-title (`T') mnemonics stay gone."
                          :command)
               #'dsh-bridge-visit-session))
   ;; `transient-get-suffix' signals when the key is absent.
-  (dolist (absent '("i" "S" "s" "d" "T"))
+  (dolist (absent '("i" "I" "S" "s" "d" "T"))
     (should-not (condition-case nil
                     (progn (transient-get-suffix 'dsh-bridge absent) t)
                   (error nil)))))

@@ -137,8 +137,6 @@ Here is a full list of commands are available from the transient menu:
 * `r` — open a buffer to type in a prompt.
 * `f` — fetch and display the latest set of replies.
 * `D` — describe the session.
-* `I` — inspect the session's newest turn in the optional detail
-  inspector (loads `dsh-bridge-extras` on first use).
 * `t` — pin the current session as the target.
 * `u` — unpin the currently-pinned session.
 * `k` — stop the running session.
@@ -176,8 +174,6 @@ live status.  The following commands are available from here:
 * `+` — create a new session, in an existing or new workspace.
 * `W` — rename the workspace of the session at point.
 * `D` — describe the session at point.
-* `I` — inspect the session's newest visible turn in the optional
-  detail inspector.
 * `g` — refresh the DSH-Sessions buffer.
 
 For a full list, see the menu bar.  Other `tabulated-list-mode` keys
@@ -201,8 +197,8 @@ The following commands are available in a DSH-View buffer:
 * `i` — receive the latest "Send to Emacs" turn (see below).
 * `v` — show or hide the turn's tool calls and thinking summaries.
 * `D` — describe the current session.
-* `I` — inspect the shown turn in the optional detail inspector,
-  starting at the activity entry or changed file at point.
+* `RET` — visit a changed file, answer a pending query or approval, follow a
+  link, navigate a table, or inspect the activity item at point.
 * `M-p`/`M-n` — cycle the current session's turns.
 * `l` — open the DSH-Sessions buffer.
 * `q` — quit the window and bury the buffer.
@@ -244,40 +240,38 @@ Whichever answers first, Emacs or web UI, settles the request and
 dismisses the other presentation.  To change this (e.g., letting the
 web UI handle all requests), customize `dsh-bridge-approval-answer`.
 
-### Turn detail inspector (optional)
+### Single-item detail inspector (optional)
 
-The optional `dsh-bridge-extras` library adds a read-only inspector for
-the complete committed detail of one turn: full reasoning text, exact
-tool arguments, tool result content, and the durable per-call file
-diffs recorded by `write` and `edit`.  Open it with `M-x
-dsh-bridge-extras-inspect-turn`, with `I` from the transient menu or a
-DSH-View buffer, or with `I` in the DSH-Sessions buffer.  From DSH-View
-it inspects the shown turn and selects the activity entry or changed
-file at point; elsewhere it inspects the newest visible turn without
-resuming a cold session.  The inspector is fetched lazily over the
-bridge's read-only `/details/*` routes; nothing is inserted into the
-DSH-View body.
+DSH-View provides the turn overview; the optional `dsh-bridge-extras`
+library provides detail for one item on that overview.  Type `RET` on a
+thinking or tool activity line (or run `M-x
+dsh-bridge-extras-inspect-item` there) to open a separate read-only
+buffer.  A thinking item contains its complete committed reasoning.  A
+tool item contains its exact arguments, result content when available,
+and durable per-call file diffs; an orphan result is shown on its own.
+The inspector never lists the turn's other entries, and nothing is
+inserted into the DSH-View body.
 
-* `TAB`/`RET` — disclose or hide the entry at point (the first
-  disclosure fetches its detail).
-* `n`/`p` — move between entries.
-* `g` — refresh the turn index, keeping disclosure state.
-* `e` — visit the file named on the current changed-file line.
-* `L` — fetch the next page of a large entry.
+* `g` — refresh the same item.
+* `e` — visit the file named at point, or the item's first changed file.
+* `L` — fetch the next page of the large content part at point.
 * `q` — quit the window.
 
-Limits are deliberate.  Only entries still visible on the current
-session surface are shown, so a compaction-shadowed block stays hidden.
-Per-call diffs cover `write` and `edit` results that recorded durable
-hunks; a `str_replace_editor` result has no such record and shows
-`none` (its arguments remain available from the tool-call entry), and
+Only items still visible on the current session surface are available,
+so a compaction-shadowed block stays hidden.  Per-call diffs cover
+`write` and `edit` results that recorded durable hunks; a
+`str_replace_editor` result has no such record and shows `none`, while
 creates or identical writes have no diff text.  The displayed diff is an
 applied per-call fragment for reading, not an appliable patch, so line
-navigation and patch application are not offered.  At most 2000 index
-entries are listed per turn; larger text is served in 64 KiB pages, and
-diff input/output are bounded (256 KiB per side, 128 KiB of display).
-Cold and archived sessions are read without being resumed; archived
-sessions remain readable until unarchived.
+navigation and patch application are not offered.  Changed-file buttons
+in DSH-View continue to visit their files; their path-only identity
+cannot distinguish multiple calls that changed the same file, so
+per-call diffs are reached through the owning tool item.
+
+Large content is served in independent 64 KiB UTF-8 pages, and diff
+input/output are bounded (256 KiB per side, 128 KiB of display).  Cold
+and archived sessions are read without being resumed; archived sessions
+remain readable until unarchived.
 
 If Markdown mode is installed, reasoning text is fontified with its
 presentation faces transferred onto a copy; the inspector's own major
@@ -374,14 +368,14 @@ Request bodies are capped at 1 MiB, and messages waiting for Emacs sit
 in a bounded outbox.  The turn activity reporter, `/turns`, carries at
 most 500 of the latest activity entries per turn, and activity for at
 most the newest 40 turns; it remains summary-only.  The optional detail
-inspector's read-only `/details/*` routes are the one place that serves
+inspector's read-only `/details/item` route is the one place that serves
 complete committed reasoning, raw tool arguments, result content, and
-durable per-call diff fragments.  They are bearer-authenticated and
-loopback-only like every other route, are fetched only on an explicit
-inspector refresh or disclosure, and never travel over SSE.  Their
-bounds are user-visible in the inspector section above: 2000 index
-entries per turn, 64 KiB text pages, 256 KiB diff input per side, and
-128 KiB of rendered diff text.  Provider `AUTH` failure diagnostics
+durable per-call diff fragments.  It is bearer-authenticated and
+loopback-only like every other route, is fetched only for an activity
+item at point or an explicit inspector refresh/page, and never travels
+over SSE.  Its bounds are user-visible in the inspector section above:
+64 KiB text pages, 256 KiB diff input per side, and 128 KiB of rendered
+diff text.  Provider `AUTH` failure diagnostics
 remain suppressed exactly as they are in `/turns`; malformed or
 unreadable diff metadata is labeled `unavailable` rather than decoded
 loosely.

@@ -70,30 +70,24 @@
 //        since=<turn>&epoch=<n> request the incremental suffix: turns with
 //        turn >= since when the epoch matches the surface's replaceGeneration,
 //        else the full list (incremental: true|false)
-//   GET  /dsh-bridge/details/turn?sessionId=&turn=<number|latest>
-//        -> the optional inspector's summary-only detail index for one
-//        currently visible turn (latest: newest visible turn, never resuming;
-//        404 when none).  Carries the observation identity (epoch =
-//        surface replaceGeneration, cursor = terminal log cursor), turn
-//        boundaries/failure, one record per visible reasoning block, tool
-//        call, or tool result (calls and results stay separate), and each
-//        successful mutation result's file-change summaries.  No full
-//        reasoning, arguments, result bodies, or diff text.  Bounded by
-//        MAX_DETAIL_ENTRIES (newest win; truncated/droppedEntries report it);
-//        file caps likewise report durable totals and dropped files/fragments.
-//   GET  /dsh-bridge/details/entry?sessionId=&turn=&epoch=&cursor=&kind=&seq=
-//        [&ord=][&byteOffset=]
-//        -> one complete committed entry: kind is thinking (ord required;
-//        exact reasoning), tool-call (name + raw arguments), tool-result
-//        (content text, non-text block metadata, isError, sanitized error,
-//        file summaries), or file-diff (result seq; applied per-call fragments
-//        rendered on the host).  Text is UTF-8-paginated: `text` plus
-//        {byteOffset,nextByteOffset,totalBytes,hasMore}; byteOffset must land
-//        on a code-point boundary.  400 malformed/repeated params or a
-//        mid-code-point offset, 404 unknown session/turn/event/kind/ordinal,
-//        409 stale epoch/cursor (with the fresh pair), a shadowed/truncated
-//        entry, or a subagent-owned session.  Cold and archived sessions are
-//        read without resuming; both routes require the bearer token.
+//   GET  /dsh-bridge/details/item?sessionId=&turn=&kind=thinking&seq=&ord=
+//   GET  /dsh-bridge/details/item?sessionId=&turn=&kind=tool&callId=
+//   GET  /dsh-bridge/details/item?sessionId=&turn=&kind=tool-result&callId=
+//        [&epoch=&cursor=&part=&byteOffset=[&fileIndex=]]
+//        -> exactly one currently visible reasoning block, logical tool
+//        invocation (call plus its current result), or current orphan result.
+//        The observation identity is epoch = surface replaceGeneration and
+//        cursor = terminal log cursor. Initial responses include first pages
+//        of all available parts: parts.reasoning, parts.arguments/result, and
+//        each files[].diff. Continuations name one part and carry the original
+//        observation; fileIndex is required only for diff. Every page contains
+//        text plus {byteOffset,nextByteOffset,totalBytes,hasMore}, split only
+//        at UTF-8 code-point boundaries. File caps report durable totals and
+//        dropped files/fragments. 400 malformed/repeated/incompatible params
+//        or offsets, 404 unknown session/turn/item/part/file, 409 stale
+//        observation (with the fresh pair), shadowed item, or subagent-owned
+//        session. Cold and archived sessions are read without resuming;
+//        the route requires the bearer token.
 //   POST /dsh-bridge/draft { text, sessionId? }   -> push a composer draft (SSE)
 //   GET  /dsh-bridge/outbox                       -> collect DSH->Emacs entries
 //   POST /dsh-bridge/outbox { messageId, sessionId, source? }
@@ -243,8 +237,9 @@ import {
   assistantTurns,
   attachmentErrorHttpStatus,
   buildEmacsInstallForm,
-  buildTurnDetailEntry,
-  buildTurnDetailProjection,
+  buildDetailItem,
+  buildDetailItemProjection,
+  buildDetailItemResponse,
   buildEmacsStatusForm,
   cachedTitleValue,
   catalogModelName,
@@ -279,8 +274,7 @@ import {
   outboxSessionId,
   parseAttachmentRequests,
   parseBearerAuthorization,
-  parseDetailEntryQuery,
-  parseDetailTurnQuery,
+  parseDetailItemQuery,
   parseSendMode,
   planChangedMessage,
   queueCounts,
@@ -308,8 +302,6 @@ import {
   turnCompleteMessage,
   turnEndFailure,
   turnStartMessage,
-  utf8Page,
-  visibleDetailTurns,
   turnsSince,
   userPrompts,
   withActivityTurns,
@@ -321,7 +313,7 @@ import {
   type ApprovalResolution,
   type ApprovalToolCallDetail,
   type BridgeImageMediaType,
-  type TurnDetailProjection,
+  type DetailItemProjection,
   type CompactCommandResultLike,
   type CompactExecutionOutcome,
   type EmacsRunResult,
@@ -2213,16 +2205,15 @@ export function apply(ctx: Context, config?: Config): void {
     }))
   }
 
-  // ---- Turn-detail reads (the /details/* routes) -------------------------
+  // ---- Single-item detail reads (the /details/item route) -----------------
   //
   // A detail read observes the log, never resumes it.  A live session serves
   // its own snapshot; a cold one is read through one handle and folded with
   // the in-repo surface replica.  The cold log is cached by the persistence
-  // revision (an opaque token whose equality promises an unchanged log), so a
-  // Refresh followed by several expanded entries costs one materialization,
-  // not one per entry.  The index projection itself is cached per session and
-  // observation key, and both caches invalidate on session events rather than
-  // on a TTL.
+  // revision (an opaque token whose equality promises an unchanged log), so
+  // initial reads and part continuations share one materialization.  The raw
+  // item projection is cached per turn and observation key, and both caches
+  // invalidate on session events rather than on a TTL.
 
   interface DetailObservation {
     sessionId: string
@@ -2243,7 +2234,7 @@ export function apply(ctx: Context, config?: Config): void {
   }
 
   const coldLogCache = new Map<string, CachedColdLog>()
-  const detailProjectionCache = new Map<string, { key: string; projection: TurnDetailProjection }>()
+  const detailProjectionCache = new Map<string, { key: string; projection: DetailItemProjection }>()
   const MAX_CACHED_COLD_LOGS = 8
   const MAX_CACHED_COLD_EVENTS = 100_000
   const MAX_CACHED_COLD_LOG_BYTES = 16 * 1024 * 1024
@@ -2303,8 +2294,8 @@ export function apply(ctx: Context, config?: Config): void {
     }
   }
 
-  /** Remember one session's current shared index/entry projection. */
-  function rememberDetailProjection(sessionId: string, key: string, projection: TurnDetailProjection): void {
+  /** Remember one session's current raw item projection. */
+  function rememberDetailProjection(sessionId: string, key: string, projection: DetailItemProjection): void {
     detailProjectionCache.delete(sessionId)
     detailProjectionCache.set(sessionId, { key, projection })
     while (detailProjectionCache.size > MAX_CACHED_DETAIL_PROJECTIONS) {
@@ -2319,20 +2310,16 @@ export function apply(ctx: Context, config?: Config): void {
     observation: DetailObservation,
     boundaries: ReturnType<typeof turnBoundaries>,
     turn: number,
-  ): TurnDetailProjection {
+  ): DetailItemProjection {
     const key = `${turn}:${observation.epoch}:${observation.cursor}`
     const cached = detailProjectionCache.get(observation.sessionId)
     if (cached !== undefined && cached.key === key) return cached.projection
-    const projection = buildTurnDetailProjection({
-      sessionId: observation.sessionId,
+    const projection = buildDetailItemProjection({
       turn,
       events: observation.events,
       surfaceSeqs: observation.surfaceSeqs,
-      epoch: observation.epoch,
-      cursor: observation.cursor,
       boundaries,
       ...observation.headerCwd === undefined ? {} : { headerCwd: observation.headerCwd },
-      ...observation.cwd === undefined ? {} : { cwd: observation.cwd },
     })
     rememberDetailProjection(observation.sessionId, key, projection)
     return projection
@@ -3106,67 +3093,22 @@ export function apply(ctx: Context, config?: Config): void {
         return
       }
 
-      // The optional inspector's read-only detail routes.  They never call
+      // The optional inspector's one read-only item route. It never calls
       // `resolveTarget()`: an explicit session id is observed as given, cold
       // and archived sessions are read without resuming, and no last-active
-      // race is possible.  The index route's `turn=latest` is the one
-      // non-resuming discovery operation; every entry request carries the
-      // concrete turn and observation identity.
-      if (req.method === 'GET' && pathname === '/dsh-bridge/details/turn') {
+      // race is possible. A stale continuation is a 409 carrying the fresh
+      // identity, never a missing-route 404.
+      if (req.method === 'GET' && pathname === '/dsh-bridge/details/item') {
         try {
-          const parsed = parseDetailTurnQuery(url.searchParams)
-          if (!parsed.ok) {
-            sendJson(res, 400, { error: parsed.error })
-            return
-          }
-          const observation = await readDetailObservation(parsed.request.sessionId)
-          const boundaries = turnBoundaries(observation.events)
-          let turn: number
-          if (parsed.request.turn === 'latest') {
-            const visible = visibleDetailTurns(observation.events, observation.surfaceSeqs, boundaries)
-            const newest = visible[visible.length - 1]
-            if (newest === undefined) {
-              sendJson(res, 404, { error: 'session has no visible turn', reason: 'no-visible-turn' })
-              return
-            }
-            turn = newest
-          } else {
-            turn = parsed.request.turn
-          }
-          const { index } = detailProjection(observation, boundaries, turn)
-          if (index === null) {
-            sendJson(res, 404, {
-              error: `turn ${turn} has no visible entries`,
-              reason: 'no-visible-turn',
-            })
-            return
-          }
-          sendJson(res, 200, index)
-        } catch (error: unknown) {
-          sendJson(res, bridgeErrorStatus(error), {
-            error: error instanceof Error ? error.message : String(error),
-          })
-        }
-        return
-      }
-
-      // One entry's complete committed detail.  A supplied observation that no
-      // longer matches the session's current epoch/cursor is a 409 carrying
-      // the fresh identity, never a 404: Emacs's generic 404 handling must not
-      // mistake an ordinary stale refresh for a missing bridge route.  An
-      // entry that existed but is now shadowed (or was truncated from the
-      // index) is a stale-read concern; malformed selectors are 400 and unknown
-      // ones 404.
-      if (req.method === 'GET' && pathname === '/dsh-bridge/details/entry') {
-        try {
-          const parsed = parseDetailEntryQuery(url.searchParams)
+          const parsed = parseDetailItemQuery(url.searchParams)
           if (!parsed.ok) {
             sendJson(res, 400, { error: parsed.error })
             return
           }
           const request = parsed.request
           const observation = await readDetailObservation(request.sessionId)
-          if (request.epoch !== observation.epoch || request.cursor !== observation.cursor) {
+          if (request.part !== undefined
+            && (request.epoch !== observation.epoch || request.cursor !== observation.cursor)) {
             sendJson(res, 409, {
               error: 'detail observation is stale',
               reason: 'stale',
@@ -3177,83 +3119,47 @@ export function apply(ctx: Context, config?: Config): void {
           }
           const boundaries = turnBoundaries(observation.events)
           const projection = detailProjection(observation, boundaries, request.turn)
-          const selected = buildTurnDetailEntry({
+          const selected = buildDetailItem({
             turn: request.turn,
             events: observation.events,
             surfaceSeqs: observation.surfaceSeqs,
             boundaries,
             ...observation.headerCwd === undefined ? {} : { headerCwd: observation.headerCwd },
             kind: request.kind,
-            seq: request.seq,
+            ...request.seq === undefined ? {} : { seq: request.seq },
             ...request.ord === undefined ? {} : { ord: request.ord },
+            ...request.callId === undefined ? {} : { callId: request.callId },
             projection,
           })
           if (!selected.ok) {
             sendJson(res, selected.status, { error: selected.message, reason: selected.reason })
             return
           }
-          const entry = selected.entry
-          let text: string
-          let body: Record<string, unknown>
-          switch (entry.kind) {
-            case 'thinking':
-              text = entry.text
-              body = { kind: entry.kind, seq: entry.seq, ord: entry.ord, time: entry.time, step: entry.step }
-              break
-            case 'tool-call':
-              text = entry.arguments
-              body = {
-                kind: entry.kind, seq: entry.seq, time: entry.time, step: entry.step,
-                callId: entry.callId, name: entry.name,
-              }
-              break
-            case 'tool-result':
-              text = entry.content.text
-              body = {
-                kind: entry.kind, seq: entry.seq, time: entry.time, step: entry.step,
-                callId: entry.callId, name: entry.name, isError: entry.isError,
-                content: {
-                  blocks: entry.content.blocks,
-                  textBlocks: entry.content.textBlocks,
-                  omittedBlocks: entry.content.omittedBlocks,
-                },
-                ...entry.error === undefined ? {} : { error: entry.error },
-                ...entry.files === undefined ? {} : {
-                  files: entry.files,
-                  totalFiles: entry.totalFiles,
-                  droppedFiles: entry.droppedFiles,
-                  filesTruncated: entry.filesTruncated,
-                },
-              }
-              break
-            case 'file-diff': {
-              const rendered = renderFileChanges(entry.files)
-              text = rendered.text
-              body = {
-                kind: entry.kind, seq: entry.seq, callId: entry.callId, name: entry.name,
-                files: rendered.files,
-                totalFiles: entry.totalFiles,
-                droppedFiles: entry.droppedFiles,
-                filesTruncated: entry.filesTruncated,
-                truncated: rendered.truncated || entry.filesTruncated,
-              }
-              break
-            }
-          }
-          const page = utf8Page(text, request.byteOffset)
-          if (page === null) {
-            sendJson(res, 400, { error: 'byteOffset is not a UTF-8 code-point boundary' })
-            return
-          }
-          sendJson(res, 200, {
+          const paged = buildDetailItemResponse({
             sessionId: observation.sessionId,
-            turn: request.turn,
             epoch: observation.epoch,
             cursor: observation.cursor,
-            ...body,
-            text: page.text,
-            page,
+            ...observation.cwd === undefined ? {} : { cwd: observation.cwd },
+            item: selected.item,
+            request,
+            renderDiff(file) {
+              const rendered = renderFileChanges([file])
+              const metadata = rendered.files[0]
+              if (metadata === undefined) throw new Error('file diff renderer returned no file')
+              return {
+                text: rendered.text,
+                render: metadata.render,
+                added: metadata.added,
+                removed: metadata.removed,
+                truncated: rendered.truncated,
+              }
+            },
           })
+          if (!paged.ok) {
+            sendJson(res, paged.status, { error: paged.message, reason: paged.reason })
+            return
+          }
+          sendJson(res, 200, paged.response)
         } catch (error: unknown) {
           sendJson(res, bridgeErrorStatus(error), {
             error: error instanceof Error ? error.message : String(error),

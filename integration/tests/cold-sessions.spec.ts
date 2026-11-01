@@ -259,8 +259,8 @@ describe('cold (persisted-only) session listing', () => {
 })
 
 
-describe('cold (persisted-only) turn detail', () => {
-  it('serves numeric and latest detail without resuming, then stays cold', async () => {
+describe('cold (persisted-only) item detail', () => {
+  it('serves direct numeric-turn items and continuations without resuming', async () => {
     const dshHome = mkdtempSync(join(tmpdir(), 'dsh-bridge-cold-details-'))
     const workspace = mkdtempSync(join(tmpdir(), 'dsh-bridge-cold-details-work-'))
     let first
@@ -285,32 +285,45 @@ describe('cold (persisted-only) turn detail', () => {
       } finally {
         sse.close()
       }
+      // Capture concrete item identities from the baseline activity summary;
+      // there is deliberately no latest-turn detail discovery route.
+      const turns = await get(first, `/dsh-bridge/turns?sessionId=${sessionId}`)
+      const current = turns.body.turns[0]
+      const { turn } = current
+      const thinking = current.activity.find(entry => entry.kind === 'thinking')
+      const call = current.activity.find(entry => entry.kind === 'tool-call')
+      expect(thinking).toBeDefined()
+      expect(call).toBeDefined()
+
       // Archived state persists with the workspace registry; a cold archived
-      // session is still a read target for the detail routes.
+      // session is still a read target for the item route.
       const archived = await post(first, '/dsh-bridge/sessions/archive', { sessionId })
       expect(archived.status, JSON.stringify(archived.body)).toBe(200)
       await first.kill()
       first = undefined
 
       second = await launch({ dshHome, timeoutMs: 120000 })
-      const latest = await get(second, `/dsh-bridge/details/turn?sessionId=${sessionId}&turn=latest`)
-      expect(latest.status, JSON.stringify(latest.body)).toBe(200)
-      expect(latest.body.entries.some(entry => entry.kind === 'thinking')).toBe(true)
-      const numeric = await get(second,
-        `/dsh-bridge/details/turn?sessionId=${sessionId}&turn=${latest.body.turn}`)
-      expect(numeric.status, JSON.stringify(numeric.body)).toBe(200)
-      expect(numeric.body.turn).toBe(latest.body.turn)
+      const selector = `sessionId=${sessionId}&turn=${turn}`
+      const thinkingItem = await get(second,
+        `/dsh-bridge/details/item?${selector}&kind=thinking&seq=${thinking.seq}&ord=${thinking.ord}`)
+      expect(thinkingItem.status, JSON.stringify(thinkingItem.body)).toBe(200)
+      expect(thinkingItem.body.turn).toBe(turn)
+      expect(thinkingItem.body.parts.reasoning.text).toContain(marker)
+      const toolItem = await get(second,
+        `/dsh-bridge/details/item?${selector}&kind=tool&callId=${call.callId}`)
+      expect(toolItem.status, JSON.stringify(toolItem.body)).toBe(200)
+      expect(JSON.parse(toolItem.body.parts.arguments.text)).toMatchObject({ file_path: 'cold-detail.txt' })
+      expect(toolItem.body.files[0].status).toBe('create')
 
-      const thinking = latest.body.entries.find(entry => entry.kind === 'thinking')
-      const entry = await get(second,
-        `/dsh-bridge/details/entry?sessionId=${sessionId}&turn=${latest.body.turn}`
-        + `&epoch=${latest.body.epoch}&cursor=${latest.body.cursor}`
-        + `&kind=thinking&seq=${thinking.seq}&ord=${thinking.ord}`)
-      expect(entry.status, JSON.stringify(entry.body)).toBe(200)
-      expect(entry.body.text).toContain(marker)
+      const continuation = await get(second,
+        `/dsh-bridge/details/item?${selector}&kind=thinking&seq=${thinking.seq}&ord=${thinking.ord}`
+        + `&epoch=${thinkingItem.body.epoch}&cursor=${thinkingItem.body.cursor}`
+        + '&part=reasoning&byteOffset=0')
+      expect(continuation.status, JSON.stringify(continuation.body)).toBe(200)
+      expect(continuation.body.parts.reasoning.text).toContain(marker)
 
       // The read-only detail path must not have resumed the session, and the
-      // archived cold row stays archived.
+      // archived cold row stays archived after both initial and paged reads.
       const rows = (await get(second, '/dsh-bridge/sessions')).body.sessions
       expect(rows.find(row => row.id === sessionId)?.live).toBe(false)
       expect(rows.find(row => row.id === sessionId)?.archived).toBe(true)

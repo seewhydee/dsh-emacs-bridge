@@ -2731,7 +2731,8 @@ query, return nil."
 press %s to view and answer" count key)
 		     (format "(Awaiting response: press %s to view and answer)"
 			     key))))
-	(dsh-bridge--fontify body 'dsh-bridge-view-awaiting-face)))))
+	(propertize (dsh-bridge--fontify body 'dsh-bridge-view-awaiting-face)
+			 'dsh-bridge-view-answer t)))))
 
 (defun dsh-bridge--view-approval-note (session-id)
   "DSH-View marker line for a pending approval for SESSION-ID, or nil.
@@ -2745,7 +2746,8 @@ pending approval, return nil."
 	     (key (substitute-command-keys "\\[dsh-bridge-answer]"))
 	     (body (format "(Awaiting approval for %s: press %s to review)"
 			   tool key)))
-	(dsh-bridge--fontify body 'dsh-bridge-view-awaiting-face)))))
+	(propertize (dsh-bridge--fontify body 'dsh-bridge-view-awaiting-face)
+			 'dsh-bridge-view-answer t)))))
 
 (defun dsh-bridge--view-answer-note-clear (session-id)
   "Retire SESSION-ID's answered note, if one is recorded."
@@ -4000,23 +4002,40 @@ follows."
            (and (fboundp 'markdown-link-at-pos)
                 (nth 3 (markdown-link-at-pos (point)))))))
 
+(defun dsh-bridge--view-property-at-line (property)
+  "Return text PROPERTY at point or at the start of the current line."
+  (or (get-text-property (point) property)
+      (save-excursion
+	(beginning-of-line)
+	(get-text-property (point) property))))
+
+(defun dsh-bridge--view-activity-at-point-p ()
+  "Whether point is on a DSH-View activity line."
+  (dsh-bridge--view-property-at-line 'dsh-bridge-activity))
+
 (defun dsh-bridge-view-enter ()
-  "RET in a DSH-View buffer: follow the link at point, else the usual RET.
-The model writes file references as Markdown links, such as
-`[dsh-bridge.el:4289](emacs/dsh-bridge.el#L4289)'; following one opens the
-file at the line its `#Lnnn' fragment names.  Away from a link this keeps
-`markdown-enter-key' (rendered-table row navigation), or `newline' where
-markdown-mode is not installed."
+  "Perform RET's context-sensitive action in a DSH-View buffer.
+Visit a changed-file button, answer a live query or approval, follow a
+Markdown link, navigate a Markdown table, or inspect the activity item at
+point.  Ordinary reply text has no inspector fallback."
   (interactive)
   (cond
    ((not (derived-mode-p 'dsh-bridge-view-mode))
     (user-error "Not in a DSH-View buffer"))
+   ((and (button-at (point)) (button-get (button-at (point)) 'path))
+    (push-button (point)))
+   ((dsh-bridge--view-property-at-line 'dsh-bridge-view-answer)
+    (dsh-bridge-answer))
    ((dsh-bridge--view-link-at-point-p)
     (markdown-follow-thing-at-point nil))
-   ((fboundp 'markdown-enter-key)
+   ((and (fboundp 'markdown-table-at-point-p)
+	 (markdown-table-at-point-p)
+	 (fboundp 'markdown-enter-key))
     (markdown-enter-key))
+   ((dsh-bridge--view-activity-at-point-p)
+    (dsh-bridge-extras-inspect-item))
    (t
-    (newline))))
+    (user-error "No RET action at point"))))
 
 ;; A conditional expression cannot go directly in the parent slot of
 ;; `define-derived-mode', since the macro quotes it into the mode
@@ -4035,9 +4054,9 @@ on GitHub-Flavored Markdown (via `gfm-view-mode').
 
 When invoked, the DSH-View buffer is typically bound to a DSH session;
 the commands below let you cycle through the session's turn history,
-compose a reply (prompt) for the session, etc.  RET follows a Markdown
-link at point (the model's file references open at the line they name);
-away from a link it keeps its usual behavior.
+compose a reply (prompt) for the session, etc.  RET visits changed files,
+answers pending requests, follows Markdown links, navigates tables, or
+inspects the activity item at point.
 \\{dsh-bridge-view-mode-map}"
      (setq buffer-read-only t)
      (setq-local dsh-bridge--view-activity dsh-bridge-view-activity)
@@ -4058,6 +4077,8 @@ away from a link it keeps its usual behavior.
 (declare-function markdown-link-at-pos "markdown-mode")
 (declare-function markdown-link-p "markdown-mode")
 (declare-function markdown-wiki-link-p "markdown-mode")
+(declare-function markdown-table-at-point-p "markdown-mode")
+(declare-function dsh-bridge-extras-inspect-item "dsh-bridge-extras")
 
 ;; These are named only in the branch that required markdown-mode, so declare
 ;; them for the byte-compiler.
@@ -4070,8 +4091,7 @@ away from a link it keeps its usual behavior.
 
 (defvar-keymap dsh-bridge-view-mode-map
   :doc "Keymap for `dsh-bridge-view-mode'."
-  ;; Follow a reply's Markdown link; `gfm-view-mode' leaves RET on
-  ;; `markdown-enter-key', which cannot insert into a read-only buffer.
+  ;; Act on the item at point; the command preserves link/table behavior.
   "RET" #'dsh-bridge-view-enter
   "r"	#'dsh-bridge-reply
   "M-p" #'dsh-bridge-view-previous-reply
@@ -8529,13 +8549,11 @@ user-confirmed, so the mutators may still act on it."
       (dsh-bridge--dispatcher-cycle-init)
       (setq dsh-bridge--focus (cons session 'pinned)))))
 
-;; The optional inspector's dispatcher suffix is inert: this autoload form
-;; defines the command without loading `dsh-bridge-extras'.  A manual
-;; source-tree user therefore gets the suffix as soon as the baseline library
-;; loads, and a packaged install also carries it in the generated autoloads.
+;; Define the item inspector's entry point without loading the optional
+;; library.  DSH-View invokes it only for an activity line at point.
 ;;;###autoload
-(autoload 'dsh-bridge-extras-inspect-turn "dsh-bridge-extras"
-  "Inspect complete committed detail for one DSH turn." t)
+(autoload 'dsh-bridge-extras-inspect-item "dsh-bridge-extras"
+  "Inspect the DSH activity item at point." t)
 
 ;; An autoload cookie on the `transient-define-prefix' form itself would make
 ;; `loaddefs-generate' copy that form verbatim into the package's autoloads
@@ -8583,8 +8601,6 @@ instead of trusting the cached one."
   ["Sessions"
    ("D" dsh-bridge-describe-session
     :description "describe session")
-   ("I" dsh-bridge-extras-inspect-turn
-    :description "inspect turn details")
    ("t" dsh-bridge--dispatcher-pin
     :description "pin" :transient t)
    ("u" dsh-bridge--dispatcher-unpin

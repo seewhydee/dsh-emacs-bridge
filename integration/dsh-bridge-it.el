@@ -22,6 +22,8 @@
 ;;; - `dsh-bridge-it-describe-session`: the DSH-Describe report rendering
 ;;;   live host statistics.
 ;;; - `dsh-bridge-it-fork-turn`: branching a completed turn from its DSH-View.
+;;; - `dsh-bridge-it-inspect-activity-items`: RET loads extras and fetches one
+;;;   real reasoning block or logical tool invocation from the live host.
 ;;; - `dsh-bridge-it-ask-user`: the ask-user waterfall's live seat; the mock
 ;;;   asks, the pending-question registry populates via SSE.
 ;;; - `dsh-bridge-it-ask-user-decline`: declining from the real question
@@ -1139,6 +1141,83 @@ then with) the activity lines."
           (should (string-match-p "thinking: " (buffer-string)))
           (should (equal (buffer-string)
                          (dsh-bridge-it--turn-render record session-id))))))))
+
+(ert-deftest dsh-bridge-it-inspect-activity-items ()
+  "RET inspects only the live activity item at point, through the real host.
+The first reasoning inspection loads extras through its autoload and reveals
+text deliberately absent from DSH-View.  A write-tool inspection then shows
+that invocation's arguments, result, and durable per-call diff."
+  (dsh-bridge-it--with-fixture
+    (let ((workspace (make-temp-file "dsh-bridge-item-it-" t))
+          (marker "FULL-REASONING-FROM-LIVE-HOST")
+          (session-id nil))
+      (unwind-protect
+          (progn
+            (dsh-bridge-it--script-mock
+             (vector
+              (list :kind "reasoning"
+                    :text (concat "Inspect this one block.\n\n" marker)
+                    :toolCall (list :name "write"
+                                    :arguments (list :file_path "item.txt"
+                                                     :content "alpha\n")))
+              (list :kind "text" :text "Finished writing.")))
+            (setq session-id (dsh-bridge-it--create-session workspace))
+            (let ((dsh-bridge-view-activity t))
+              (dsh-bridge-it--notifications-start)
+              (dsh-bridge-it--prompt-send session-id "Write one file.")
+              (should (dsh-bridge-it--wait
+                       (lambda ()
+                         (let ((text (dsh-bridge-it--view-text session-id)))
+                           (and text
+                                (string-match-p "thinking: " text)
+                                (string-match-p "write" text)
+                                (string-match-p "Finished writing\\." text)
+                                (alist-get 'endSeq
+                                           (car (dsh-bridge--turns-cache-turns
+                                                 session-id))))))
+                       30000))
+            (let ((view (dsh-bridge-it--view session-id)))
+              (with-current-buffer view
+                (goto-char (point-min))
+                (search-forward "thinking: ")
+                (dsh-bridge-view-enter))
+              (should (dsh-bridge-it--wait
+                       (lambda ()
+                         (let ((buffer (get-buffer dsh-bridge-extras-buffer-name)))
+                           (and buffer
+                                (equal (alist-get 'kind
+                                                  (buffer-local-value
+                                                   'dsh-bridge-extras--item buffer))
+                                       "thinking"))))
+                       15000))
+              (with-current-buffer dsh-bridge-extras-buffer-name
+                (should (string-match-p marker (buffer-string)))
+                (should-not (string-match-p "Finished writing\\." (buffer-string)))
+                (should-not (string-match-p "^Arguments$" (buffer-string))))
+              (with-current-buffer view
+                (goto-char (point-min))
+                (search-forward "write")
+                (dsh-bridge-view-enter))
+              (should (dsh-bridge-it--wait
+                       (lambda ()
+                         (let ((buffer (get-buffer dsh-bridge-extras-buffer-name)))
+                           (and buffer
+                                (equal (alist-get 'kind
+                                                  (buffer-local-value
+                                                   'dsh-bridge-extras--item buffer))
+                                       "tool"))))
+                       15000))
+              (with-current-buffer dsh-bridge-extras-buffer-name
+                (let ((text (buffer-string)))
+                  (should (string-match-p "^write$" text))
+                  (should (string-match-p "\"file_path\": \"item.txt\"" text))
+                  (should (string-match-p "^Result$" text))
+                  (should (string-match-p "^Changed files$" text))
+                  (should (string-match-p "item.txt" text))
+                  (should-not (string-match-p marker text))))))
+        (when (get-buffer dsh-bridge-extras-buffer-name)
+          (kill-buffer dsh-bridge-extras-buffer-name))
+        (delete-directory workspace t))))))
 
 (ert-deftest dsh-bridge-it-activity-toggle-while-waiting ()
   "Toggling activity on while the post-send placeholder is up shows activity.

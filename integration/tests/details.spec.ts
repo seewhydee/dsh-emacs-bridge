@@ -1,4 +1,4 @@
-// dsh-emacs-bridge — integration spec: the optional turn-detail inspector.
+// dsh-emacs-bridge — integration spec: the optional single-item inspector.
 // Copyright (C) 2026  Chong Yidong <cyd@stupidchicken.com>
 //
 // This program is free software: you can redistribute it and/or modify
@@ -14,11 +14,11 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 //
-// Pins the host-plane contract of `GET /details/turn' and `/details/entry':
-// baseline `/turns' remains summary-only while the detail routes return the
-// complete committed reasoning, exact arguments, result content, and durable
-// per-call applied diffs; the observation identity makes a stale read a 409;
-// and `turn=latest' discovers the newest visible turn without resuming.
+// Pins the host-plane contract of `GET /details/item': baseline `/turns'
+// remains summary-only while a direct item read returns complete committed
+// reasoning, exact arguments, result content, and durable per-call applied
+// diffs. Independent continuations require their original observation, and
+// the retired turn/index routes no longer exist.
 
 import { afterAll, describe, expect, it, inject } from 'vitest'
 import { mkdtempSync, realpathSync, rmSync } from 'node:fs'
@@ -75,8 +75,17 @@ async function runTurn(fixture, sessionId, text) {
   }
 }
 
-describe('the turn-detail inspector routes', () => {
-  it('serves complete detail while baseline responses stay summary-only', async () => {
+async function currentActivity(fixture, sessionId) {
+  const baseline = await get(fixture, `/dsh-bridge/turns?sessionId=${sessionId}`)
+  expect(baseline.status, JSON.stringify(baseline.body)).toBe(200)
+  const current = baseline.body.turns[0]
+  expect(current).toBeDefined()
+  expect(current.activity?.length).toBeGreaterThan(0)
+  return { baseline, current }
+}
+
+describe('the single-item inspector route', () => {
+  it('serves exact selected items with independent result and diff parts', async () => {
     const fixture = inject('fixture')
     await post(fixture, '/mock-llm/reset', {})
     const dir = tempWorkspace()
@@ -84,110 +93,138 @@ describe('the turn-detail inspector routes', () => {
     const sessionId = await createSession(fixture, dir)
     await runTurn(fixture, sessionId, 'Make a note.')
 
-    const baseline = await get(fixture, `/dsh-bridge/turns?sessionId=${sessionId}`)
-    expect(baseline.status).toBe(200)
+    const { baseline, current } = await currentActivity(fixture, sessionId)
     expect(JSON.stringify(baseline.body)).not.toContain(marker)
+    const { turn } = current
+    const thinking = current.activity.find(entry => entry.kind === 'thinking')
+    expect(thinking).toBeDefined()
 
-    const index = await get(fixture, `/dsh-bridge/details/turn?sessionId=${sessionId}&turn=latest`)
-    expect(index.status, JSON.stringify(index.body)).toBe(200)
-    const { turn, epoch, cursor } = index.body
-    expect(typeof turn).toBe('number')
-    expect(typeof epoch).toBe('number')
-    expect(typeof cursor).toBe('number')
-    expect(index.body.open).toBe(false)
-    expect(index.body.entries.map(entry => entry.kind))
-      .toEqual(['thinking', 'tool-call', 'tool-result', 'thinking', 'tool-call', 'tool-result'])
-    // The index is summary-only too: no full reasoning and no diff text.
-    expect(JSON.stringify(index.body)).not.toContain(marker)
-
-    const thinking = index.body.entries.find(entry => entry.kind === 'thinking')
     const thinkingDetail = await get(fixture,
-      `/dsh-bridge/details/entry?sessionId=${sessionId}&turn=${turn}&epoch=${epoch}&cursor=${cursor}`
+      `/dsh-bridge/details/item?sessionId=${sessionId}&turn=${turn}`
       + `&kind=thinking&seq=${thinking.seq}&ord=${thinking.ord}`)
     expect(thinkingDetail.status, JSON.stringify(thinkingDetail.body)).toBe(200)
-    expect(thinkingDetail.body.text).toContain(marker)
-    expect(thinkingDetail.body.page.totalBytes).toBeGreaterThan(0)
-    expect(thinkingDetail.body.page.hasMore).toBe(false)
+    const { epoch, cursor } = thinkingDetail.body
+    expect(typeof epoch).toBe('number')
+    expect(typeof cursor).toBe('number')
+    expect(thinkingDetail.body).toMatchObject({
+      sessionId, turn, kind: 'thinking', open: false,
+      parts: { reasoning: { byteOffset: 0, hasMore: false } },
+    })
+    expect(thinkingDetail.body.parts.reasoning.text).toContain(marker)
+    expect(thinkingDetail.body.parts.reasoning.text).not.toContain('Now change alpha to beta.')
+    expect(thinkingDetail.body.entries).toBeUndefined()
 
-    const call = index.body.entries.find(entry => entry.kind === 'tool-call')
-    const callDetail = await get(fixture,
-      `/dsh-bridge/details/entry?sessionId=${sessionId}&turn=${turn}&epoch=${epoch}&cursor=${cursor}`
-      + `&kind=tool-call&seq=${call.seq}`)
-    expect(callDetail.status, JSON.stringify(callDetail.body)).toBe(200)
-    expect(JSON.parse(callDetail.body.text)).toMatchObject({ file_path: 'detail-note.txt' })
+    const calls = current.activity.filter(entry => entry.kind === 'tool-call')
+    expect(calls).toHaveLength(2)
+    const createDetail = await get(fixture,
+      `/dsh-bridge/details/item?sessionId=${sessionId}&turn=${turn}&kind=tool&callId=${calls[0].callId}`)
+    expect(createDetail.status, JSON.stringify(createDetail.body)).toBe(200)
+    expect(createDetail.body).toMatchObject({
+      kind: 'tool', callId: calls[0].callId, name: 'write', settlement: 'settled',
+      parts: { arguments: { byteOffset: 0 }, result: { byteOffset: 0 } },
+      files: [{ status: 'create', pathSource: 'recorded' }],
+    })
+    expect(JSON.parse(createDetail.body.parts.arguments.text)).toMatchObject({ file_path: 'detail-note.txt' })
+    expect(createDetail.body.files[0].diff.text).toContain('no recorded before-image')
+    expect(JSON.stringify(createDetail.body)).not.toContain(marker)
+    expect(createDetail.body.entries).toBeUndefined()
 
-    const results = index.body.entries.filter(entry => entry.kind === 'tool-result')
-    expect(results).toHaveLength(2)
-    const create = results[0]
-    const edit = results[1]
-    expect(create.files[0]).toMatchObject({ status: 'create', pathSource: 'recorded' })
-    expect(edit.files[0]).toMatchObject({ status: 'applied', pathSource: 'recorded' })
-    expect(edit.files[0].fragmentCount).toBeGreaterThan(0)
+    const editDetail = await get(fixture,
+      `/dsh-bridge/details/item?sessionId=${sessionId}&turn=${turn}&kind=tool&callId=${calls[1].callId}`)
+    expect(editDetail.status, JSON.stringify(editDetail.body)).toBe(200)
+    expect(editDetail.body.result.isError).toBe(false)
+    expect(editDetail.body.files[0]).toMatchObject({ status: 'applied', pathSource: 'recorded' })
+    expect(editDetail.body.files[0].fragmentCount).toBeGreaterThan(0)
+    expect(editDetail.body.files[0].diff).toMatchObject({
+      byteOffset: 0, hasMore: false, render: 'ok',
+    })
+    expect(editDetail.body.files[0].diff.text).toContain('-alpha')
+    expect(editDetail.body.files[0].diff.text).toContain('+beta')
+    expect(editDetail.body.files[0].diff.text).toContain('not an appliable patch')
+    expect(editDetail.body.files[0].diff.text).not.toContain('@@ -')
 
-    const resultDetail = await get(fixture,
-      `/dsh-bridge/details/entry?sessionId=${sessionId}&turn=${turn}&epoch=${epoch}&cursor=${cursor}`
-      + `&kind=tool-result&seq=${edit.seq}`)
-    expect(resultDetail.status, JSON.stringify(resultDetail.body)).toBe(200)
-    expect(resultDetail.body.isError).toBe(false)
-    expect(resultDetail.body.files[0]).toMatchObject({ status: 'applied' })
+    const argumentsPage = await get(fixture,
+      `/dsh-bridge/details/item?sessionId=${sessionId}&turn=${turn}&kind=tool&callId=${calls[1].callId}`
+      + `&epoch=${epoch}&cursor=${cursor}&part=arguments&byteOffset=0`)
+    expect(argumentsPage.status, JSON.stringify(argumentsPage.body)).toBe(200)
+    expect(argumentsPage.body.part).toBe('arguments')
+    expect(argumentsPage.body.parts.arguments).toBeDefined()
+    expect(argumentsPage.body.parts.result).toBeUndefined()
+    expect(argumentsPage.body.result).toBeUndefined()
+    expect(argumentsPage.body.files).toBeUndefined()
 
-    const diff = await get(fixture,
-      `/dsh-bridge/details/entry?sessionId=${sessionId}&turn=${turn}&epoch=${epoch}&cursor=${cursor}`
-      + `&kind=file-diff&seq=${edit.seq}`)
-    expect(diff.status, JSON.stringify(diff.body)).toBe(200)
-    expect(diff.body.kind).toBe('file-diff')
-    expect(diff.body.files[0]).toMatchObject({ status: 'applied', render: 'ok' })
-    expect(diff.body.text).toContain('-alpha')
-    expect(diff.body.text).toContain('+beta')
-    expect(diff.body.text).toContain('not an appliable patch')
-    expect(diff.body.text).not.toContain('@@ -')
+    const diffPage = await get(fixture,
+      `/dsh-bridge/details/item?sessionId=${sessionId}&turn=${turn}&kind=tool&callId=${calls[1].callId}`
+      + `&epoch=${epoch}&cursor=${cursor}&part=diff&byteOffset=0&fileIndex=0`)
+    expect(diffPage.status, JSON.stringify(diffPage.body)).toBe(200)
+    expect(diffPage.body).toMatchObject({ kind: 'tool', part: 'diff', fileIndex: 0, files: { length: 1 } })
+    expect(diffPage.body.parts.arguments).toBeUndefined()
+    expect(diffPage.body.parts.result).toBeUndefined()
 
-    // The create result has no recorded before-image.
-    const createDiff = await get(fixture,
-      `/dsh-bridge/details/entry?sessionId=${sessionId}&turn=${turn}&epoch=${epoch}&cursor=${cursor}`
-      + `&kind=file-diff&seq=${create.seq}`)
-    expect(createDiff.status, JSON.stringify(createDiff.body)).toBe(200)
-    expect(createDiff.body.files[0].status).toBe('create')
-    expect(createDiff.body.text).toContain('no recorded before-image')
+    const badFile = await get(fixture,
+      `/dsh-bridge/details/item?sessionId=${sessionId}&turn=${turn}&kind=tool&callId=${calls[1].callId}`
+      + `&epoch=${epoch}&cursor=${cursor}&part=diff&byteOffset=0&fileIndex=99`)
+    expect(badFile.status).toBe(404)
+    expect(badFile.body.reason).toBe('unknown-file')
 
-    // Archiving removes a run target, not read access: the same observation
+    // Archiving removes a run target, not read access: the same concrete item
     // stays readable, and the detail route never resumes it.
     const archived = await post(fixture, '/dsh-bridge/sessions/archive', { sessionId })
     expect(archived.status, JSON.stringify(archived.body)).toBe(200)
-    const archivedIndex = await get(fixture, `/dsh-bridge/details/turn?sessionId=${sessionId}&turn=latest`)
-    expect(archivedIndex.status, JSON.stringify(archivedIndex.body)).toBe(200)
+    const archivedItem = await get(fixture,
+      `/dsh-bridge/details/item?sessionId=${sessionId}&turn=${turn}`
+      + `&kind=thinking&seq=${thinking.seq}&ord=${thinking.ord}`)
+    expect(archivedItem.status, JSON.stringify(archivedItem.body)).toBe(200)
   }, 90000)
 
-  it('rejects malformed selectors, unknown turns, stale observations, and missing auth', async () => {
+  it('rejects malformed/unknown/stale requests, missing auth, and retired routes', async () => {
     const fixture = inject('fixture')
     await post(fixture, '/mock-llm/reset', {})
     await scriptMock(fixture, [{ kind: 'reasoning', text: 'A stale-read thought.' }, { kind: 'text', text: 'One turn.' }])
     const sessionId = await createSession(fixture)
     await runTurn(fixture, sessionId, 'Hello.')
+    const { current } = await currentActivity(fixture, sessionId)
+    const { turn } = current
+    const thinking = current.activity.find(entry => entry.kind === 'thinking')
+    expect(thinking).toBeDefined()
+    const selector = `sessionId=${sessionId}&turn=${turn}&kind=thinking&seq=${thinking.seq}&ord=${thinking.ord}`
 
-    const repeated = await get(fixture,
-      `/dsh-bridge/details/turn?sessionId=${sessionId}&sessionId=other&turn=latest`)
+    const repeated = await get(fixture, `/dsh-bridge/details/item?${selector}&sessionId=other`)
     expect(repeated.status).toBe(400)
     const badKind = await get(fixture,
-      `/dsh-bridge/details/entry?sessionId=${sessionId}&turn=1&epoch=0&cursor=1&kind=nope&seq=1`)
+      `/dsh-bridge/details/item?sessionId=${sessionId}&turn=${turn}&kind=nope&seq=${thinking.seq}`)
     expect(badKind.status).toBe(400)
+    const latest = await get(fixture,
+      `/dsh-bridge/details/item?sessionId=${sessionId}&turn=latest&kind=tool&callId=none`)
+    expect(latest.status).toBe(400)
+    const wrongSelector = await get(fixture,
+      `/dsh-bridge/details/item?sessionId=${sessionId}&turn=${turn}&kind=tool&callId=none&seq=${thinking.seq}`)
+    expect(wrongSelector.status).toBe(400)
     const unknownTurn = await get(fixture,
-      `/dsh-bridge/details/turn?sessionId=${sessionId}&turn=9999`)
+      `/dsh-bridge/details/item?sessionId=${sessionId}&turn=9999&kind=tool&callId=none`)
     expect(unknownTurn.status).toBe(404)
+    const unknownItem = await get(fixture,
+      `/dsh-bridge/details/item?sessionId=${sessionId}&turn=${turn}&kind=tool&callId=none`)
+    expect(unknownItem.status).toBe(404)
 
-    const index = await get(fixture, `/dsh-bridge/details/turn?sessionId=${sessionId}&turn=latest`)
-    expect(index.status).toBe(200)
-    const thinking = index.body.entries.find(entry => entry.kind === 'thinking')
-    expect(thinking, 'the scripted reasoning block must be indexed').toBeDefined()
+    const initial = await get(fixture, `/dsh-bridge/details/item?${selector}`)
+    expect(initial.status, JSON.stringify(initial.body)).toBe(200)
     const stale = await get(fixture,
-      `/dsh-bridge/details/entry?sessionId=${sessionId}&turn=${index.body.turn}`
-      + `&epoch=${index.body.epoch + 1}&cursor=${index.body.cursor}`
-      + `&kind=thinking&seq=${thinking.seq}&ord=${thinking.ord}`)
+      `/dsh-bridge/details/item?${selector}&epoch=${initial.body.epoch + 1}&cursor=${initial.body.cursor}`
+      + '&part=reasoning&byteOffset=0')
     expect(stale.status).toBe(409)
-    expect(stale.body.reason).toBe('stale')
+    expect(stale.body).toMatchObject({
+      reason: 'stale', epoch: initial.body.epoch, cursor: initial.body.cursor,
+    })
 
-    const unauthorized = await raw(fixture, 'GET',
-      `/dsh-bridge/details/turn?sessionId=${sessionId}&turn=latest`)
+    const unauthorized = await raw(fixture, 'GET', `/dsh-bridge/details/item?${selector}`)
     expect(unauthorized.status).toBe(401)
+    for (const retired of [
+      `/dsh-bridge/details/turn?sessionId=${sessionId}&turn=${turn}`,
+      `/dsh-bridge/details/entry?${selector}&epoch=${initial.body.epoch}&cursor=${initial.body.cursor}`,
+    ]) {
+      const absent = await get(fixture, retired)
+      expect(absent.status).toBe(404)
+    }
   }, 90000)
 })

@@ -169,10 +169,10 @@ autoload-check:
 	  emacs -Q --batch -L emacs --eval "(progn (require 'loaddefs-gen) (loaddefs-generate \"emacs\" \"$$tmp/autoloads.el\"))" >/dev/null || \
 	    { echo "error: could not generate autoloads"; exit 1; }; \
 	  emacs -Q --batch -L emacs --eval "(progn (load \"$$tmp/autoloads.el\") \
-	    (unless (autoloadp (symbol-function 'dsh-bridge-extras-inspect-turn)) (kill-emacs 1)) \
+	    (unless (autoloadp (symbol-function 'dsh-bridge-extras-inspect-item)) (kill-emacs 1)) \
 	    (when (featurep 'dsh-bridge) (kill-emacs 2)) \
 	    (when (featurep 'dsh-bridge-extras) (kill-emacs 3)) \
-	    (autoload-do-load (symbol-function 'dsh-bridge-extras-inspect-turn)) \
+	    (autoload-do-load (symbol-function 'dsh-bridge-extras-inspect-item)) \
 	    (unless (featurep 'dsh-bridge-extras) (kill-emacs 4)) \
 	    (unless (featurep 'dsh-bridge) (kill-emacs 5)))"
 

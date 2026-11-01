@@ -1,4 +1,4 @@
-// dsh-emacs-bridge — Vitest specs for the optional turn-detail inspector.
+// dsh-emacs-bridge — Vitest specs for the optional single-item inspector.
 // Copyright (C) 2026  Chong Yidong <cyd@stupidchicken.com>
 //
 // This program is free software: you can redistribute it and/or modify
@@ -16,19 +16,18 @@
 
 import { describe, expect, it } from 'vitest'
 import {
-  buildTurnDetailEntry,
-  buildTurnDetailIndex,
-  buildTurnDetailProjection,
-  parseDetailEntryQuery,
-  parseDetailTurnQuery,
+  buildDetailItem,
+  buildDetailItemProjection,
+  buildDetailItemResponse,
+  parseDetailItemQuery,
   turnBoundaries,
   utf8Page,
-  visibleDetailTurns,
   DETAIL_PAGE_BYTES,
-  MAX_DETAIL_ENTRIES,
   MAX_DETAIL_FILE_CHANGES,
   MAX_DETAIL_FILE_FRAGMENTS,
   type DetailFileChange,
+  type DetailItemKind,
+  type DetailItemPart,
   type DetailQueryParams,
   type SessionEventLike,
 } from '../src/logic.ts'
@@ -59,15 +58,6 @@ function turnEnd(turn: number, failure?: { code?: string; message: string }): Se
     data: failure === undefined
       ? { turn, reason: { kind: 'completed' } }
       : { turn, reason: { kind: 'error', error: failure } },
-  }
-}
-
-function userMessage(turn: number, text: string): SessionEventLike {
-  return {
-    time: turn * 1000,
-    type: 'user/message',
-    data: { turn, step: 0, message: { role: 'user', content: [{ type: 'text', text }] } },
-    surfaceOp: 'append',
   }
 }
 
@@ -137,22 +127,60 @@ function currentSurface(events: readonly SessionEventLike[], omit: number[] = []
     .map(event => event.seq as number))
 }
 
-function indexOf(events: readonly SessionEventLike[], turn: number, surface = currentSurface(events), cwd = '/work') {
-  return buildTurnDetailIndex({
-    sessionId: 's1', turn, events, surfaceSeqs: surface, epoch: 2, cursor: events.length,
-    boundaries: turnBoundaries(events), headerCwd: cwd,
+type Selector = { seq: number; ord: number } | { callId: string }
+
+function itemOf(
+  events: readonly SessionEventLike[], turn: number, kind: DetailItemKind, selector: Selector,
+  opts: { surface?: Set<number>; cwd?: string } = {},
+) {
+  return buildDetailItem({
+    turn, events, surfaceSeqs: opts.surface ?? currentSurface(events),
+    boundaries: turnBoundaries(events), headerCwd: opts.cwd ?? '/work', kind, ...selector,
   })
 }
 
-function entryOf(
-  events: readonly SessionEventLike[], turn: number,
-  kind: 'thinking' | 'tool-call' | 'tool-result' | 'file-diff', seq: number,
-  opts: { ord?: number; surface?: Set<number>; cwd?: string } = {},
+function renderDiff(file: DetailFileChange) {
+  const rendered = renderFileChanges([file])
+  const metadata = rendered.files[0]
+  if (metadata === undefined) throw new Error('missing rendered file')
+  return {
+    text: rendered.text,
+    render: metadata.render,
+    added: metadata.added,
+    removed: metadata.removed,
+    truncated: rendered.truncated,
+  }
+}
+
+function responseOf(
+  events: readonly SessionEventLike[], turn: number, kind: DetailItemKind, selector: Selector,
+  opts: {
+    surface?: Set<number>
+    cwd?: string
+    part?: DetailItemPart
+    byteOffset?: number
+    fileIndex?: number
+    renderDiff?: typeof renderDiff
+  } = {},
 ) {
-  return buildTurnDetailEntry({
+  const projection = buildDetailItemProjection({
     turn, events, surfaceSeqs: opts.surface ?? currentSurface(events),
     boundaries: turnBoundaries(events), headerCwd: opts.cwd ?? '/work',
-    kind, seq, ...opts.ord === undefined ? {} : { ord: opts.ord },
+  })
+  const selected = buildDetailItem({
+    turn, events, surfaceSeqs: opts.surface ?? currentSurface(events),
+    boundaries: turnBoundaries(events), headerCwd: opts.cwd ?? '/work', kind, ...selector, projection,
+  })
+  if (!selected.ok) return selected
+  return buildDetailItemResponse({
+    sessionId: 's1', epoch: 2, cursor: events.length, cwd: '/final',
+    item: selected.item,
+    request: {
+      ...opts.part === undefined ? {} : { part: opts.part },
+      ...opts.byteOffset === undefined ? {} : { byteOffset: opts.byteOffset },
+      ...opts.fileIndex === undefined ? {} : { fileIndex: opts.fileIndex },
+    },
+    renderDiff: opts.renderDiff ?? renderDiff,
   })
 }
 
@@ -163,47 +191,166 @@ function params(query: Record<string, string | string[]>): DetailQueryParams {
   } }
 }
 
-// -- Index and visibility ----------------------------------------------------
+// -- Direct item selection ---------------------------------------------------
 
-describe('buildTurnDetailIndex', () => {
-  it('lists complete reasoning blocks with seq+ord identity', () => {
+describe('buildDetailItem', () => {
+  it('selects exact reasoning blocks by seq+ord and returns no turn roster', () => {
     const l = log()
     l.add(turnStart(1))
-    l.add(assistant(1, 0, [
+    l.add(assistant(1, 2, [
       { type: 'reasoning', text: 'first line\nfull body' },
       { type: 'text', text: 'visible reply' },
       { type: 'reasoning', text: 'second thought' },
     ]))
     l.add(turnEnd(1))
-    const index = indexOf(l.events, 1)
-    expect(index).not.toBeNull()
-    const thinking = index!.entries.filter(entry => entry.kind === 'thinking')
-    expect(thinking).toEqual([
-      { kind: 'thinking', seq: 1, ord: 0, time: 1000, step: 0, summary: 'first line' },
-      { kind: 'thinking', seq: 1, ord: 1, time: 1000, step: 0, summary: 'second thought' },
-    ])
-    expect(index!.epoch).toBe(2)
-    expect(index!.open).toBe(false)
+    const first = responseOf(l.events, 1, 'thinking', { seq: 1, ord: 0 })
+    expect(first).toMatchObject({
+      ok: true,
+      response: {
+        sessionId: 's1', turn: 1, epoch: 2, cursor: 3, cwd: '/final',
+        kind: 'thinking', seq: 1, ord: 0, time: 1002, step: 2, open: false,
+        parts: { reasoning: { text: 'first line\nfull body', byteOffset: 0, hasMore: false } },
+      },
+    })
+    if (!first.ok) return
+    expect(first.response).not.toHaveProperty('entries')
+    expect(first.response).not.toHaveProperty('droppedEntries')
+    expect(JSON.stringify(first.response)).not.toContain('second thought')
+    expect(responseOf(l.events, 1, 'thinking', { seq: 1, ord: 1 })).toMatchObject({
+      ok: true, response: { parts: { reasoning: { text: 'second thought' } } },
+    })
+    expect(itemOf(l.events, 1, 'thinking', { seq: 1, ord: 2 })).toMatchObject({
+      ok: false, status: 404, reason: 'unknown-ordinal',
+    })
   })
 
-  it('pairs calls with current results and keeps orphan results', () => {
+  it('returns one logical tool with exact arguments and its visible result', () => {
     const l = log()
     l.add(turnStart(1))
-    l.add(assistant(1, 0, [{ type: 'text', text: 'working' }]))
-    l.add(toolCall(1, 0, 'c1', 'read', { path: 'a' }))
-    l.add(toolResult(1, 0, 'c1'))
-    l.add(toolResult(1, 0, 'orphan'))
+    l.add(assistant(1, 0, [{ type: 'reasoning', text: 'unrelated thought' }]))
+    l.add(toolCall(1, 0, 'c1', 'bash', '{"command":"printf hi"}'))
+    l.add(toolResult(1, 0, 'c1', { content: [{ type: 'text', text: 'exact result' }] }))
+    l.add(toolResult(1, 1, 'other', { content: [{ type: 'text', text: 'unrelated result' }] }))
     l.add(turnEnd(1))
-    const index = indexOf(l.events, 1)!
-    const tools = index.entries.filter(entry => entry.kind !== 'thinking')
-    expect(tools.map(entry => [entry.kind, entry.settlement])).toEqual([
-      ['tool-call', 'settled'],
-      ['tool-result', 'settled'],
-      ['tool-result', 'orphan'],
-    ])
+    const selected = responseOf(l.events, 1, 'tool', { callId: 'c1' })
+    expect(selected).toMatchObject({
+      ok: true,
+      response: {
+        kind: 'tool', seq: 2, callId: 'c1', name: 'bash', settlement: 'settled', callCwd: '/work',
+        parts: {
+          arguments: { text: '{"command":"printf hi"}' },
+          result: { text: 'exact result' },
+        },
+        result: { seq: 3, isError: false, content: { blocks: [], textBlocks: 1, omittedBlocks: 0 } },
+      },
+    })
+    if (!selected.ok) return
+    expect(JSON.stringify(selected.response)).not.toContain('unrelated thought')
+    expect(JSON.stringify(selected.response)).not.toContain('unrelated result')
+    expect(selected.response).not.toHaveProperty('entries')
   })
 
-  it('excludes shadowed reasoning/results while keeping other entries of the turn', () => {
+  it('keeps pending calls result-free and rejects them after the turn closes', () => {
+    const open = log()
+    open.add(turnStart(1))
+    open.add(toolCall(1, 0, 'c1', 'bash', { command: 'ls' }))
+    expect(responseOf(open.events, 1, 'tool', { callId: 'c1' })).toMatchObject({
+      ok: true,
+      response: { kind: 'tool', settlement: 'pending', parts: { arguments: { text: '{"command":"ls"}' } } },
+    })
+    const pending = responseOf(open.events, 1, 'tool', { callId: 'c1' })
+    if (pending.ok) expect(pending.response).not.toHaveProperty('result')
+
+    const closed = log()
+    closed.add(turnStart(1))
+    closed.add(toolCall(1, 0, 'c1', 'bash', { command: 'ls' }))
+    closed.add(turnEnd(1))
+    expect(itemOf(closed.events, 1, 'tool', { callId: 'c1' })).toMatchObject({
+      ok: false, status: 409, reason: 'not-visible',
+    })
+  })
+
+  it('returns current orphan results without borrowing call arguments', () => {
+    const l = log()
+    l.add(turnStart(1))
+    l.add(toolResult(1, 3, 'orphan', {
+      content: [
+        { type: 'text', text: 'failed' },
+        { type: 'image', attachment: { mediaType: 'image/png', bytes: 12, width: 1, height: 2, attachmentId: 'secret' } },
+        { type: 'future-block', secret: 'nope' },
+      ],
+      isError: true,
+      error: { name: 'AuthError', code: 'AUTH', reason: 'key-123' },
+    }))
+    l.add(turnEnd(1))
+    const selected = responseOf(l.events, 1, 'tool-result', { callId: 'orphan' })
+    expect(selected).toMatchObject({
+      ok: true,
+      response: {
+        kind: 'tool-result', seq: 1, step: 3, callId: 'orphan', name: 'tool', settlement: 'orphan',
+        isError: true,
+        content: {
+          blocks: [
+            { type: 'image', mediaType: 'image/png', bytes: 12, width: 1, height: 2 },
+            { type: 'future-block' },
+          ],
+          textBlocks: 1,
+          omittedBlocks: 1,
+        },
+        error: { name: 'AuthError', code: 'AUTH' },
+        parts: { result: { text: 'failed' } },
+      },
+    })
+    if (selected.ok) {
+      expect(selected.response).not.toHaveProperty('parts.arguments')
+      expect(JSON.stringify(selected.response)).not.toContain('secret')
+      expect(JSON.stringify(selected.response)).not.toContain('key-123')
+    }
+  })
+
+  it('rejects paired results on the orphan-only selector', () => {
+    const l = log()
+    l.add(turnStart(1))
+    l.add(toolCall(1, 0, 'c1', 'read', {}))
+    l.add(toolResult(1, 0, 'c1'))
+    l.add(turnEnd(1))
+    expect(itemOf(l.events, 1, 'tool-result', { callId: 'c1' })).toMatchObject({
+      ok: false, status: 404, reason: 'not-orphan',
+    })
+  })
+
+  it('validates call ids within the requested turn and expected kind', () => {
+    const l = log()
+    l.add(turnStart(1))
+    l.add(toolCall(1, 0, 'shared', 'read', { path: 'one' }))
+    l.add(toolResult(1, 0, 'shared'))
+    l.add(turnEnd(1))
+    l.add(turnStart(2))
+    l.add(toolCall(2, 0, 'shared', 'read', { path: 'two' }))
+    l.add(toolResult(2, 0, 'shared'))
+    l.add(turnEnd(2))
+    expect(itemOf(l.events, 1, 'tool', { callId: 'missing' })).toMatchObject({ ok: false, status: 404 })
+    expect(responseOf(l.events, 1, 'tool', { callId: 'shared' })).toMatchObject({
+      ok: true, response: { parts: { arguments: { text: '{"path":"one"}' } } },
+    })
+    expect(itemOf(l.events, 1, 'thinking', { seq: 5, ord: 0 })).toMatchObject({ ok: false, status: 404 })
+  })
+
+  it('does not pair an orphan with a same-id call in another turn', () => {
+    const l = log()
+    l.add(turnStart(1))
+    l.add(toolResult(1, 0, 'shared', { content: [{ type: 'text', text: 'orphan one' }] }))
+    l.add(turnEnd(1))
+    l.add(turnStart(2))
+    l.add(toolCall(2, 0, 'shared', 'read', { path: 'two' }))
+    l.add(toolResult(2, 0, 'shared'))
+    l.add(turnEnd(2))
+    expect(responseOf(l.events, 1, 'tool-result', { callId: 'shared' })).toMatchObject({
+      ok: true, response: { kind: 'tool-result', parts: { result: { text: 'orphan one' } } },
+    })
+  })
+
+  it('applies visibility per item when other entries of the turn survive', () => {
     const l = log()
     l.add(turnStart(1))
     l.add(assistant(1, 0, [{ type: 'reasoning', text: 'keep me' }]))
@@ -212,89 +359,62 @@ describe('buildTurnDetailIndex', () => {
     l.add(toolResult(1, 1, 'c1'))
     l.add(turnEnd(1))
     const surface = currentSurface(l.events, [2, 4])
-    const index = indexOf(l.events, 1, surface)!
-    expect(index.entries.map(entry => entry.seq)).toEqual([1])
-    // The call's only result is shadowed: the call must not survive alone.
-    expect(index.entries.some(entry => entry.kind === 'tool-call')).toBe(false)
+    expect(itemOf(l.events, 1, 'thinking', { seq: 1, ord: 0 }, { surface })).toMatchObject({ ok: true })
+    expect(itemOf(l.events, 1, 'thinking', { seq: 2, ord: 0 }, { surface })).toMatchObject({
+      ok: false, status: 409, reason: 'not-visible',
+    })
+    expect(itemOf(l.events, 1, 'tool', { callId: 'c1' }, { surface })).toMatchObject({
+      ok: false, status: 409, reason: 'not-visible',
+    })
+    expect(itemOf(l.events, 1, 'tool-result', { callId: 'c1' }, { surface })).toMatchObject({
+      ok: false, status: 404, reason: 'not-orphan',
+    })
   })
 
-  it('keeps an unsettled log-only call only in an open turn', () => {
-    const open = log()
-    open.add(turnStart(1))
-    open.add(assistant(1, 0, [{ type: 'text', text: 'starting' }]))
-    open.add(toolCall(1, 0, 'c1', 'bash', { command: 'ls' }))
-    expect(indexOf(open.events, 1)!.entries.some(entry => entry.kind === 'tool-call')).toBe(true)
-
-    const closed = log()
-    closed.add(turnStart(1))
-    closed.add(assistant(1, 0, [{ type: 'text', text: 'starting' }]))
-    closed.add(toolCall(1, 0, 'c1', 'bash', { command: 'ls' }))
-    closed.add(turnEnd(1))
-    expect(indexOf(closed.events, 1)).toBeNull()
-  })
-
-  it('keeps a failure-only turn visible and carries the sanitized failure', () => {
+  it('accepts current append and replacement copies and uses the latest visible result', () => {
     const l = log()
     l.add(turnStart(1))
-    l.add(turnEnd(1, { code: 'AUTH', message: 'bad key' }))
-    const index = indexOf(l.events, 1)!
-    expect(index.entries).toEqual([])
-    expect(index.failure).toEqual({ code: 'AUTH', message: '' })
+    l.add(assistant(1, 0, [{ type: 'reasoning', text: 'append copy' }]))
+    l.add(assistant(1, 0, [{ type: 'reasoning', text: 'replacement copy' }], { surfaceOp: 'replace' }))
+    l.add(toolCall(1, 0, 'c1', 'read', {}))
+    l.add(toolResult(1, 0, 'c1', { content: [{ type: 'text', text: 'old current copy' }] }))
+    l.add(toolResult(1, 0, 'c1', {
+      content: [{ type: 'text', text: 'latest current copy' }], surfaceOp: 'replace',
+    }))
+    l.add(turnEnd(1))
+    expect(itemOf(l.events, 1, 'thinking', { seq: 1, ord: 0 })).toMatchObject({ ok: true })
+    expect(itemOf(l.events, 1, 'thinking', { seq: 2, ord: 0 })).toMatchObject({ ok: true })
+    expect(responseOf(l.events, 1, 'tool', { callId: 'c1' })).toMatchObject({
+      ok: true, response: { parts: { result: { text: 'latest current copy' } } },
+    })
   })
 
-  it('bounds the index with explicit truncation metadata', () => {
+  it('rejects whitespace-only and malformed current reasoning', () => {
     const l = log()
     l.add(turnStart(1))
-    l.add(assistant(1, 0, Array.from({ length: MAX_DETAIL_ENTRIES + 3 }, (_, i) => ({
+    l.add(assistant(1, 0, [{ type: 'reasoning', text: '  \n' }]))
+    const malformed = assistant(1, 1, [{ type: 'reasoning', text: 'not inspectable' }])
+    if (typeof malformed.data === 'object' && malformed.data !== null) {
+      delete (malformed.data as { step?: unknown }).step
+    }
+    l.add(malformed)
+    l.add(turnEnd(1))
+    expect(itemOf(l.events, 1, 'thinking', { seq: 1, ord: 0 })).toMatchObject({ ok: false, status: 409 })
+    expect(itemOf(l.events, 1, 'thinking', { seq: 2, ord: 0 })).toMatchObject({ ok: false, status: 409 })
+    expect(itemOf(l.events, 99, 'thinking', { seq: 1, ord: 0 })).toMatchObject({
+      ok: false, status: 404, reason: 'unknown-turn',
+    })
+  })
+
+  it('has no index-entry cap or truncation state', () => {
+    const l = log()
+    l.add(turnStart(1))
+    l.add(assistant(1, 0, Array.from({ length: 2001 }, (_, i) => ({
       type: 'reasoning', text: `thought ${i}`,
     }))))
     l.add(turnEnd(1))
-    const index = indexOf(l.events, 1)!
-    expect(index.entries).toHaveLength(MAX_DETAIL_ENTRIES)
-    expect(index.truncated).toBe(true)
-    expect(index.droppedEntries).toBe(3)
-    expect(index.truncatedFromSeq).toBe(1)
-  })
-
-  it('returns null for a shadowed turn even when its user prompt survives', () => {
-    const l = log()
-    l.add(turnStart(1))
-    l.add(userMessage(1, 'a real prompt retained by compaction'))
-    l.add(assistant(1, 0, [{ type: 'reasoning', text: 'gone' }]))
-    l.add(turnEnd(1))
-    const surface = currentSurface(l.events, [2])
-    expect(surface.has(1)).toBe(true)
-    expect(indexOf(l.events, 1, surface)).toBeNull()
-    expect(visibleDetailTurns(l.events, surface, turnBoundaries(l.events))).toEqual([])
-  })
-})
-
-describe('visibleDetailTurns', () => {
-  it('chooses the newest detail-producing turn, not a fully shadowed user-only turn', () => {
-    const l = log()
-    l.add(turnStart(1))
-    l.add(userMessage(1, 'old prompt'))
-    l.add(assistant(1, 0, [{ type: 'reasoning', text: 'old' }]))
-    l.add(turnEnd(1))
-    l.add(turnStart(2))
-    l.add(userMessage(2, 'new prompt survives'))
-    l.add(assistant(2, 0, [{ type: 'reasoning', text: 'shadowed newest' }]))
-    l.add(turnEnd(2))
-    const surface = currentSurface(l.events, [6])
-    expect(visibleDetailTurns(l.events, surface, turnBoundaries(l.events))).toEqual([1])
-  })
-
-  it('keeps mixed surviving user and assistant surface entries without reviving shadowed detail', () => {
-    const l = log()
-    l.add(turnStart(1))
-    l.add(userMessage(1, 'prompt survives'))
-    l.add(assistant(1, 0, [{ type: 'reasoning', text: 'visible thought' }]))
-    l.add(assistant(1, 1, [{ type: 'reasoning', text: 'shadowed thought' }]))
-    l.add(turnEnd(1))
-    const surface = currentSurface(l.events, [3])
-    const index = indexOf(l.events, 1, surface)!
-    expect(index.entries.map(entry => [entry.kind, entry.seq])).toEqual([['thinking', 2]])
-    expect(visibleDetailTurns(l.events, surface, turnBoundaries(l.events))).toEqual([1])
+    expect(itemOf(l.events, 1, 'thinking', { seq: 1, ord: 0 })).toMatchObject({ ok: true })
+    expect(itemOf(l.events, 1, 'thinking', { seq: 1, ord: 2000 })).toMatchObject({ ok: true })
   })
 })
 
@@ -311,11 +431,9 @@ describe('file-change classification', () => {
     l.add(toolCall(1, 0, 'c1', opts.name ?? 'write', args))
     l.add(toolResult(1, 0, 'c1', { meta }))
     l.add(turnEnd(1))
-    const index = indexOf(l.events, 1)
-    const result = index!.entries.find(entry => entry.kind === 'tool-result')
-    if (result?.kind !== 'tool-result' || result.files === undefined) return []
-    const detail = entryOf(l.events, 1, 'file-diff', result.seq)
-    return detail.ok && detail.entry.kind === 'file-diff' ? detail.entry.files : []
+    const selected = itemOf(l.events, 1, 'tool', { callId: 'c1' })
+    if (!selected.ok || selected.item.kind !== 'tool') return []
+    return selected.item.result?.files ?? []
   }
 
   it('classifies applied write/update hunks and keeps canonical paths', () => {
@@ -369,19 +487,21 @@ describe('file-change classification', () => {
     expect(notAnObject[0]).toMatchObject({ status: 'unavailable' })
   })
 
-  it("exposes a valid orphan result durable diff without inventing a call", () => {
+  it('exposes a valid orphan result durable diff without inventing a call', () => {
     const l = log()
     l.add(turnStart(1))
     l.add(toolResult(1, 0, 'orphan-file', {
       meta: { path: '/w/orphan.txt', operation: 'create', diffs: [] },
     }))
     l.add(turnEnd(1))
-    const index = indexOf(l.events, 1)!
-    const result = index.entries.find(entry => entry.kind === 'tool-result') as
-      | { files?: Array<Record<string, unknown>> }
-      | undefined
-    expect(result?.files?.[0]).toMatchObject({
-      status: 'create', path: '/w/orphan.txt', absolute: '/w/orphan.txt', pathSource: 'recorded',
+    expect(responseOf(l.events, 1, 'tool-result', { callId: 'orphan-file' })).toMatchObject({
+      ok: true,
+      response: {
+        files: [{
+          status: 'create', path: '/w/orphan.txt', absolute: '/w/orphan.txt', pathSource: 'recorded',
+          diff: { text: expect.stringContaining('no recorded before-image') },
+        }],
+      },
     })
   })
 
@@ -389,7 +509,6 @@ describe('file-change classification', () => {
     const l = log()
     l.add(turnStart(1))
     l.add({ time: 1000, type: 'working-directory/change', data: { cwd: '/call' } })
-    l.add(assistant(1, 0, [{ type: 'text', text: 'write' }]))
     l.add(toolCall(1, 0, 'c1', 'write', { file_path: 'call.txt', content: 'x' }))
     l.add({ time: 1001, type: 'working-directory/change', data: { cwd: '/result' } })
     l.add(toolResult(1, 0, 'c1', {
@@ -401,22 +520,24 @@ describe('file-change classification', () => {
     }))
     l.add({ time: 1003, type: 'working-directory/change', data: { cwd: '/final' } })
     l.add(turnEnd(1))
-    const paired = entryOf(l.events, 1, 'file-diff', 5)
-    const orphan = entryOf(l.events, 1, 'file-diff', 7)
-    expect(paired).toMatchObject({ ok: true, entry: { files: [{ absolute: '/call/call.txt', cwd: '/call' }] } })
-    expect(orphan).toMatchObject({ ok: true, entry: { files: [{ absolute: '/orphan/orphan.txt', cwd: '/orphan' }] } })
+    expect(itemOf(l.events, 1, 'tool', { callId: 'c1' })).toMatchObject({
+      ok: true, item: { result: { files: [{ absolute: '/call/call.txt', cwd: '/call' }] } },
+    })
+    expect(itemOf(l.events, 1, 'tool-result', { callId: 'orphan' })).toMatchObject({
+      ok: true, item: { result: { files: [{ absolute: '/orphan/orphan.txt', cwd: '/orphan' }] } },
+    })
   })
 
   it('does not claim a failed mutation as an applied change', () => {
     const l = log()
     l.add(turnStart(1))
-    l.add(assistant(1, 0, [{ type: 'text', text: 'edit' }]))
     l.add(toolCall(1, 0, 'c1', 'write', { file_path: 'a', content: 'b' }))
-    l.add(toolResult(1, 0, 'c1', { isError: true, meta: { diffs: [{ path: 'a', oldText: 'a', newText: 'b' }] } }))
+    l.add(toolResult(1, 0, 'c1', {
+      isError: true, meta: { diffs: [{ path: 'a', oldText: 'a', newText: 'b' }] },
+    }))
     l.add(turnEnd(1))
-    const index = indexOf(l.events, 1)!
-    expect(index.entries.find(entry => entry.kind === 'tool-result')).toMatchObject({ isError: true })
-    expect(index.entries.some(entry => entry.kind === 'tool-result' && entry.files !== undefined)).toBe(false)
+    const selected = itemOf(l.events, 1, 'tool', { callId: 'c1' })
+    expect(selected).toMatchObject({ ok: true, item: { result: { isError: true, files: [] } } })
   })
 
   it('reports durable file totals and drops beyond the per-result file cap', () => {
@@ -431,21 +552,12 @@ describe('file-change classification', () => {
       meta: { diffs: Array.from({ length: total }, (_, i) => ({ path: `f${i}.txt`, oldText: 'a', newText: 'b' })) },
     }))
     l.add(turnEnd(1))
-    const index = indexOf(l.events, 1)!
-    expect(index.entries[0]).toMatchObject({
-      files: { length: MAX_DETAIL_FILE_CHANGES },
-      totalFiles: total, droppedFiles: 2, filesTruncated: true,
-    })
-    expect(entryOf(l.events, 1, 'file-diff', 1)).toMatchObject({
+    expect(responseOf(l.events, 1, 'tool-result', { callId: 'orphan' })).toMatchObject({
       ok: true,
-      entry: {
+      response: {
         files: { length: MAX_DETAIL_FILE_CHANGES },
         totalFiles: total, droppedFiles: 2, filesTruncated: true,
       },
-    })
-    expect(entryOf(l.events, 1, 'tool-result', 1)).toMatchObject({
-      ok: true,
-      entry: { totalFiles: total, droppedFiles: 2, filesTruncated: true },
     })
   })
 
@@ -461,206 +573,190 @@ describe('file-change classification', () => {
     l.add(turnStart(1))
     l.add(toolResult(1, 0, 'orphan', { meta: { diffs } }))
     l.add(turnEnd(1))
-    const index = indexOf(l.events, 1)!
-    expect(index.entries[0]).toMatchObject({
-      files: [{
-        fragmentCount: total,
-        retainedFragmentCount: MAX_DETAIL_FILE_FRAGMENTS,
-        droppedFragments: 3,
-        fragmentsTruncated: true,
-      }],
-    })
-  })
-})
-
-// -- Entry selection ---------------------------------------------------------
-
-describe('buildTurnDetailEntry', () => {
-  it('returns complete reasoning text by block ordinal', () => {
-    const l = log()
-    l.add(turnStart(1))
-    l.add(assistant(1, 0, [
-      { type: 'reasoning', text: 'one' },
-      { type: 'reasoning', text: 'two\nfull' },
-    ]))
-    l.add(turnEnd(1))
-    const one = entryOf(l.events, 1, 'thinking', 1, { ord: 0 })
-    expect(one).toMatchObject({ ok: true, entry: { kind: 'thinking', ord: 0, text: 'one' } })
-    const two = entryOf(l.events, 1, 'thinking', 1, { ord: 1 })
-    expect(two).toMatchObject({ ok: true, entry: { text: 'two\nfull' } })
-    expect(entryOf(l.events, 1, 'thinking', 1, { ord: 2 })).toMatchObject({
-      ok: false, status: 404, reason: 'unknown-ordinal',
-    })
-  })
-
-  it('returns exact tool arguments', () => {
-    const l = log()
-    l.add(turnStart(1))
-    l.add(assistant(1, 0, [{ type: 'text', text: 'call' }]))
-    l.add(toolCall(1, 0, 'c1', 'bash', '{"command":"printf hi"}'))
-    l.add(toolResult(1, 0, 'c1'))
-    l.add(turnEnd(1))
-    expect(entryOf(l.events, 1, 'tool-call', 2)).toMatchObject({
+    expect(responseOf(l.events, 1, 'tool-result', { callId: 'orphan' })).toMatchObject({
       ok: true,
-      entry: { kind: 'tool-call', name: 'bash', arguments: '{"command":"printf hi"}' },
+      response: {
+        files: [{
+          fragmentCount: total,
+          retainedFragmentCount: MAX_DETAIL_FILE_FRAGMENTS,
+          droppedFragments: 3,
+          fragmentsTruncated: true,
+        }],
+      },
     })
-  })
-
-  it('returns every result content block, error, and sanitized AUTH diagnostic', () => {
-    const l = log()
-    l.add(turnStart(1))
-    l.add(assistant(1, 0, [{ type: 'text', text: 'call' }]))
-    l.add(toolCall(1, 0, 'c1', 'read', {}))
-    l.add(toolResult(1, 0, 'c1', {
-      isError: true,
-      content: [
-        { type: 'text', text: 'failed' },
-        { type: 'image', attachment: { mediaType: 'image/png', bytes: 12, width: 1, height: 2, attachmentId: 'secret' } },
-        { type: 'future-block', secret: 'nope' },
-      ],
-      error: { name: 'AuthError', code: 'AUTH', reason: 'key-123' },
-    }))
-    l.add(turnEnd(1))
-    const result = entryOf(l.events, 1, 'tool-result', 3)
-    expect(result.ok).toBe(true)
-    if (!result.ok || result.entry.kind !== 'tool-result') return
-    expect(result.entry.isError).toBe(true)
-    expect(result.entry.content.text).toBe('failed')
-    expect(result.entry.content.blocks).toEqual([
-      { type: 'image', mediaType: 'image/png', bytes: 12, width: 1, height: 2 },
-      { type: 'future-block' },
-    ])
-    expect(result.entry.content.omittedBlocks).toBe(1)
-    expect(result.entry.error).toEqual({ name: 'AuthError', code: 'AUTH' })
-  })
-
-  it('rejects a shadowed entry with 409 and an unknown seq with 404', () => {
-    const l = log()
-    l.add(turnStart(1))
-    l.add(assistant(1, 0, [{ type: 'reasoning', text: 'shadowed' }]))
-    l.add(turnEnd(1))
-    const surface = new Set<number>()
-    expect(entryOf(l.events, 1, 'thinking', 1, { ord: 0, surface })).toMatchObject({
-      ok: false, status: 409, reason: 'not-visible',
-    })
-    expect(entryOf(l.events, 1, 'thinking', 99, { ord: 0, surface })).toMatchObject({
-      ok: false, status: 404, reason: 'unknown-entry',
-    })
-  })
-
-  it('reports a valid entry dropped by the index bound as 409 truncated', () => {
-    const l = log()
-    l.add(turnStart(1))
-    l.add(assistant(1, 0, Array.from({ length: MAX_DETAIL_ENTRIES + 1 }, (_, i) => ({
-      type: 'reasoning', text: `thought ${i}`,
-    }))))
-    l.add(turnEnd(1))
-    expect(entryOf(l.events, 1, 'thinking', 1, { ord: 0 })).toMatchObject({
-      ok: false, status: 409, reason: 'truncated',
-    })
-  })
-
-  it('rejects whitespace-only and malformed current reasoning that has no index entry', () => {
-    const l = log()
-    l.add(turnStart(1))
-    l.add(assistant(1, 0, [{ type: 'reasoning', text: '  \n' }]))
-    const malformed = assistant(1, 1, [{ type: 'reasoning', text: 'not indexed' }])
-    if (typeof malformed.data === 'object' && malformed.data !== null) {
-      delete (malformed.data as { step?: unknown }).step
-    }
-    l.add(malformed)
-    l.add(turnEnd(1))
-    expect(entryOf(l.events, 1, 'thinking', 1, { ord: 0 })).toMatchObject({
-      ok: false, status: 409, reason: 'not-visible',
-    })
-    expect(entryOf(l.events, 1, 'thinking', 2, { ord: 0 })).toMatchObject({
-      ok: false, status: 409, reason: 'not-visible',
-    })
-  })
-
-  it('requires matching index entries for direct call, result, and file-diff reads', () => {
-    const l = log()
-    l.add(turnStart(1))
-    l.add(toolCall(1, 0, 'c1', 'read', {}))
-    l.add(toolResult(1, 0, 'c1'))
-    l.add(turnEnd(1))
-    const surface = currentSurface(l.events, [2])
-    expect(entryOf(l.events, 1, 'tool-call', 1, { surface })).toMatchObject({
-      ok: false, status: 409, reason: 'not-visible',
-    })
-    expect(entryOf(l.events, 1, 'tool-result', 2, { surface })).toMatchObject({
-      ok: false, status: 409, reason: 'not-visible',
-    })
-    expect(entryOf(l.events, 1, 'file-diff', 2, { surface })).toMatchObject({
-      ok: false, status: 409, reason: 'not-visible',
-    })
-    expect(entryOf(l.events, 1, 'file-diff', 2)).toMatchObject({
-      ok: false, status: 409, reason: 'not-visible',
-    })
-  })
-
-  it('uses a shared projection for identical index and entry visibility', () => {
-    const l = log()
-    l.add(turnStart(1))
-    l.add(assistant(1, 0, [{ type: 'reasoning', text: 'shared' }]))
-    l.add(turnEnd(1))
-    const args = {
-      sessionId: 's1', turn: 1, events: l.events, surfaceSeqs: currentSurface(l.events),
-      epoch: 2, cursor: l.events.length, boundaries: turnBoundaries(l.events), headerCwd: '/work',
-    }
-    const projection = buildTurnDetailProjection(args)
-    expect(projection.index?.entries).toHaveLength(1)
-    expect(buildTurnDetailEntry({ ...args, kind: 'thinking', seq: 1, ord: 0, projection }))
-      .toMatchObject({ ok: true, entry: { text: 'shared' } })
-  })
-
-  it('rejects a seq that names another turn', () => {
-    const l = log()
-    l.add(turnStart(1))
-    l.add(assistant(1, 0, [{ type: 'reasoning', text: 'one' }]))
-    l.add(turnEnd(1))
-    l.add(turnStart(2))
-    l.add(assistant(2, 0, [{ type: 'reasoning', text: 'two' }]))
-    l.add(turnEnd(2))
-    expect(entryOf(l.events, 1, 'thinking', 4, { ord: 0 })).toMatchObject({ ok: false, status: 404 })
   })
 })
 
-// -- Query parsing and pagination -------------------------------------------
+// -- Query parsing and independent pagination --------------------------------
 
-describe('detail query parsing', () => {
-  it('accepts numeric and latest turn requests', () => {
-    expect(parseDetailTurnQuery(params({ sessionId: 's', turn: '3' })))
-      .toEqual({ ok: true, request: { sessionId: 's', turn: 3 } })
-    expect(parseDetailTurnQuery(params({ sessionId: 's', turn: 'latest' })))
-      .toEqual({ ok: true, request: { sessionId: 's', turn: 'latest' } })
+describe('detail item query parsing', () => {
+  it('accepts the three concrete initial selectors', () => {
+    expect(parseDetailItemQuery(params({ sessionId: 's', turn: '3', kind: 'thinking', seq: '4', ord: '0' })))
+      .toEqual({ ok: true, request: { sessionId: 's', turn: 3, kind: 'thinking', seq: 4, ord: 0 } })
+    expect(parseDetailItemQuery(params({ sessionId: 's', turn: '3', kind: 'tool', callId: 'c1' })))
+      .toEqual({ ok: true, request: { sessionId: 's', turn: 3, kind: 'tool', callId: 'c1' } })
+    expect(parseDetailItemQuery(params({ sessionId: 's', turn: '3', kind: 'tool-result', callId: 'orphan' })))
+      .toEqual({ ok: true, request: { sessionId: 's', turn: 3, kind: 'tool-result', callId: 'orphan' } })
   })
 
-  it('requires one non-empty session id', () => {
-    expect(parseDetailTurnQuery(params({ turn: '1' }))).toMatchObject({ ok: false })
-    expect(parseDetailTurnQuery(params({ sessionId: '', turn: '1' }))).toMatchObject({ ok: false })
-    expect(parseDetailTurnQuery(params({ sessionId: ['a', 'b'], turn: '1' }))).toMatchObject({ ok: false })
+  it('requires one non-empty session id and a numeric turn, never latest', () => {
+    expect(parseDetailItemQuery(params({ turn: '1', kind: 'tool', callId: 'c' }))).toMatchObject({ ok: false })
+    expect(parseDetailItemQuery(params({ sessionId: '', turn: '1', kind: 'tool', callId: 'c' }))).toMatchObject({ ok: false })
+    expect(parseDetailItemQuery(params({ sessionId: ['a', 'b'], turn: '1', kind: 'tool', callId: 'c' }))).toMatchObject({ ok: false })
+    for (const turn of ['latest', '-1', '1.5', 'x']) {
+      expect(parseDetailItemQuery(params({ sessionId: 's', turn, kind: 'tool', callId: 'c' }))).toMatchObject({ ok: false })
+    }
   })
 
-  it('rejects repeated and malformed parameters', () => {
-    expect(parseDetailTurnQuery(params({ sessionId: 's', turn: ['1', '2'] }))).toMatchObject({ ok: false })
-    expect(parseDetailTurnQuery(params({ sessionId: 's', turn: '-1' }))).toMatchObject({ ok: false })
-    expect(parseDetailTurnQuery(params({ sessionId: 's', turn: '1.5' }))).toMatchObject({ ok: false })
-    expect(parseDetailEntryQuery(params({
-      sessionId: 's', turn: '1', epoch: '0', cursor: '4', kind: 'thinking', seq: '1', ord: '0', byteOffset: 'x',
+  it('repeated and wrong-kind selector fields are malformed', () => {
+    expect(parseDetailItemQuery(params({ sessionId: 's', turn: ['1', '2'], kind: 'tool', callId: 'c' }))).toMatchObject({ ok: false })
+    expect(parseDetailItemQuery(params({ sessionId: 's', turn: '1', kind: 'nope', callId: 'c' }))).toMatchObject({ ok: false })
+    expect(parseDetailItemQuery(params({ sessionId: 's', turn: '1', kind: 'thinking', seq: '1' }))).toMatchObject({ ok: false })
+    expect(parseDetailItemQuery(params({ sessionId: 's', turn: '1', kind: 'thinking', seq: '1', ord: '0', callId: 'c' }))).toMatchObject({ ok: false })
+    expect(parseDetailItemQuery(params({ sessionId: 's', turn: '1', kind: 'tool', callId: '' }))).toMatchObject({ ok: false })
+    expect(parseDetailItemQuery(params({ sessionId: 's', turn: '1', kind: 'tool', callId: 'c', seq: '1' }))).toMatchObject({ ok: false })
+    expect(parseDetailItemQuery(params({ sessionId: 's', turn: '1', kind: 'tool-result', callId: 'c', ord: '0' }))).toMatchObject({ ok: false })
+  })
+
+  it('accepts complete continuations and requires their observation and offset', () => {
+    const base = { sessionId: 's', turn: '1', kind: 'tool', callId: 'c' }
+    expect(parseDetailItemQuery(params({
+      ...base, epoch: '2', cursor: '8', part: 'arguments', byteOffset: '64',
+    }))).toEqual({
+      ok: true,
+      request: { ...base, turn: 1, epoch: 2, cursor: 8, part: 'arguments', byteOffset: 64 },
+    })
+    expect(parseDetailItemQuery(params({ ...base, epoch: '2', cursor: '8', part: 'arguments' }))).toMatchObject({ ok: false })
+    expect(parseDetailItemQuery(params({ ...base, part: 'arguments', byteOffset: '0' }))).toMatchObject({ ok: false })
+    expect(parseDetailItemQuery(params({ ...base, epoch: 'x', cursor: '8', part: 'arguments', byteOffset: '0' }))).toMatchObject({ ok: false })
+  })
+
+  it('validates part/kind compatibility and diff file indexes', () => {
+    const thinking = { sessionId: 's', turn: '1', kind: 'thinking', seq: '2', ord: '0' }
+    expect(parseDetailItemQuery(params({
+      ...thinking, epoch: '2', cursor: '8', part: 'arguments', byteOffset: '0',
+    }))).toMatchObject({ ok: false })
+    const orphan = { sessionId: 's', turn: '1', kind: 'tool-result', callId: 'o' }
+    expect(parseDetailItemQuery(params({
+      ...orphan, epoch: '2', cursor: '8', part: 'arguments', byteOffset: '0',
+    }))).toMatchObject({ ok: false })
+    expect(parseDetailItemQuery(params({
+      ...orphan, epoch: '2', cursor: '8', part: 'diff', byteOffset: '0',
+    }))).toMatchObject({ ok: false })
+    expect(parseDetailItemQuery(params({
+      ...orphan, epoch: '2', cursor: '8', part: 'diff', byteOffset: '0', fileIndex: '1',
+    }))).toMatchObject({ ok: true, request: { part: 'diff', fileIndex: 1 } })
+    expect(parseDetailItemQuery(params({
+      ...orphan, epoch: '2', cursor: '8', part: 'result', byteOffset: '0', fileIndex: '1',
     }))).toMatchObject({ ok: false })
   })
+})
 
-  it('requires ord for thinking and rejects it elsewhere', () => {
-    const base = { sessionId: 's', turn: '1', epoch: '0', cursor: '4', seq: '1' }
-    expect(parseDetailEntryQuery(params({ ...base, kind: 'thinking' }))).toMatchObject({ ok: false })
-    expect(parseDetailEntryQuery(params({ ...base, kind: 'thinking', ord: '0' }))).toMatchObject({
-      ok: true, request: { kind: 'thinking', ord: 0 },
+describe('independent item pagination', () => {
+  it('paginates reasoning at UTF-8 boundaries and continues only reasoning', () => {
+    const text = `start😀${'x'.repeat(DETAIL_PAGE_BYTES)}end`
+    const l = log()
+    l.add(turnStart(1))
+    l.add(assistant(1, 0, [{ type: 'reasoning', text }]))
+    l.add(turnEnd(1))
+    const initial = responseOf(l.events, 1, 'thinking', { seq: 1, ord: 0 })
+    if (!initial.ok || initial.response.kind !== 'thinking') throw new Error('missing thinking response')
+    const first = initial.response.parts.reasoning
+    expect(first).toBeDefined()
+    expect(first?.hasMore).toBe(true)
+    expect(first?.totalBytes).toBe(Buffer.byteLength(text, 'utf8'))
+    const next = responseOf(l.events, 1, 'thinking', { seq: 1, ord: 0 }, {
+      part: 'reasoning', byteOffset: first?.nextByteOffset,
     })
-    expect(parseDetailEntryQuery(params({ ...base, kind: 'tool-call', ord: '0' }))).toMatchObject({ ok: false })
-    expect(parseDetailEntryQuery(params({ ...base, kind: 'tool-call' }))).toMatchObject({
-      ok: true, request: { kind: 'tool-call', byteOffset: 0 },
+    expect(next).toMatchObject({
+      ok: true,
+      response: { kind: 'thinking', part: 'reasoning', parts: { reasoning: { byteOffset: first?.nextByteOffset } } },
     })
+    if (next.ok) expect(Object.keys(next.response.parts)).toEqual(['reasoning'])
+  })
+
+  it('paginates arguments and result independently and updates only the requested part', () => {
+    const args = `😀${'a'.repeat(DETAIL_PAGE_BYTES)}`
+    const resultText = `result-${'r'.repeat(DETAIL_PAGE_BYTES * 2)}`
+    const l = log()
+    l.add(turnStart(1))
+    l.add(toolCall(1, 0, 'c1', 'bash', args))
+    l.add(toolResult(1, 0, 'c1', { content: [{ type: 'text', text: resultText }] }))
+    l.add(turnEnd(1))
+    const initial = responseOf(l.events, 1, 'tool', { callId: 'c1' })
+    if (!initial.ok || initial.response.kind !== 'tool') throw new Error('missing tool response')
+    const argsFirst = initial.response.parts.arguments
+    const resultFirst = initial.response.parts.result
+    expect(argsFirst?.byteOffset).toBe(0)
+    expect(resultFirst?.byteOffset).toBe(0)
+    expect(argsFirst?.hasMore).toBe(true)
+    expect(resultFirst?.hasMore).toBe(true)
+    expect(argsFirst?.totalBytes).toBe(Buffer.byteLength(args, 'utf8'))
+    expect(resultFirst?.totalBytes).toBe(Buffer.byteLength(resultText, 'utf8'))
+
+    const argsNext = responseOf(l.events, 1, 'tool', { callId: 'c1' }, {
+      part: 'arguments', byteOffset: argsFirst?.nextByteOffset,
+    })
+    if (!argsNext.ok || argsNext.response.kind !== 'tool') throw new Error('missing arguments continuation')
+    expect(argsNext.response.parts.arguments?.text).toBe('a'.repeat(4))
+    expect(argsNext.response.parts.result).toBeUndefined()
+    expect(argsNext.response.result).toBeUndefined()
+    expect(argsNext.response.files).toBeUndefined()
+
+    const resultNext = responseOf(l.events, 1, 'tool', { callId: 'c1' }, {
+      part: 'result', byteOffset: resultFirst?.nextByteOffset,
+    })
+    if (!resultNext.ok || resultNext.response.kind !== 'tool') throw new Error('missing result continuation')
+    expect(resultNext.response.parts.arguments).toBeUndefined()
+    expect(resultNext.response.parts.result?.byteOffset).toBe(resultFirst?.nextByteOffset)
+    expect(resultNext.response.parts.result?.hasMore).toBe(true)
+  })
+
+  it('paginates each file diff independently and rejects invalid indexes and offsets', () => {
+    const l = log()
+    l.add(turnStart(1))
+    l.add(toolResult(1, 0, 'orphan', {
+      meta: {
+        diffs: [
+          { path: 'a.txt', oldText: 'a', newText: 'b' },
+          { path: 'b.txt', oldText: 'c', newText: 'd' },
+        ],
+      },
+    }))
+    l.add(turnEnd(1))
+    const fakeRender = (file: DetailFileChange) => ({
+      text: `${file.path}:${'😀'.repeat(Math.ceil(DETAIL_PAGE_BYTES / 4))}`,
+      render: 'ok' as const, added: 1, removed: 1, truncated: false,
+    })
+    const initial = responseOf(l.events, 1, 'tool-result', { callId: 'orphan' }, { renderDiff: fakeRender })
+    if (!initial.ok || initial.response.kind !== 'tool-result') throw new Error('missing orphan response')
+    expect(initial.response.files).toHaveLength(2)
+    expect(initial.response.files?.[0]?.diff.hasMore).toBe(true)
+    expect(initial.response.files?.[1]?.diff.byteOffset).toBe(0)
+    const offset = initial.response.files?.[0]?.diff.nextByteOffset
+    const continued = responseOf(l.events, 1, 'tool-result', { callId: 'orphan' }, {
+      part: 'diff', fileIndex: 0, byteOffset: offset, renderDiff: fakeRender,
+    })
+    if (!continued.ok || continued.response.kind !== 'tool-result') throw new Error('missing diff continuation')
+    expect(continued.response.files).toHaveLength(1)
+    expect(continued.response.fileIndex).toBe(0)
+    expect(continued.response.files?.[0]?.path).toBe('a.txt')
+    expect(continued.response.files?.[0]?.diff.byteOffset).toBe(offset)
+    expect(continued.response.parts.result).toBeUndefined()
+    expect(responseOf(l.events, 1, 'tool-result', { callId: 'orphan' }, {
+      part: 'diff', fileIndex: 2, byteOffset: 0, renderDiff: fakeRender,
+    })).toMatchObject({ ok: false, status: 404, reason: 'unknown-file' })
+    expect(responseOf(l.events, 1, 'tool-result', { callId: 'orphan' }, {
+      part: 'diff', fileIndex: 0, byteOffset: Buffer.byteLength('a.txt:') + 1, renderDiff: fakeRender,
+    })).toMatchObject({ ok: false, status: 400, reason: 'invalid-offset' })
+  })
+
+  it('reports a pending result continuation as unavailable', () => {
+    const l = log()
+    l.add(turnStart(1))
+    l.add(toolCall(1, 0, 'c1', 'bash', {}))
+    expect(responseOf(l.events, 1, 'tool', { callId: 'c1' }, { part: 'result', byteOffset: 0 }))
+      .toMatchObject({ ok: false, status: 404, reason: 'result-unavailable' })
   })
 })
 

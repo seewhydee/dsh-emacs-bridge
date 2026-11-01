@@ -1,4 +1,4 @@
-;;; dsh-bridge-extras-tests.el --- ERT tests for the optional DSH inspectors  -*- lexical-binding: t; -*-
+;;; dsh-bridge-extras-tests.el --- ERT tests for the DSH item inspector  -*- lexical-binding: t; -*-
 
 ;; Copyright (C) 2026  Chong Yidong <cyd@stupidchicken.com>
 
@@ -17,739 +17,470 @@
 ;; You should have received a copy of the GNU General Public License
 ;; along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-;;; Commentary:
-
-;; ERT coverage for `dsh-bridge-extras'.  The no-eager-load and
-;; generated-autoload checks live in the Makefile's fresh-process targets: a
-;; test file that requires the extras library cannot make them order-dependent.
-
 ;;; Code:
 
 (require 'ert)
 (require 'cl-lib)
 (require 'dsh-bridge-extras)
 
-(defvar dsh-bridge-extras-tests--requests nil
-  "Requests issued by the current test's request stub.")
+(defun dsh-bridge-extras-tests--page (text &optional next total more)
+  "Build one direct page object for TEXT, NEXT, TOTAL, and MORE."
+  (list (cons 'text text)
+        (cons 'byteOffset 0)
+        (cons 'nextByteOffset (or next (string-bytes text)))
+        (cons 'totalBytes (or total (string-bytes text)))
+        (cons 'hasMore (and more t))))
 
-(defvar dsh-bridge-extras-tests--responder nil
-  "Function called by the request stub with PATH; returns (STATUS . ALIST) or nil.")
+(defun dsh-bridge-extras-tests--thinking-response (&optional text)
+  "Build a thinking item containing TEXT."
+  `((kind . "thinking") (sessionId . "s1") (turn . 3) (epoch . 2) (cursor . 20)
+    (cwd . "/work") (seq . 4) (ord . 0) (step . 1) (time . 1000)
+    (parts . ((reasoning . ,(dsh-bridge-extras-tests--page
+                             (or text "complete reasoning\n")))))))
 
-(defun dsh-bridge-extras-tests--stub-request (method path _payload callback)
-  "Record METHOD/PATH and deliver the current test's response to CALLBACK."
-  (push (list method path) dsh-bridge-extras-tests--requests)
-  (let ((response (funcall dsh-bridge-extras-tests--responder path)))
-    ;; `dsh-bridge--request-async' yields (STATUS . ALIST); tests write the
-    ;; same pair as (list STATUS ALIST) for readability, so normalize here.
-    (when response (funcall callback (cons (car response) (cadr response))))))
+(defun dsh-bridge-extras-tests--tool-response (&optional orphan)
+  "Build a logical tool item, or an orphan result when ORPHAN is non-nil."
+  `((kind . ,(if orphan "tool-result" "tool"))
+    (sessionId . "s1") (turn . 3) (epoch . 2) (cursor . 20) (cwd . "/work")
+    (callId . "c1") (name . "edit") (step . 1)
+    (settlement . ,(if orphan "orphan" "settled"))
+    ,@(if orphan
+          '((isError . :json-false)
+            (content . ((blocks . []) (textBlocks . 1) (omittedBlocks . 0))))
+        '((result . ((isError . :json-false)
+                     (content . ((blocks . []) (textBlocks . 1) (omittedBlocks . 0)))))))
+    (files . (((path . "/work/f.txt") (absolute . "/work/f.txt")
+               (pathSource . "recorded") (status . "applied")
+               (diff . ,(dsh-bridge-extras-tests--page
+                         "File: /work/f.txt\n-old\n+new\n")))))
+    (parts . (,@(unless orphan
+                  `((arguments . ,(dsh-bridge-extras-tests--page
+                                   "{\"file_path\":\"f.txt\"}"))))
+              (result . ,(dsh-bridge-extras-tests--page "done\n"))))))
+
+(defun dsh-bridge-extras-tests--file (absolute diff)
+  "Build one file-change entry at ABSOLUTE with rendered DIFF page."
+  (list (cons 'path absolute) (cons 'absolute absolute)
+        (cons 'pathSource "recorded") (cons 'status "applied")
+        (cons 'diff diff)))
 
 (defmacro dsh-bridge-extras-tests--with-requests (responder &rest body)
-  "Run BODY with `dsh-bridge--request-async' replaced by RESPONDER."
-  (declare (indent 1) (debug (form body)))
-  `(let ((dsh-bridge-extras-tests--requests nil)
-         (dsh-bridge-extras-tests--responder ,responder))
+  "Run BODY with async requests answered synchronously by RESPONDER.
+RESPONDER receives the path and returns (STATUS . ALIST).  Return the
+list of requests in invocation order."
+  (declare (indent 1))
+  `(let ((requests nil))
      (cl-letf (((symbol-function 'dsh-bridge--request-async)
-                #'dsh-bridge-extras-tests--stub-request))
-       ,@body)
-     (nreverse dsh-bridge-extras-tests--requests)))
+                (lambda (method path payload callback)
+                  (push (list method path payload) requests)
+                  (funcall callback (funcall ,responder path)))))
+       (prog1 (progn ,@body)
+         (setq requests (nreverse requests))))
+     requests))
 
-(defun dsh-bridge-extras-tests--index (&rest entries)
-  "Build an index alist containing ENTRIES."
-  (list (cons 'sessionId "s1")
-        (cons 'turn 1)
-        (cons 'epoch 2)
-        (cons 'cursor 9)
-        (cons 'open nil)
-        (cons 'cwd default-directory)
-        (cons 'entries entries)))
-
-(defun dsh-bridge-extras-tests--thinking (seq ord summary &optional step)
-  "Build a thinking index entry."
-  (list (cons 'kind "thinking") (cons 'seq seq) (cons 'ord ord)
-        (cons 'time 1000) (cons 'step (or step 0))
-        (cons 'summary summary)))
-
-(defun dsh-bridge-extras-tests--call (seq call-id name summary &optional settlement)
-  "Build a tool-call index entry."
-  (list (cons 'kind "tool-call") (cons 'seq seq) (cons 'time 1000)
-        (cons 'step 1) (cons 'callId call-id) (cons 'name name)
-        (cons 'summary summary)
-        (cons 'settlement (or settlement "settled"))))
-
-(defun dsh-bridge-extras-tests--result (seq call-id name &optional files is-error)
-  "Build a tool-result index entry."
-  (append (list (cons 'kind "tool-result") (cons 'seq seq) (cons 'time 1000)
-                (cons 'step 1) (cons 'callId call-id) (cons 'name name)
-                (cons 'settlement "settled"))
-          (when is-error (list (cons 'isError t)))
-          (when files (list (cons 'files files)))))
-
-(defun dsh-bridge-extras-tests--file (path &optional status source)
-  "Build a file-change summary."
-  (list (cons 'path path) (cons 'absolute path)
-        (cons 'pathSource (or source "recorded"))
-        (cons 'status (or status "applied"))
-        (cons 'fragmentCount 1)))
-
-(defun dsh-bridge-extras-tests--inspector (index)
-  "Create a read-only inspector buffer primed with INDEX."
-  (let ((buffer (generate-new-buffer "*test-dsh-inspector*")))
-    (with-current-buffer buffer
-      (dsh-bridge-extras-mode)
-      (setq dsh-bridge-extras--session "s1"
-            dsh-bridge-extras--turn 1
-            dsh-bridge-extras--request-turn 1
-            dsh-bridge-extras--epoch 2
-            dsh-bridge-extras--cursor 9
-            dsh-bridge-extras--cwd default-directory
-            dsh-bridge-extras--index index
-            dsh-bridge-extras--details (make-hash-table :test #'equal)
-            dsh-bridge-extras--inflight (make-hash-table :test #'equal)
-            dsh-bridge-extras--stale-refreshed (make-hash-table :test #'equal)
-            dsh-bridge-extras--expanded (make-hash-table :test #'equal)
-            dsh-bridge-extras--selected nil
-            dsh-bridge-extras--generation 1)
-      (dsh-bridge-extras--render))
-    buffer))
-
-(defmacro dsh-bridge-extras-tests--with-inspector (index &rest body)
-  "Run BODY in a fresh inspector buffer primed with INDEX."
-  (declare (indent 1) (debug (form body)))
-  `(let ((buffer (dsh-bridge-extras-tests--inspector ,index)))
+(defmacro dsh-bridge-extras-tests--with-item (response &rest body)
+  "Run BODY in a fresh inspector buffer containing RESPONSE."
+  (declare (indent 1))
+  `(let ((buffer (generate-new-buffer "*test-dsh-item*")))
      (unwind-protect
-         (with-current-buffer buffer ,@body)
+         (with-current-buffer buffer
+           (dsh-bridge-extras-mode)
+           (setq dsh-bridge-extras--session "s1"
+                 dsh-bridge-extras--turn 3
+                 dsh-bridge-extras--selector '(:kind thinking :seq 4 :ord 0)
+                 dsh-bridge-extras--generation 1)
+           (dsh-bridge-extras--handle-item (cons 200 ,response))
+           ,@body)
        (kill-buffer buffer))))
 
-(defun dsh-bridge-extras-tests--point-at-key (key)
-  "Move point to the header line for KEY; return non-nil on success."
-  (goto-char (point-min))
-  (dsh-bridge-extras--goto-key key))
-
-(defun dsh-bridge-extras-tests--detail-response (kind text &rest extra)
-  "Build a detail response for KIND with TEXT and EXTRA alist pairs."
-  (list 200 (append (list (cons 'kind kind)
-                          (cons 'text text)
-                          (cons 'page (list (cons 'byteOffset 0)
-                                            (cons 'nextByteOffset (length text))
-                                            (cons 'totalBytes (length text))
-                                            (cons 'hasMore nil))))
-                    extra)))
-
-;; -- Targeting ---------------------------------------------------------------
-
-(ert-deftest dsh-bridge-extras-at-point-identity ()
-  "At-point identity reads the baseline's activity and button properties."
+(ert-deftest dsh-bridge-extras-identity-at-point-selects-one-item ()
+  "View activity identities map to thinking, logical tool, and orphan selectors."
   (with-temp-buffer
     (dsh-bridge-view-mode)
     (let ((inhibit-read-only t))
-      (insert (propertize "line\n" 'dsh-bridge-activity '(4 . 2))))
+      (insert (propertize "think\n" 'dsh-bridge-activity '(4 . 1))
+              (propertize "call\n" 'dsh-bridge-activity "c1")
+              (propertize "orphan\n" 'dsh-bridge-activity '(tool-result . "c2"))))
     (goto-char (point-min))
     (should (equal (dsh-bridge-extras--identity-at-point)
-                   (list :kind 'thinking :seq 4 :ord 2))))
+                   '(:kind thinking :seq 4 :ord 1)))
+    (forward-line 1)
+    (should (equal (dsh-bridge-extras--identity-at-point)
+                   '(:kind tool :call-id "c1")))
+    (forward-line 1)
+    (should (equal (dsh-bridge-extras--identity-at-point)
+                   '(:kind tool-result :call-id "c2")))))
+
+(ert-deftest dsh-bridge-extras-inspect-requires-an-activity-item ()
+  "Session-only and ordinary-reply contexts never fall back to a turn inspector."
+  (with-temp-buffer
+    (should-error (dsh-bridge-extras-inspect-item) :type 'user-error))
   (with-temp-buffer
     (dsh-bridge-view-mode)
-    (let ((inhibit-read-only t))
-      (insert (propertize "line\n" 'dsh-bridge-activity "call-7")))
-    (goto-char (point-min))
-    (should (equal (dsh-bridge-extras--identity-at-point)
-                   (list :kind 'tool-call :call-id "call-7"))))
+    (setq-local dsh-bridge--view-content-session "s1"
+                dsh-bridge--view-turn 3)
+    (should-error (dsh-bridge-extras-inspect-item) :type 'user-error)))
+
+(ert-deftest dsh-bridge-extras-inspect-thinking-fetches-only-that-block ()
+  "RET's thinking target fetches one concrete block, never an index or latest turn."
   (with-temp-buffer
     (dsh-bridge-view-mode)
-    (let ((inhibit-read-only t))
-      (insert (propertize "line\n" 'dsh-bridge-activity '(tool-result . "call-8"))))
+    (setq-local dsh-bridge--view-content-session "s1"
+                dsh-bridge--view-turn 3)
+    (let ((inhibit-read-only t)
+          (requests nil))
+      (insert (propertize "thinking\n" 'dsh-bridge-activity '(4 . 0)))
+      (goto-char (point-min))
+      (cl-letf (((symbol-function 'pop-to-buffer) (lambda (buffer &rest _) buffer)))
+        (setq requests
+              (dsh-bridge-extras-tests--with-requests
+                  (lambda (_path) (cons 200 (dsh-bridge-extras-tests--thinking-response)))
+                (dsh-bridge-extras-inspect-item))))
+      (unwind-protect
+          (with-current-buffer dsh-bridge-extras-buffer-name
+            (should (= (length requests) 1))
+            (let ((path (cadr (car requests))))
+              (should (string-match-p "/details/item?" path))
+              (should (string-match-p "turn=3" path))
+              (should (string-match-p "kind=thinking" path))
+              (should (string-match-p "seq=4" path))
+              (should (string-match-p "ord=0" path))
+              (should-not (string-match-p "latest\\|epoch=\\|cursor=" path)))
+            (should (equal (buffer-string)
+                           (concat "Thinking — step 1\n"
+                                   "Session      s1   Turn 3\n"
+                                   "Directory    /work\n"
+                                   "Observation  epoch 2, cursor 20\n\n"
+                                   "complete reasoning\n")))
+            (should-not (alist-get 'entries dsh-bridge-extras--item))
+            (should buffer-read-only)
+            (should-not (buffer-modified-p)))
+        (kill-buffer dsh-bridge-extras-buffer-name)))))
+
+(ert-deftest dsh-bridge-extras-tool-item-groups-call-result-and-diff ()
+  "A logical tool item shows its own arguments, result, and diff only."
+  (dsh-bridge-extras-tests--with-item (dsh-bridge-extras-tests--tool-response)
+    (let ((text (buffer-string)))
+      (should (string-match-p "^edit$" text))
+      (should (string-match-p "^Arguments$" text))
+      (should (string-match-p "\"file_path\": \"f.txt\"" text))
+      (should (string-match-p "^Result$" text))
+      (should (string-match-p "^done$" text))
+      (should (string-match-p "^Changed files$" text))
+      (should (string-match-p "^-old$" text))
+      (should (string-match-p "^+new$" text))
+      (should-not (string-match-p "Thinking\\|Tool calls\\|entries" text)))))
+
+(ert-deftest dsh-bridge-extras-orphan-item-has-no-arguments ()
+  "An orphan result never borrows a call's arguments."
+  (dsh-bridge-extras-tests--with-item (dsh-bridge-extras-tests--tool-response t)
+    (should (string-match-p "result (orphan)" (buffer-string)))
+    (should (string-match-p "No call arguments (orphan tool result)\\."
+                            (buffer-string)))
+    (should (string-match-p "^Result$" (buffer-string)))
+    (should-not (string-match-p "^Arguments$" (buffer-string)))))
+
+(ert-deftest dsh-bridge-extras-tool-status-and-file-truncation-are-visible ()
+  "Errors and host-reported omitted file changes remain visible."
+  (dsh-bridge-extras-tests--with-item
+      (let ((response (dsh-bridge-extras-tests--tool-response)))
+        (setf (alist-get 'isError (alist-get 'result response)) t
+              (alist-get 'droppedFiles response) 2)
+        response)
+    (should (string-match-p "Tool reported an error" (buffer-string)))
+    (should (string-match-p "2 durable file change(s) omitted" (buffer-string)))))
+
+(ert-deftest dsh-bridge-extras-pending-tool-is-labelled ()
+  "A pending invocation shows its arguments and pending state, with no result."
+  (dsh-bridge-extras-tests--with-item
+      (let ((response (dsh-bridge-extras-tests--tool-response)))
+        (setf (alist-get 'settlement response) "pending"
+              (alist-get 'result response) nil
+              (alist-get 'result (alist-get 'parts response)) nil
+              (alist-get 'files response) nil)
+        response)
+    (should (string-match-p "^edit (pending)$" (buffer-string)))
+    (should (string-match-p "^Arguments$" (buffer-string)))
+    (should-not (string-match-p "^Result$" (buffer-string)))))
+
+(ert-deftest dsh-bridge-extras-load-more-appends-one-part ()
+  "L continues only the content part at point and preserves the others."
+  (dsh-bridge-extras-tests--with-item
+      (let ((response (dsh-bridge-extras-tests--thinking-response "first")))
+        (setf (alist-get 'reasoning (alist-get 'parts response))
+              (dsh-bridge-extras-tests--page "first" 5 10 t))
+        response)
     (goto-char (point-min))
-    (should (equal (dsh-bridge-extras--identity-at-point)
-                   (list :kind 'tool-result :call-id "call-8")))))
+    (search-forward "first")
+    (let ((requests
+           (dsh-bridge-extras-tests--with-requests
+               (lambda (_path)
+                 (cons 200 `((parts . ((reasoning . ,(dsh-bridge-extras-tests--page
+                                                     "-next" 10 10 nil)))))))
+             (dsh-bridge-extras-load-more))))
+      (should (= (length requests) 1))
+      (let ((path (cadr (car requests))))
+        (should (string-match-p "part=reasoning" path))
+        (should (string-match-p "byteOffset=5" path))
+        (should (string-match-p "epoch=2" path))
+        (should (string-match-p "cursor=20" path))))
+    (should (equal (plist-get (dsh-bridge-extras--part 'reasoning) :text)
+                   "first-next"))))
 
-(ert-deftest dsh-bridge-extras-resolve-target-keys ()
-  "A target resolves to the matching entry key, including a file group."
-  (let* ((file (dsh-bridge-extras-tests--file "/w/f.txt"))
-         (index (dsh-bridge-extras-tests--index
-                 (dsh-bridge-extras-tests--thinking 1 0 "think")
-                 (dsh-bridge-extras-tests--result 2 "c1" "edit" (list file))))
-         (thinking (dsh-bridge-extras--key-for-target
-                    (list :kind 'thinking :seq 1 :ord 0) index))
-         (file-key (dsh-bridge-extras--key-for-target
-                    (list :kind 'file-diff :path "/w/f.txt") index)))
-    (should (equal thinking '(thinking 1 0)))
-    (should (equal file-key '(file-diff 2 nil)))
-    (should (equal dsh-bridge-extras--focus-file "/w/f.txt"))))
+(ert-deftest dsh-bridge-extras-load-more-diff-carries-file-index ()
+  "A diff continuation identifies its file within the same observed tool item."
+  (dsh-bridge-extras-tests--with-item
+      (let ((response (dsh-bridge-extras-tests--tool-response)))
+        (setf (alist-get 'diff (car (alist-get 'files response)))
+              (dsh-bridge-extras-tests--page "File: /work/f.txt\n" 15 20 t))
+        response)
+    (goto-char (point-min))
+    (search-forward "File:")
+    (let ((requests nil))
+      (setq requests
+            (dsh-bridge-extras-tests--with-requests
+                (lambda (_path)
+                  (cons 200 (dsh-bridge-extras-tests--tool-response)))
+              (dsh-bridge-extras-load-more)))
+      (should (= (length requests) 1))
+      (should (string-match-p "part=diff" (cadr (car requests))))
+      (should (string-match-p "fileIndex=0" (cadr (car requests)))))))
 
-(ert-deftest dsh-bridge-extras-inspect-opens-and-selects-shown-turn ()
-  "Inspect-turn opens a read-only buffer and fetches the concrete turn."
-  (let* ((index (dsh-bridge-extras-tests--index
-                 (dsh-bridge-extras-tests--thinking 1 0 "think")))
-         (requests
-          (dsh-bridge-extras-tests--with-requests
-              (lambda (_path) (list 200 index))
-            (dsh-bridge-extras-inspect-turn nil "s1" 1))))
-    (unwind-protect
-        (with-current-buffer dsh-bridge-extras-buffer-name
-          (should (derived-mode-p 'dsh-bridge-extras-mode))
-          (should buffer-read-only)
-          (should (equal dsh-bridge-extras--turn 1))
-          (should (equal dsh-bridge-extras--epoch 2))
-          (should (equal dsh-bridge-extras--cursor 9))
-          (should (string-match-p "DSH Inspector" (buffer-string)))
-          (should (string-match-p "think" (buffer-string)))
-          (should (equal (length requests) 1))
-          (should (string-match-p "turn=1" (cadr (car requests))))
-          (should-not (string-match-p "latest" (cadr (car requests)))))
-      (kill-buffer dsh-bridge-extras-buffer-name))))
+(ert-deftest dsh-bridge-extras-diff-part-keeps-point-across-renders ()
+  "L and g on a file diff leave point inside that same diff."
+  (dsh-bridge-extras-tests--with-item
+      (let ((response (dsh-bridge-extras-tests--tool-response)))
+        (setf (alist-get 'diff (car (alist-get 'files response)))
+              (dsh-bridge-extras-tests--page "File: /work/f.txt\n-old\n" 15 30 t))
+        response)
+    (goto-char (point-min))
+    (search-forward "-old")
+    (let ((line (line-number-at-pos)))
+      (dsh-bridge-extras-tests--with-requests
+          (lambda (_path)
+            (cons 200 `((files . (,(dsh-bridge-extras-tests--file
+                                    "/work/f.txt"
+                                    (dsh-bridge-extras-tests--page "+new\n" 20 20 nil)))))))
+        (dsh-bridge-extras-load-more))
+      (should (= (line-number-at-pos) line))
+      (dsh-bridge-extras-tests--with-requests
+          (lambda (_path)
+            (cons 200 (let ((response (dsh-bridge-extras-tests--tool-response)))
+                        (setf (alist-get 'diff (car (alist-get 'files response)))
+                              (dsh-bridge-extras-tests--page
+                               "File: /work/f.txt\n-old\n+new\n" 20 20 nil))
+                        response)))
+        (dsh-bridge-extras-refresh))
+      (should (= (line-number-at-pos) line))
+      (should (string-match-p "^+new$" (buffer-string))))))
 
-(ert-deftest dsh-bridge-extras-inspect-from-view-uses-shown-turn-and-point ()
-  "A DSH-View invocation targets the shown turn and the entry at point."
-  (let* ((index (dsh-bridge-extras-tests--index
-                 (dsh-bridge-extras-tests--thinking 1 0 "shown")
-                 (dsh-bridge-extras-tests--thinking 2 0 "other")))
-         (requests nil))
+(ert-deftest dsh-bridge-extras-diff-notice-visits-its-own-file ()
+  "A diff pagination notice carries its own file's absolute path."
+  (dsh-bridge-extras-tests--with-item
+      (let ((response (dsh-bridge-extras-tests--tool-response)))
+        (setf (alist-get 'files response)
+              (list (dsh-bridge-extras-tests--file
+                     "/work/first.txt"
+                     (dsh-bridge-extras-tests--page
+                      "File: /work/first.txt\n-a\n" 15 30 t))
+                    (dsh-bridge-extras-tests--file
+                     "/work/second.txt"
+                     (dsh-bridge-extras-tests--page
+                      "File: /work/second.txt\n-b\n" 15 30 t))))
+        response)
+    (goto-char (point-min))
+    (search-forward "File: /work/second.txt")
+    (search-forward "more bytes")
+    (should (equal (dsh-bridge-extras--part-at-point) '(diff 1)))
+    (should (equal (dsh-bridge-extras--property-at-line 'dsh-bridge-extras-file)
+                   "/work/second.txt"))
+    (let ((visited nil))
+      (cl-letf (((symbol-function 'find-file)
+                 (lambda (path &optional _wildcards) (setq visited path))))
+        (dsh-bridge-extras-visit-file))
+      (should (equal visited "/work/second.txt")))))
+
+(ert-deftest dsh-bridge-extras-pagination-notice-remains-actionable ()
+  "The load-more notice belongs to the same content part as its body."
+  (dsh-bridge-extras-tests--with-item
+      (let ((response (dsh-bridge-extras-tests--thinking-response "first")))
+        (setf (alist-get 'reasoning (alist-get 'parts response))
+              (dsh-bridge-extras-tests--page "first" 5 10 t))
+        response)
+    (goto-char (point-min))
+    (search-forward "more bytes")
+    (should (equal (dsh-bridge-extras--part-at-point) 'reasoning))))
+
+(ert-deftest dsh-bridge-extras-refresh-re-resolves-the-same-item ()
+  "Manual refresh uses no stale observation and resets all part pages."
+  (dsh-bridge-extras-tests--with-item (dsh-bridge-extras-tests--thinking-response "old")
+    (let ((requests
+           (dsh-bridge-extras-tests--with-requests
+               (lambda (_path)
+                 (cons 200 (dsh-bridge-extras-tests--thinking-response "new")))
+             (dsh-bridge-extras-refresh))))
+      (should (= (length requests) 1))
+      (should (string-match-p "kind=thinking" (cadr (car requests))))
+      (should-not (string-match-p "epoch=\\|cursor=" (cadr (car requests)))))
+    (should (string-match-p "new" (buffer-string)))
+    (should-not (string-match-p "old" (buffer-string)))))
+
+(ert-deftest dsh-bridge-extras-failed-refresh-preserves-item ()
+  "A failed refresh keeps the last successful item visible."
+  (dsh-bridge-extras-tests--with-item (dsh-bridge-extras-tests--thinking-response "kept")
+    (dsh-bridge-extras-tests--with-requests
+        (lambda (_path) (cons 503 '((error . "down"))))
+      (dsh-bridge-extras-refresh))
+    (should (string-match-p "kept" (buffer-string)))
+    (should (string-match-p "down" (buffer-string)))))
+
+(ert-deftest dsh-bridge-extras-stale-page-preserves-loaded-text ()
+  "A stale continuation reports an error without dropping earlier pages."
+  (dsh-bridge-extras-tests--with-item
+      (let ((response (dsh-bridge-extras-tests--thinking-response "first"))
+            (state nil))
+        (setf (alist-get 'reasoning (alist-get 'parts response))
+              (dsh-bridge-extras-tests--page "first" 5 10 t))
+        response)
+    (goto-char (point-min))
+    (search-forward "first")
+    (dsh-bridge-extras-tests--with-requests
+        (lambda (_path) (cons 409 '((error . "stale") (reason . "stale"))))
+      (dsh-bridge-extras-load-more))
+    (should (equal (plist-get (dsh-bridge-extras--part 'reasoning) :text) "first"))
+    (should (string-match-p "stale" (buffer-string)))
+    (should (string-match-p "press g to refresh" (buffer-string)))
+    (should-not (string-match-p "press L to retry" (buffer-string)))))
+
+(ert-deftest dsh-bridge-extras-late-response-cannot-replace-new-item ()
+  "A response from an earlier item generation is ignored."
+  (let ((callbacks nil))
     (with-temp-buffer
       (dsh-bridge-view-mode)
-      (setq dsh-bridge--view-content-session "s1"
-            dsh-bridge--view-turn 1)
-      (let ((inhibit-read-only t))
-        (insert (propertize "shown\n" 'dsh-bridge-activity '(1 . 0)))
-        (goto-char (point-min)))
-      (setq requests
-            (dsh-bridge-extras-tests--with-requests
-                (lambda (_path) (list 200 index))
-              (dsh-bridge-extras-inspect-turn nil "s1" nil))))
-    (unwind-protect
-        (with-current-buffer dsh-bridge-extras-buffer-name
-          (should (equal (length requests) 1))
-          (should (string-match-p "turn=1" (cadr (car requests))))
-          (should (equal dsh-bridge-extras--selected '(thinking 1 0))))
-      (kill-buffer dsh-bridge-extras-buffer-name))))
-
-(ert-deftest dsh-bridge-extras-inspect-dispatcher-retarget-ignores-view-context ()
-  "A dispatcher focus on another session selects that session's latest turn."
-  (let ((view (generate-new-buffer "*test-dsh-view*"))
-        (index (list (cons 'sessionId "s2") (cons 'turn 8)
-                     (cons 'epoch 4) (cons 'cursor 20)
-                     (cons 'entries
-                          (list (dsh-bridge-extras-tests--thinking 9 0 "first")
-                                (dsh-bridge-extras-tests--thinking 1 0 "target")))))
-        (requests nil))
-    (unwind-protect
-        (progn
-          (with-current-buffer view
-            (dsh-bridge-view-mode)
-            (setq dsh-bridge--view-content-session "s1"
+      (setq-local dsh-bridge--view-content-session "s1"
                   dsh-bridge--view-turn 3)
-            (let ((inhibit-read-only t))
-              (insert (propertize "target\n" 'dsh-bridge-activity '(1 . 0))))
-            (goto-char (point-min)))
-          (let ((transient--prefix t)
-                (transient--original-buffer view)
-                (dsh-bridge--focus (cons "s2" 'cycled)))
-            (with-temp-buffer
-              (setq requests
-                    (dsh-bridge-extras-tests--with-requests
-                        (lambda (_path) (list 200 index))
-                      (dsh-bridge-extras-inspect-turn)))))
-          (with-current-buffer dsh-bridge-extras-buffer-name
-            (should (equal dsh-bridge-extras--session "s2"))
-            (should (equal dsh-bridge-extras--turn 8))
-            (should (equal dsh-bridge-extras--selected '(thinking 9 0)))
-            (should (string-match-p "turn=latest" (cadr (car requests))))
-            (should-not (string-match-p "turn=3" (cadr (car requests))))))
-      (when (buffer-live-p view) (kill-buffer view))
-      (when (get-buffer dsh-bridge-extras-buffer-name)
-        (kill-buffer dsh-bridge-extras-buffer-name)))))
-
-(ert-deftest dsh-bridge-extras-inspect-prefix-retarget-ignores-view-context ()
-  "A prefix-selected session never inherits the current view's turn or point."
-  (let ((index (list (cons 'sessionId "s2") (cons 'turn 7)
-                     (cons 'epoch 4) (cons 'cursor 20)
-                     (cons 'entries
-                          (list (dsh-bridge-extras-tests--thinking 9 0 "first")
-                                (dsh-bridge-extras-tests--thinking 1 0 "target")))))
-        (requests nil))
-    (unwind-protect
-        (with-temp-buffer
-          (dsh-bridge-view-mode)
-          (setq dsh-bridge--view-content-session "s1"
-                dsh-bridge--view-turn 3)
-          (let ((inhibit-read-only t))
-            (insert (propertize "target\n" 'dsh-bridge-activity '(1 . 0))))
-          (goto-char (point-min))
-          (let ((current-prefix-arg '(4)))
-            (cl-letf (((symbol-function 'dsh-bridge--read-session-id)
-                       (lambda (_prompt) "s2")))
-              (setq requests
-                    (dsh-bridge-extras-tests--with-requests
-                        (lambda (_path) (list 200 index))
-                      (dsh-bridge-extras-inspect-turn '(4))))))
-          (with-current-buffer dsh-bridge-extras-buffer-name
-            (should (equal dsh-bridge-extras--session "s2"))
-            (should (equal dsh-bridge-extras--turn 7))
-            (should (equal dsh-bridge-extras--selected '(thinking 9 0)))
-            (should (string-match-p "turn=latest" (cadr (car requests))))
-            (should-not (string-match-p "turn=3" (cadr (car requests))))))
-      (when (get-buffer dsh-bridge-extras-buffer-name)
-        (kill-buffer dsh-bridge-extras-buffer-name)))))
-
-(ert-deftest dsh-bridge-extras-inspect-without-session-refuses ()
-  "Inspect-turn refuses rather than falling back to the last-active session."
-  (cl-letf (((symbol-function 'dsh-bridge--session-for-command) (lambda (_prompt) nil)))
-    (should-error (dsh-bridge-extras-inspect-turn nil nil 'latest) :type 'user-error)))
-
-;; -- Disclosure, navigation, and read-only rendering --------------------------
-
-(ert-deftest dsh-bridge-extras-toggle-fetches-and-renders ()
-  "Toggling an entry fetches its detail and discloses it in place."
-  (let* ((index (dsh-bridge-extras-tests--index
-                 (dsh-bridge-extras-tests--thinking 1 0 "think")
-                 (dsh-bridge-extras-tests--thinking 2 0 "second")))
-         (requests nil))
-    (dsh-bridge-extras-tests--with-inspector index
-      (should (dsh-bridge-extras-tests--point-at-key '(thinking 1 0)))
-      (setq requests
-            (dsh-bridge-extras-tests--with-requests
-                (lambda (_path) (dsh-bridge-extras-tests--detail-response
-                                 "thinking" "complete reasoning\n"))
-              (dsh-bridge-extras-toggle)))
-      (should (gethash '(thinking 1 0) dsh-bridge-extras--expanded))
-      (should (string-match-p "complete reasoning" (buffer-string)))
-      (should (equal (length requests) 1))
-      (should (string-match-p "kind=thinking" (cadr (car requests))))
-      (should (string-match-p "ord=0" (cadr (car requests))))
-      (should buffer-read-only))))
-
-(ert-deftest dsh-bridge-extras-toggle-hides-without-new-request ()
-  "Toggling an already-fetched entry hides it without another request."
-  (let* ((index (dsh-bridge-extras-tests--index
-                 (dsh-bridge-extras-tests--thinking 1 0 "think")))
-         (detail (dsh-bridge-extras-tests--detail-response "thinking" "body\n")))
-    (dsh-bridge-extras-tests--with-inspector index
-      (puthash '(thinking 1 0)
-               (list :response (cadr detail) :text "body\n" :next 0 :hasMore nil)
-               dsh-bridge-extras--details)
-      (puthash '(thinking 1 0) t dsh-bridge-extras--expanded)
-      (dsh-bridge-extras--render)
-      (should (string-match-p "body" (buffer-string)))
-      (dsh-bridge-extras-tests--point-at-key '(thinking 1 0))
-      (let ((requests (dsh-bridge-extras-tests--with-requests
-                          (lambda (_path) (should nil))
-                        (dsh-bridge-extras-toggle))))
-        (should-not requests)
-        (should-not (gethash '(thinking 1 0) dsh-bridge-extras--expanded))
-        (should-not (string-match-p "body" (buffer-string)))))))
-
-(ert-deftest dsh-bridge-extras-navigation-walks-headers ()
-  "n/p move between entry headers and update the selected key."
-  (let ((index (dsh-bridge-extras-tests--index
-                (dsh-bridge-extras-tests--thinking 1 0 "one")
-                (dsh-bridge-extras-tests--thinking 2 0 "two"))))
-    (dsh-bridge-extras-tests--with-inspector index
-      (dsh-bridge-extras--render)
-      (dsh-bridge-extras-tests--point-at-key '(thinking 1 0))
-      (dsh-bridge-extras-next-entry)
-      (should (equal (dsh-bridge-extras--key-at-point) '(thinking 2 0)))
-      (dsh-bridge-extras-previous-entry)
-      (should (equal (dsh-bridge-extras--key-at-point) '(thinking 1 0))))))
-
-(ert-deftest dsh-bridge-extras-refresh-refetches-expanded-details ()
-  "A new observation clears bodies but refills still-expanded entries."
-  (let* ((old (dsh-bridge-extras-tests--index
-               (dsh-bridge-extras-tests--thinking 1 0 "kept")))
-         (new (list (cons 'sessionId "s1") (cons 'turn 1) (cons 'epoch 3)
-                    (cons 'cursor 10) (cons 'open nil)
-                    (cons 'entries (list (dsh-bridge-extras-tests--thinking 1 0 "kept")))))
-         (requests nil))
-    (dsh-bridge-extras-tests--with-inspector old
-      (puthash '(thinking 1 0) t dsh-bridge-extras--expanded)
-      (puthash '(thinking 1 0)
-               (list :response '((kind . "thinking")) :text "old body" :next 0 :hasMore nil)
-               dsh-bridge-extras--details)
-      (dsh-bridge-extras--render)
-      (setq requests
-            (dsh-bridge-extras-tests--with-requests
-                (lambda (_path) (dsh-bridge-extras-tests--detail-response "thinking" "new body\n"))
-              (dsh-bridge-extras--handle-index (cons 200 new) 1 "s1" 1)))
-      (should (equal (length requests) 1))
-      (should (string-match-p "/details/entry" (cadr (car requests))))
-      (should (string-match-p "new body" (buffer-string)))
-      (should-not (string-match-p "old body" (buffer-string))))))
-
-(ert-deftest dsh-bridge-extras-failed-refresh-preserves-content ()
-  "A failed refresh keeps the previous index and reports the failure."
-  (let ((index (dsh-bridge-extras-tests--index
-                (dsh-bridge-extras-tests--thinking 1 0 "kept"))))
-    (dsh-bridge-extras-tests--with-inspector index
-      (dsh-bridge-extras--render)
-      (dsh-bridge-extras-tests--with-requests
-          (lambda (_path) (list 503 '((error . "down"))))
-        (dsh-bridge-extras-refresh))
-      (should (equal dsh-bridge-extras--turn 1))
-      (should (string-match-p "kept" (buffer-string))))))
-
-(ert-deftest dsh-bridge-extras-failed-entry-shows-error ()
-  "A failed detail request is shown without dropping the index."
-  (let ((index (dsh-bridge-extras-tests--index
-                (dsh-bridge-extras-tests--thinking 1 0 "kept"))))
-    (dsh-bridge-extras-tests--with-inspector index
-      (dsh-bridge-extras--render)
-      (dsh-bridge-extras-tests--point-at-key '(thinking 1 0))
-      (dsh-bridge-extras-tests--with-requests
-          (lambda (_path) (list 404 '((error . "no entry"))))
-        (dsh-bridge-extras-toggle))
-      (should (string-match-p "no entry" (buffer-string)))
-      (should (string-match-p "kept" (buffer-string))))))
-
-(ert-deftest dsh-bridge-extras-stale-entry-refreshes-index ()
-  "A 409 stale entry response triggers an index refresh."
-  (let* ((index (dsh-bridge-extras-tests--index
-                 (dsh-bridge-extras-tests--thinking 1 0 "kept")))
-         (requests nil))
-    (dsh-bridge-extras-tests--with-inspector index
-      (dsh-bridge-extras--render)
-      (dsh-bridge-extras-tests--point-at-key '(thinking 1 0))
-      (setq requests
-            (dsh-bridge-extras-tests--with-requests
-                (lambda (path)
-                  (if (string-match-p "/details/entry" path)
-                      (list 409 '((error . "stale") (reason . "stale")))
-                    (list 200 index)))
-              (dsh-bridge-extras-toggle)))
-      (should (>= (length requests) 2))
-      (should (string-match-p "/details/entry" (cadr (car requests))))
-      (should (seq-some (lambda (request)
-                          (string-match-p "/details/turn" (cadr request)))
-                        requests)))))
-
-(ert-deftest dsh-bridge-extras-stale-index-response-is-ignored ()
-  "An index response from an older generation never overwrites newer state."
-  (let* ((old (dsh-bridge-extras-tests--index
-               (dsh-bridge-extras-tests--thinking 1 0 "old")))
-         (new (list (cons 'sessionId "s1") (cons 'turn 2) (cons 'epoch 3)
-                    (cons 'cursor 12) (cons 'open nil)
-                    (cons 'entries (list (dsh-bridge-extras-tests--thinking 5 0 "new"))))))
-    (dsh-bridge-extras-tests--with-inspector old
-      (dsh-bridge-extras--render)
-      (setq dsh-bridge-extras--generation 2)
-      (dsh-bridge-extras--handle-index (cons 200 old) 1 "s1" 1)
-      (should (equal dsh-bridge-extras--turn 1))
-      (dsh-bridge-extras--handle-index (cons 200 new) 2 "s1" 1)
-      (should (equal dsh-bridge-extras--turn 2))
-      (should (string-match-p "new" (buffer-string)))
-      (should-not (string-match-p "old" (buffer-string))))))
-
-(ert-deftest dsh-bridge-extras-refresh-drops-removed-expanded-entries ()
-  "A turn change refills surviving entries but never removed expanded keys."
-  (let* ((old (dsh-bridge-extras-tests--index
-               (dsh-bridge-extras-tests--thinking 1 0 "removed")
-               (dsh-bridge-extras-tests--thinking 2 0 "kept")))
-         (new (list (cons 'sessionId "s1") (cons 'turn 2)
-                    (cons 'epoch 3) (cons 'cursor 10)
-                    (cons 'entries
-                          (list (dsh-bridge-extras-tests--thinking 2 0 "kept")))))
-         (requests nil))
-    (dsh-bridge-extras-tests--with-inspector old
-      (puthash '(thinking 1 0) t dsh-bridge-extras--expanded)
-      (puthash '(thinking 2 0) t dsh-bridge-extras--expanded)
-      (setq requests
-            (dsh-bridge-extras-tests--with-requests
-                (lambda (_path)
-                  (dsh-bridge-extras-tests--detail-response "thinking" "new body\n"))
-              (dsh-bridge-extras--handle-index (cons 200 new) 1 "s1" 1)))
-      (should (equal (length requests) 1))
-      (should (string-match-p "seq=2" (cadr (car requests))))
-      (should-not (gethash '(thinking 1 0) dsh-bridge-extras--expanded))
-      (should (gethash '(thinking 2 0) dsh-bridge-extras--expanded))
-      (should (string-match-p "new body" (buffer-string)))
-      (should-not (string-match-p "removed" (buffer-string))))))
-
-(ert-deftest dsh-bridge-extras-stale-detail-cannot-clear-replacement ()
-  "A stale callback leaves its replacement in flight and duplicate calls share it."
-  (let ((index (dsh-bridge-extras-tests--index
-                (dsh-bridge-extras-tests--thinking 1 0 "think")))
-        (callbacks nil))
-    (dsh-bridge-extras-tests--with-inspector index
-      (cl-letf (((symbol-function 'dsh-bridge--request-async)
-                 (lambda (_method _path _payload callback)
-                   (setq callbacks (append callbacks (list callback))))))
-        (dsh-bridge-extras--fetch-detail '(thinking 1 0))
-        (dsh-bridge-extras--fetch-detail '(thinking 1 0))
-        (should (equal (length callbacks) 1))
-        (setq dsh-bridge-extras--generation 2
-              dsh-bridge-extras--epoch 3
-              dsh-bridge-extras--cursor 10
-              dsh-bridge-extras--inflight (make-hash-table :test #'equal))
-        (dsh-bridge-extras--fetch-detail '(thinking 1 0))
-        (should (equal (length callbacks) 2))
-        (funcall (car callbacks)
-                 (cons 200 '((kind . "thinking") (text . "old"))))
-        (should (gethash '(thinking 1 0) dsh-bridge-extras--inflight))
-        (should-not (dsh-bridge-extras--detail '(thinking 1 0)))
-        (funcall (cadr callbacks)
-                 (cons 200 '((kind . "thinking") (text . "new"))))
-        (should-not (gethash '(thinking 1 0) dsh-bridge-extras--inflight))
-        (should (equal (plist-get (dsh-bridge-extras--detail '(thinking 1 0)) :text)
-                       "new"))))))
-
-(ert-deftest dsh-bridge-extras-killed-buffer-detail-callback-is-inert ()
-  "Completing a detail request after its inspector dies has no effect."
-  (let* ((index (dsh-bridge-extras-tests--index
-                 (dsh-bridge-extras-tests--thinking 1 0 "think")))
-         (buffer (dsh-bridge-extras-tests--inspector index))
-         (callback nil))
-    (unwind-protect
-        (progn
-          (with-current-buffer buffer
-            (cl-letf (((symbol-function 'dsh-bridge--request-async)
-                       (lambda (_method _path _payload done)
-                         (setq callback done))))
-              (dsh-bridge-extras--fetch-detail '(thinking 1 0))))
-          (kill-buffer buffer)
-          (should-not (buffer-live-p buffer))
-          (should callback)
-          (should-not (funcall callback
-                               (cons 200 '((kind . "thinking") (text . "late"))))))
-      (when (buffer-live-p buffer) (kill-buffer buffer)))))
-
-(ert-deftest dsh-bridge-extras-changing-stale-observations-stop-looping ()
-  "Changing observations cannot cause a stale-refresh loop; explicit g can retry."
-  (let* ((entry (dsh-bridge-extras-tests--thinking 1 0 "think"))
-         (index (dsh-bridge-extras-tests--index entry))
-         (refreshes 0)
-         (responder
-          (lambda (path)
-            (if (string-match-p "/details/entry" path)
-                (list 409 '((error . "stale") (reason . "stale")))
-              (setq refreshes (1+ refreshes))
-              (list 200 (list (cons 'sessionId "s1") (cons 'turn 1)
-                              (cons 'epoch (+ 2 refreshes))
-                              (cons 'cursor (+ 9 refreshes))
-                              (cons 'entries (list entry)))))))
-         (requests nil))
-    (dsh-bridge-extras-tests--with-inspector index
-      (dsh-bridge-extras-tests--point-at-key '(thinking 1 0))
-      (setq requests
-            (dsh-bridge-extras-tests--with-requests responder
-              (dsh-bridge-extras-toggle)))
-      (should (equal refreshes 1))
-      (should (equal (cl-count-if
-                      (lambda (request) (string-match-p "/details/entry" (cadr request)))
-                      requests)
-                     2))
-      (should (string-match-p "observation moved; press g"
-                              (or (plist-get (dsh-bridge-extras--detail '(thinking 1 0))
-                                             :error)
-                                  "")))
-      (setq requests
-            (append requests
-                    (dsh-bridge-extras-tests--with-requests responder
-                      (dsh-bridge-extras-refresh))))
-      (should (equal refreshes 3))
-      (should (equal (cl-count-if
-                      (lambda (request) (string-match-p "/details/entry" (cadr request)))
-                      requests)
-                     4))
-      (should (equal (cl-count-if
-                      (lambda (request) (string-match-p "/details/turn" (cadr request)))
-                      requests)
-                     3)))))
-
-;; -- Pagination --------------------------------------------------------------
-
-(ert-deftest dsh-bridge-extras-load-more-appends-pages ()
-  "L fetches the next page and appends it to the disclosed entry."
-  (let ((index (dsh-bridge-extras-tests--index
-                (dsh-bridge-extras-tests--thinking 1 0 "think")))
-        (requests nil))
-    (dsh-bridge-extras-tests--with-inspector index
-      (puthash '(thinking 1 0)
-               (list :response '((kind . "thinking"))
-                     :text "first "
-                     :next 6
-                     :hasMore t)
-               dsh-bridge-extras--details)
-      (puthash '(thinking 1 0) t dsh-bridge-extras--expanded)
-      (setq dsh-bridge-extras--selected '(thinking 1 0))
-      (dsh-bridge-extras--render)
-      (setq requests
-            (dsh-bridge-extras-tests--with-requests
-                (lambda (_path)
-                  (list 200 (list (cons 'kind "thinking")
-                                  (cons 'text "second")
-                                  (cons 'page (list (cons 'nextByteOffset 12)
-                                                    (cons 'hasMore nil))))))
-              (dsh-bridge-extras-load-more)))
-      (should (equal (length requests) 1))
-      (should (string-match-p "byteOffset=6" (cadr (car requests))))
-      (should (equal (plist-get (gethash '(thinking 1 0) dsh-bridge-extras--details) :text)
-                     "first second"))
-      (should (string-match-p "first second" (buffer-string))))))
-
-(ert-deftest dsh-bridge-extras-page-error-preserves-pages-and-can-retry ()
-  "A later-page error preserves loaded text, remaining bytes, and L retry."
-  (let ((index (dsh-bridge-extras-tests--index
-                (dsh-bridge-extras-tests--thinking 1 0 "think")))
-        (requests nil))
-    (dsh-bridge-extras-tests--with-inspector index
-      (puthash '(thinking 1 0)
-               (list :response '((kind . "thinking"))
-                     :text "first page\n"
-                     :next 11
-                     :total 30
-                     :hasMore t)
-               dsh-bridge-extras--details)
-      (puthash '(thinking 1 0) t dsh-bridge-extras--expanded)
-      (setq dsh-bridge-extras--selected '(thinking 1 0))
-      (dsh-bridge-extras--render)
-      (should (string-match-p "19 more bytes" (buffer-string)))
-      (setq requests
-            (dsh-bridge-extras-tests--with-requests
-                (lambda (_path) (list 503 '((error . "down"))))
-              (dsh-bridge-extras-load-more)))
-      (should (string-match-p "byteOffset=11" (cadr (car requests))))
-      (should (string-match-p "first page" (buffer-string)))
-      (should (string-match-p "Could not load more.*press L to retry"
-                              (buffer-string)))
-      (should (string-match-p "19 more bytes" (buffer-string)))
-      (should-not (string-match-p "11 more bytes" (buffer-string)))
-      (setq requests
-            (dsh-bridge-extras-tests--with-requests
-                (lambda (_path)
-                  (list 200 (list (cons 'kind "thinking")
-                                  (cons 'text "second")
-                                  (cons 'page
-                                        (list (cons 'nextByteOffset 17)
-                                              (cons 'totalBytes 30)
-                                              (cons 'hasMore t))))))
-              (dsh-bridge-extras-load-more)))
-      (should (string-match-p "byteOffset=11" (cadr (car requests))))
-      (should (equal (plist-get (dsh-bridge-extras--detail '(thinking 1 0)) :text)
-                     "first page\nsecond"))
-      (should-not (plist-get (dsh-bridge-extras--detail '(thinking 1 0)) :error))
-      (should (string-match-p "13 more bytes" (buffer-string))))))
-
-;; -- Markdown ----------------------------------------------------------------
-
-(ert-deftest dsh-bridge-extras-markdown-unavailable-uses-reasoning-face ()
-  "Without Markdown mode, reasoning text is verbatim with the reasoning face."
-  (should-not (dsh-bridge-extras--fontify-markdown "text"))
-  (with-temp-buffer
-    (dsh-bridge-extras--insert-markdown "verbatim `code`")
-    (should (equal (buffer-string) "verbatim `code`\n"))
-    (should (eq (get-text-property (point-min) 'face)
-                'dsh-bridge-view-thinking-face))))
-
-(ert-deftest dsh-bridge-extras-markdown-transfers-only-whitelisted-properties ()
-  "The Markdown branch keeps face/font-lock-face and drops keymaps/display."
-  (cl-letf (((symbol-function 'require)
-             (lambda (feature &optional _file noerror)
-               (if (eq feature 'markdown-mode) t
-                 (or noerror (signal 'file-missing (list feature))))))
-            ((symbol-function 'gfm-mode)
-             (lambda () (setq major-mode 'gfm-mode)))
-            ((symbol-function 'font-lock-ensure)
-             (lambda (&optional _beg _end)
-               (add-text-properties (point-min) (point-max)
-                                    '(face bold
-                                      keymap (keymap (x . y))
-                                      display "hidden"
-                                      invisibility t
-                                      read-only t)))))
-    (let ((result (dsh-bridge-extras--fontify-markdown "hello")))
-      (should result)
-      (should (eq (get-text-property 0 'face result) 'bold))
-      (should-not (get-text-property 0 'font-lock-face result))
-      (should-not (get-text-property 0 'keymap result))
-      (should-not (get-text-property 0 'display result))
-      (should-not (get-text-property 0 'invisibility result))
-      (should-not (get-text-property 0 'read-only result)))))
-
-(ert-deftest dsh-bridge-extras-markdown-large-text-skips-fontification ()
-  "Text over the byte bound is returned unfontified, not truncated."
-  (let ((dsh-bridge-extras-markdown-byte-limit 4))
-    (should-not (dsh-bridge-extras--fontify-markdown "longer than four"))))
-
-;; -- Diff rendering and file visits -----------------------------------------
-
-(ert-deftest dsh-bridge-extras-diff-text-uses-diff-faces ()
-  "Rendered diff lines are fontified without becoming an appliable patch."
-  (with-temp-buffer
-    (dsh-bridge-extras-mode)
-    (let ((inhibit-read-only t))
-      (erase-buffer)
-      (dsh-bridge-extras--insert-diff-text
-       "File: /w/f.txt\n  status: applied\n-b\n+c\n context\n"))
-    (goto-char (point-min))
-    (search-forward "-b")
-    (should (eq (get-text-property (1- (point)) 'face)
-                (if (facep 'diff-removed) 'diff-removed 'shadow)))
-    (goto-char (point-min))
-    (search-forward "+c")
-    (should (eq (get-text-property (1- (point)) 'face)
-                (if (facep 'diff-added) 'diff-added 'highlight)))))
-
-(ert-deftest dsh-bridge-extras-visit-file-uses-absolute-path ()
-  "e visits the file line's absolute path."
-  (let ((visited nil))
-    (cl-letf (((symbol-function 'find-file)
-               (lambda (path &optional _wildcards) (setq visited path))))
-      (with-temp-buffer
-        (dsh-bridge-extras-mode)
-        (let ((inhibit-read-only t))
-          (erase-buffer)
-          (insert (propertize "f.txt\n" 'dsh-bridge-extras-file "/w/f.txt")))
-        (goto-char (point-min))
-        (dsh-bridge-extras-visit-file)))
-    (should (equal visited "/w/f.txt"))))
-
-(ert-deftest dsh-bridge-extras-file-group-selects-path ()
-  "A file group is expandable and its path line carries the file property."
-  (let* ((file (dsh-bridge-extras-tests--file "/w/f.txt"))
-         (index (dsh-bridge-extras-tests--index
-                 (dsh-bridge-extras-tests--result 2 "c1" "edit" (list file)))))
-    (dsh-bridge-extras-tests--with-inspector index
-      (dsh-bridge-extras--render)
-      (should (dsh-bridge-extras--goto-key '(file-diff 2 nil)))
-      (should (equal (get-text-property (point) 'dsh-bridge-extras-entry)
-                     '(file-diff 2 nil)))
+      (let ((inhibit-read-only t))
+        (insert (propertize "thinking\n" 'dsh-bridge-activity '(4 . 0))))
       (goto-char (point-min))
-      (should (search-forward "/w/f.txt" nil t))
-      (should (equal (get-text-property (1- (point)) 'dsh-bridge-extras-file)
-                     "/w/f.txt")))))
+      (cl-letf (((symbol-function 'pop-to-buffer) (lambda (buffer &rest _) buffer))
+                ((symbol-function 'dsh-bridge--request-async)
+                 (lambda (_method _path _payload callback)
+                   (push callback callbacks))))
+        (dsh-bridge-extras-inspect-item)
+        (dsh-bridge-extras-inspect-item))
+      (unwind-protect
+          (with-current-buffer dsh-bridge-extras-buffer-name
+            (let ((old (nth 1 callbacks))
+                  (new (nth 0 callbacks)))
+              (funcall old (cons 200 (dsh-bridge-extras-tests--thinking-response "old")))
+              (should-not (string-match-p "old" (buffer-string)))
+              (funcall new (cons 200 (dsh-bridge-extras-tests--thinking-response "new")))
+              (should (string-match-p "new" (buffer-string)))))
+        (kill-buffer dsh-bridge-extras-buffer-name)))))
 
-(ert-deftest dsh-bridge-extras-header-reports-truncated-index ()
-  "The inspector makes entries dropped by the index bound visible."
-  (let ((index (append (dsh-bridge-extras-tests--index
-                        (dsh-bridge-extras-tests--thinking 1 0 "think"))
-                       '((truncated . t) (droppedEntries . 3)))))
-    (dsh-bridge-extras-tests--with-inspector index
-      (should (string-match-p "index truncated; 3 older entries not shown"
-                              (buffer-string))))))
+(ert-deftest dsh-bridge-extras-killed-buffer-callback-is-inert ()
+  "Completing a request after its inspector dies has no effect."
+  (let ((callback nil)
+        (buffer nil))
+    (with-temp-buffer
+      (dsh-bridge-view-mode)
+      (setq-local dsh-bridge--view-content-session "s1"
+                  dsh-bridge--view-turn 3)
+      (let ((inhibit-read-only t))
+        (insert (propertize "thinking\n" 'dsh-bridge-activity '(4 . 0))))
+      (goto-char (point-min))
+      (cl-letf (((symbol-function 'pop-to-buffer)
+                 (lambda (target &rest _) (setq buffer target)))
+                ((symbol-function 'dsh-bridge--request-async)
+                 (lambda (_method _path _payload done) (setq callback done))))
+        (dsh-bridge-extras-inspect-item)))
+    (kill-buffer buffer)
+    (should-not (funcall callback
+                         (cons 200 (dsh-bridge-extras-tests--thinking-response))))))
 
 (ert-deftest dsh-bridge-extras-json-is-pretty-printed-with-raw-access ()
-  "Valid JSON gets a readable presentation, raw access, and verbatim fallback."
+  "Complete valid JSON gets a readable presentation and exact raw access."
   (with-temp-buffer
-    (dsh-bridge-extras--insert-json "{\"b\":1,\"a\":[2]}")
+    (dsh-bridge-extras--insert-json "{\"b\":1,\"a\":[2]}" t)
     (should (string-match-p "\"b\": 1" (buffer-string)))
-    (should (string-match-p "\"a\": \\[" (buffer-string)))
     (goto-char (point-min))
     (search-forward "[raw]")
     (let ((button (button-at (match-beginning 0))))
       (should button)
       (should (equal (button-get button 'raw-text) "{\"b\":1,\"a\":[2]}"))))
   (with-temp-buffer
-    (dsh-bridge-extras--insert-json "not JSON")
+    (dsh-bridge-extras--insert-json "not JSON" t)
     (should (equal (buffer-string) "not JSON\n"))))
 
-(ert-deftest dsh-bridge-extras-rendered-buffers-are-unmodified ()
-  "Inspector renders and raw-text updates do not leave buffers modified."
-  (let ((index (dsh-bridge-extras-tests--index
-                (dsh-bridge-extras-tests--thinking 1 0 "think"))))
-    (dsh-bridge-extras-tests--with-inspector index
-      (set-buffer-modified-p t)
-      (dsh-bridge-extras--render)
-      (should-not (buffer-modified-p))))
+(ert-deftest dsh-bridge-extras-partial-json-has-no-misleading-raw-button ()
+  "Raw access waits until all argument pages are present."
+  (with-temp-buffer
+    (dsh-bridge-extras--insert-json "{\"b\":1}" nil)
+    (should-not (string-match-p "\\[raw\\]" (buffer-string)))))
+
+(ert-deftest dsh-bridge-extras-diff-text-uses-diff-faces ()
+  "Rendered diff lines are fontified without becoming an appliable patch."
+  (with-temp-buffer
+    (dsh-bridge-extras-mode)
+    (let ((inhibit-read-only t))
+      (dsh-bridge-extras--insert-diff-text "-old\n+new\n context\n"))
+    (goto-char (point-min))
+    (search-forward "-old")
+    (should (eq (get-text-property (1- (point)) 'face)
+                (if (facep 'diff-removed) 'diff-removed 'shadow)))
+    (search-forward "+new")
+    (should (eq (get-text-property (1- (point)) 'face)
+                (if (facep 'diff-added) 'diff-added 'highlight)))))
+
+(ert-deftest dsh-bridge-extras-visit-file-uses-absolute-path ()
+  "E visits the file metadata's absolute path."
+  (dsh-bridge-extras-tests--with-item (dsh-bridge-extras-tests--tool-response)
+    (goto-char (point-min))
+    (search-forward "File:")
+    (let ((visited nil))
+      (cl-letf (((symbol-function 'find-file)
+                 (lambda (path &optional _wildcards) (setq visited path))))
+        (dsh-bridge-extras-visit-file))
+      (should (equal visited "/work/f.txt")))))
+
+(ert-deftest dsh-bridge-extras-markdown-unavailable-returns-nil ()
+  "No Markdown installation means no error and verbatim caller fallback."
+  (cl-letf (((symbol-function 'require)
+             (lambda (feature &optional _file noerror)
+               (if (eq feature 'markdown-mode) nil
+                 (or noerror (signal 'file-missing (list feature)))))))
+    (should-not (dsh-bridge-extras--fontify-markdown "**hi**"))))
+
+(ert-deftest dsh-bridge-extras-markdown-transfers-only-faces ()
+  "Markdown properties cannot inject keymaps, display, or invisibility."
+  (cl-letf (((symbol-function 'require)
+             (lambda (feature &optional _file noerror)
+               (if (eq feature 'markdown-mode) t
+                 (or noerror (signal 'file-missing (list feature))))))
+            ((symbol-function 'gfm-mode) (lambda () (setq major-mode 'gfm-mode)))
+            ((symbol-function 'font-lock-ensure)
+             (lambda (&optional _beg _end)
+               (add-text-properties (point-min) (point-max)
+                                    '(face bold keymap (keymap (x . y))
+                                      display "hidden" invisibility t read-only t)))))
+    (let ((result (dsh-bridge-extras--fontify-markdown "hello")))
+      (should (eq (get-text-property 0 'face result) 'bold))
+      (should-not (get-text-property 0 'keymap result))
+      (should-not (get-text-property 0 'display result))
+      (should-not (get-text-property 0 'invisibility result))
+      (should-not (get-text-property 0 'read-only result)))))
+
+(ert-deftest dsh-bridge-extras-markdown-large-text-skips-fontification ()
+  "Text over the byte bound is unfontified, not truncated."
+  (let ((dsh-bridge-extras-markdown-byte-limit 4))
+    (should-not (dsh-bridge-extras--fontify-markdown "longer than four"))))
+
+(ert-deftest dsh-bridge-extras-raw-buffer-is-read-only-and-unmodified ()
+  "The exact-text popup does not leave a modified buffer."
   (unwind-protect
       (progn
         (cl-letf (((symbol-function 'pop-to-buffer)
-                   (lambda (buffer &rest _args) buffer)))
+                   (lambda (buffer &rest _) buffer)))
           (dsh-bridge-extras--show-raw "exact raw text"))
         (with-current-buffer dsh-bridge-extras--raw-buffer-name
           (should buffer-read-only)
