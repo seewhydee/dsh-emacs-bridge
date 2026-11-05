@@ -650,15 +650,12 @@ describe('turnsSince', () => {
 
 describe('isSubagentChild', () => {
   it('treats subagent origin as a child', () => {
-    expect(isSubagentChild('subagent', false)).toBe(true)
+    expect(isSubagentChild('subagent')).toBe(true)
   })
 
-  it('treats parent ownership as a child regardless of origin', () => {
-    expect(isSubagentChild(undefined, true)).toBe(true)
-  })
-
-  it('treats a top-level, unowned session as targetable', () => {
-    expect(isSubagentChild(undefined, false)).toBe(false)
+  it('treats an ordinary top-level or forked session as targetable', () => {
+    expect(isSubagentChild(undefined)).toBe(false)
+    expect(isSubagentChild('fork')).toBe(false)
   })
 })
 

@@ -1524,20 +1524,10 @@ export function apply(ctx: Context, config?: Config): void {
     return { usedTokens: used, contextWindow: window }
   }
 
-  /** Whether a live session is owned by its live parent agent. */
-  function ownedByLiveParent(session: Session): boolean {
-    const parentId = session.header.parentSession
-    if (parentId === undefined) return false
-    const agent = ctx.agents.get(session.id)
-    if (agent === undefined) return false
-    const parent = ctx.agents.get(parentId)
-    return parent !== undefined && ctx.agents.isOwnedBy(agent.id, parent)
-  }
-
   /** Live sessions the bridge may target, shaped for the pure logic. */
   function targetableSessions(): LiveSessionLike[] {
     return sessions.list()
-      .filter(session => !isSubagentChild(session.header.origin, ownedByLiveParent(session)))
+      .filter(session => !isSubagentChild(session.header.origin))
       .map((session): LiveSessionLike => ({
         id: String(session.id),
         header: { cwd: session.header.cwd, createdAt: session.header.createdAt },
@@ -1661,11 +1651,6 @@ export function apply(ctx: Context, config?: Config): void {
   /** In-flight resume/create per session id, deduplicating concurrent requests. */
   const sessionCreations = new Map<string, Promise<Agent>>()
 
-  /** Whether a persisted or live header marks a session subagent-owned. */
-  function subagentOwnedHeader(header: { origin?: string } | undefined): boolean {
-    return header?.origin === 'subagent'
-  }
-
   /** Whether the workspace registry currently hides the session from grouping surfaces. */
   function isArchivedSession(id: string): boolean {
     const registry = ctx.get('workspaceRegistry') as WorkspaceRegistryService | undefined
@@ -1708,16 +1693,14 @@ export function apply(ctx: Context, config?: Config): void {
         if (live !== undefined) {
           // Adopting a live agent needs the same ownership guard as the cold
           // arm: a live subagent child is as off-limits as a persisted one.
-          const session = sessions.list().find(s => String(s.id) === id)
-          if (session !== undefined
-            && isSubagentChild(session.header.origin, ownedByLiveParent(session))) {
+          if (isSubagentChild(live.session.header.origin)) {
             throw new BridgeError(409, `session ${id} is owned by a subagent`)
           }
           return live
         }
         const snapshot = await sessionPersistence.stat(id)
         if (snapshot === undefined) throw new BridgeError(404, `session ${id} is not live`)
-        if (subagentOwnedHeader(snapshot.header)) {
+        if (isSubagentChild(snapshot.header.origin)) {
           throw new BridgeError(409, `session ${id} is owned by a subagent`)
         }
         // The preset a cold session runs is a log fact: read the full log once
@@ -1726,7 +1709,7 @@ export function apply(ctx: Context, config?: Config): void {
         const readHandle = await sessionPersistence.open(id, 'read')
         let presetId: string | undefined
         try {
-          if (subagentOwnedHeader(readHandle.header)) {
+          if (isSubagentChild(readHandle.header.origin)) {
             throw new BridgeError(409, `session ${id} is owned by a subagent`)
           }
           presetId = sessionPreset(readHandle.header, (await readHandle.read()).events)
@@ -1907,7 +1890,7 @@ export function apply(ctx: Context, config?: Config): void {
   // `turn` number so Emacs can key its turn-level reply cache (mid-turn
   // segments, the ending turn's closing divider).
   ctx.on('session/event', (session, event) => {
-    if (isSubagentChild(session.header.origin, ownedByLiveParent(session))) return
+    if (isSubagentChild(session.header.origin)) return
     const id = String(session.id)
     // The activity nudge is independent of the lifecycle branches below: a
     // tool-only step emits no turn boundary and no replies-changed, yet it is
@@ -1995,7 +1978,7 @@ export function apply(ctx: Context, config?: Config): void {
   ctx.inject(['sessionProjections'], (projectionCtx) => {
     const registry = projectionCtx.get('sessionProjections') as SessionProjectionRegistryService
     registry.onChanged((session, key, value) => {
-      if (isSubagentChild(session.header.origin, ownedByLiveParent(session))) return
+      if (isSubagentChild(session.header.origin)) return
       const id = String(session.id)
       if (key === 'contextPressure') {
         const pressure = value as
@@ -2041,7 +2024,7 @@ export function apply(ctx: Context, config?: Config): void {
   goalEvents.on('goal/activation-changed', (payload) => {
     const id = String(payload.sessionId)
     const session = sessions.list().find(candidate => String(candidate.id) === id)
-    if (session === undefined || isSubagentChild(session.header.origin, ownedByLiveParent(session))) return
+    if (session === undefined || isSubagentChild(session.header.origin)) return
     const goal = payload.goal
     if (goal === undefined || (goal.activation !== 'armed' && goal.activation !== 'disarmed')) return
     broadcast(goalActivationChangedMessage(id, goal.activation, goal.id, goal.revision))
@@ -2053,7 +2036,7 @@ export function apply(ctx: Context, config?: Config): void {
   // (one per write); the Emacs consumer debounces, so a plain frame suffices.
   ctx.on('session/created', (session) => {
     clearDetailCaches(String(session.id))
-    if (!isSubagentChild(session.header.origin, ownedByLiveParent(session))) {
+    if (!isSubagentChild(session.header.origin)) {
       broadcastSessionsChanged(String(session.id))
     }
   })
@@ -2067,7 +2050,7 @@ export function apply(ctx: Context, config?: Config): void {
   ctx.on('session/disposed', (session) => {
     clearActivityFrame(String(session.id))
     clearDetailCaches(String(session.id))
-    if (!isSubagentChild(session.header.origin, ownedByLiveParent(session))) {
+    if (!isSubagentChild(session.header.origin)) {
       broadcastSessionsChanged(String(session.id))
     }
   })
@@ -2335,7 +2318,7 @@ export function apply(ctx: Context, config?: Config): void {
   async function readDetailObservation(sessionId: string): Promise<DetailObservation> {
     const live = sessions.list().find(candidate => String(candidate.id) === sessionId)
     if (live !== undefined) {
-      if (subagentOwnedHeader(live.header)) {
+      if (isSubagentChild(live.header.origin)) {
         throw new BridgeError(409, `session ${sessionId} is owned by a subagent`)
       }
       const events = live.snapshotEvents() as readonly SessionEventLike[]
@@ -2358,7 +2341,7 @@ export function apply(ctx: Context, config?: Config): void {
       throw new BridgeError(500, `cannot inspect session ${sessionId}: ${error instanceof Error ? error.message : String(error)}`)
     }
     if (snapshot === undefined) throw new BridgeError(404, `session ${sessionId} is not live`)
-    if (subagentOwnedHeader(snapshot.header)) {
+    if (isSubagentChild(snapshot.header.origin)) {
       throw new BridgeError(409, `session ${sessionId} is owned by a subagent`)
     }
     const revision = snapshot.revision
@@ -3823,7 +3806,7 @@ export function apply(ctx: Context, config?: Config): void {
           const id = await resolveReadId(explicitId)
           const live = sessions.list().find(session => String(session.id) === id)
           if (live !== undefined) {
-            if (isSubagentChild(live.header.origin, ownedByLiveParent(live))) {
+            if (isSubagentChild(live.header.origin)) {
               sendJson(res, 409, { error: `session ${id} is owned by a subagent` })
               return
             }

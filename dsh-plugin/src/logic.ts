@@ -1236,12 +1236,13 @@ export function workspaceRefsBySession(workspaces: readonly WorkspaceLike[]): Ma
 }
 
 /**
- * Whether a session must be excluded from targeting and listing: it is a
- * subagent child by origin, or its live parent still owns it (`ownedByParent`
- * is computed by the caller from the live agent registry).
+ * Whether a session must be excluded from targeting and listing. DSH marks a
+ * subagent-created session with `origin: 'subagent'`; ordinary forks and
+ * resumed sessions carry no runtime parent ownership, and a historical fork's
+ * `parentSession` lineage is not subagent ownership.
  */
-export function isSubagentChild(origin: string | undefined, ownedByParent: boolean): boolean {
-  return origin === 'subagent' || ownedByParent
+export function isSubagentChild(origin: string | undefined): boolean {
+  return origin === 'subagent'
 }
 
 /**
