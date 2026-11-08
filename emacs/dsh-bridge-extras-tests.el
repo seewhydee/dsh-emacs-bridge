@@ -93,6 +93,14 @@ list of requests in invocation order."
            ,@body)
        (kill-buffer buffer))))
 
+(ert-deftest dsh-bridge-extras-mode-wraps-long-lines ()
+  "The inspector wraps long content rather than truncating it."
+  (with-temp-buffer
+    (dsh-bridge-extras-mode)
+    (should visual-line-mode)
+    (should word-wrap)
+    (should-not truncate-lines)))
+
 (ert-deftest dsh-bridge-extras-identity-at-point-selects-one-item ()
   "View activity identities map to thinking, logical tool, and orphan selectors."
   (with-temp-buffer
@@ -484,6 +492,8 @@ list of requests in invocation order."
           (dsh-bridge-extras--show-raw "exact raw text"))
         (with-current-buffer dsh-bridge-extras--raw-buffer-name
           (should buffer-read-only)
+          (should visual-line-mode)
+          (should word-wrap)
           (should-not (buffer-modified-p))
           (should (equal (buffer-string) "exact raw text\n"))))
     (when (get-buffer dsh-bridge-extras--raw-buffer-name)

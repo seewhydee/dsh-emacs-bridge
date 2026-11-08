@@ -104,11 +104,13 @@ fontification, rather than being truncated or dropped."
 (define-derived-mode dsh-bridge-extras-mode special-mode "DSH-Inspector"
   "Major mode for inspecting one DSH activity item.
 The buffer is read-only and shows one reasoning block, logical tool
-invocation, or orphan result.  \\[dsh-bridge-extras-refresh] refreshes
+invocation, or orphan result.  Long lines are wrapped by
+`visual-line-mode'.  \\[dsh-bridge-extras-refresh] refreshes
 that item, \\[dsh-bridge-extras-load-more] fetches the next content page,
 and \\[dsh-bridge-extras-visit-file] visits an associated file.
 \\{dsh-bridge-extras-mode-map}"
-  (setq buffer-read-only t))
+  (setq buffer-read-only t)
+  (visual-line-mode 1))
 
 (defvar-local dsh-bridge-extras--session nil
   "The session id containing the inspected item.")
@@ -440,6 +442,7 @@ Text over the byte/line bounds is returned unfontified, never truncated."
       (insert text)
       (unless (string-suffix-p "\n" text) (insert "\n"))
       (special-mode)
+      (visual-line-mode 1)
       (set-buffer-modified-p nil))
     (pop-to-buffer buffer)))
 
