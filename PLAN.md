@@ -104,7 +104,43 @@ the next minor line. The harness does not warn about a mismatch:
 hard `incompatible-version` refusal at install or enable, exemptible
 only per exact version.
 
-### 1. Permission mode (display only, implemented)
+### 1. In-flight reasoning visibility
+
+- **Problem** — DSH-View activity lines and the item inspector only see
+  reasoning after the step's `assistant/message` commits. The web UI shows
+  thinking text while it is still streaming, so a long reasoning block is
+  invisible in Emacs until it finishes.
+- **Why it is not a rendering tweak** — the activity fold walks committed
+  session events and only recognizes `assistant/message`
+  (`activityRelevantEvent`/`turnActivity`); `/details/item` selects reasoning
+  blocks from committed events and their surface seqs. Live reasoning arrives
+  as the host's process-local `agent/assistant-stream` frames; the bridge does
+  not consume them, and the log-only `assistant/attempt` event is appended only
+  at settlement, so neither path can serve a block in flight.
+- **Shape** — host-side, listen to `agent/assistant-stream` per live agent and
+  keep bounded per-session/per-step in-flight reasoning state (attempt id,
+  revision, accumulated text, first-line summary; reset on replacement, drop on
+  end/abort). Publish a summary-only SSE nudge so DSH-View can draw an in-flight
+  thinking line; keep full text off SSE, as today. Expose the accumulated block
+  through an explicit read-only, bearer-authenticated observation/route (extend
+  `/details/item` with a live in-flight selector, or add a sibling route) with
+  UTF-8 pagination and `MAX_DETAIL_*`-style bounds. The inspector fetches it only
+  when the user opens or refreshes that item.
+- **Emacs** — stable identity for the in-flight block; incremental activity-line
+  update; partial Markdown fontification; refresh until the committed block
+  replaces it without duplication. Cold/archived sessions keep today's
+  committed-only behavior.
+- **Privacy and bounds** — in-flight reasoning is raw model output, so the read
+  route must preserve the inspector's explicit-disclosure rules; update
+  README's "Security Matters", the route inventory, and the `logic.ts` bounds.
+  Cap accumulated bytes per attempt and live attempts per session, and drop state
+  when the agent/turn ends.
+- **Acceptance** — a mock-LLM scripted reasoning stream surfaces a thinking line
+  in DSH-View before the step settles; the inspector can open that line and
+  paginate its text; on completion the transient item hands off to the committed
+  block with no duplicate line; stale/aborted attempts disappear.
+
+### 2. Permission mode (display only, implemented)
 
 Show the effective sandbox mode (`read-only` / `workspace-write` /
 `danger-full-access`) and approval policy (`ask` / `never` — note `never`
@@ -121,7 +157,7 @@ risk acknowledgement. See [Deferred](#deferred).  Answering an on-demand
 `approval/request` (a one-shot sandbox escalation or hook-gated tool ask) is
 a separate, implemented feature.
 
-### 2. Queue visibility and queued-item management
+### 3. Queue visibility and queued-item management
 
 - **Problem** — a prompt sent from Emacs while a turn runs is queued
   host-side and invisible in Emacs; there is no way to retract, edit, or
@@ -141,7 +177,7 @@ a separate, implemented feature.
   stop look ineffective; the stop confirmation now warns when that is about
   to happen.
 
-### 3. Ratings/Feedback
+### 4. Ratings/Feedback
 
 - **Seam** — `ctx.messageFeedback` (`list`/`put`/`delete`; also the Remotes
   `messageFeedback/list|put|delete`). Log-only, cold-readable, optimistic
@@ -156,7 +192,7 @@ a separate, implemented feature.
   hover, so rating the shown turn is the faithful equivalent; narrowing to the
   latest turn would make ratings unavailable while browsing.
 
-### 4. `/emacs edit` flow
+### 5. `/emacs edit` flow
 
 Open a file (and line) from DSH in Emacs. The harness `open-in-app` catalog
 ships VS Code, Zed, Sublime, Xcode… but **no Emacs target**, and the flow is
@@ -173,7 +209,7 @@ attachments, signal}` and returns `{kind:'success', text?} |
 {kind:'error', text}`. Convenience, not core; keep it parked behind the
 candidates above.
 
-### 5. Cross-session search
+### 6. Cross-session search
 
 - **Route** — `GET /dsh-bridge/search?q=`: full-text over live sessions plus
   cold logs read via `sessionPersistence.open(id, 'read')` (never resuming).
@@ -182,14 +218,14 @@ candidates above.
 - **UX** — an occur/grep-style results buffer; `RET` jumps to that session's
   transcript at the matching turn.
 
-### 6. Transcript buffer
+### 7. Transcript buffer
 
 A continuous, read-only rendering of a whole session (`/prompts` + `/turns`
 already carry the data), with turn separators and the existing follow/refresh
 machinery. This is the natural home for the turn actions below; no new host
 seam required.
 
-### 7. Deadline-aware ask-user questions
+### 8. Deadline-aware ask-user questions
 
 - **Seam** — 0.2.0-rc.2 lets `tool-ask-user` run in `mode: 'timed'`: the ask
   carries `wait: {callId, timed: true}`, the client's countdown decides the
