@@ -108,7 +108,7 @@ describe('the single-item inspector route', () => {
     expect(typeof cursor).toBe('number')
     expect(thinkingDetail.body).toMatchObject({
       sessionId, turn, kind: 'thinking', open: false,
-      parts: { reasoning: { byteOffset: 0, hasMore: false } },
+      parts: { reasoning: { totalBytes: Buffer.byteLength(thinkingDetail.body.parts.reasoning.text, 'utf8') } },
     })
     expect(thinkingDetail.body.parts.reasoning.text).toContain(marker)
     expect(thinkingDetail.body.parts.reasoning.text).not.toContain('Now change alpha to beta.')
@@ -121,7 +121,7 @@ describe('the single-item inspector route', () => {
     expect(createDetail.status, JSON.stringify(createDetail.body)).toBe(200)
     expect(createDetail.body).toMatchObject({
       kind: 'tool', callId: calls[0].callId, name: 'write', settlement: 'settled',
-      parts: { arguments: { byteOffset: 0 }, result: { byteOffset: 0 } },
+      parts: { arguments: { totalBytes: createDetail.body.parts.arguments.totalBytes }, result: { totalBytes: createDetail.body.parts.result.totalBytes } },
       files: [{ status: 'create', pathSource: 'recorded' }],
     })
     expect(JSON.parse(createDetail.body.parts.arguments.text)).toMatchObject({ file_path: 'detail-note.txt' })
@@ -135,37 +135,11 @@ describe('the single-item inspector route', () => {
     expect(editDetail.body.result.isError).toBe(false)
     expect(editDetail.body.files[0]).toMatchObject({ status: 'applied', pathSource: 'recorded' })
     expect(editDetail.body.files[0].fragmentCount).toBeGreaterThan(0)
-    expect(editDetail.body.files[0].diff).toMatchObject({
-      byteOffset: 0, hasMore: false, render: 'ok',
-    })
+    expect(editDetail.body.files[0].diff).toMatchObject({ render: 'ok' })
     expect(editDetail.body.files[0].diff.text).toContain('-alpha')
     expect(editDetail.body.files[0].diff.text).toContain('+beta')
     expect(editDetail.body.files[0].diff.text).toContain('not an appliable patch')
     expect(editDetail.body.files[0].diff.text).not.toContain('@@ -')
-
-    const argumentsPage = await get(fixture,
-      `/dsh-bridge/details/item?sessionId=${sessionId}&turn=${turn}&kind=tool&callId=${calls[1].callId}`
-      + `&epoch=${epoch}&cursor=${cursor}&part=arguments&byteOffset=0`)
-    expect(argumentsPage.status, JSON.stringify(argumentsPage.body)).toBe(200)
-    expect(argumentsPage.body.part).toBe('arguments')
-    expect(argumentsPage.body.parts.arguments).toBeDefined()
-    expect(argumentsPage.body.parts.result).toBeUndefined()
-    expect(argumentsPage.body.result).toBeUndefined()
-    expect(argumentsPage.body.files).toBeUndefined()
-
-    const diffPage = await get(fixture,
-      `/dsh-bridge/details/item?sessionId=${sessionId}&turn=${turn}&kind=tool&callId=${calls[1].callId}`
-      + `&epoch=${epoch}&cursor=${cursor}&part=diff&byteOffset=0&fileIndex=0`)
-    expect(diffPage.status, JSON.stringify(diffPage.body)).toBe(200)
-    expect(diffPage.body).toMatchObject({ kind: 'tool', part: 'diff', fileIndex: 0, files: { length: 1 } })
-    expect(diffPage.body.parts.arguments).toBeUndefined()
-    expect(diffPage.body.parts.result).toBeUndefined()
-
-    const badFile = await get(fixture,
-      `/dsh-bridge/details/item?sessionId=${sessionId}&turn=${turn}&kind=tool&callId=${calls[1].callId}`
-      + `&epoch=${epoch}&cursor=${cursor}&part=diff&byteOffset=0&fileIndex=99`)
-    expect(badFile.status).toBe(404)
-    expect(badFile.body.reason).toBe('unknown-file')
 
     // Archiving removes a run target, not read access: the same concrete item
     // stays readable, and the detail route never resumes it.
@@ -177,7 +151,7 @@ describe('the single-item inspector route', () => {
     expect(archivedItem.status, JSON.stringify(archivedItem.body)).toBe(200)
   }, 90000)
 
-  it('rejects malformed/unknown/stale requests, missing auth, and retired routes', async () => {
+  it('rejects malformed/unknown/retired-pagination requests, missing auth, and retired routes', async () => {
     const fixture = inject('fixture')
     await post(fixture, '/mock-llm/reset', {})
     await scriptMock(fixture, [{ kind: 'reasoning', text: 'A stale-read thought.' }, { kind: 'text', text: 'One turn.' }])
@@ -209,13 +183,9 @@ describe('the single-item inspector route', () => {
 
     const initial = await get(fixture, `/dsh-bridge/details/item?${selector}`)
     expect(initial.status, JSON.stringify(initial.body)).toBe(200)
-    const stale = await get(fixture,
-      `/dsh-bridge/details/item?${selector}&epoch=${initial.body.epoch + 1}&cursor=${initial.body.cursor}`
-      + '&part=reasoning&byteOffset=0')
-    expect(stale.status).toBe(409)
-    expect(stale.body).toMatchObject({
-      reason: 'stale', epoch: initial.body.epoch, cursor: initial.body.cursor,
-    })
+    const legacy = await get(fixture,
+      `/dsh-bridge/details/item?${selector}&part=reasoning&byteOffset=0`)
+    expect(legacy.status).toBe(400)
 
     const unauthorized = await raw(fixture, 'GET', `/dsh-bridge/details/item?${selector}`)
     expect(unauthorized.status).toBe(401)

@@ -21,13 +21,11 @@ import {
   buildDetailItemResponse,
   parseDetailItemQuery,
   turnBoundaries,
-  utf8Page,
-  DETAIL_PAGE_BYTES,
+  DETAIL_FULL_LOAD_BYTES,
   MAX_DETAIL_FILE_CHANGES,
   MAX_DETAIL_FILE_FRAGMENTS,
   type DetailFileChange,
   type DetailItemKind,
-  type DetailItemPart,
   type DetailQueryParams,
   type SessionEventLike,
 } from '../src/logic.ts'
@@ -157,9 +155,7 @@ function responseOf(
   opts: {
     surface?: Set<number>
     cwd?: string
-    part?: DetailItemPart
-    byteOffset?: number
-    fileIndex?: number
+    full?: true
     renderDiff?: typeof renderDiff
   } = {},
 ) {
@@ -175,11 +171,7 @@ function responseOf(
   return buildDetailItemResponse({
     sessionId: 's1', epoch: 2, cursor: events.length, cwd: '/final',
     item: selected.item,
-    request: {
-      ...opts.part === undefined ? {} : { part: opts.part },
-      ...opts.byteOffset === undefined ? {} : { byteOffset: opts.byteOffset },
-      ...opts.fileIndex === undefined ? {} : { fileIndex: opts.fileIndex },
-    },
+    request: opts.full === true ? { full: true } : {},
     renderDiff: opts.renderDiff ?? renderDiff,
   })
 }
@@ -209,7 +201,8 @@ describe('buildDetailItem', () => {
       response: {
         sessionId: 's1', turn: 1, epoch: 2, cursor: 3, cwd: '/final',
         kind: 'thinking', seq: 1, ord: 0, time: 1002, step: 2, open: false,
-        parts: { reasoning: { text: 'first line\nfull body', byteOffset: 0, hasMore: false } },
+        parts: { reasoning: { text: 'first line\nfull body', totalBytes: 20 } },
+        totalBytes: 20,
       },
     })
     if (!first.ok) return
@@ -587,10 +580,10 @@ describe('file-change classification', () => {
   })
 })
 
-// -- Query parsing and independent pagination --------------------------------
+// -- Query parsing, size probe, and full load -------------------------------
 
 describe('detail item query parsing', () => {
-  it('accepts the three concrete initial selectors', () => {
+  it('accepts the three concrete selectors', () => {
     expect(parseDetailItemQuery(params({ sessionId: 's', turn: '3', kind: 'thinking', seq: '4', ord: '0' })))
       .toEqual({ ok: true, request: { sessionId: 's', turn: 3, kind: 'thinking', seq: 4, ord: 0 } })
     expect(parseDetailItemQuery(params({ sessionId: 's', turn: '3', kind: 'tool', callId: 'c1' })))
@@ -618,174 +611,100 @@ describe('detail item query parsing', () => {
     expect(parseDetailItemQuery(params({ sessionId: 's', turn: '1', kind: 'tool-result', callId: 'c', ord: '0' }))).toMatchObject({ ok: false })
   })
 
-  it('accepts complete continuations and requires their observation and offset', () => {
+  it('accepts the full-load flag and rejects malformed values', () => {
     const base = { sessionId: 's', turn: '1', kind: 'tool', callId: 'c' }
-    expect(parseDetailItemQuery(params({
-      ...base, epoch: '2', cursor: '8', part: 'arguments', byteOffset: '64',
-    }))).toEqual({
-      ok: true,
-      request: { ...base, turn: 1, epoch: 2, cursor: 8, part: 'arguments', byteOffset: 64 },
-    })
-    expect(parseDetailItemQuery(params({ ...base, epoch: '2', cursor: '8', part: 'arguments' }))).toMatchObject({ ok: false })
-    expect(parseDetailItemQuery(params({ ...base, part: 'arguments', byteOffset: '0' }))).toMatchObject({ ok: false })
-    expect(parseDetailItemQuery(params({ ...base, epoch: 'x', cursor: '8', part: 'arguments', byteOffset: '0' }))).toMatchObject({ ok: false })
+    expect(parseDetailItemQuery(params({ ...base, full: '1' })))
+      .toMatchObject({ ok: true, request: { ...base, turn: 1, full: true } })
+    expect(parseDetailItemQuery(params({ ...base, full: 'true' })))
+      .toMatchObject({ ok: true, request: { ...base, turn: 1, full: true } })
+    expect(parseDetailItemQuery(params({ ...base, full: '0' }))).toMatchObject({ ok: false })
+    expect(parseDetailItemQuery(params({ ...base, full: ['1', '1'] }))).toMatchObject({ ok: false })
   })
 
-  it('validates part/kind compatibility and diff file indexes', () => {
-    const thinking = { sessionId: 's', turn: '1', kind: 'thinking', seq: '2', ord: '0' }
-    expect(parseDetailItemQuery(params({
-      ...thinking, epoch: '2', cursor: '8', part: 'arguments', byteOffset: '0',
-    }))).toMatchObject({ ok: false })
-    const orphan = { sessionId: 's', turn: '1', kind: 'tool-result', callId: 'o' }
-    expect(parseDetailItemQuery(params({
-      ...orphan, epoch: '2', cursor: '8', part: 'arguments', byteOffset: '0',
-    }))).toMatchObject({ ok: false })
-    expect(parseDetailItemQuery(params({
-      ...orphan, epoch: '2', cursor: '8', part: 'diff', byteOffset: '0',
-    }))).toMatchObject({ ok: false })
-    expect(parseDetailItemQuery(params({
-      ...orphan, epoch: '2', cursor: '8', part: 'diff', byteOffset: '0', fileIndex: '1',
-    }))).toMatchObject({ ok: true, request: { part: 'diff', fileIndex: 1 } })
-    expect(parseDetailItemQuery(params({
-      ...orphan, epoch: '2', cursor: '8', part: 'result', byteOffset: '0', fileIndex: '1',
-    }))).toMatchObject({ ok: false })
+  it('rejects the removed pagination parameters', () => {
+    const base = { sessionId: 's', turn: '1', kind: 'tool', callId: 'c' }
+    for (const legacy of [
+      { epoch: '2' }, { cursor: '8' }, { part: 'arguments' },
+      { byteOffset: '0' }, { fileIndex: '0' },
+    ]) {
+      expect(parseDetailItemQuery(params({ ...base, ...legacy }))).toMatchObject({ ok: false })
+    }
   })
 })
 
-describe('independent item pagination', () => {
-  it('paginates reasoning at UTF-8 boundaries and continues only reasoning', () => {
-    const text = `start😀${'x'.repeat(DETAIL_PAGE_BYTES)}end`
+describe('size probe and full load', () => {
+  it('returns a small item complete', () => {
+    const l = log()
+    l.add(turnStart(1))
+    l.add(assistant(1, 0, [{ type: 'reasoning', text: 'short thought' }]))
+    l.add(turnEnd(1))
+    const result = responseOf(l.events, 1, 'thinking', { seq: 1, ord: 0 })
+    if (!result.ok || result.response.kind !== 'thinking') throw new Error('missing thinking response')
+    expect(result.response.deferred).toBeUndefined()
+    expect(result.response.parts.reasoning?.text).toBe('short thought')
+    expect(result.response.totalBytes).toBe(Buffer.byteLength('short thought', 'utf8'))
+  })
+
+  it('withholds a large item and reports its bytes', () => {
+    const text = 'x'.repeat(DETAIL_FULL_LOAD_BYTES + 1)
     const l = log()
     l.add(turnStart(1))
     l.add(assistant(1, 0, [{ type: 'reasoning', text }]))
     l.add(turnEnd(1))
-    const initial = responseOf(l.events, 1, 'thinking', { seq: 1, ord: 0 })
-    if (!initial.ok || initial.response.kind !== 'thinking') throw new Error('missing thinking response')
-    const first = initial.response.parts.reasoning
-    expect(first).toBeDefined()
-    expect(first?.hasMore).toBe(true)
-    expect(first?.totalBytes).toBe(Buffer.byteLength(text, 'utf8'))
-    const next = responseOf(l.events, 1, 'thinking', { seq: 1, ord: 0 }, {
-      part: 'reasoning', byteOffset: first?.nextByteOffset,
-    })
-    expect(next).toMatchObject({
-      ok: true,
-      response: { kind: 'thinking', part: 'reasoning', parts: { reasoning: { byteOffset: first?.nextByteOffset } } },
-    })
-    if (next.ok) expect(Object.keys(next.response.parts)).toEqual(['reasoning'])
+    const result = responseOf(l.events, 1, 'thinking', { seq: 1, ord: 0 })
+    if (!result.ok || result.response.kind !== 'thinking') throw new Error('missing thinking response')
+    expect(result.response.deferred).toBe(true)
+    expect(result.response.totalBytes).toBe(Buffer.byteLength(text, 'utf8'))
+    expect(result.response.parts.reasoning?.text).toBe('')
+    expect(result.response.parts.reasoning?.totalBytes).toBe(Buffer.byteLength(text, 'utf8'))
   })
 
-  it('paginates arguments and result independently and updates only the requested part', () => {
-    const args = `😀${'a'.repeat(DETAIL_PAGE_BYTES)}`
-    const resultText = `result-${'r'.repeat(DETAIL_PAGE_BYTES * 2)}`
+  it('returns the complete item when full is requested', () => {
+    const text = 'x'.repeat(DETAIL_FULL_LOAD_BYTES + 1)
     const l = log()
     l.add(turnStart(1))
-    l.add(toolCall(1, 0, 'c1', 'bash', args))
-    l.add(toolResult(1, 0, 'c1', { content: [{ type: 'text', text: resultText }] }))
+    l.add(assistant(1, 0, [{ type: 'reasoning', text }]))
     l.add(turnEnd(1))
-    const initial = responseOf(l.events, 1, 'tool', { callId: 'c1' })
-    if (!initial.ok || initial.response.kind !== 'tool') throw new Error('missing tool response')
-    const argsFirst = initial.response.parts.arguments
-    const resultFirst = initial.response.parts.result
-    expect(argsFirst?.byteOffset).toBe(0)
-    expect(resultFirst?.byteOffset).toBe(0)
-    expect(argsFirst?.hasMore).toBe(true)
-    expect(resultFirst?.hasMore).toBe(true)
-    expect(argsFirst?.totalBytes).toBe(Buffer.byteLength(args, 'utf8'))
-    expect(resultFirst?.totalBytes).toBe(Buffer.byteLength(resultText, 'utf8'))
-
-    const argsNext = responseOf(l.events, 1, 'tool', { callId: 'c1' }, {
-      part: 'arguments', byteOffset: argsFirst?.nextByteOffset,
-    })
-    if (!argsNext.ok || argsNext.response.kind !== 'tool') throw new Error('missing arguments continuation')
-    expect(argsNext.response.parts.arguments?.text).toBe('a'.repeat(4))
-    expect(argsNext.response.parts.result).toBeUndefined()
-    expect(argsNext.response.result).toBeUndefined()
-    expect(argsNext.response.files).toBeUndefined()
-
-    const resultNext = responseOf(l.events, 1, 'tool', { callId: 'c1' }, {
-      part: 'result', byteOffset: resultFirst?.nextByteOffset,
-    })
-    if (!resultNext.ok || resultNext.response.kind !== 'tool') throw new Error('missing result continuation')
-    expect(resultNext.response.parts.arguments).toBeUndefined()
-    expect(resultNext.response.parts.result?.byteOffset).toBe(resultFirst?.nextByteOffset)
-    expect(resultNext.response.parts.result?.hasMore).toBe(true)
+    const result = responseOf(l.events, 1, 'thinking', { seq: 1, ord: 0 }, { full: true })
+    if (!result.ok || result.response.kind !== 'thinking') throw new Error('missing thinking response')
+    expect(result.response.deferred).toBeUndefined()
+    expect(result.response.parts.reasoning?.text).toBe(text)
+    expect(result.response.totalBytes).toBe(Buffer.byteLength(text, 'utf8'))
   })
 
-  it('paginates each file diff independently and rejects invalid indexes and offsets', () => {
+  it('sizes a large tool item across arguments, result, and files', () => {
     const l = log()
     l.add(turnStart(1))
-    l.add(toolResult(1, 0, 'orphan', {
-      meta: {
-        diffs: [
-          { path: 'a.txt', oldText: 'a', newText: 'b' },
-          { path: 'b.txt', oldText: 'c', newText: 'd' },
-        ],
-      },
+    l.add(toolCall(1, 0, 'c1', 'edit', { file_path: 'f.txt', old_string: 'a', new_string: 'b' }))
+    l.add(toolResult(1, 0, 'c1', {
+      content: [{ type: 'text', text: 'result' }],
+      meta: { path: '/work/f.txt', operation: 'update',
+        diffs: [{ path: 'f.txt', oldText: 'a', newText: 'b' }] },
     }))
     l.add(turnEnd(1))
     const fakeRender = (file: DetailFileChange) => ({
-      text: `${file.path}:${'😀'.repeat(Math.ceil(DETAIL_PAGE_BYTES / 4))}`,
-      render: 'ok' as const, added: 1, removed: 1, truncated: false,
+      text: file.path, render: 'ok' as const, added: 1, removed: 1, truncated: false,
     })
-    const initial = responseOf(l.events, 1, 'tool-result', { callId: 'orphan' }, { renderDiff: fakeRender })
-    if (!initial.ok || initial.response.kind !== 'tool-result') throw new Error('missing orphan response')
-    expect(initial.response.files).toHaveLength(2)
-    expect(initial.response.files?.[0]?.diff.hasMore).toBe(true)
-    expect(initial.response.files?.[1]?.diff.byteOffset).toBe(0)
-    const offset = initial.response.files?.[0]?.diff.nextByteOffset
-    const continued = responseOf(l.events, 1, 'tool-result', { callId: 'orphan' }, {
-      part: 'diff', fileIndex: 0, byteOffset: offset, renderDiff: fakeRender,
-    })
-    if (!continued.ok || continued.response.kind !== 'tool-result') throw new Error('missing diff continuation')
-    expect(continued.response.files).toHaveLength(1)
-    expect(continued.response.fileIndex).toBe(0)
-    expect(continued.response.files?.[0]?.path).toBe('a.txt')
-    expect(continued.response.files?.[0]?.diff.byteOffset).toBe(offset)
-    expect(continued.response.parts.result).toBeUndefined()
-    expect(responseOf(l.events, 1, 'tool-result', { callId: 'orphan' }, {
-      part: 'diff', fileIndex: 2, byteOffset: 0, renderDiff: fakeRender,
-    })).toMatchObject({ ok: false, status: 404, reason: 'unknown-file' })
-    expect(responseOf(l.events, 1, 'tool-result', { callId: 'orphan' }, {
-      part: 'diff', fileIndex: 0, byteOffset: Buffer.byteLength('a.txt:') + 1, renderDiff: fakeRender,
-    })).toMatchObject({ ok: false, status: 400, reason: 'invalid-offset' })
+    const result = responseOf(l.events, 1, 'tool', { callId: 'c1' }, { renderDiff: fakeRender })
+    if (!result.ok || result.response.kind !== 'tool') throw new Error('missing tool response')
+    expect(result.response.files).toHaveLength(1)
+    expect(result.response.files?.[0]?.diff.text).toBe('/work/f.txt')
+    expect(result.response.files?.[0]?.diff.totalBytes).toBe(Buffer.byteLength('/work/f.txt', 'utf8'))
+    expect(result.response.totalBytes).toBe(
+      Buffer.byteLength(JSON.stringify({ file_path: 'f.txt', old_string: 'a', new_string: 'b' }), 'utf8')
+      + Buffer.byteLength('result', 'utf8')
+      + Buffer.byteLength('/work/f.txt', 'utf8'),
+    )
   })
 
-  it('reports a pending result continuation as unavailable', () => {
+  it('leaves a pending tool call result-free without a continuation error', () => {
     const l = log()
     l.add(turnStart(1))
     l.add(toolCall(1, 0, 'c1', 'bash', {}))
-    expect(responseOf(l.events, 1, 'tool', { callId: 'c1' }, { part: 'result', byteOffset: 0 }))
-      .toMatchObject({ ok: false, status: 404, reason: 'result-unavailable' })
-  })
-})
-
-describe('utf8Page', () => {
-  it('splits only on code-point boundaries and reports the total', () => {
-    const text = 'aé😀z'
-    const first = utf8Page(text, 0, 3)
-    expect(first).toEqual({ text: 'aé', byteOffset: 0, nextByteOffset: 3, totalBytes: 8, hasMore: true })
-    const second = utf8Page(text, first!.nextByteOffset, 4)
-    expect(second).toEqual({ text: '😀', byteOffset: 3, nextByteOffset: 7, totalBytes: 8, hasMore: true })
-    const third = utf8Page(text, second!.nextByteOffset, DETAIL_PAGE_BYTES)
-    expect(third).toEqual({ text: 'z', byteOffset: 7, nextByteOffset: 8, totalBytes: 8, hasMore: false })
-  })
-
-  it('still makes progress when the byte budget is smaller than one code point', () => {
-    const page = utf8Page('😀x', 0, 1)
-    expect(page).toMatchObject({ text: '😀', nextByteOffset: 4, totalBytes: 5, hasMore: true })
-  })
-
-  it('rejects an offset inside a code point or past the end', () => {
-    expect(utf8Page('😀', 1)).toBeNull()
-    expect(utf8Page('abc', 4)).toBeNull()
-    expect(utf8Page('abc', 0, 0)).toBeNull()
-  })
-
-  it('returns an empty final page at the total', () => {
-    expect(utf8Page('abc', 3)).toEqual({
-      text: '', byteOffset: 3, nextByteOffset: 3, totalBytes: 3, hasMore: false,
-    })
+    const result = responseOf(l.events, 1, 'tool', { callId: 'c1' })
+    if (!result.ok || result.response.kind !== 'tool') throw new Error('missing tool response')
+    expect(result.response.result).toBeUndefined()
+    expect(result.response.parts.result).toBeUndefined()
   })
 })
 

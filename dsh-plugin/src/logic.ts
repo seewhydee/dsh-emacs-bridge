@@ -2930,8 +2930,13 @@ export const MAX_DETAIL_FILE_CHANGES = 50
 /** Maximum fragments retained for one file change. */
 export const MAX_DETAIL_FILE_FRAGMENTS = 200
 
-/** Maximum UTF-8 bytes served by one detail page. */
-export const DETAIL_PAGE_BYTES = 65536
+/**
+ * Maximum UTF-8 bytes loaded without confirmation.  A larger item's first
+ * response carries sizes only; the inspector asks before fetching the whole
+ * item.  The limit is the bridge's own, not the harness's: the session log
+ * holds the complete text.
+ */
+export const DETAIL_FULL_LOAD_BYTES = 256 * 1024
 
 /** One durable applied-diff fragment, exactly as the producing tool recorded
  * it: no original-file line positions and no final-newline marker. */
@@ -2967,7 +2972,7 @@ export interface DetailFileChange {
   droppedFragments: number
 }
 
-/** One file-change summary; its rendered text is paginated independently. */
+/** One file-change summary; its rendered text is carried complete. */
 export interface DetailFileSummary {
   path: string
   absolute: string
@@ -2985,10 +2990,8 @@ export interface DetailFileSummary {
 /** The three direct item selectors exposed by `/details/item`. */
 export type DetailItemKind = 'thinking' | 'tool' | 'tool-result'
 
-/** The independently paginated payloads of one item. */
-export type DetailItemPart = 'reasoning' | 'arguments' | 'result' | 'diff'
-
-/** A validated initial item read or observation-checked part continuation. */
+/** A validated item read.  FULL asks for the complete content without the
+ * size probe's confirmation threshold. */
 export interface DetailItemRequest {
   sessionId: string
   turn: number
@@ -2996,11 +2999,7 @@ export interface DetailItemRequest {
   seq?: number
   ord?: number
   callId?: string
-  epoch?: number
-  cursor?: number
-  part?: DetailItemPart
-  byteOffset?: number
-  fileIndex?: number
+  full?: true
 }
 
 /** The minimal query accessor shared by URLSearchParams and test fixtures. */
@@ -3047,11 +3046,10 @@ function requiredSessionId(params: DetailQueryParams): { value?: string; error?:
 }
 
 /**
- * Parse `GET /details/item`.  Initial reads carry only a concrete item
- * selector.  A continuation additionally carries the original observation,
- * one compatible part, and its UTF-8 byte offset; `fileIndex` belongs only to
- * a diff part.  Selector fields from another kind are rejected rather than
- * ignored, so a malformed request cannot silently select a different item.
+ * Parse `GET /details/item`.  The request carries a concrete item selector and
+ * optionally `full=1` to fetch content above the confirmation threshold.  The
+ * former continuation parameters are rejected rather than ignored, so a stale
+ * client cannot silently read a different item.
  */
 export function parseDetailItemQuery(params: DetailQueryParams): DetailQueryParse<DetailItemRequest> {
   const session = requiredSessionId(params)
@@ -3093,124 +3091,30 @@ export function parseDetailItemQuery(params: DetailQueryParams): DetailQueryPars
     callId = callSingle.value
   }
 
-  const epochSingle = singleQueryParam(params, 'epoch')
-  const cursorSingle = singleQueryParam(params, 'cursor')
-  const partSingle = singleQueryParam(params, 'part')
-  const offsetSingle = singleQueryParam(params, 'byteOffset')
-  const fileSingle = singleQueryParam(params, 'fileIndex')
-  for (const single of [epochSingle, cursorSingle, partSingle, offsetSingle, fileSingle]) {
-    if (single.error !== undefined) return { ok: false, error: single.error }
+  const fullSingle = singleQueryParam(params, 'full')
+  if (fullSingle.error !== undefined) return { ok: false, error: fullSingle.error }
+  if (fullSingle.value !== undefined && fullSingle.value !== '1' && fullSingle.value !== 'true') {
+    return { ok: false, error: 'full must be 1 or true' }
   }
-  const continuation = epochSingle.value !== undefined || cursorSingle.value !== undefined
-    || partSingle.value !== undefined || offsetSingle.value !== undefined || fileSingle.value !== undefined
-  const base = {
-    sessionId: session.value as string,
-    turn: turn.value as number,
-    kind: kind as DetailItemKind,
-    ...seq === undefined ? {} : { seq },
-    ...ord === undefined ? {} : { ord },
-    ...callId === undefined ? {} : { callId },
+  for (const name of ['epoch', 'cursor', 'part', 'byteOffset', 'fileIndex']) {
+    const legacy = singleQueryParam(params, name)
+    if (legacy.error !== undefined) return { ok: false, error: legacy.error }
+    if (legacy.value !== undefined) {
+      return { ok: false, error: `${name} is not supported; the item route returns one complete response` }
+    }
   }
-  if (!continuation) return { ok: true, request: base }
-  if (epochSingle.value === undefined || cursorSingle.value === undefined
-    || partSingle.value === undefined || offsetSingle.value === undefined) {
-    return { ok: false, error: 'continuations require epoch, cursor, part, and byteOffset' }
-  }
-  const epoch = queryInteger(epochSingle.value)
-  const cursor = queryInteger(cursorSingle.value)
-  const byteOffset = queryInteger(offsetSingle.value)
-  if (epoch === null) return { ok: false, error: 'epoch must be a non-negative integer' }
-  if (cursor === null) return { ok: false, error: 'cursor must be a non-negative integer' }
-  if (byteOffset === null) return { ok: false, error: 'byteOffset must be a non-negative integer' }
-  const part = partSingle.value
-  if (part !== 'reasoning' && part !== 'arguments' && part !== 'result' && part !== 'diff') {
-    return { ok: false, error: 'part must be reasoning, arguments, result, or diff' }
-  }
-  const partAllowed = kind === 'thinking'
-    ? part === 'reasoning'
-    : kind === 'tool'
-      ? part === 'arguments' || part === 'result' || part === 'diff'
-      : part === 'result' || part === 'diff'
-  if (!partAllowed) return { ok: false, error: `${part} is not a part of a ${kind} item` }
-  let fileIndex: number | undefined
-  if (part === 'diff') {
-    if (fileSingle.value === undefined) return { ok: false, error: 'fileIndex is required for diff' }
-    const parsed = queryInteger(fileSingle.value)
-    if (parsed === null) return { ok: false, error: 'fileIndex must be a non-negative integer' }
-    fileIndex = parsed
-  } else if (fileSingle.value !== undefined) {
-    return { ok: false, error: 'fileIndex is only valid for diff' }
-  }
+
   return {
     ok: true,
-    request: { ...base, epoch, cursor, part, byteOffset, ...fileIndex === undefined ? {} : { fileIndex } },
-  }
-}
-
-/** One UTF-8-safe slice of a larger text. */
-export interface Utf8Page {
-  text: string
-  byteOffset: number
-  nextByteOffset: number
-  totalBytes: number
-  hasMore: boolean
-}
-
-/**
- * Slice TEXT to at most MAX-BYTES UTF-8 bytes starting at byte OFFSET.
- *
- * OFFSET counts UTF-8 bytes, never UTF-16 code units: a split is always on a
- * code-point boundary, so a page can never cut a surrogate pair.  A non-zero
- * offset that falls inside a code point is rejected (null) rather than
- * rounded: offsets come from a previous page's `nextByteOffset`, so a
- * misaligned one is a malformed request, not a client preference.
- */
-export function utf8Page(text: string, offset = 0, maxBytes = DETAIL_PAGE_BYTES): Utf8Page | null {
-  if (!Number.isSafeInteger(offset) || offset < 0 || !Number.isSafeInteger(maxBytes) || maxBytes <= 0) {
-    return null
-  }
-  const totalBytes = Buffer.byteLength(text, 'utf8')
-  if (offset > totalBytes) return null
-  if (offset === totalBytes) {
-    return { text: '', byteOffset: offset, nextByteOffset: totalBytes, totalBytes, hasMore: false }
-  }
-  let index = 0
-  let bytes = 0
-  // Walk code points until the requested starting byte offset is reached.
-  for (const ch of text) {
-    const size = Buffer.byteLength(ch, 'utf8')
-    if (bytes === offset) break
-    if (bytes > offset) return null
-    bytes += size
-    index += ch.length
-  }
-  if (bytes !== offset) return null
-  let used = 0
-  let end = index
-  while (end < text.length) {
-    const ch = text.codePointAt(end) as number
-    const width = ch > 0xffff ? 2 : 1
-    const piece = text.slice(end, end + width)
-    const size = Buffer.byteLength(piece, 'utf8')
-    if (used + size > maxBytes) {
-      // A page budget smaller than one code point must still make progress;
-      // return that single code point rather than an empty page at the same
-      // offset (which would make a client's load-more loop forever).
-      if (used === 0) {
-        used = size
-        end += width
-      }
-      break
-    }
-    used += size
-    end += width
-  }
-  return {
-    text: text.slice(index, end),
-    byteOffset: offset,
-    nextByteOffset: offset + used,
-    totalBytes,
-    hasMore: offset + used < totalBytes,
+    request: {
+      sessionId: session.value as string,
+      turn: turn.value as number,
+      kind: kind as DetailItemKind,
+      ...seq === undefined ? {} : { seq },
+      ...ord === undefined ? {} : { ord },
+      ...callId === undefined ? {} : { callId },
+      ...fullSingle.value === undefined ? {} : { full: true as const },
+    },
   }
 }
 
@@ -3364,7 +3268,7 @@ export interface DetailOrphanResultItem extends DetailItemContext {
   result: DetailResultFact
 }
 
-/** The raw selected item, before any part is paginated or rendered. */
+/** The raw selected item, before its parts and diffs are rendered. */
 export type DetailItem = DetailThinkingItem | DetailToolItem | DetailOrphanResultItem
 
 /** The outcome of one direct item selection. */
@@ -3724,9 +3628,9 @@ function detailItemContext(fold: DetailFold): DetailItemContext {
 }
 
 /**
- * Select exactly one current item.  The route checks observation age before
- * calling this function; its 409s therefore mean a visibility conflict, not a
- * stale continuation or an index-retention problem.
+ * Select exactly one current item.  Its 409s mean the item is no longer
+ * visible on the current surface, never a stale-read or retention problem:
+ * the route observes the log once and returns the complete item.
  */
 export function buildDetailItem(args: {
   turn: number
@@ -3807,14 +3711,20 @@ export interface DetailDiffRender {
   truncated: boolean
 }
 
-/** One independently paginated file diff and its rendering metadata. */
-export interface DetailDiffPage extends Utf8Page, DetailDiffRender {
+/** One complete text payload and its UTF-8 byte size. */
+export interface DetailTextPart {
   text: string
+  totalBytes: number
 }
 
-/** One file summary with its selected diff page. */
+/** One complete rendered file diff and its rendering metadata. */
+export interface DetailDiffPart extends DetailDiffRender {
+  totalBytes: number
+}
+
+/** One file summary with its complete diff. */
 export interface DetailItemFile extends DetailFileSummary {
-  diff: DetailDiffPage
+  diff: DetailDiffPart
 }
 
 /** Result metadata; the potentially large text lives in `parts.result`. */
@@ -3832,6 +3742,10 @@ interface DetailResponseBase extends DetailItemContext {
   epoch: number
   cursor: number
   cwd?: string
+  /** UTF-8 bytes of every text part and diff in this item. */
+  totalBytes: number
+  /** True when the first read withheld the text pending confirmation. */
+  deferred?: true
 }
 
 export interface DetailThinkingResponse extends DetailResponseBase {
@@ -3840,8 +3754,7 @@ export interface DetailThinkingResponse extends DetailResponseBase {
   ord: number
   time: number
   step: number
-  parts: { reasoning?: Utf8Page }
-  part?: 'reasoning'
+  parts: { reasoning?: DetailTextPart }
 }
 
 export interface DetailToolResponse extends DetailResponseBase {
@@ -3853,14 +3766,12 @@ export interface DetailToolResponse extends DetailResponseBase {
   name: string
   callCwd?: string
   settlement: 'settled' | 'pending'
-  parts: { arguments?: Utf8Page; result?: Utf8Page }
+  parts: { arguments?: DetailTextPart; result?: DetailTextPart }
   result?: DetailResultMetadata
   files?: DetailItemFile[]
   totalFiles?: number
   droppedFiles?: number
   filesTruncated?: boolean
-  part?: 'arguments' | 'result' | 'diff'
-  fileIndex?: number
 }
 
 export interface DetailOrphanResultResponse extends DetailResponseBase {
@@ -3875,23 +3786,21 @@ export interface DetailOrphanResultResponse extends DetailResponseBase {
   isError: boolean
   content: Omit<DetailResultContent, 'text'>
   error?: DetailToolError
-  parts: { result?: Utf8Page }
+  parts: { result?: DetailTextPart }
   files?: DetailItemFile[]
   totalFiles?: number
   droppedFiles?: number
   filesTruncated?: boolean
-  part?: 'result' | 'diff'
-  fileIndex?: number
 }
 
-/** The tagged response union returned by initial and continuation reads. */
+/** The tagged response union returned by a probe or full read. */
 export type DetailItemResponse = DetailThinkingResponse | DetailToolResponse | DetailOrphanResultResponse
 
-export type DetailItemPageResult =
+export type DetailItemReadResult =
   | { ok: true; response: DetailItemResponse }
   | { ok: false; status: 400 | 404; reason: string; message: string }
 
-/** Project one result's non-text metadata without its paginated text. */
+/** Project one result's non-text metadata without its text payload. */
 function detailResultMetadata(result: DetailResultFact): DetailResultMetadata {
   return {
     seq: result.seq,
@@ -3907,11 +3816,69 @@ function detailResultMetadata(result: DetailResultFact): DetailResultMetadata {
   }
 }
 
+/** UTF-8 byte length of one text payload. */
+function detailBytes(text: string): number {
+  return Buffer.byteLength(text, 'utf8')
+}
+
+/** Project one complete text payload. */
+function detailTextPart(text: string): DetailTextPart {
+  return { text, totalBytes: detailBytes(text) }
+}
+
+/** Sum the text bytes of one response, including every file diff. */
+function detailResponseBytes(response: DetailItemResponse): number {
+  let total = 0
+  for (const part of Object.values(response.parts)) total += part?.totalBytes ?? 0
+  if ('files' in response) {
+    for (const file of response.files ?? []) total += file.diff.totalBytes
+  }
+  return total
+}
+
+/** Withhold every text payload, retaining its size and all metadata. */
+function deferredDetailResponse(response: DetailItemResponse, totalBytes: number): DetailItemResponse {
+  const files = 'files' in response
+    ? response.files?.map(file => ({ ...file, diff: { ...file.diff, text: '' } }))
+    : undefined
+  if (response.kind === 'thinking') {
+    const reasoning = response.parts.reasoning
+    return {
+      ...response,
+      totalBytes,
+      deferred: true,
+      parts: reasoning === undefined ? {} : { reasoning: { ...reasoning, text: '' } },
+    }
+  }
+  if (response.kind === 'tool') {
+    const { arguments: args, result } = response.parts
+    return {
+      ...response,
+      totalBytes,
+      deferred: true,
+      parts: {
+        ...args === undefined ? {} : { arguments: { ...args, text: '' } },
+        ...result === undefined ? {} : { result: { ...result, text: '' } },
+      },
+      ...files === undefined ? {} : { files },
+    }
+  }
+  const result = response.parts.result
+  return {
+    ...response,
+    totalBytes,
+    deferred: true,
+    parts: result === undefined ? {} : { result: { ...result, text: '' } },
+    ...files === undefined ? {} : { files },
+  }
+}
+
 /**
- * Paginate one selected item.  Initial reads include every available part's
- * first page.  A continuation includes only the requested part; a diff
- * continuation likewise contains only its selected file.  Rendering is injected
- * so all selection, bounds, offsets, and response shapes stay dependency-free.
+ * Build one selected item's complete response.  The response carries every
+ * available part and file diff in one payload.  If the total text exceeds
+ * {@link DETAIL_FULL_LOAD_BYTES} and the request did not say `full`, the text is
+ * withheld and `deferred` marks the size probe; the inspector then asks the
+ * user before requesting the full item.
  */
 export function buildDetailItemResponse(args: {
   sessionId: string
@@ -3919,59 +3886,36 @@ export function buildDetailItemResponse(args: {
   cursor: number
   cwd?: string
   item: DetailItem
-  request: Pick<DetailItemRequest, 'part' | 'byteOffset' | 'fileIndex'>
+  request: Pick<DetailItemRequest, 'full'>
   renderDiff: (file: DetailFileChange) => DetailDiffRender
-}): DetailItemPageResult {
-  const { item, request } = args
-  const offset = request.part === undefined ? 0 : request.byteOffset as number
+}): DetailItemReadResult {
+  const { item } = args
   const base: DetailResponseBase = {
     sessionId: args.sessionId,
     turn: item.turn,
     epoch: args.epoch,
     cursor: args.cursor,
     ...args.cwd === undefined ? {} : { cwd: args.cwd },
+    totalBytes: 0,
     open: item.open,
     ...item.startedAt === undefined ? {} : { startedAt: item.startedAt },
     ...item.endedAt === undefined ? {} : { endedAt: item.endedAt },
     ...item.reason === undefined ? {} : { reason: item.reason },
     ...item.failure === undefined ? {} : { failure: item.failure },
   }
-  const textPage = (text: string): Utf8Page | DetailItemPageResult => {
-    const page = utf8Page(text, offset)
-    return page ?? {
-      ok: false,
-      status: 400,
-      reason: 'invalid-offset',
-      message: 'byteOffset is outside the part or not a UTF-8 code-point boundary',
-    }
-  }
-  const filePage = (file: DetailFileChange): DetailItemFile | DetailItemPageResult => {
+  const filePart = (file: DetailFileChange): DetailItemFile => {
     const rendered = args.renderDiff(file)
-    const page = textPage(rendered.text)
-    if (!('text' in page)) return page
     return {
       ...fileSummary(file),
       diff: {
-        ...page,
-        render: rendered.render,
-        added: rendered.added,
-        removed: rendered.removed,
-        truncated: rendered.truncated,
+        ...rendered,
+        totalBytes: detailBytes(rendered.text),
       },
     }
   }
-  const fileBody = (result: DetailResultFact, indexes: number[]): Pick<DetailToolResponse,
-    'files' | 'totalFiles' | 'droppedFiles' | 'filesTruncated'> | DetailItemPageResult => {
-    const files: DetailItemFile[] = []
-    for (const index of indexes) {
-      const file = result.files[index]
-      if (file === undefined) {
-        return { ok: false, status: 404, reason: 'unknown-file', message: `no file ${index} in this item` }
-      }
-      const projected = filePage(file)
-      if (!('path' in projected)) return projected
-      files.push(projected)
-    }
+  const fileBody = (result: DetailResultFact): Pick<DetailToolResponse,
+    'files' | 'totalFiles' | 'droppedFiles' | 'filesTruncated'> => {
+    const files = result.files.map(file => filePart(file))
     return {
       files,
       totalFiles: result.totalFiles,
@@ -3980,25 +3924,18 @@ export function buildDetailItemResponse(args: {
     }
   }
 
+  let response: DetailItemResponse
   if (item.kind === 'thinking') {
-    const page = textPage(item.text)
-    if (!('text' in page)) return page
-    return {
-      ok: true,
-      response: {
-        ...base,
-        kind: 'thinking', seq: item.seq, ord: item.ord, time: item.time, step: item.step,
-        parts: { reasoning: page },
-        ...request.part === undefined ? {} : { part: 'reasoning' },
-      },
-    }
-  }
-
-  if (item.kind === 'tool') {
-    const call = item.call
-    const itemBase = {
+    response = {
       ...base,
-      kind: 'tool' as const,
+      kind: 'thinking', seq: item.seq, ord: item.ord, time: item.time, step: item.step,
+      parts: { reasoning: detailTextPart(item.text) },
+    }
+  } else if (item.kind === 'tool') {
+    const call = item.call
+    response = {
+      ...base,
+      kind: 'tool',
       seq: call.seq,
       time: call.time,
       step: call.step,
@@ -4006,98 +3943,44 @@ export function buildDetailItemResponse(args: {
       name: call.name,
       ...call.cwd === undefined ? {} : { callCwd: call.cwd },
       settlement: item.settlement,
+      parts: {
+        arguments: detailTextPart(call.arguments),
+        ...item.result === undefined ? {} : { result: detailTextPart(item.result.content.text) },
+      },
+      ...item.result === undefined ? {} : { result: detailResultMetadata(item.result) },
+      ...item.result === undefined || item.result.files.length === 0 ? {} : fileBody(item.result),
     }
-    if (request.part === 'arguments' || request.part === undefined) {
-      const argumentsPage = textPage(call.arguments)
-      if (!('text' in argumentsPage)) return argumentsPage
-      if (request.part === 'arguments') {
-        return { ok: true, response: { ...itemBase, parts: { arguments: argumentsPage }, part: 'arguments' } }
-      }
-      const resultPage = item.result === undefined ? undefined : textPage(item.result.content.text)
-      if (resultPage !== undefined && !('text' in resultPage)) return resultPage
-      let files: ReturnType<typeof fileBody> | undefined
-      if (item.result !== undefined && item.result.files.length > 0) {
-        files = fileBody(item.result, item.result.files.map((_, index) => index))
-        if ('ok' in files) return files
-      }
-      return {
-        ok: true,
-        response: {
-          ...itemBase,
-          parts: {
-            arguments: argumentsPage,
-            ...resultPage === undefined ? {} : { result: resultPage },
-          },
-          ...item.result === undefined ? {} : { result: detailResultMetadata(item.result) },
-          ...files === undefined ? {} : files,
-        },
-      }
-    }
-    if (request.part === 'result') {
-      if (item.result === undefined) {
-        return { ok: false, status: 404, reason: 'result-unavailable', message: 'the tool call is still pending' }
-      }
-      const page = textPage(item.result.content.text)
-      if (!('text' in page)) return page
-      return { ok: true, response: { ...itemBase, parts: { result: page }, part: 'result' } }
-    }
-    if (item.result === undefined || request.fileIndex === undefined) {
-      return { ok: false, status: 404, reason: 'unknown-file', message: 'the tool call has no such file diff' }
-    }
-    const files = fileBody(item.result, [request.fileIndex])
-    if ('ok' in files) return files
-    return {
-      ok: true,
-      response: { ...itemBase, ...files, part: 'diff', fileIndex: request.fileIndex, parts: {} },
+  } else {
+    const result = item.result
+    response = {
+      ...base,
+      kind: 'tool-result',
+      seq: result.seq,
+      time: result.time,
+      step: result.step,
+      callId: result.callId,
+      name: result.name,
+      ...result.cwd === undefined ? {} : { resultCwd: result.cwd },
+      settlement: 'orphan',
+      isError: result.isError,
+      content: {
+        blocks: result.content.blocks,
+        textBlocks: result.content.textBlocks,
+        omittedBlocks: result.content.omittedBlocks,
+      },
+      ...result.error === undefined ? {} : { error: result.error },
+      parts: { result: detailTextPart(result.content.text) },
+      ...result.files.length === 0 ? {} : fileBody(result),
     }
   }
 
-  const result = item.result
-  const itemBase = {
-    ...base,
-    kind: 'tool-result' as const,
-    seq: result.seq,
-    time: result.time,
-    step: result.step,
-    callId: result.callId,
-    name: result.name,
-    ...result.cwd === undefined ? {} : { resultCwd: result.cwd },
-    settlement: 'orphan' as const,
-    isError: result.isError,
-    content: {
-      blocks: result.content.blocks,
-      textBlocks: result.content.textBlocks,
-      omittedBlocks: result.content.omittedBlocks,
-    },
-    ...result.error === undefined ? {} : { error: result.error },
-  }
-  if (request.part === 'diff') {
-    if (request.fileIndex === undefined) {
-      return { ok: false, status: 404, reason: 'unknown-file', message: 'the result has no such file diff' }
-    }
-    const files = fileBody(result, [request.fileIndex])
-    if ('ok' in files) return files
-    return {
-      ok: true,
-      response: { ...itemBase, ...files, part: 'diff', fileIndex: request.fileIndex, parts: {} },
-    }
-  }
-  const page = textPage(result.content.text)
-  if (!('text' in page)) return page
-  if (request.part === 'result') {
-    return { ok: true, response: { ...itemBase, parts: { result: page }, part: 'result' } }
-  }
-  const files = result.files.length === 0
-    ? undefined
-    : fileBody(result, result.files.map((_, index) => index))
-  if (files !== undefined && 'ok' in files) return files
+  const totalBytes = detailResponseBytes(response)
+  const complete = { ...response, totalBytes }
   return {
     ok: true,
-    response: {
-      ...itemBase,
-      parts: { result: page },
-      ...files === undefined ? {} : files,
-    },
+    response: args.request.full === true || totalBytes <= DETAIL_FULL_LOAD_BYTES
+      ? complete
+      : deferredDetailResponse(complete, totalBytes),
   }
 }
 

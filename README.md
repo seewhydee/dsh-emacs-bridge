@@ -240,44 +240,6 @@ Whichever answers first, Emacs or web UI, settles the request and
 dismisses the other presentation.  To change this (e.g., letting the
 web UI handle all requests), customize `dsh-bridge-approval-answer`.
 
-### Single-item detail inspector (optional)
-
-DSH-View provides the turn overview; the optional `dsh-bridge-extras`
-library provides detail for one item on that overview.  Type `RET` on a
-thinking or tool activity line (or run `M-x
-dsh-bridge-extras-inspect-item` there) to open a separate read-only
-buffer.  A thinking item contains its complete committed reasoning.  A
-tool item contains its exact arguments, result content when available,
-and durable per-call file diffs; an orphan result is shown on its own.
-The inspector never lists the turn's other entries, and nothing is
-inserted into the DSH-View body.
-
-* `g` — refresh the same item.
-* `e` — visit the file named at point, or the item's first changed file.
-* `L` — fetch the next page of the large content part at point.
-* `q` — quit the window.
-
-Only items still visible on the current session surface are available,
-so a compaction-shadowed block stays hidden.  Per-call diffs cover
-`write` and `edit` results that recorded durable hunks; a
-`str_replace_editor` result has no such record and shows `none`, while
-creates or identical writes have no diff text.  The displayed diff is an
-applied per-call fragment for reading, not an appliable patch, so line
-navigation and patch application are not offered.  Changed-file buttons
-in DSH-View continue to visit their files; their path-only identity
-cannot distinguish multiple calls that changed the same file, so
-per-call diffs are reached through the owning tool item.
-
-Large content is served in independent 64 KiB UTF-8 pages, and diff
-input/output are bounded (256 KiB per side, 128 KiB of display).  Cold
-and archived sessions are read without being resumed; archived sessions
-remain readable until unarchived.
-
-If Markdown mode is installed, reasoning text is fontified with its
-presentation faces transferred onto a copy; the inspector's own major
-mode is unchanged.  Above a size bound the text is shown verbatim
-rather than truncated.
-
 ### DSH-Prompt buffer
 
 The DSH-Prompt buffer is used to compose a prompt, or reply.  It is
@@ -372,11 +334,12 @@ inspector's read-only `/details/item` route is the one place that serves
 complete committed reasoning, raw tool arguments, result content, and
 durable per-call diff fragments.  It is bearer-authenticated and
 loopback-only like every other route, is fetched only for an activity
-item at point or an explicit inspector refresh/page, and never travels
-over SSE.  Its bounds are user-visible in the inspector section above:
-64 KiB text pages, 256 KiB diff input per side, and 128 KiB of rendered
-diff text.  Provider `AUTH` failure diagnostics
-remain suppressed exactly as they are in `/turns`; malformed or
+item at point, an explicit inspector refresh, or a confirmed full-load
+request, and never travels over SSE.  An item above the 256 KiB
+confirmation threshold withholds its text on the first response and asks
+before the inspector fetches it whole; diffs are bounded to 256 KiB of
+input per side and 128 KiB of rendered text.  Provider `AUTH` failure
+diagnostics remain suppressed exactly as they are in `/turns`; malformed or
 unreadable diff metadata is labeled `unavailable` rather than decoded
 loosely.
 

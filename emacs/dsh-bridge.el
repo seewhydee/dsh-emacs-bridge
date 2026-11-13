@@ -1789,9 +1789,10 @@ If BUFFER is nil, it defaults to the current buffer.
 
 For a DSH-Prompt, DSH-View, or DSH-Describe buffer, this is the session
 it is currently bound to (nil if set to following the pinned target).
-For a DSH-Sessions buffer, this is the session at point, if any.
-If there is no such binding, fall back on `dsh-bridge-pinned-target';
-otherwise return nil.
+For a DSH-Inspector buffer (the optional inspector), this is the item's
+session.  For a DSH-Sessions buffer, this is the session at point, if
+any.  If there is no such binding, fall back on
+`dsh-bridge-pinned-target'; otherwise return nil.
 
 If NODEFAULT is non-nil, skip the pinned-target fallback.
 
@@ -1808,6 +1809,8 @@ fall back here if no menu is open."
 		     dsh-bridge--view-content-session)
 		    ((derived-mode-p 'dsh-bridge-describe-mode)
 		     dsh-bridge--describe-session)
+		    ((derived-mode-p 'dsh-bridge-extras-mode)
+		     (dsh-bridge-extras-session))
 		    ((derived-mode-p 'dsh-bridge-sessions-mode)
 		     (tabulated-list-get-id)))))
       (unless (or session nodefault)
@@ -4079,6 +4082,7 @@ inspects the activity item at point.
 (declare-function markdown-wiki-link-p "markdown-mode")
 (declare-function markdown-table-at-point-p "markdown-mode")
 (declare-function dsh-bridge-extras-inspect-item "dsh-bridge-extras")
+(declare-function dsh-bridge-extras-session "dsh-bridge-extras")
 
 ;; These are named only in the branch that required markdown-mode, so declare
 ;; them for the byte-compiler.

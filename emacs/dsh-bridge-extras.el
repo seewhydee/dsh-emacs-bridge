@@ -97,17 +97,19 @@ fontification, rather than being truncated or dropped."
   :doc "Keymap for `dsh-bridge-extras-mode'."
   :parent special-mode-map
   "g" #'dsh-bridge-extras-refresh
-  "e" #'dsh-bridge-extras-visit-file
-  "L" #'dsh-bridge-extras-load-more
+  "RET" #'dsh-bridge-extras-enter
+  "f" #'dsh-bridge-extras-show-in-view
+  "D" #'dsh-bridge-extras-describe-session
+  "r" #'dsh-bridge-extras-open-prompt
+  "l" #'dsh-bridge-list-sessions
   "q" #'quit-window)
 
 (define-derived-mode dsh-bridge-extras-mode special-mode "DSH-Inspector"
   "Major mode for inspecting one DSH activity item.
 The buffer is read-only and shows one reasoning block, logical tool
 invocation, or orphan result.  Long lines are wrapped by
-`visual-line-mode'.  \\[dsh-bridge-extras-refresh] refreshes
-that item, \\[dsh-bridge-extras-load-more] fetches the next content page,
-and \\[dsh-bridge-extras-visit-file] visits an associated file.
+`visual-line-mode'.  \\[dsh-bridge-extras-refresh] refreshes that item;
+RET activates a file-name button.
 \\{dsh-bridge-extras-mode-map}"
   (setq buffer-read-only t)
   (visual-line-mode 1))
@@ -134,7 +136,10 @@ and \\[dsh-bridge-extras-visit-file] visits an associated file.
   "The effective working directory reported with the item.")
 
 (defvar-local dsh-bridge-extras--parts nil
-  "Hash table mapping a content-part key to its accumulated page state.")
+  "Hash table mapping a content-part key to its complete text state.")
+
+(defvar-local dsh-bridge-extras--full-loaded nil
+  "Whether the current item was fetched in full, above the probe threshold.")
 
 (defvar-local dsh-bridge-extras--status nil
   "A status or error notice to show in the inspector, or nil.")
@@ -145,8 +150,13 @@ and \\[dsh-bridge-extras-visit-file] visits an associated file.
 (defvar-local dsh-bridge-extras--inflight nil
   "A token identifying the current request, or nil.")
 
-(defvar dsh-bridge-extras--raw-buffer-name "*DSH Inspector Raw*"
-  "Name of the buffer that shows exact loaded text.")
+;;; Session accessor
+
+(defun dsh-bridge-extras-session ()
+  "Return the session id of the item in the current DSH-Inspector buffer.
+Return nil outside `dsh-bridge-extras-mode'."
+  (and (derived-mode-p 'dsh-bridge-extras-mode)
+       dsh-bridge-extras--session))
 
 ;;; Selectors and query paths
 
@@ -188,25 +198,24 @@ and \\[dsh-bridge-extras-visit-file] visits an associated file.
              (list (cons "callId" (plist-get selector :call-id))))
             (_ (error "Unknown DSH item selector: %S" selector))))))
 
-(defun dsh-bridge-extras--item-path
-    (session turn selector &optional epoch cursor part offset file-index)
+(defun dsh-bridge-extras--activity-key (selector)
+  "Return the DSH-View activity identity for item SELECTOR, or nil."
+  (pcase (plist-get selector :kind)
+    ('thinking (cons (plist-get selector :seq) (plist-get selector :ord)))
+    ('tool (plist-get selector :call-id))
+    ('tool-result (cons 'tool-result (plist-get selector :call-id)))
+    (_ nil)))
+
+(defun dsh-bridge-extras--item-path (session turn selector &optional full)
   "Return the item route for SESSION, TURN, and SELECTOR.
-When PART is non-nil, request its continuation at OFFSET using EPOCH and
-CURSOR.  FILE-INDEX identifies a diff part."
+FULL requests the complete item without the confirmation threshold."
   (concat "/details/item?"
           (dsh-bridge-extras--query
            (append
             (list (cons "sessionId" session)
                   (cons "turn" (number-to-string turn)))
             (dsh-bridge-extras--selector-params selector)
-            (when part
-              (append
-               (list (cons "epoch" (number-to-string epoch))
-                     (cons "cursor" (number-to-string cursor))
-                     (cons "part" (symbol-name part))
-                     (cons "byteOffset" (number-to-string (or offset 0))))
-               (when (eq part 'diff)
-                 (list (cons "fileIndex" (number-to-string file-index))))))))))
+            (when full (list (cons "full" "1")))))))
 
 ;;; Content-part state
 
@@ -215,64 +224,23 @@ CURSOR.  FILE-INDEX identifies a diff part."
   (and (hash-table-p dsh-bridge-extras--parts)
        (gethash key dsh-bridge-extras--parts)))
 
-(defun dsh-bridge-extras--page-value (part name)
-  "Return page field NAME from PART, accepting a nested page object."
-  (or (alist-get name part)
-      (alist-get name (alist-get 'page part))))
-
-(defun dsh-bridge-extras--page-text (part)
-  "Return the text in PART, accepting a nested page object."
-  (or (alist-get 'text part)
-      (alist-get 'text (alist-get 'page part))
-      ""))
-
-(defun dsh-bridge-extras--store-page (key part &optional append)
-  "Store PART under KEY, appending its text when APPEND is non-nil."
-  (let* ((previous (and append (dsh-bridge-extras--part key)))
-         (text (dsh-bridge-extras--page-text part)))
-    (puthash key
-             (list :text (if previous (concat (plist-get previous :text) text) text)
-                   :next (dsh-bridge-extras--page-value part 'nextByteOffset)
-                   :total (dsh-bridge-extras--page-value part 'totalBytes)
-                   :hasMore (eq (dsh-bridge-extras--page-value part 'hasMore) t)
-                   :error nil)
-             dsh-bridge-extras--parts)))
+(defun dsh-bridge-extras--store-part (key part)
+  "Store the complete PART under KEY."
+  (puthash key
+           (list :text (or (alist-get 'text part) "")
+                 :total (alist-get 'totalBytes part))
+           dsh-bridge-extras--parts))
 
 (defun dsh-bridge-extras--store-initial-parts (response)
   "Initialize the buffer's content parts from item RESPONSE."
   (let ((parts (alist-get 'parts response)))
     (dolist (name '(reasoning arguments result))
       (when-let* ((part (alist-get name parts)))
-        (dsh-bridge-extras--store-page name part)))
+        (dsh-bridge-extras--store-part name part)))
     (let ((index 0))
       (dolist (file (append (alist-get 'files response) nil))
-        (dsh-bridge-extras--store-page (list 'diff index) (alist-get 'diff file))
+        (dsh-bridge-extras--store-part (list 'diff index) (alist-get 'diff file))
         (setq index (1+ index))))))
-
-(defun dsh-bridge-extras--part-at-point ()
-  "Return the content-part key at point, or at the start of its line."
-  (dsh-bridge-extras--property-at-line 'dsh-bridge-extras-part))
-
-(defun dsh-bridge-extras--find-part (part)
-  "Return the first position whose content-part property equals PART.
-Diff parts are lists rebuilt on every render, so this must compare with
-`equal' rather than `eq'."
-  (let ((pos (point-min))
-        (found nil))
-    (while (and (null found) (< pos (point-max)))
-      (if (equal (get-text-property pos 'dsh-bridge-extras-part) part)
-          (setq found pos)
-        (setq pos (next-single-property-change
-                   pos 'dsh-bridge-extras-part nil (point-max)))))
-    found))
-
-(defun dsh-bridge-extras--mark-part (start key &optional absolute)
-  "Mark the region from START to point as content-part KEY.
-ABSOLUTE optionally supplies the region's visitable file path."
-  (add-text-properties start (point)
-                       (append (list 'dsh-bridge-extras-part key)
-                               (when absolute
-                                 (list 'dsh-bridge-extras-file absolute)))))
 
 ;;; Requests
 
@@ -287,8 +255,28 @@ ABSOLUTE optionally supplies the region's visitable file path."
                 "request failed")))
    (t "request failed")))
 
-(defun dsh-bridge-extras--request (part offset file-index)
-  "Fetch the current item, or PART at OFFSET and FILE-INDEX when supplied."
+(defun dsh-bridge-extras--handle-deferred (response)
+  "Ask whether to load the large item RESPONSE in full."
+  (let* ((total (alist-get 'totalBytes response))
+         (size (if (numberp total)
+                   (file-size-human-readable total)
+                 "large"))
+         (load (y-or-n-p
+                (format "This item contains %s of content; load it all?" size))))
+    (if load
+        (progn
+          (setq dsh-bridge-extras--status "Loading full item..."
+                dsh-bridge-extras--generation
+                (1+ dsh-bridge-extras--generation))
+          (dsh-bridge-extras--render)
+          (dsh-bridge-extras--request t))
+      (setq dsh-bridge-extras--status
+            (format "Large item (%s) not loaded; press g to load." size))
+      (dsh-bridge-extras--render)
+      (message "dsh-bridge-extras: large item not loaded"))))
+
+(defun dsh-bridge-extras--request (&optional full)
+  "Fetch the current item, asking for the complete item when FULL is non-nil."
   (when (and dsh-bridge-extras--session
              (numberp dsh-bridge-extras--turn)
              dsh-bridge-extras--selector
@@ -298,14 +286,10 @@ ABSOLUTE optionally supplies the region's visitable file path."
            (session dsh-bridge-extras--session)
            (turn dsh-bridge-extras--turn)
            (selector dsh-bridge-extras--selector)
-           (epoch dsh-bridge-extras--epoch)
-           (cursor dsh-bridge-extras--cursor)
-           (key (when part (if (eq part 'diff) (list 'diff file-index) part)))
            (request (make-symbol "item-request")))
       (setq dsh-bridge-extras--inflight request)
       (dsh-bridge--request-async
-       "GET" (dsh-bridge-extras--item-path
-              session turn selector epoch cursor part offset file-index)
+       "GET" (dsh-bridge-extras--item-path session turn selector full)
        nil
        (lambda (result)
          (when (buffer-live-p buffer)
@@ -316,12 +300,10 @@ ABSOLUTE optionally supplies the region's visitable file path."
                         (equal turn dsh-bridge-extras--turn)
                         (equal selector dsh-bridge-extras--selector))
                (setq dsh-bridge-extras--inflight nil)
-               (if part
-                   (dsh-bridge-extras--handle-page key result)
-                 (dsh-bridge-extras--handle-item result))))))))))
+               (dsh-bridge-extras--handle-item result)))))))))
 
 (defun dsh-bridge-extras--handle-item (result)
-  "Apply an initial or refreshed item RESULT."
+  "Apply an item RESULT, prompting when the host withheld a large payload."
   (let ((status (car result))
         (response (cdr result)))
     (if (not (eq status 200))
@@ -332,44 +314,23 @@ ABSOLUTE optionally supplies the region's visitable file path."
             (setq dsh-bridge-extras--status
                   (format "Could not load this item: %s"
                           dsh-bridge-extras--status)))
-          (message "dsh-bridge-extras: %s" dsh-bridge-extras--status))
+          (message "dsh-bridge-extras: %s" dsh-bridge-extras--status)
+          (dsh-bridge-extras--render))
       (setq dsh-bridge-extras--item response
             dsh-bridge-extras--epoch (alist-get 'epoch response)
             dsh-bridge-extras--cursor (alist-get 'cursor response)
             dsh-bridge-extras--cwd (alist-get 'cwd response)
+            dsh-bridge-extras--full-loaded
+            (not (eq (alist-get 'deferred response) t))
             dsh-bridge-extras--parts (make-hash-table :test #'equal)
             dsh-bridge-extras--status nil)
       (dsh-bridge-extras--store-initial-parts response)
       (when dsh-bridge-extras--cwd
         (dsh-bridge--apply-session-directory
-         dsh-bridge-extras--session dsh-bridge-extras--cwd)))
-    (dsh-bridge-extras--render)))
-
-(defun dsh-bridge-extras--handle-page (key result)
-  "Apply a continuation RESULT for content-part KEY."
-  (let ((status (car result))
-        (response (cdr result)))
-    (if (not (eq status 200))
-        (let* ((text (dsh-bridge-extras--error-message status response))
-               (hint (if (eq status 409)
-                         "press g to refresh"
-                       "press L to retry"))
-               (state (dsh-bridge-extras--part key)))
-          (when state
-            (puthash key (plist-put (copy-sequence state) :error
-                                    (format "Could not load more: %s; %s" text hint))
-                     dsh-bridge-extras--parts))
-          (message "dsh-bridge-extras: %s" text))
-      (let ((name (if (consp key) (car key) key))
-            (part nil))
-        (let ((parts (alist-get 'parts response)))
-          (setq part (if (eq name 'diff)
-                         (alist-get 'diff (car (append (alist-get 'files response) nil)))
-                       (alist-get name parts)))
-          (unless part
-            (setq part (or (alist-get 'part response) response))))
-        (dsh-bridge-extras--store-page key part t)))
-    (dsh-bridge-extras--render)))
+         dsh-bridge-extras--session dsh-bridge-extras--cwd))
+      (dsh-bridge-extras--render)
+      (when (eq (alist-get 'deferred response) t)
+        (dsh-bridge-extras--handle-deferred response)))))
 
 ;;; Markdown, JSON, and diff presentation
 
@@ -433,42 +394,14 @@ Text over the byte/line bounds is returned unfontified, never truncated."
           (unless (string= (string-trim pretty) (string-trim text)) pretty)))
     (error nil)))
 
-(defun dsh-bridge-extras--show-raw (text)
-  "Show exact loaded TEXT in a read-only buffer."
-  (let ((buffer (get-buffer-create dsh-bridge-extras--raw-buffer-name)))
-    (with-current-buffer buffer
-      (setq buffer-read-only nil)
-      (erase-buffer)
-      (insert text)
-      (unless (string-suffix-p "\n" text) (insert "\n"))
-      (special-mode)
-      (visual-line-mode 1)
-      (set-buffer-modified-p nil))
-    (pop-to-buffer buffer)))
-
-(defun dsh-bridge-extras--insert-raw-button (text)
-  "Insert a button that shows exact loaded TEXT."
-  (insert " ")
-  (insert-text-button "[raw]"
-                      'action (lambda (button)
-                                (dsh-bridge-extras--show-raw
-                                 (button-get button 'raw-text)))
-                      'raw-text text
-                      'help-echo "Show the exact loaded text"
-                      'follow-link t))
-
-(defun dsh-bridge-extras--insert-json (text complete)
-  "Insert arguments TEXT, pretty-printed when valid JSON.
-COMPLETE indicates that all pages are available for exact raw access."
+(defun dsh-bridge-extras--insert-json (text)
+  "Insert arguments TEXT, pretty-printed when valid JSON."
   (let ((pretty (dsh-bridge-extras--pretty-json text)))
     (if pretty
         (progn
           (insert (propertize (substring-no-properties pretty)
                               'face 'dsh-bridge-extras-code-face))
-          (unless (string-suffix-p "\n" pretty) (insert "\n"))
-          (when complete
-            (dsh-bridge-extras--insert-raw-button text)
-            (insert "\n")))
+          (unless (string-suffix-p "\n" pretty) (insert "\n")))
       (insert text)
       (unless (string-suffix-p "\n" text) (insert "\n")))))
 
@@ -482,13 +415,23 @@ COMPLETE indicates that all pages are available for exact raw access."
    ((string-prefix-p " " line) (if (facep 'diff-context) 'diff-context 'default))
    (t 'dsh-bridge-extras-note-face)))
 
-(defun dsh-bridge-extras--insert-diff-text (text)
-  "Insert rendered diff TEXT with diff faces, never as an appliable patch."
+(defun dsh-bridge-extras--insert-diff-text (text absolute)
+  "Insert rendered diff TEXT with diff faces, never as an appliable patch.
+ABSOLUTE is the file's host path; the `File: ' line names it as a button."
   (require 'diff-mode nil t)
   (dolist (line (split-string text "\n"))
     (unless (string-empty-p line)
-      (let ((face (dsh-bridge-extras--diff-face line)))
-        (insert (if face (propertize line 'face face) line) "\n")))))
+      (if (and absolute (string-prefix-p "File: " line))
+          (progn
+            (insert (propertize "File: " 'face 'dsh-bridge-extras-note-face))
+            (insert-text-button (substring line 6)
+                                'path absolute
+                                'action #'dsh-bridge--button-visit
+                                'follow-link t
+                                'help-echo "mouse-1/RET: visit this file")
+            (insert "\n"))
+        (let ((face (dsh-bridge-extras--diff-face line)))
+          (insert (if face (propertize line 'face face) line) "\n"))))))
 
 ;;; Rendering
 
@@ -502,6 +445,9 @@ COMPLETE indicates that all pages are available for exact raw access."
   "Insert the current item's title and metadata."
   (let* ((item dsh-bridge-extras--item)
          (kind (and item (intern (or (alist-get 'kind item) ""))))
+         (session (dsh-bridge-extras-session))
+         (label (and session
+                     (or (dsh-bridge--session-label session nil t) session)))
          (title (pcase kind
                   ('thinking (format "Thinking — step %s"
                                      (or (alist-get 'step item) "?")))
@@ -513,10 +459,21 @@ COMPLETE indicates that all pages are available for exact raw access."
                                         (or (alist-get 'name item) "Tool")))
                   (_ "DSH Inspector"))))
     (insert (propertize (concat title "\n") 'face 'dsh-bridge-extras-heading-face))
-    (insert (propertize (format "Session      %s   Turn %s\n"
-                                (or dsh-bridge-extras--session "?")
-                                (or dsh-bridge-extras--turn "?"))
+    (insert (propertize "Session      " 'face 'dsh-bridge-extras-note-face))
+    (if session
+        (insert-text-button label
+                            'action (lambda (button)
+                                      (dsh-bridge-describe-session
+                                       (button-get button 'dsh-bridge-session-id)))
+                            'dsh-bridge-session-id session
+                            'follow-link t
+                            'help-echo "mouse-1: describe this session")
+      (insert "?"))
+    (insert (propertize (format "   Turn %s\n" (or dsh-bridge-extras--turn "?"))
                         'face 'dsh-bridge-extras-note-face))
+    (when (and session label (not (equal label session)))
+      (insert (propertize (format "Id           %s\n" session)
+                          'face 'dsh-bridge-extras-note-face)))
     (when dsh-bridge-extras--cwd
       (insert (propertize (format "Directory    %s\n" dsh-bridge-extras--cwd)
                           'face 'dsh-bridge-extras-note-face)))
@@ -534,32 +491,10 @@ COMPLETE indicates that all pages are available for exact raw access."
   (unless (bobp) (insert "\n"))
   (insert (propertize (concat title "\n") 'face 'dsh-bridge-extras-section-face)))
 
-(defun dsh-bridge-extras--insert-page-notice (key &optional absolute)
-  "Insert pagination and error notices for content-part KEY.
-ABSOLUTE optionally supplies the notice's visitable file path."
-  (when-let* ((state (dsh-bridge-extras--part key)))
-    (let ((start (point)))
-      (when-let* ((error (plist-get state :error)))
-        (insert (propertize (format "%s\n" error) 'face 'dsh-bridge-extras-error-face)))
-      (when (plist-get state :hasMore)
-        (let* ((next (plist-get state :next))
-               (total (plist-get state :total))
-               (remaining (and (numberp next) (numberp total)
-                               (max 0 (- total next)))))
-          (insert (propertize
-                   (if remaining
-                       (format "... %d more bytes; press L to load more\n" remaining)
-                     "... more content; press L to load more\n")
-                   'face 'dsh-bridge-extras-note-face))))
-      (dsh-bridge-extras--mark-part start key absolute))))
-
 (defun dsh-bridge-extras--insert-text-part (key renderer)
-  "Insert content-part KEY through RENDERER and mark its interactive region."
+  "Insert content-part KEY through RENDERER."
   (when-let* ((state (dsh-bridge-extras--part key)))
-    (let ((start (point)))
-      (funcall renderer (plist-get state :text) state)
-      (dsh-bridge-extras--mark-part start key)
-      (dsh-bridge-extras--insert-page-notice key))))
+    (funcall renderer (plist-get state :text))))
 
 (defun dsh-bridge-extras--insert-result-metadata ()
   "Insert non-text result blocks and structured errors for the item."
@@ -602,12 +537,12 @@ ABSOLUTE optionally supplies the notice's visitable file path."
     (dsh-bridge-extras--insert-section "Arguments")
     (dsh-bridge-extras--insert-text-part
      'arguments
-     (lambda (text state)
-       (dsh-bridge-extras--insert-json text (not (plist-get state :hasMore))))))
+     (lambda (text)
+       (dsh-bridge-extras--insert-json text))))
   (when (dsh-bridge-extras--part 'result)
     (dsh-bridge-extras--insert-section "Result")
     (dsh-bridge-extras--insert-text-part
-     'result (lambda (text _state)
+     'result (lambda (text)
                (insert text)
                (unless (string-suffix-p "\n" text) (insert "\n"))))
     (dsh-bridge-extras--insert-result-metadata))
@@ -617,12 +552,9 @@ ABSOLUTE optionally supplies the notice's visitable file path."
       (when (= index 0) (dsh-bridge-extras--insert-section "Changed files"))
       (let* ((key (list 'diff index))
              (file (nth index files))
-             (absolute (alist-get 'absolute file))
-             (start (point)))
+             (absolute (alist-get 'absolute file)))
         (dsh-bridge-extras--insert-diff-text
-         (plist-get (dsh-bridge-extras--part key) :text))
-        (dsh-bridge-extras--mark-part start key absolute)
-        (dsh-bridge-extras--insert-page-notice key absolute))
+         (plist-get (dsh-bridge-extras--part key) :text) absolute))
       (setq index (1+ index)))
     (when (> (or (alist-get 'droppedFiles dsh-bridge-extras--item) 0) 0)
       (insert (propertize
@@ -631,27 +563,109 @@ ABSOLUTE optionally supplies the notice's visitable file path."
                'face 'dsh-bridge-extras-note-face)))))
 
 (defun dsh-bridge-extras--render ()
-  "Render the current item from its response and accumulated content pages."
+  "Render the current item from its response and complete content parts."
   (let ((inhibit-read-only t)
-        (part (dsh-bridge-extras--part-at-point))
         (line (line-number-at-pos)))
     (erase-buffer)
     (dsh-bridge-extras--insert-title)
-    (when dsh-bridge-extras--item
+    (when (and dsh-bridge-extras--item
+               (or dsh-bridge-extras--full-loaded
+                   (not (eq (alist-get 'deferred dsh-bridge-extras--item) t))))
       (if (equal (alist-get 'kind dsh-bridge-extras--item) "thinking")
           (dsh-bridge-extras--insert-text-part
-           'reasoning (lambda (text _state)
+           'reasoning (lambda (text)
                         (dsh-bridge-extras--insert-markdown text)))
         (dsh-bridge-extras--insert-tool-body)))
     (setq buffer-read-only t)
     (goto-char (point-min))
-    (when part
-      (when-let* ((found (dsh-bridge-extras--find-part part)))
-        (goto-char found)
-        (forward-line (max 0 (- line (line-number-at-pos))))))
+    (forward-line (max 0 (1- line)))
     (set-buffer-modified-p nil)))
 
 ;;; Commands
+
+(defun dsh-bridge-extras--goto-view-item (key)
+  "Move point to the DSH-View activity line for KEY.
+Return non-nil when the line was found."
+  (widen)
+  (goto-char (point-min))
+  (when-let* ((match (text-property-search-forward
+                      'dsh-bridge-activity key #'equal)))
+    (goto-char (prop-match-beginning match))
+    t))
+
+(defun dsh-bridge-extras-enter ()
+  "Activate the file button at point."
+  (interactive)
+  (if (button-at (point))
+      (push-button (point))
+    (user-error "No action at point")))
+
+(defun dsh-bridge-extras-describe-session ()
+  "Show the DSH-Describe report for the inspected item's session."
+  (interactive)
+  (let ((session (dsh-bridge-extras-session)))
+    (if session
+        (dsh-bridge-describe-session session)
+      (message "No DSH session for this buffer."))))
+
+(defun dsh-bridge-extras-open-prompt ()
+  "Open a DSH-Prompt buffer for the inspected item's session."
+  (interactive)
+  (let ((session (dsh-bridge-extras-session)))
+    (if session
+        (pop-to-buffer (dsh-bridge--prompt-buffer session)
+                       dsh-bridge-prompt-display-action)
+      (message "No DSH session for this buffer."))))
+
+(defun dsh-bridge-extras-show-in-view ()
+  "Show the inspected item at its line in a DSH-View buffer.
+Reuse a view already showing the session.  When that view shows another
+turn, select the item's turn from its cached history.  If no view exists,
+report rather than opening or resuming one."
+  (interactive)
+  (let* ((session dsh-bridge-extras--session)
+         (turn dsh-bridge-extras--turn)
+         (key (and dsh-bridge-extras--selector
+                   (dsh-bridge-extras--activity-key
+                    dsh-bridge-extras--selector)))
+         (views (and session (dsh-bridge--session-views session)))
+         (turns (and session (dsh-bridge--turns-cache-turns session))))
+    (cond
+     ((or (null session) (not (numberp turn)) (null key))
+      (message "dsh-bridge-extras: no activity item to show"))
+     ((null views)
+      (message "dsh-bridge-extras: no DSH-View buffer for this session"))
+     (t
+      (let* ((buffer
+              (or (seq-find (lambda (view)
+                              (with-current-buffer view
+                                (equal dsh-bridge--view-turn turn)))
+                            views)
+                  (car views)))
+             (index (seq-position
+                     turns turn
+                     (lambda (record wanted)
+                       (equal (alist-get 'turn record) wanted)))))
+        (with-current-buffer buffer
+          (let ((activity-was-off (null dsh-bridge--view-activity))
+                (turn-changed (not (equal dsh-bridge--view-turn turn))))
+            (when activity-was-off
+              (setq-local dsh-bridge--view-activity t))
+            (if (and (or activity-was-off turn-changed)
+                     (not (numberp index)))
+                (message "dsh-bridge-extras: turn %s is not in this view's cached history"
+                         turn)
+              (when (or activity-was-off turn-changed)
+                (dsh-bridge--view-show-turn index turns))
+              (if (and (equal dsh-bridge--view-turn turn)
+                       (dsh-bridge-extras--goto-view-item key))
+                  (progn
+                    (pop-to-buffer
+                     buffer
+                     '((display-buffer-reuse-window display-buffer-same-window)))
+                    (when (get-buffer-window buffer)
+                      (recenter)))
+                (message "dsh-bridge-extras: item is not visible in the DSH-View"))))))))))
 
 (defun dsh-bridge-extras-inspect-item ()
   "Inspect only the DSH activity item at point.
@@ -679,10 +693,11 @@ result.  Refuse when the current DSH-View line names no activity item."
               dsh-bridge-extras--cursor nil
               dsh-bridge-extras--cwd nil
               dsh-bridge-extras--parts (make-hash-table :test #'equal)
+              dsh-bridge-extras--full-loaded nil
               dsh-bridge-extras--status "Loading item..."
               dsh-bridge-extras--inflight nil)
         (dsh-bridge-extras--render)
-        (dsh-bridge-extras--request nil nil nil))
+        (dsh-bridge-extras--request))
       (pop-to-buffer buffer)
       buffer)))
 
@@ -698,33 +713,32 @@ result.  Refuse when the current DSH-View line names no activity item."
     (setq dsh-bridge-extras--generation (1+ dsh-bridge-extras--generation)
           dsh-bridge-extras--status "Refreshing item...")
     (dsh-bridge-extras--render)
-    (dsh-bridge-extras--request nil nil nil))))
+    (dsh-bridge-extras--request dsh-bridge-extras--full-loaded))))
 
-(defun dsh-bridge-extras-load-more ()
-  "Fetch the next page of the content part at point."
-  (interactive)
-  (let* ((key (dsh-bridge-extras--part-at-point))
-         (state (and key (dsh-bridge-extras--part key))))
-    (cond
-     ((null key) (message "dsh-bridge-extras: no content part at point"))
-     ((null state) (message "dsh-bridge-extras: no page state at point"))
-     ((not (plist-get state :hasMore))
-      (message "dsh-bridge-extras: no more content"))
-     (dsh-bridge-extras--inflight
-      (message "dsh-bridge-extras: a request is already in flight"))
-     (t
-      (dsh-bridge-extras--request
-       (if (consp key) (car key) key) (plist-get state :next)
-       (when (eq (car-safe key) 'diff) (nth 1 key)))))))
-
-(defun dsh-bridge-extras-visit-file ()
-  "Visit the file at point, or the current item's first changed file."
-  (interactive)
-  (let ((path (or (dsh-bridge-extras--property-at-line 'dsh-bridge-extras-file)
-                  (alist-get 'absolute (car (dsh-bridge-extras--item-files))))))
-    (if path
-        (find-file path)
-      (message "dsh-bridge-extras: no file at point"))))
+(easy-menu-define dsh-bridge-extras-menu dsh-bridge-extras-mode-map
+  "Menu bar menu for DSH-Inspector buffers."
+  '("DSH Bridge"
+    ["Show in DSH-View" dsh-bridge-extras-show-in-view
+     :keys "f"
+     :help "Move to this item's line in its DSH-View buffer"]
+    ["Describe Session" dsh-bridge-extras-describe-session
+     :keys "D"
+     :help "Show this item's session report"]
+    ["Open Prompt Buffer" dsh-bridge-extras-open-prompt
+     :keys "r"
+     :help "Open a DSH-Prompt buffer for this item's session"]
+    "---"
+    ["Refresh" dsh-bridge-extras-refresh
+     :keys "g"
+     :help "Re-fetch this item"]
+    "---"
+    ["List Sessions" dsh-bridge-list-sessions
+     :keys "l"
+     :help "Browse DSH sessions"]
+    "---"
+    ["Quit Window" quit-window
+     :keys "q"
+     :help "Dismiss this buffer"]))
 
 (provide 'dsh-bridge-extras)
 

@@ -73,21 +73,20 @@
 //   GET  /dsh-bridge/details/item?sessionId=&turn=&kind=thinking&seq=&ord=
 //   GET  /dsh-bridge/details/item?sessionId=&turn=&kind=tool&callId=
 //   GET  /dsh-bridge/details/item?sessionId=&turn=&kind=tool-result&callId=
-//        [&epoch=&cursor=&part=&byteOffset=[&fileIndex=]]
+//        [&full=1]
 //        -> exactly one currently visible reasoning block, logical tool
 //        invocation (call plus its current result), or current orphan result.
 //        The observation identity is epoch = surface replaceGeneration and
-//        cursor = terminal log cursor. Initial responses include first pages
-//        of all available parts: parts.reasoning, parts.arguments/result, and
-//        each files[].diff. Continuations name one part and carry the original
-//        observation; fileIndex is required only for diff. Every page contains
-//        text plus {byteOffset,nextByteOffset,totalBytes,hasMore}, split only
-//        at UTF-8 code-point boundaries. File caps report durable totals and
-//        dropped files/fragments. 400 malformed/repeated/incompatible params
-//        or offsets, 404 unknown session/turn/item/part/file, 409 stale
-//        observation (with the fresh pair), shadowed item, or subagent-owned
-//        session. Cold and archived sessions are read without resuming;
-//        the route requires the bearer token.
+//        cursor = terminal log cursor. The response includes complete parts:
+//        parts.reasoning, parts.arguments/result, and each files[].diff, with
+//        totalBytes for the whole item. If the item's text exceeds the
+//        confirmation threshold, the initial response withholds every text
+//        field and sets deferred: true; &full=1 returns the complete item.
+//        File caps report durable totals and dropped files/fragments. 400
+//        malformed/repeated/legacy-pagination params, 404 unknown
+//        session/turn/item, 409 shadowed item or subagent-owned session. Cold
+//        and archived sessions are read without resuming; the route requires
+//        the bearer token.
 //   POST /dsh-bridge/draft { text, sessionId? }   -> push a composer draft (SSE)
 //   GET  /dsh-bridge/outbox                       -> collect DSH->Emacs entries
 //   POST /dsh-bridge/outbox { messageId, sessionId, source? }
@@ -3079,8 +3078,8 @@ export function apply(ctx: Context, config?: Config): void {
       // The optional inspector's one read-only item route. It never calls
       // `resolveTarget()`: an explicit session id is observed as given, cold
       // and archived sessions are read without resuming, and no last-active
-      // race is possible. A stale continuation is a 409 carrying the fresh
-      // identity, never a missing-route 404.
+      // race is possible. Large content is probed by size and fetched whole
+      // only after the inspector confirms it.
       if (req.method === 'GET' && pathname === '/dsh-bridge/details/item') {
         try {
           const parsed = parseDetailItemQuery(url.searchParams)
@@ -3090,16 +3089,6 @@ export function apply(ctx: Context, config?: Config): void {
           }
           const request = parsed.request
           const observation = await readDetailObservation(request.sessionId)
-          if (request.part !== undefined
-            && (request.epoch !== observation.epoch || request.cursor !== observation.cursor)) {
-            sendJson(res, 409, {
-              error: 'detail observation is stale',
-              reason: 'stale',
-              epoch: observation.epoch,
-              cursor: observation.cursor,
-            })
-            return
-          }
           const boundaries = turnBoundaries(observation.events)
           const projection = detailProjection(observation, boundaries, request.turn)
           const selected = buildDetailItem({
@@ -3118,7 +3107,7 @@ export function apply(ctx: Context, config?: Config): void {
             sendJson(res, selected.status, { error: selected.message, reason: selected.reason })
             return
           }
-          const paged = buildDetailItemResponse({
+          const result = buildDetailItemResponse({
             sessionId: observation.sessionId,
             epoch: observation.epoch,
             cursor: observation.cursor,
@@ -3138,11 +3127,11 @@ export function apply(ctx: Context, config?: Config): void {
               }
             },
           })
-          if (!paged.ok) {
-            sendJson(res, paged.status, { error: paged.message, reason: paged.reason })
+          if (!result.ok) {
+            sendJson(res, result.status, { error: result.message, reason: result.reason })
             return
           }
-          sendJson(res, 200, paged.response)
+          sendJson(res, 200, result.response)
         } catch (error: unknown) {
           sendJson(res, bridgeErrorStatus(error), {
             error: error instanceof Error ? error.message : String(error),

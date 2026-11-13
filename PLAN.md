@@ -47,11 +47,12 @@ The host side keeps the same split. `/turns` stays summary-only (its newest-40
 turn/newest-500 entry activity window is a view stream, not an archive).
 `/details/item` takes an explicit session id, concrete shown turn, and item
 selector: `seq + ord` for reasoning, or a validated per-turn `callId` for a tool
-or orphan result. Initial reads return only that item and the first page of each
-of its content parts. Reasoning, arguments, result text, and each file diff have
-independent UTF-8-byte pagination; continuations also carry the observation
-identity so pages from different log cuts cannot be concatenated. Reads never
-call `resolveTarget()`, so cold and archived sessions are not resumed.
+or orphan result. The response carries the item's complete reasoning,
+arguments, result text, and each file diff. An item whose text exceeds
+`DETAIL_FULL_LOAD_BYTES` withholds every text field on the first read and
+reports `totalBytes` plus `deferred: true`; the inspector asks once and either
+fetches the complete item with `full=1` or leaves it unloaded. Reads never call
+`resolveTarget()`, so cold and archived sessions are not resumed.
 
 Compaction makes turn-level visibility wrong: it can shadow one assistant
 message while leaving another event in the same turn current. The fold therefore
@@ -62,10 +63,9 @@ whose only results were shadowed stay hidden rather than being resurrected from
 the log.
 
 An item response carries an observation identity: the numeric surface
-`replaceGeneration` and terminal log cursor. A continuation with a stale pair is
-a 409 rather than a missing-route 404. Manual refresh deliberately re-resolves
-the same item at a fresh observation and never substitutes a newest turn or a
-different entry.
+`replaceGeneration` and terminal log cursor. Manual refresh deliberately
+re-resolves the same item at a fresh observation and never substitutes a newest
+turn or a different entry.
 
 Per-call file changes are honest about provenance. `write` and `edit` results
 carry durable `meta.diffs` fragments (and `write` a recorded `operation` and
@@ -76,7 +76,8 @@ it never fabricates absolute hunk positions or final-newline markers, and the
 inspector never offers patch application from it. The baseline changed-files
 footer still just visits files: its `{path, op}` identity cannot distinguish two
 calls that changed the same path, so per-call diffs are reached through their
-owning tool item. Whole-turn workspace review (`workspaceChanges`) remains a
+owning tool item, whose `File:` lines are themselves file buttons. Whole-turn
+workspace review (`workspaceChanges`) remains a
 possible separate review UI because its recorders are live-only and cannot be
 replayed cold; it is not part of the item inspector.
 
@@ -124,7 +125,7 @@ only per exact version.
   thinking line; keep full text off SSE, as today. Expose the accumulated block
   through an explicit read-only, bearer-authenticated observation/route (extend
   `/details/item` with a live in-flight selector, or add a sibling route) with
-  UTF-8 pagination and `MAX_DETAIL_*`-style bounds. The inspector fetches it only
+  the same size-probe/full-load bounds. The inspector fetches it only
   when the user opens or refreshes that item.
 - **Emacs** — stable identity for the in-flight block; incremental activity-line
   update; partial Markdown fontification; refresh until the committed block

@@ -315,15 +315,8 @@ describe('cold (persisted-only) item detail', () => {
       expect(JSON.parse(toolItem.body.parts.arguments.text)).toMatchObject({ file_path: 'cold-detail.txt' })
       expect(toolItem.body.files[0].status).toBe('create')
 
-      const continuation = await get(second,
-        `/dsh-bridge/details/item?${selector}&kind=thinking&seq=${thinking.seq}&ord=${thinking.ord}`
-        + `&epoch=${thinkingItem.body.epoch}&cursor=${thinkingItem.body.cursor}`
-        + '&part=reasoning&byteOffset=0')
-      expect(continuation.status, JSON.stringify(continuation.body)).toBe(200)
-      expect(continuation.body.parts.reasoning.text).toContain(marker)
-
       // The read-only detail path must not have resumed the session, and the
-      // archived cold row stays archived after both initial and paged reads.
+      // archived cold row stays archived after both item reads.
       const rows = (await get(second, '/dsh-bridge/sessions')).body.sessions
       expect(rows.find(row => row.id === sessionId)?.live).toBe(false)
       expect(rows.find(row => row.id === sessionId)?.archived).toBe(true)
