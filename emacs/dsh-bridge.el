@@ -302,10 +302,10 @@ brief echo area message if there is no DSH-View showing that session."
   :group 'dsh-bridge)
 
 (defcustom dsh-bridge-view-answer-echo t
-  "Whether answering leaves a temporary note in the DSH-View buffer.
-If non-nil, answering or declining an ask-user question leaves a short
-note in the corresponding DSH-View buffer.  This note is overwritten
-when the turn commits its next reply segment, or when the turn ends."
+  "Whether answering a query leaves a note in the DSH-View buffer.
+If non-nil, answering or declining a query leaves a short note in the
+corresponding DSH-View buffer.  This note is overwritten when the turn
+commits its next reply segment, or when the turn ends."
   :type 'boolean
   :group 'dsh-bridge)
 
@@ -655,7 +655,7 @@ display cache to show the active model in DSH-prompt buffers.")
 ;; The harness allows at most one query per session; a second request
 ;; cannot arrive before the first is resolved.
 (defvar dsh-bridge--pending-questions nil
-  "Alist of \"ask-user\" questions pending in DSH sessions.
+  "Alist of \"ask-user\" queries pending in DSH sessions.
 Each entry has the form (SESSION-ID . (REQUEST-ID . QUESTIONS)).")
 
 ;; For approvals, however, DSH internals retains the possibility of
@@ -1113,8 +1113,8 @@ Currently supported events are:
   a known activation for the same goal, and re-render.
 - `goal-activation': update the cached goal's `activation' slot when the
   frame names the cached goal, and re-render.
-- `ask-user': record a pending ask-user question and surface it.
-- `ask-user-resolved': retire a pending question (answered or cancelled).
+- `ask-user': record a pending ask-user query and surface it.
+- `ask-user-resolved': retire a pending query (answered or cancelled).
 - `approval': record a pending approval request and surface it.
 - `approval-resolved': retire a pending approval (allowed, rejected, or
   cancelled).
@@ -2574,17 +2574,15 @@ the visited file (not the buffer text) is attached."
 
 ;; The DSH-View buffer shows one turn, consisting of sequential
 ;; messages ("segments") separated by horizontal-rule dividers.
-;; Furthermore, user answers (from replying to ask-user queries) are
-;; spliced between the segments where they occur.
 ;;
 ;; If `dsh-bridge--view-follow' is non-nil (the default), and the
 ;; DSH-View buffer is showing the latest turn of a non-idle session,
 ;; then arriving segments are inserted automatically.  We also put a
 ;; run-status line at the end of the buffer: "(running...)"  if the
 ;; turn is awaiting its first segment; "(continuing...)" if waiting
-;; for more segments; and an ask-user question if the turn is parked
-;; on a query.	In a completed (idle) turn, the final segment ends
-;; without any run-status line.
+;; for more segments; and an ask-user query if the turn is parked on a
+;; query. In a completed (idle) turn, the final segment ends without
+;; any run-status line.
 ;;
 ;; A turn whose tool calls changed files ends with a changed-files
 ;; footer (see "Changed files" below) just above that run-status line:
@@ -2760,11 +2758,11 @@ pending approval, return nil."
 
 (defun dsh-bridge--view-answer-note (session-id turn)
   "DSH-View marker line for a user-supplied answer, or nil.
-After an ask-user query is answered for SESSION-ID, the note is
-displayed temporarily, until the next turn segment arrives.  TURN should
-be the rendered turn record or `new'.  A baseline of `:unknown' (the
-turn list was not cached when the question was answered) matches any
-open turn and relies on the notification handlers to retire it.
+After a query is answered for SESSION-ID, the note is shown temporarily,
+until the next turn segment arrives.  TURN should be the rendered turn
+record or `new'.  A baseline of `:unknown' (the turn list was not cached
+when the question was answered) matches any open turn and relies on the
+notification handlers to retire it.
 
 If SESSION-ID is nil, or no answer note is recorded for it, return nil."
   (let ((note (and dsh-bridge-view-answer-echo session-id
@@ -4871,13 +4869,10 @@ must contain a `sessionId' and a numeric `turn'."
 
 (defun dsh-bridge--view-await-refresh (session-id)
   "Re-render the terminal furniture of every DSH-View buffer showing SESSION-ID.
-Called when SESSION-ID's ask-user question or approval request arrives or is
-resolved: for a view showing an open turn the terminal marker flips between
-`(continuing...)' and the awaiting note (`dsh-bridge--view-awaiting-note' /
-`dsh-bridge--view-approval-note'), so the refill reuses the cached turn record
-and preserves point; a view in the waiting state (a fresh turn may ask before
-committing any text) swaps its running placeholder for the note instead.  A
-no-op for sessions no view shows in either state."
+This is called after a query or approval request arrives, or is
+answered.  It leaves the main body of the DSH-View buffer untouched,
+only updating the terminal furniture (e.g., changing a \"running...\"
+line to a query message)."
   (dolist (buf (dsh-bridge--session-views session-id))
     (with-current-buffer buf
       (cond
@@ -4900,7 +4895,7 @@ no-op for sessions no view shows in either state."
 	  (when (and record (dsh-bridge--view-turn-open-p record))
 	    (dsh-bridge--view-fill session-id record nil t t))))))))
 
-;;; Ask-user questions (the DSH `ask_user_question` tool)
+;;; Queries
 
 ;; The ask-user path registers an in-process answerer on the host's
 ;; `user-questions/request` waterfall, ahead of the browser forwarder.
@@ -5025,7 +5020,7 @@ demand by `\\[dsh-bridge-answer]'."
       (dsh-bridge--view-await-refresh session-id))))
 
 (defun dsh-bridge--ask-user-resolved (session-id request-id outcome)
-  "Retire a pending ask for SESSION-ID if it was answered or cancelled.
+  "Retire a query for SESSION-ID if it was answered or cancelled.
 Only the stored request id retires the entry: a frame naming an ask this
 session has already moved past leaves the live one alone.  Update the
 DSH-Question buffer's banner accordingly."
@@ -5605,7 +5600,7 @@ that wait is still the current one (see `dsh-bridge--view-answer-notes')."
 		(assoc-delete-all session-id dsh-bridge--view-answer-notes)))))
 
 (defun dsh-bridge--view-answer-note-record (answers)
-  "Record ANSWERS for the ask-user question in the current buffer.
+  "Record ANSWERS for the query in the current buffer.
 ANSWERS is `none' when the user declined to answer at all, else the
 answers list `dsh-bridge--question-validate' returned: a list of
 alists, each with `id', `selected' and, for a custom answer, `custom'.
@@ -5685,7 +5680,7 @@ and pop to the session's DSH-View in turn-following state."
 			 (if reason (concat ": " reason) ""))))))))))
 
 (defun dsh-bridge--question-decline ()
-  "Tell the model we will not answer (cancels the ask_user_question tool call).
+  "Tell the model we will not answer a query.
 On acceptance the cancelled session resumes, so the session's DSH-View is
 selected in turn-following state at its tail, exactly as for a submitted
 answer; an already-resolved question is bannered in place."
@@ -5778,7 +5773,7 @@ neither, report that nothing is pending."
 (define-derived-mode dsh-bridge-question-mode special-mode "DSH-Question"
   "Major mode for answering model queries from the DeepSeek Harness (DSH).
 This buffer is launched when the user calls `dsh-bridge-answer' to
-answer an \"ask-user\" query emitted from a DSH session.
+answer a query emitted by DSH's \"ask-user\" tool.
 
 The buffer is read-only; the user marks options mark options with RET or
 an option's number key.	 These commands are also available:
@@ -6055,14 +6050,13 @@ first GET /models succeeds for the session."
 	  (or (dsh-bridge--model-display-name data provider model) model))))))
 
 (defun dsh-bridge--prompt-context-label (session-id)
-  "The prompt header's context-occupancy segment for SESSION-ID, or nil.
-Renders the DSH formula `min(100, round(used/window*100))%'; nil until both
-numbers are known."
+  "The prompt header's context-occupancy segment for SESSION-ID, or nil."
   (let ((entry (and session-id (assoc session-id dsh-bridge--session-context))))
     (when entry
       (let ((used (cadr entry))
 	    (window (cddr entry)))
 	(when (and (numberp used) (numberp window) (> window 0))
+	  ;; Same formula as DSH's web UI.
 	  (format "%d%%" (min 100 (round (* 100.0 (/ used (float window)))))))))))
 
 (defun dsh-bridge--refresh-prompt-metadata ()
@@ -6974,14 +6968,8 @@ or a plugin that predates the route)."
 
 (defun dsh-bridge--stop-confirmation (session-id)
   "Return the confirmation text for stopping SESSION-ID.
-Name a pending ask-user question or approval, and any prompts already
-pending for the session.  A stop keeps the session's queued prompts, so
-without that note a queued prompt starting a new turn right afterwards
-could make the stop look ineffective.  The pending-prompt counts are
-advisory: a read that fails simply drops that part of the text.  SESSION-ID
-is read only for that pending state: the text names no session label, which
-can be arbitrarily long, because the stop always acts on the session at
-hand."
+If the session has a pending query or approval, or queued prompt(s), the
+confirmation message flags it explicitly."
   (when session-id
     (let* ((counts (dsh-bridge--pending-prompt-counts session-id))
 	   (queued (car-safe counts))
@@ -7061,10 +7049,9 @@ an error if there is no such session.
 
 Ask the host to compact the session's context history (the slash-command
 registry's `/compact').  Sessions in a state the host would busy-reject
-anyway are refused locally with a `user-error': a running turn, a pending
-ask-user/approval answer, or input already queued to start a new turn
-(steering-only queues stay compactable, with the host 409 as the race
-backstop).  A cold session is resumed on demand by the host.
+anyway are refused locally with a `user-error': a running turn, an
+active query, or input queued to start a new turn.  A cold session is
+resumed on demand by the host.
 
 This asks for confirmation before posting.  The post is asynchronous;
 updates arrive as `compaction' SSE frames and are handled on arrival.
@@ -7351,7 +7338,7 @@ id.
 
 Visiting means, depending on the session state:
 
-- Waiting on an ask-user question or approval: open its answer buffer.
+- Waiting on a query or approval: open its answer buffer.
 - Running a turn: show the session's DSH-View in turn-following state,
   with point at the end, exactly as the prompt flow collects a reply.
 - Idle with no output yet: open a prompt in the same window.
