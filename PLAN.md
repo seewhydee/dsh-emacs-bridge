@@ -85,8 +85,8 @@ replayed cold; it is not part of the item inspector.
 
 Ordered by recommended sequence, but out-of-sequence implementation is
 acceptable based on user needs. Harness seams were last verified
-against DSH 0.2.2-rc.1 plus post-release commits; the peer floor remains
-`^0.2.0-rc.1`, while the dev dependencies are set to `^0.2.2-rc.1` and
+against DSH 0.2.2-rc.2 plus post-release commits; the peer floor remains
+`^0.2.0-rc.1`, while the dev dependencies are set to `^0.2.2-rc.2` and
 the matching vendor set (cordis 4.1.0, schemastery 3.19.0). The two
 ranges are deliberately not in lockstep — the peers are the
 compatibility floor, the dev dependencies the verified build target.
