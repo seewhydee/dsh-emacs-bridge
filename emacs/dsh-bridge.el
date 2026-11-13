@@ -3466,25 +3466,17 @@ to pop to the buffer using the same window.  Return the buffer."
 
 (defun dsh-bridge--exit-to-view (buffer &optional invoked-window)
   "Select DSH-View BUFFER after an explicit user action.
-Return BUFFER.  If BUFFER is already current — an approval prompt reads
-the minibuffer without leaving the DSH-View — leave the window
-configuration and point untouched: there is nothing to dismiss, and the
-user is already where the continuation will appear.
+If BUFFER is already current, leave the window configuration and point
+untouched (this happens after handling an approval request, which uses
+the minibuffer without leaving the DSH-View).  Otherwise, reuse a window
+already displaying BUFFER, or display it in the selected window.
 
-Otherwise reuse a window already displaying BUFFER, or display it in
-the selected window.  If INVOKED-WINDOW is non-nil, it specifies the
-window the action came from; if this window is displaying the buffer
-that was current when this function was invoked, quit it.  This ensures
-that the old buffer does not linger on screen.  Leave point at the end
-of BUFFER, so that following replies splice in above it.
-
-Only explicit user actions (sending a prompt, answering or declining a
-question) jump this way; an outcome learned from the host while the user
-did nothing (a question resolved elsewhere) is bannered in place."
-  (if (eq (current-buffer) buffer)
-      ;; The action ran in the view itself.  Quitting its window here would
-      ;; bury the view the user is returning to.
-      buffer
+If INVOKED-WINDOW is non-nil, it specifies the window the action came
+from; if this window is displaying the buffer that was current when this
+function was invoked, quit it."
+  ;; If the user action triggering this function call ran in the
+  ;; DSH-View buffer itself, do nothing extra.
+  (unless (eq (current-buffer) buffer)
     (let* ((old (current-buffer))
 	   (old-window (or (and (window-live-p invoked-window)
 				(eq (window-buffer invoked-window) old)
@@ -3500,8 +3492,7 @@ did nothing (a question resolved elsewhere) is bannered in place."
 	;; The selected window now shows BUFFER; bury the old buffer.
 	(bury-buffer old))
       (with-current-buffer buffer
-	(goto-char (point-max)))
-      buffer)))
+	(goto-char (point-max))))))
 
 (defun dsh-bridge--session-turns (session-id)
   "Return SESSION-ID's parsed \"GET /turns\" response, or nil.
@@ -3524,13 +3515,13 @@ host resumes a cold session as part of resolving the target."
 
 (defun dsh-bridge--view-for-session (session-id &optional alist)
   "Return SESSION-ID's DSH-View buffer, refreshed from its turn list.
-Reuse the session's view, else `*dsh-bridge-output*'.  ALIST, when
-non-nil, is an already-fetched \"GET /turns\" response; otherwise one is
-fetched.  Refresh the turn cache, fill the newest turn, and enter
-turn-following state while that turn is open or running.  A running
-session with no committed turn yet shows the running placeholder.  Used
-when an explicit action resumes a session and the continuation must be
-collected in the view."
+This function is called when an explicit user action resumes a session.
+Fill the DSH-View buffer (a pre-existing one for the session, or else
+`*dsh-bridge-output*') with the latest turn, and enter turn-following
+state if that turn is active.
+
+ALIST, if non-nil, should be an already-fetched \"GET /turns\" response
+to consult; otherwise, one is fetched."
   (let* ((alist (or alist (dsh-bridge--session-turns session-id)))
 	 (turns-pair (assq 'turns alist))
 	 (turns (cdr-safe turns-pair))
@@ -3604,21 +3595,20 @@ line, then refill every turn-following view."
 
 (defun dsh-bridge--view-running-duration-p (&optional buffer)
   "Whether BUFFER's DSH-View header shows a running elapsed duration.
-That is exactly when the header changes from one tick to the next: the
-displayed turn is open with a known `startedAt', or the buffer is waiting
-for a new turn's first reply and the status tracker knows its start.
-A view browsing an older, settled turn while the session runs a newer one
-does not tick — the header describes the displayed turn."
+This is non-nil if `dsh-bridge-view-elapsed-ticker' is non-nil, and the
+displayed turn is running (so the ticker should be ticking)."
   (with-current-buffer (or buffer (current-buffer))
-    (and dsh-bridge-view-elapsed-ticker
-	 (let ((record (dsh-bridge--view-turn-record)))
-	   (cond
-	    ((and record (dsh-bridge--view-turn-open-p record))
-	     (numberp (alist-get 'startedAt record)))
-	    ((and dsh-bridge--view-waiting (null record))
-	     (numberp (dsh-bridge--status-turn-start
-		       dsh-bridge--view-content-session)))
-	    (t nil))))))
+    (when dsh-bridge-view-elapsed-ticker
+      (let ((record (dsh-bridge--view-turn-record)))
+	(cond
+	 ((and record (dsh-bridge--view-turn-open-p record))
+	  (numberp (alist-get 'startedAt record)))
+	 ;; If the buffer is awaiting a new turn's first reply, the
+	 ;; ticker ought to tick too.
+	 ((and dsh-bridge--view-waiting (null record))
+	  (numberp (dsh-bridge--status-turn-start
+		    dsh-bridge--view-content-session)))
+	 (t nil))))))
 
 (defun dsh-bridge--view-ticking-buffers ()
   "Live DSH-View buffers showing a running elapsed clock in a visible window."
@@ -3628,10 +3618,7 @@ does not tick — the header describes the displayed turn."
 	      (dsh-bridge--view-buffers)))
 
 (defun dsh-bridge--view-ticker-ensure ()
-  "Start (or retain) the DSH-View header elapsed ticker, as needed.
-A single repeating timer shared by all DSH-View buffers; it runs only while
-some view shows a running session in a visible window, and cancels itself
-otherwise — so it provably never runs for a session no one is looking at."
+  "Start or retain the DSH-View header's elapsed ticker, as needed."
   (if (or (not dsh-bridge-view-elapsed-ticker)
 	  (null (dsh-bridge--view-ticking-buffers)))
       (dsh-bridge--view-ticker-maybe-cancel)
@@ -3655,7 +3642,7 @@ redisplay of the line; the form recomputes the elapsed time itself."
 	    (run-at-time 1 nil #'dsh-bridge--view-ticker-tick)))))
 
 (defun dsh-bridge--header-window-width ()
-  "The display columns available to the header line being drawn, or nil.
+  "The display columns available for the current header line, or nil.
 Called from a `header-line-format' `:eval' form, `selected-window' is the
 window whose header line is being redisplayed, so the result is that
 window's width — the same buffer shown in two windows of different widths
@@ -4186,9 +4173,9 @@ inspects the activity item at point.
 ;; be ambiguous to the old reply-index lookup).
 
 (defun dsh-bridge--turns-cache-entry (session-id)
-  "The cached entry value for SESSION-ID — (EPOCH . TURNS) — or nil.
-A nil return means the session has no entry (never fetched).  An entry whose
-TURNS is nil is a *known-empty* snapshot (see `dsh-bridge--turns-cache')."
+  "The cached entry for SESSION-ID, in the form (EPOCH . TURNS), or nil.
+A nil value means the session has no entry (never fetched).  An entry
+whose TURNS is nil is known-empty; see `dsh-bridge--turns-cache'."
   (and session-id
        (cdr (assoc session-id dsh-bridge--turns-cache))))
 
@@ -4205,13 +4192,9 @@ distinguish via `dsh-bridge--turns-cache-entry'."
 
 (defun dsh-bridge--turns-record-stale-p (candidate reference)
   "Whether CANDIDATE is a stale view of the same turn as REFERENCE.
-Within one history epoch a turn only ever grows: segments append, activity
-entries append until the host's per-turn cap starts sliding its window, and
-`turn/end' adds the terminal facts once.  CANDIDATE is stale when it carries
-fewer segments, when its newest activity entry predates REFERENCE's (once the
-window slides the entry count stops changing, so a count alone cannot tell an
-older view from a newer one), or when it drops the `endedAt' that REFERENCE
-already records."
+CANDIDATE is stale if it has fewer segments than REFERENCE (since a turn
+should only ever grow), or its newest activity entry predates that of
+REFERENCE's, or it drops the `endedAt' recorded in REFERENCE."
   (or (< (length (alist-get 'segments candidate))
 	 (length (alist-get 'segments reference)))
       (let ((candidate-seq (dsh-bridge--turns-activity-newest-seq candidate))
@@ -4283,18 +4266,12 @@ keeps the merge and the epoch atomic."
 If the session already has an entry with a numeric epoch and at least
 one cached turn, request only the incremental turn data.
 
-When the response's `incremental' field is true the suffix is merged
-into the cached list; any other response replaces the entry wholesale.
-Field presence, not truthiness: an explicit empty `turns' list means the
-session genuinely has no turns (e.g. after a full compaction) and
-replaces the stale cache with a known-empty entry, while a response
-without the field (an error or malformed body) leaves the cache alone.
-Returns a `(turns . FINAL-LIST)' cons — non-nil even when FINAL-LIST is
-empty — of the list the cache holds after the fetch, or nil when
-SESSION-ID is nil or the response has no `turns' field.	 The cache is
-shared by every DSH-View buffer, so one fetch serves them all —
-multi-view refills call this once and skip the per-view refresh in
-`dsh-bridge--view-fill'."
+If the response's `incremental' field is true, the suffix is merged into
+the cached list.  Any other response replaces the entry wholesale.
+
+Return non-nil if the session exists and carries a `turns' list (a
+known-empty list counts), and nil otherwise.  Callers can read the
+resulting list through `dsh-bridge--turns-cache-turns'."
   (when session-id
     (let* ((cached (dsh-bridge--turns-cache-entry session-id))
 	   (cached-epoch (car-safe cached))
@@ -4320,8 +4297,7 @@ multi-view refills call this once and skip the per-view refresh in
 	      (dsh-bridge--turns-cache-merge session-id cached-turns
 					     since turns epoch)
 	    (dsh-bridge--turns-cache-store session-id turns epoch)))
-	;; Return (turns . FINAL-LIST) if all good.
-	(cons 'turns (dsh-bridge--turns-cache-turns session-id))))))
+	t))))
 
 (defun dsh-bridge--view-turns-refresh (&optional force)
   "Return the cached turn list (newest first) for the current view's session.
@@ -4330,40 +4306,34 @@ FORCE is non-nil or the session has no cache entry.  FORCE keeps the position
 count current after a fill or a turn-complete refetch; a known-empty entry is
 authoritative until such a forced refresh."
   (let ((session dsh-bridge--view-content-session))
-    (when (and session
-	       (or force
-		   (null (dsh-bridge--turns-cache-entry session))))
-      (dsh-bridge--turns-cache-fetch session))
-    (and session
-	 (dsh-bridge--turns-cache-turns session))))
+    (when session
+      (when (or force (null (dsh-bridge--turns-cache-entry session)))
+	(dsh-bridge--turns-cache-fetch session))
+      (dsh-bridge--turns-cache-turns session))))
 
 (defun dsh-bridge--view-turns-cache-refresh (session-id)
   "Force-refresh the cached turn list for the DSH bridge's SESSION-ID.
-This calls `dsh-bridge--turns-cache-fetch' to fetch the session's turns
-and update the cache, then applies necessary updates to any DSH-View
-buffer viewing SESSION-ID.
-
-Returns the new turns list for the session, or nil.  If the session is
-neither shown nor cached, it is left alone."
-  (when (or (dsh-bridge--session-view session-id)
-	    (assoc session-id dsh-bridge--turns-cache))
-    (let ((pair (dsh-bridge--turns-cache-fetch session-id)))
-      (when pair
-	(let ((turns (cdr pair)))
-	  (dolist (buf (dsh-bridge--session-views session-id))
-	    ;; For a mid-browse view, the turn may vanish from the
-	    ;; refreshed list (replaced by compaction, or the list
-	    ;; coming back empty for some reason).	In that case,
-	    ;; leave browsing state, returning to \"at rest\".
-	    (with-current-buffer buf
-	      (when dsh-bridge--view-browsing
-		(setq dsh-bridge--view-browsing
-		      (and dsh-bridge--view-turn
-			   (dsh-bridge--view-turn-index turns)
-			   t)))
-	      (setq header-line-format dsh-bridge--view-header-line-format)))
-	  (dsh-bridge--view-ticker-ensure)
-	  turns)))))
+Call `dsh-bridge--turns-cache-fetch' to fetch the session's turns and
+update the cache, then apply necessary updates to any DSH-View buffer
+viewing SESSION-ID.  A failed fetch leaves those buffers alone; if the
+session is neither shown nor cached, it is left alone."
+  (when (and (or (dsh-bridge--session-view session-id)
+		 (assoc session-id dsh-bridge--turns-cache))
+	     (dsh-bridge--turns-cache-fetch session-id))
+    (let ((turns (dsh-bridge--turns-cache-turns session-id)))
+      (dolist (buf (dsh-bridge--session-views session-id))
+	;; For a mid-browse view, the turn may vanish from the
+	;; refreshed list (replaced by compaction, or the list
+	;; coming back empty for some reason).	In that case,
+	;; leave browsing state, returning to "at rest".
+	(with-current-buffer buf
+	  (when dsh-bridge--view-browsing
+	    (setq dsh-bridge--view-browsing
+		  (and dsh-bridge--view-turn
+		       (dsh-bridge--view-turn-index turns)
+		       t)))
+	  (setq header-line-format dsh-bridge--view-header-line-format)))
+      (dsh-bridge--view-ticker-ensure))))
 
 (defun dsh-bridge--view-show-turn (index turns)
   "Display turn list INDEX (newest first) in the current DSH-View buffer.
