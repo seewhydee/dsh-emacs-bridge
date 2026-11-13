@@ -3173,20 +3173,14 @@ protocol did not already provide."
 
 (defun dsh-bridge--view-insert-suffix (turn session-id)
   "Insert the terminal suffix of TURN for SESSION-ID's view.
-TURN is a turn record, `new' while a just-sent turn waits for its first
-committed reply, or `blocked' for a rejected turn with no body to
-render; any other value is a caller error.
+TURN should be either a turn record, `new' if the turn is awaiting its
+first reply, or `blocked' if the turn was rejected.
 
-The suffix is the changed-files footer (when TURN changed files), then
-the terminal marker indicating a failure, pending query or approval,
-answer acknowledgment, the running placeholder for a new turn, the
-running marker for an open turn, or the rejection note for `blocked'.
-A completed turn with no failure and no rejection has no terminal marker
-at all.
-
-The inserted region is marked with the `dsh-bridge-turn-marker' text
-property, so an incremental fill can find and replace the suffix without
-recording its length."
+The suffix may include a changed-files footer, and/or a message about a
+failure, rejection, pending query/approval, answer acknowledgment, new
+turn, and/or running turn.  The `dsh-bridge-turn-marker' text property
+is applied to any inserted text.  The function may also insert nothing,
+if there is nothing additional to report."
   (unless (or (consp turn) (memq turn '(new blocked)))
     (error "dsh-bridge: --view-insert-suffix called with a non-record TURN"))
   (let* ((completed (and (consp turn)
@@ -3222,20 +3216,15 @@ recording its length."
 	  (put-text-property old-point (point)
 			     'dsh-bridge-turn-marker t))))))
 
+
 (defun dsh-bridge--view-turn-renders-empty-p (turn)
   "Whether TURN would render an empty DSH-View body and suffix.
-An activity-only turn with `dsh-bridge--view-activity' nil and no changed
-files is the case: the host still serves a synthetic record for it, but this
-buffer has nothing to draw.  A caller refilling a view that already shows
-another turn skips such a record so the fill cannot blank the buffer.  An
-open turn is never empty: its running marker is terminal furniture, and the
-awaiting, approval, and answer notes attach only while it is open."
-  ;; Test the slots the rendering is built from instead of building it: the
-  ;; body joins the reply segments and the drawn activity, and the suffix
-  ;; joins the failure note and the changed-files footer.  A `blocked' record
-  ;; with no activity is still empty here: its rejection note belongs to the
-  ;; waiting placeholder path (`dsh-bridge--view-blocked-fill'), not to a
-  ;; record fill.
+A turn may have nothing to render, e.g. if it only has activity
+data (but activity rendering is disabled) and no changed files.
+
+Note that this does not include an open turn, which contains a
+\"running...\" message at the end."
+  ;; Test the slots the rendering is built from instead of building it.
   (and (consp turn)
        (null (alist-get 'segments turn))
        (not (and dsh-bridge--view-activity (alist-get 'activity turn)))
@@ -3290,11 +3279,6 @@ if there is no valid positioning.  If the DSH-View buffer is at rest or
 mid-browse, k is the index of the shown turn in the session's turn
 list (a fetched turn is normally 1).  In turn-following state, the
 segment is \"(latest/n)\" instead.
-
-The post-send waiting state follows the session's live tail, so it too
-reads \"(latest/n)\"; n counts the turns that have a record, so a turn
-whose first reply (or, with activity rendering on, first activity) has not
-arrived yet is not counted until it does.
 
 This function uses the turns cache only, and does no synchronous I/O."
   (let* ((session dsh-bridge--view-content-session)
@@ -3397,29 +3381,21 @@ A hidden view does not count as \"the user is looking\"."
 
 (defun dsh-bridge--view-follow-enter ()
   "Put the current DSH-View buffer into turn-following state.
-The buffer then tracks the session's newest turn, refilling as the turn's
-segments are committed and flipping to a newer turn when one starts producing.
-A session already running a turn that has no record yet — the turn a send
-started, with no committed reply — is shown as its running placeholder
-instead of as the newest turn that does have one.  Also ensures the header's
-elapsed ticker runs if the session is live."
+In this state, the DSH-View buffer tracks the session's newest turn,
+filling it automatically and flipping to a newer turn if one starts."
   (let* ((session dsh-bridge--view-content-session)
 	 (turns (dsh-bridge--view-turns-refresh t))
 	 (newest (car-safe turns))
-	 ;; The awaited turn has no `/turns' record: the session is running and
-	 ;; its newest cached turn is already closed, so a later turn is in
-	 ;; flight that the fold cannot name yet.  The placeholder is the
-	 ;; rendering that follows.
+	 ;; A turn that we are waiting on has no `/turns' record if
+	 ;; the session is running but its newest cached turn is
+	 ;; already closed.  Handle this specially.
 	 (awaited (and newest
 		       (numberp (alist-get 'turn newest))
 		       (not (dsh-bridge--view-turn-open-p newest))
 		       (eq (dsh-bridge--status-state session) 'running))))
     (if awaited
 	(dsh-bridge--view-waiting-fill session (alist-get 'turn newest))
-      ;; Entering follow by hand ends any waiting state.	 Kept explicit even
-      ;; though `dsh-bridge--view-fill' also clears it, because the refill below
-      ;; is skipped when the turn cache is empty — and in that case the awaited
-      ;; turn number must be dropped too, since no fill will replace it.
+      ;; Entering turn-following state by hand ends any waiting state.
       (setq-local dsh-bridge--view-waiting nil)
       (setq-local dsh-bridge--view-turn nil)
       (setq-local dsh-bridge--view-follow t)
