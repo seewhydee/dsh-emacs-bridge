@@ -324,20 +324,22 @@ describe('sessionReport', () => {
     ])
   })
 
-  it('treats a present-but-malformed model selection as null, not as missing', () => {
+  it('treats present-but-malformed model selections as null, not as missing', () => {
     // A malformed `next` degrades the section rather than falling back to
     // `lastUsed`: a corrupt projection is reported, not silently repaired.
-    const report = sessionReport({
-      source: 'live',
-      header: { id: 's8', createdAt: 1 },
-      projections: {
-        values: {
-          modelSelection: { next: { provider: 7, model: 'new' }, lastUsed: { provider: 'p', model: 'used' } },
+    for (const next of [{ provider: 7, model: 'new' }, 'new', 7, true]) {
+      const report = sessionReport({
+        source: 'live',
+        header: { id: 's8', createdAt: 1 },
+        projections: {
+          values: {
+            modelSelection: { next, lastUsed: { provider: 'p', model: 'used' } },
+          },
         },
-      },
-    })
-    expect(report.model).toBeNull()
-    expect(report.missing).not.toContain('model')
+      })
+      expect(report.model).toBeNull()
+      expect(report.missing).not.toContain('model')
+    }
   })
 
   it('returns null context when every pressure field is absent', () => {

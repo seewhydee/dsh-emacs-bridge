@@ -1257,8 +1257,6 @@ const MAX_INFLIGHT_FIRST_LINE_CHARS = 512
 
 /** One reasoning block of the active attempt. */
 interface InFlightReasoningBlock {
-  /** The raw stream block index (counts text and tool-call blocks too). */
-  streamIndex: number
   /** Zero-based reasoning ordinal, matching the committed fold. */
   ord: number
   firstTime: number
@@ -1738,7 +1736,6 @@ export class InFlightActivityRegistry {
     const existing = attempt.blocks.get(index)
     if (existing !== undefined) return existing
     const block: InFlightReasoningBlock = {
-      streamIndex: index,
       ord: attempt.ordCounter,
       firstTime: time,
       pieces: [],
@@ -3035,7 +3032,9 @@ function reportContext(value: unknown): SessionReportContext | null {
  */
 function reportModel(value: unknown): SessionReportModel | null {
   const view = asObject(value)
-  const selection = asObject(view?.next) ?? asObject(view?.lastUsed)
+  const selection = view?.next == null
+    ? asObject(view?.lastUsed)
+    : asObject(view.next)
   if (selection === undefined) return null
   const provider = selection.provider
   const model = selection.model
@@ -4224,7 +4223,7 @@ export interface DetailItemProjection {
   fold: DetailFold | null
 }
 
-/** Fold one turn once so initial item and part reads share visibility/files. */
+/** Fold one turn once so repeated item reads share visibility and files. */
 export function buildDetailItemProjection(args: {
   turn: number
   events: readonly SessionEventLike[]
@@ -4669,10 +4668,6 @@ export type DetailItemResponse =
   | DetailToolResponse
   | DetailOrphanResultResponse
 
-export type DetailItemReadResult =
-  | { ok: true; response: DetailItemResponse }
-  | { ok: false; status: 400 | 404; reason: string; message: string }
-
 /** Project one result's non-text metadata without its text payload. */
 function detailResultMetadata(result: DetailResultFact): DetailResultMetadata {
   return {
@@ -4761,7 +4756,7 @@ export function buildDetailItemResponse(args: {
   item: DetailItem
   request: Pick<DetailItemRequest, 'full'>
   renderDiff: (file: DetailFileChange) => DetailDiffRender
-}): DetailItemReadResult {
+}): DetailItemResponse {
   const { item } = args
   const base: DetailResponseBase = {
     sessionId: args.sessionId,
@@ -4867,12 +4862,9 @@ export function buildDetailItemResponse(args: {
 
   const totalBytes = detailResponseBytes(response)
   const complete = { ...response, totalBytes }
-  return {
-    ok: true,
-    response: args.request.full === true || totalBytes <= DETAIL_FULL_LOAD_BYTES
-      ? complete
-      : deferredDetailResponse(complete, totalBytes),
-  }
+  return args.request.full === true || totalBytes <= DETAIL_FULL_LOAD_BYTES
+    ? complete
+    : deferredDetailResponse(complete, totalBytes)
 }
 
 // ---- Emacs batch install (the /emacs and /emacs/install routes) ----
@@ -4994,7 +4986,6 @@ export function buildEmacsInstallForm(bundledPath: string): string {
 /** An Emacs version, truncated to the components the 29.1 floor compares. */
 export interface EmacsVersion {
   major: number
-  /** Absent minor (a bare "GNU Emacs 29") reads as 0. */
   minor: number
 }
 

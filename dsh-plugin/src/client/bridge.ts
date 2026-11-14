@@ -85,16 +85,17 @@ async function readJsonBody(response: Response): Promise<unknown> {
  * not JSON leaves `body` undefined rather than throwing.
  */
 export async function callBridge(call: BridgeCall): Promise<{ ok: boolean; status: number; body: unknown }> {
-  for (let attempt = 0; attempt < 2; attempt += 1) {
+  let retried = false
+  for (;;) {
     const token = await getToken()
     const response = call.method === 'GET'
       ? await getAuthorized(call.path, token)
       : await postAuthorized(call.path, call.payload, token)
-    if (response.status === 401 && attempt === 0) {
+    if (response.status === 401 && !retried) {
+      retried = true
       forgetToken()
       continue
     }
     return { ok: response.ok, status: response.status, body: await readJsonBody(response) }
   }
-  throw new Error('HTTP 401')
 }

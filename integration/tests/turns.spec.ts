@@ -4,7 +4,8 @@
 // Exercises host-side contracts that no other suite reaches: a real turn folded
 // into /turns (segments, running, epoch, incremental), model-selection parity
 // (a /model selection is visible in the mock's recorded GenerateOptions), and
-// target-resolution failure semantics (404 unknown id, 413 oversize body).
+// request/target failure semantics (400 malformed JSON, 404 unknown id, 413
+// oversize body).
 // Each test resets the mock and uses its own session so the shared fixture
 // stays deterministic.
 
@@ -103,6 +104,20 @@ describe('plugin surface against a live fixture', () => {
     })
     expect(oversize.status).toBe(413)
     expect(oversize.body.error).toMatch(/too large/)
+  }, 90000)
+
+  it('returns 400 for a malformed JSON body', async () => {
+    const fixture = inject('fixture')
+    const response = await fetch(`${fixture.url}/dsh-bridge/send`, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${fixture.token}`,
+        'content-type': 'application/json',
+      },
+      body: '{"text":',
+    })
+    expect(response.status).toBe(400)
+    expect((await response.json()).error).toMatch(/invalid JSON/)
   }, 90000)
 })
 

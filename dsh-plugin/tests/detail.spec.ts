@@ -168,12 +168,15 @@ function responseOf(
     boundaries: turnBoundaries(events), headerCwd: opts.cwd ?? '/work', kind, ...selector, projection,
   })
   if (!selected.ok) return selected
-  return buildDetailItemResponse({
-    sessionId: 's1', epoch: 2, cursor: events.length, cwd: '/final',
-    item: selected.item,
-    request: opts.full === true ? { full: true } : {},
-    renderDiff: opts.renderDiff ?? renderDiff,
-  })
+  return {
+    ok: true as const,
+    response: buildDetailItemResponse({
+      sessionId: 's1', epoch: 2, cursor: events.length, cwd: '/final',
+      item: selected.item,
+      request: opts.full === true ? { full: true } : {},
+      renderDiff: opts.renderDiff ?? renderDiff,
+    }),
+  }
 }
 
 function params(query: Record<string, string | string[]>): DetailQueryParams {
@@ -697,7 +700,7 @@ describe('size probe and full load', () => {
     )
   })
 
-  it('leaves a pending tool call result-free without a continuation error', () => {
+  it('leaves a pending tool call result-free', () => {
     const l = log()
     l.add(turnStart(1))
     l.add(toolCall(1, 0, 'c1', 'bash', {}))

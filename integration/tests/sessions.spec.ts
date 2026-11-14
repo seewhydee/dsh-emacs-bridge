@@ -101,6 +101,27 @@ describe('session creation in a workspace', () => {
     expect(matches[0].title).toBe(title)
   }, 60000)
 
+  it('trims new workspace titles and rejects whitespace-variant conflicts', async () => {
+    const fixture = inject('fixture')
+    const title = uniqueTitle('normalized-title')
+    const first = await post(fixture, '/dsh-bridge/sessions/create', {
+      path: tempWorkspace(),
+      workspaceTitle: `  ${title}\n`,
+    })
+    expect(first.status).toBe(201)
+
+    const workspaces = await get(fixture, '/dsh-bridge/workspaces')
+    const created = workspaces.body.workspaces.find((w) => w.id === first.body.workspaceId)
+    expect(created.title).toBe(title)
+
+    const conflict = await post(fixture, '/dsh-bridge/sessions/create', {
+      path: tempWorkspace(),
+      workspaceTitle: `\t${title}  `,
+    })
+    expect(conflict.status).toBe(409)
+    expect(conflict.body.sessionId).toBeUndefined()
+  }, 60000)
+
   it('attaches a second session to an existing workspace by workspaceId', async () => {
     const fixture = inject('fixture')
     const dir = tempWorkspace()

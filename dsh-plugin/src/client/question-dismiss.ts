@@ -48,7 +48,7 @@ export function questionIdsOf(questions: readonly { readonly id?: unknown }[] | 
   return ids
 }
 
-/** Whether two question-id lists name the same set (order- and duplicate-insensitive). */
+/** Whether two question-id lists contain the same ids, ignoring order but not duplicates. */
 export function sameQuestionIds(left: readonly string[], right: readonly string[]): boolean {
   if (left.length !== right.length) return false
   const sortedLeft = [...left].sort()

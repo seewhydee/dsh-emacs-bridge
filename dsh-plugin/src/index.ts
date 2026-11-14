@@ -832,9 +832,10 @@ class PayloadTooLargeError extends Error {
 }
 
 /**
- * Read a bounded JSON request body; rejects on oversize or malformed input.
- * An oversize body is NOT socket-destroyed: the remaining bytes are drained
- * and discarded so the caller can still write the 413 response on the same
+ * Read a bounded JSON request body; rejects malformed input as 400 and
+ * oversize input as 413. An oversize body is NOT socket-destroyed: the
+ * remaining bytes are drained and discarded so the caller can still write
+ * the 413 response on the same
  * connection.
  */
 function readJson(req: IncomingMessage): Promise<unknown> {
@@ -855,7 +856,7 @@ function readJson(req: IncomingMessage): Promise<unknown> {
       try {
         resolve(body === '' ? undefined : JSON.parse(body))
       } catch (error: unknown) {
-        reject(new Error(`invalid JSON: ${error instanceof Error ? error.message : String(error)}`))
+        reject(new BridgeError(400, `invalid JSON: ${error instanceof Error ? error.message : String(error)}`))
       }
     })
     req.on('error', reject)
@@ -872,8 +873,6 @@ function sendJson(res: ServerResponse, status: number, value: unknown): void {
 /** One attachment request after `stat` and content sniffing. */
 interface PreparedAttachment {
   request: AttachmentRequest
-  /** Exact byte length from `stat`. */
-  bytes: number
   /** Sniffed image type, or undefined for the verbatim file arm. */
   mediaType?: BridgeImageMediaType
 }
@@ -2042,7 +2041,7 @@ export function apply(ctx: Context, config?: Config): void {
   const lastPlanFrames = new Map<string, string>()
   ctx.inject(['sessionProjections'], (projectionCtx) => {
     const registry = projectionCtx.get('sessionProjections') as SessionProjectionRegistryService
-    registry.onChanged((session, key, value) => {
+    projectionCtx.effect(() => registry.onChanged((session, key, value) => {
       if (isSubagentChild(session.header.origin)) return
       const id = String(session.id)
       if (key === 'contextPressure') {
@@ -2072,7 +2071,7 @@ export function apply(ctx: Context, config?: Config): void {
       if (key === 'goal') {
         broadcast(goalChangedMessage(id, liveGoalSection(session, value)))
       }
-    })
+    }), 'dsh-bridge: projection changes')
   })
 
   // The goal activation is process-local and deliberately absent from the
@@ -2260,8 +2259,8 @@ export function apply(ctx: Context, config?: Config): void {
   // its own snapshot; a cold one is read through one handle and folded with
   // the in-repo surface replica.  The cold log is cached by the persistence
   // revision (an opaque token whose equality promises an unchanged log), so
-  // initial reads and part continuations share one materialization.  The raw
-  // item projection is cached per turn and observation key, and both caches
+  // repeated reads share one materialization. The raw item projection is
+  // cached per turn and observation key, and both caches
   // invalidate on session events rather than on a TTL.
 
   interface DetailObservation {
@@ -2980,7 +2979,6 @@ export function apply(ctx: Context, config?: Config): void {
             }
             prepared.push({
               request,
-              bytes: info.size,
               ...(mediaType === undefined ? {} : { mediaType }),
             })
           }
@@ -3197,7 +3195,7 @@ export function apply(ctx: Context, config?: Config): void {
             sendJson(res, selected.status, { error: selected.message, reason: selected.reason })
             return
           }
-          const result = buildDetailItemResponse({
+          const response = buildDetailItemResponse({
             sessionId: observation.sessionId,
             epoch: observation.epoch,
             cursor: observation.cursor,
@@ -3217,11 +3215,7 @@ export function apply(ctx: Context, config?: Config): void {
               }
             },
           })
-          if (!result.ok) {
-            sendJson(res, result.status, { error: result.message, reason: result.reason })
-            return
-          }
-          sendJson(res, 200, result.response)
+          sendJson(res, 200, response)
         } catch (error: unknown) {
           sendJson(res, bridgeErrorStatus(error), {
             error: error instanceof Error ? error.message : String(error),
@@ -3799,7 +3793,8 @@ export function apply(ctx: Context, config?: Config): void {
           } | undefined
           const workspaceId = typeof body?.workspaceId === 'string' && body.workspaceId !== '' ? body.workspaceId : undefined
           const path = typeof body?.path === 'string' && body.path !== '' ? body.path : undefined
-          const workspaceTitle = typeof body?.workspaceTitle === 'string' ? body.workspaceTitle : undefined
+          const rawWorkspaceTitle = typeof body?.workspaceTitle === 'string' ? body.workspaceTitle.trim() : undefined
+          const workspaceTitle = rawWorkspaceTitle !== undefined && rawWorkspaceTitle !== '' ? rawWorkspaceTitle : undefined
           const rawTitle = typeof body?.title === 'string' ? body.title.trim() : undefined
           const title = rawTitle !== undefined && rawTitle !== '' ? rawTitle : undefined
           if ((workspaceId === undefined) === (path === undefined)) {

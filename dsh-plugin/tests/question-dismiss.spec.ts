@@ -29,10 +29,11 @@ describe('question-panel dismissal matching', () => {
     expect(questionIdsOf(undefined)).toEqual([])
   })
 
-  it('sameQuestionIds compares sets, not order or duplicates', () => {
+  it('sameQuestionIds ignores order but compares duplicate counts', () => {
     expect(sameQuestionIds(['q1', 'q2'], ['q2', 'q1'])).toBe(true)
     expect(sameQuestionIds(['q1'], ['q1', 'q2'])).toBe(false)
     expect(sameQuestionIds(['q1', 'q1'], ['q1', 'q2'])).toBe(false)
+    expect(sameQuestionIds(['q1', 'q1'], ['q1'])).toBe(false)
     expect(sameQuestionIds([], [])).toBe(true)
   })
 

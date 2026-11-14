@@ -607,15 +607,13 @@ describe('buildInFlightDetailItem', () => {
     const response = buildDetailItemResponse({
       sessionId: 's1', epoch: 1, cursor: 2, cwd: '/tmp',
       item: selected.item, request: {},
-      renderDiff: () => ({ text: '', render: 'none', added: 0, removed: 0, truncated: false }),
+      renderDiff: () => ({ text: '', render: 'ok', added: 0, removed: 0, truncated: false }),
     })
-    expect(response.ok).toBe(true)
-    if (!response.ok) return
-    expect(response.response).toMatchObject({
+    expect(response).toMatchObject({
       kind: 'thinking', inFlight: true, inFlightId: id, attemptId: 's:1',
       revision: 2, ord: 0, parts: { reasoning: { text: 'small snapshot' } },
     })
-    expect(response.response).not.toHaveProperty('seq')
+    expect(response).not.toHaveProperty('seq')
   })
 
   it('reports per-block truncation and cannot recover the discarded bytes', () => {
@@ -632,14 +630,12 @@ describe('buildInFlightDetailItem', () => {
     const response = buildDetailItemResponse({
       sessionId: 's1', epoch: 1, cursor: 2,
       item: selected.item, request: { full: true },
-      renderDiff: () => ({ text: '', render: 'none', added: 0, removed: 0, truncated: false }),
+      renderDiff: () => ({ text: '', render: 'ok', added: 0, removed: 0, truncated: false }),
     })
     expect(response).toMatchObject({
-      ok: true,
-      response: { truncated: true, totalBytes: MAX_INFLIGHT_REASONING_BYTES },
+      kind: 'thinking', truncated: true, totalBytes: MAX_INFLIGHT_REASONING_BYTES,
     })
-    if (!response.ok) return
-    expect(response.response.parts.reasoning?.text)
+    expect(response.parts.reasoning?.text)
       .toBe('a'.repeat(MAX_INFLIGHT_REASONING_BYTES))
   })
 
@@ -657,11 +653,9 @@ describe('buildInFlightDetailItem', () => {
     const probe = buildDetailItemResponse({
       sessionId: 's1', epoch: 1, cursor: 2,
       item: selected.item, request: {},
-      renderDiff: () => ({ text: '', render: 'none', added: 0, removed: 0, truncated: false }),
+      renderDiff: () => ({ text: '', render: 'ok', added: 0, removed: 0, truncated: false }),
     })
-    expect(probe.ok).toBe(true)
-    if (!probe.ok) return
-    expect(probe.response).toMatchObject({
+    expect(probe).toMatchObject({
       deferred: true,
       totalBytes: DETAIL_FULL_LOAD_BYTES + 1024,
       parts: { reasoning: { text: '', totalBytes: DETAIL_FULL_LOAD_BYTES + 1024 } },
@@ -669,11 +663,9 @@ describe('buildInFlightDetailItem', () => {
     const full = buildDetailItemResponse({
       sessionId: 's1', epoch: 1, cursor: 2,
       item: selected.item, request: { full: true },
-      renderDiff: () => ({ text: '', render: 'none', added: 0, removed: 0, truncated: false }),
+      renderDiff: () => ({ text: '', render: 'ok', added: 0, removed: 0, truncated: false }),
     })
-    expect(full.ok).toBe(true)
-    if (!full.ok) return
-    expect(full.response.parts.reasoning?.text).toBe(large)
-    expect(full.response).not.toHaveProperty('deferred')
+    expect(full.parts.reasoning?.text).toBe(large)
+    expect(full).not.toHaveProperty('deferred')
   })
 })
