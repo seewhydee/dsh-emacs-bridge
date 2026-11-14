@@ -52,29 +52,42 @@
 //        replies, newest first (each turn: { turn, startedAt, endedAt?,
 //        reason?, endSeq?, failure?: { code?, message }, segments:
 //        [{ text, time, step }], files?: [{ path, op }], activity?: [{ kind,
-//        seq, ord, time, turn, step, callId?, name?, summary?, isError? }] };
+//        seq?, ord, time, turn, step, callId?, name?, summary?, isError?,
+//        inFlight?, inFlightId?, attemptId?, revision? }], activityEpoch,
+//        activityRevision };
 //        endSeq is the turn/end event's seq — the session/fork anchor — and is
 //        absent while the turn is open; failure is the sanitized terminal
 //        error ({ code, message }, message blanked for AUTH), present when the
 //        turn ended in error or a signed-out abort, even when it produced no
 //        text and no activity; files is the changed-files fold's
 //        per-turn attribution, absent when the turn changed nothing; activity
-//        is the tool-call/result + thinking-summary fold (summary-only: full
-//        reasoning never leaves the host; the newest 60 entries per turn),
-//        absent when the turn has none.  A turn that has activity but no text
-//        yet is also served, with segments: [] and its turn/start (and
-//        turn/end, once closed) boundary facts.) plus running, archived,
-//        epoch, title and cwd (the session's effective working directory: the
-//        last `working-directory/change`, else the header's original project).
+//        is the tool-call/result + thinking-summary fold (summary-only:
+//        full reasoning never leaves the host; at most 500 entries per turn,
+//        newest 40 turns), absent when the turn has none.  A turn that has
+//        activity but no text yet is also served, with segments: [] and its
+//        turn/start (and turn/end, once closed) boundary facts.)
+//        An open turn's active assistant attempt appends its visible reasoning
+//        summaries as transient thinking entries with inFlight: true,
+//        inFlightId, attemptId, revision and NO seq; they are never offered
+//        for a turn with a turn/end, and settlement removes them (the same
+//        refetch then carries the committed message entry instead).
+//        activityEpoch identifies this bridge instance and activityRevision
+//        increases for every accepted live-stream frame, allowing Emacs to
+//        reject out-of-order snapshots even when an attempt leaves no commit.)
+//        plus running, archived, epoch, title and cwd (the session's effective
+//        working directory: the last `working-directory/change`, else the
+//        header's original project).
 //        Optional
 //        since=<turn>&epoch=<n> request the incremental suffix: turns with
 //        turn >= since when the epoch matches the surface's replaceGeneration,
 //        else the full list (incremental: true|false)
 //   GET  /dsh-bridge/details/item?sessionId=&turn=&kind=thinking&seq=&ord=
+//   GET  /dsh-bridge/details/item?sessionId=&turn=&kind=thinking&inFlightId=&ord=
 //   GET  /dsh-bridge/details/item?sessionId=&turn=&kind=tool&callId=
 //   GET  /dsh-bridge/details/item?sessionId=&turn=&kind=tool-result&callId=
 //        [&full=1]
-//        -> exactly one currently visible reasoning block, logical tool
+//        -> exactly one currently visible reasoning block (committed by
+//        seq+ord, or the live attempt by inFlightId+ord), logical tool
 //        invocation (call plus its current result), or current orphan result.
 //        The observation identity is epoch = surface replaceGeneration and
 //        cursor = terminal log cursor. The response includes complete parts:
@@ -82,11 +95,20 @@
 //        totalBytes for the whole item. If the item's text exceeds the
 //        confirmation threshold, the initial response withholds every text
 //        field and sets deferred: true; &full=1 returns the complete item.
-//        File caps report durable totals and dropped files/fragments. 400
-//        malformed/repeated/legacy-pagination params, 404 unknown
-//        session/turn/item, 409 shadowed item or subagent-owned session. Cold
-//        and archived sessions are read without resuming; the route requires
-//        the bearer token.
+//        A live thinking response carries inFlight: true, inFlightId,
+//        attemptId and revision, no seq; parts.reasoning is one complete
+//        snapshot of the text retained at read time, and a block capped by the
+//        1 MiB per-attempt budget is marked truncated: true (its totalBytes is
+//        the retained size; full=1 cannot recover discarded bytes). A settled
+//        inFlightId resolves to the canonical committed response (through the
+//        interrupted-message survivor mapping); an abandoned or log-only
+//        attempt is 409 not-visible. File caps report durable totals and
+//        dropped files/fragments. 400 malformed/repeated/combined selector
+//        params or legacy pagination, 404 unknown session/turn/item or an
+//        unknown, evicted, wrong-turn, or text-less live id, 409 shadowed item,
+//        abandoned/log-only live attempt, or subagent-owned session. Cold
+//        and archived sessions are read without resuming (they never acquire
+//        live state); the route requires the bearer token.
 //   POST /dsh-bridge/draft { text, sessionId? }   -> push a composer draft (SSE)
 //   GET  /dsh-bridge/outbox                       -> collect DSH->Emacs entries
 //   POST /dsh-bridge/outbox { messageId, sessionId, source? }
@@ -239,6 +261,7 @@ import {
   buildDetailItem,
   buildDetailItemProjection,
   buildDetailItemResponse,
+  buildInFlightDetailItem,
   buildEmacsStatusForm,
   cachedTitleValue,
   catalogModelName,
@@ -304,8 +327,10 @@ import {
   turnsSince,
   userPrompts,
   withActivityTurns,
+  withInFlightActivity,
   workspaceRefsBySession,
   workspaceTitleConflict,
+  InFlightActivityRegistry,
   KeyedSerial,
   type AttachmentRequest,
   type ApprovalDecision,
@@ -1828,11 +1853,43 @@ export function apply(ctx: Context, config?: Config): void {
     activityTimers.delete(sessionId)
   }
 
+  // Process-local in-flight reasoning.  The durable log has no text until an
+  // assistant attempt settles, so the transient `agent/assistant-stream`
+  // frames are folded by the pure registry.  `/turns` appends its summary
+  // entries; `/details/item` reads its retained prefix on explicit request.
+  // No text ever travels over SSE.
+  const inFlightActivity = new InFlightActivityRegistry()
+
+  // The scoped assistant-stream publication is global here: the bridge is not
+  // one agent.  Subagent-owned sessions are filtered before anything is
+  // retained, and `ctx.agents.get` is the replacement authority: a late frame
+  // from a disposed agent cannot touch the replacement's state.
+  ctx.on('agent/assistant-stream', ({ agent, frame }) => {
+    const session = agent.session
+    if (isSubagentChild(session.header.origin)) return
+    const id = String(session.id)
+    const registered = ctx.agents.get(session.id)
+    const effect = inFlightActivity.accept(id, agent, registered, frame)
+    if (effect.nudge) scheduleActivityFrame(id, effect.turn)
+    if (effect.evicted !== undefined) {
+      scheduleActivityFrame(effect.evicted.sessionId, effect.evicted.turn)
+    }
+  }, { global: true })
+
+  ctx.on('agent/disposed', ({ agent }) => {
+    const session = agent.session
+    if (isSubagentChild(session.header.origin)) return
+    const id = String(session.id)
+    const effect = inFlightActivity.agentDisposed(id, agent)
+    if (effect.nudge) scheduleActivityFrame(id, effect.turn)
+  }, { global: true })
+
   // The timer map is process state, so it must not outlive the plugin (a
   // hot-reload disposes the effect while a frame may still be pending).
   ctx.effect(() => () => {
     for (const timer of activityTimers.values()) clearTimeout(timer)
     activityTimers.clear()
+    inFlightActivity.clear()
   }, 'dsh-bridge: activity debounce')
 
   // Compaction lifecycle observation. `compaction/start`/`summary`/`end` all
@@ -1911,11 +1968,20 @@ export function apply(ctx: Context, config?: Config): void {
       const data = event.data as { reason?: unknown } | undefined
       const reason = data?.reason as { kind?: unknown } | undefined
       const failure = turnEndFailure(event.data)
+      // Defensive: a malformed host lifecycle that omitted the stream end must
+      // not leave a live entry behind a closed turn.  The handoff records an
+      // abandoned attempt, so a selector that opened before the close sees a
+      // known 409 rather than 404.
+      const turn = turnNumberOf(event.data)
+      if (turn !== undefined) {
+        const effect = inFlightActivity.turnEnded(id, turn)
+        if (effect.nudge) scheduleActivityFrame(id, turn)
+      }
       broadcast(turnCompleteMessage(
         id,
         typeof reason?.kind === 'string' ? reason.kind : 'unrecognized',
         event.time,
-        turnNumberOf(event.data),
+        turn,
         failure,
       ))
       return
@@ -2047,6 +2113,7 @@ export function apply(ctx: Context, config?: Config): void {
     clearDetailCaches(String(session.id))
   })
   ctx.on('session/disposed', (session) => {
+    inFlightActivity.sessionDisposed(String(session.id))
     clearActivityFrame(String(session.id))
     clearDetailCaches(String(session.id))
     if (!isSubagentChild(session.header.origin)) {
@@ -3033,26 +3100,36 @@ export function apply(ctx: Context, config?: Config): void {
           // log; it also supplies synthetic records for activity-bearing turns
           // that have no text yet, so the view can stream activity before the
           // turn's first reply.  The surface set keeps compaction-shadowed
-          // turns vanished.
+          // turns vanished.  The process-local in-flight entries are appended
+          // only for an open turn, and both retention bounds apply afterwards.
+          const boundaries = turnBoundaries(events)
           const fold = changedFiles(events, session.header.cwd)
-          const activity = turnActivity(events)
+          const activityEpoch = inFlightActivity.activityEpoch
+          const activityRevision = inFlightActivity.revision(String(session.id))
+          const activity = withInFlightActivity(
+            turnActivity(events),
+            inFlightActivity.entries(String(session.id)),
+            boundaries,
+          )
           const records = withActivityTurns(
             assistantTurns({ nodes: session.surface.nodes, events }),
             activity,
-            turnBoundaries(events),
+            boundaries,
             new Set(session.surface.nodes),
           )
             .reverse()
             .map((turn) => {
               const files = fold.byTurn.get(turn.turn)
               const stream = activity.get(turn.turn)
-              const extra = {
+              return {
+                ...turn,
+                activityEpoch,
+                activityRevision,
                 ...(files === undefined
                   ? {}
                   : { files: files.map(file => ({ path: file.path, op: file.op })) }),
                 ...(stream === undefined ? {} : { activity: stream.entries }),
               }
-              return Object.keys(extra).length === 0 ? turn : { ...turn, ...extra }
             })
           const { incremental, turns } = turnsSince(
             records,
@@ -3091,18 +3168,31 @@ export function apply(ctx: Context, config?: Config): void {
           const observation = await readDetailObservation(request.sessionId)
           const boundaries = turnBoundaries(observation.events)
           const projection = detailProjection(observation, boundaries, request.turn)
-          const selected = buildDetailItem({
-            turn: request.turn,
-            events: observation.events,
-            surfaceSeqs: observation.surfaceSeqs,
-            boundaries,
-            ...observation.headerCwd === undefined ? {} : { headerCwd: observation.headerCwd },
-            kind: request.kind,
-            ...request.seq === undefined ? {} : { seq: request.seq },
-            ...request.ord === undefined ? {} : { ord: request.ord },
-            ...request.callId === undefined ? {} : { callId: request.callId },
-            projection,
-          })
+          const selected = request.inFlightId === undefined
+            ? buildDetailItem({
+              turn: request.turn,
+              events: observation.events,
+              surfaceSeqs: observation.surfaceSeqs,
+              boundaries,
+              ...observation.headerCwd === undefined ? {} : { headerCwd: observation.headerCwd },
+              kind: request.kind,
+              ...request.seq === undefined ? {} : { seq: request.seq },
+              ...request.ord === undefined ? {} : { ord: request.ord },
+              ...request.callId === undefined ? {} : { callId: request.callId },
+              projection,
+            })
+            : buildInFlightDetailItem({
+              registry: inFlightActivity,
+              sessionId: request.sessionId,
+              turn: request.turn,
+              ord: request.ord as number,
+              inFlightId: request.inFlightId,
+              events: observation.events,
+              surfaceSeqs: observation.surfaceSeqs,
+              boundaries,
+              ...observation.headerCwd === undefined ? {} : { headerCwd: observation.headerCwd },
+              projection,
+            })
           if (!selected.ok) {
             sendJson(res, selected.status, { error: selected.message, reason: selected.reason })
             return

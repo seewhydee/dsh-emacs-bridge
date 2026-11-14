@@ -104,6 +104,10 @@ fontification, rather than being truncated or dropped."
   "l" #'dsh-bridge-list-sessions
   "q" #'quit-window)
 
+(defun dsh-bridge-extras--revert (&rest _)
+  "Refresh the inspected item, ignoring `revert-buffer' arguments."
+  (dsh-bridge-extras-refresh))
+
 (define-derived-mode dsh-bridge-extras-mode special-mode "DSH-Inspector"
   "Major mode for inspecting one DSH activity item.
 The buffer is read-only and shows one reasoning block, logical tool
@@ -112,6 +116,7 @@ invocation, or orphan result.  Long lines are wrapped by
 RET activates a file-name button.
 \\{dsh-bridge-extras-mode-map}"
   (setq buffer-read-only t)
+  (setq-local revert-buffer-function #'dsh-bridge-extras--revert)
   (visual-line-mode 1))
 
 (defvar-local dsh-bridge-extras--session nil
@@ -172,6 +177,10 @@ Return nil outside `dsh-bridge-extras-mode'."
   (when (derived-mode-p 'dsh-bridge-view-mode)
     (let ((activity (dsh-bridge-extras--property-at-line 'dsh-bridge-activity)))
       (cond
+       ((and (consp activity) (eq (car activity) 'inflight-thinking))
+        (list :kind 'thinking
+              :in-flight-id (nth 1 activity)
+              :ord (cddr activity)))
        ((and (consp activity) (eq (car activity) 'tool-result))
         (list :kind 'tool-result :call-id (cdr activity)))
        ((consp activity)
@@ -192,8 +201,11 @@ Return nil outside `dsh-bridge-extras-mode'."
     (cons (cons "kind" (symbol-name kind))
           (pcase kind
             ('thinking
-             (list (cons "seq" (number-to-string (plist-get selector :seq)))
-                   (cons "ord" (number-to-string (plist-get selector :ord)))))
+             (append
+              (if-let* ((id (plist-get selector :in-flight-id)))
+                  (list (cons "inFlightId" id))
+                (list (cons "seq" (number-to-string (plist-get selector :seq)))))
+              (list (cons "ord" (number-to-string (plist-get selector :ord))))))
             ((or 'tool 'tool-result)
              (list (cons "callId" (plist-get selector :call-id))))
             (_ (error "Unknown DSH item selector: %S" selector))))))
@@ -201,7 +213,10 @@ Return nil outside `dsh-bridge-extras-mode'."
 (defun dsh-bridge-extras--activity-key (selector)
   "Return the DSH-View activity identity for item SELECTOR, or nil."
   (pcase (plist-get selector :kind)
-    ('thinking (cons (plist-get selector :seq) (plist-get selector :ord)))
+    ('thinking
+     (if-let* ((id (plist-get selector :in-flight-id)))
+         (cons 'inflight-thinking (cons id (plist-get selector :ord)))
+       (cons (plist-get selector :seq) (plist-get selector :ord))))
     ('tool (plist-get selector :call-id))
     ('tool-result (cons 'tool-result (plist-get selector :call-id)))
     (_ nil)))
@@ -324,6 +339,15 @@ FULL requests the complete item without the confirmation threshold."
             (not (eq (alist-get 'deferred response) t))
             dsh-bridge-extras--parts (make-hash-table :test #'equal)
             dsh-bridge-extras--status nil)
+      ;; A transient selector that has settled is promoted to the committed
+      ;; identity only after all the async guards accepted this response.
+      (when (and (numberp (alist-get 'seq response))
+                 (equal (plist-get dsh-bridge-extras--selector :kind) 'thinking)
+                 (plist-get dsh-bridge-extras--selector :in-flight-id))
+        (setq dsh-bridge-extras--selector
+              (list :kind 'thinking
+                    :seq (alist-get 'seq response)
+                    :ord (alist-get 'ord response))))
       (dsh-bridge-extras--store-initial-parts response)
       (when dsh-bridge-extras--cwd
         (dsh-bridge--apply-session-directory
@@ -449,8 +473,12 @@ ABSOLUTE is the file's host path; the `File: ' line names it as a button."
          (label (and session
                      (or (dsh-bridge--session-label session nil t) session)))
          (title (pcase kind
-                  ('thinking (format "Thinking — step %s"
-                                     (or (alist-get 'step item) "?")))
+                  ('thinking
+                   (if (eq (alist-get 'inFlight item) t)
+                       (format "Thinking (in progress) — step %s"
+                               (or (alist-get 'step item) "?"))
+                     (format "Thinking — step %s"
+                             (or (alist-get 'step item) "?"))))
                   ('tool (format "%s%s"
                                  (or (alist-get 'name item) "Tool")
                                  (if (equal (alist-get 'settlement item) "pending")
@@ -482,6 +510,18 @@ ABSOLUTE is the file's host path; the `File: ' line names it as a button."
                                   dsh-bridge-extras--epoch
                                   dsh-bridge-extras--cursor)
                           'face 'dsh-bridge-extras-note-face)))
+    (when (and item (numberp (alist-get 'revision item)))
+      (insert (propertize (format "Stream       revision %s\n"
+                                  (alist-get 'revision item))
+                          'face 'dsh-bridge-extras-note-face)))
+    (when (and item (eq (alist-get 'truncated item) t))
+      (let ((retained (alist-get 'totalBytes item)))
+        (insert (propertize
+                 (format "Showing %s retained by the host; later in-flight text was discarded.\n"
+                         (if (numberp retained)
+                             (file-size-human-readable retained)
+                           "a partial snapshot"))
+                 'face 'dsh-bridge-extras-error-face))))
     (when-let* ((status dsh-bridge-extras--status))
       (insert (propertize (concat status "\n") 'face 'dsh-bridge-extras-error-face)))
     (insert "\n")))

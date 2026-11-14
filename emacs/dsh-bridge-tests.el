@@ -13223,5 +13223,143 @@ and never for a frame that names no session."
     (setq dsh-bridge--sessions-compacting nil)
     (should (null (dsh-bridge--header-compacting-cell "s1")))))
 
+
+;;; In-flight reasoning
+
+(defun dsh-bridge-test--view-inflight-thinking (summary in-flight-id &optional ord step time revision)
+  "A transient `thinking' activity entry for SUMMARY with IN-FLIGHT-ID.
+It deliberately carries no `seq', matching `GET /turns'."
+  (list (cons 'kind "thinking")
+        (cons 'inFlight t)
+        (cons 'inFlightId in-flight-id)
+        (cons 'attemptId "s:1")
+        (cons 'revision (or revision 1))
+        (cons 'summary summary)
+        (cons 'ord (or ord 0))
+        (cons 'step (or step 1))
+        (cons 'time (or time 1000))))
+
+(ert-deftest dsh-bridge-view-inflight-thinking-render ()
+  "A live summary renders as an in-progress line with its own identity.
+The committed rendering is unchanged, and a transient line's text property
+is the opaque (inflight-thinking ID . ORD) form, not a seq pair."
+  (let* ((live (dsh-bridge-test--view-inflight-thinking "live thought" "live-1" 0 1 7000100))
+         (open (dsh-bridge-test--view-turn 7 7000000 nil nil nil nil (list live)))
+         (committed (dsh-bridge-test--view-thinking "settled thought" 10 0 1 7000200))
+         (closed (dsh-bridge-test--view-turn 7 7000000 nil 7000300 "completed" nil (list committed)))
+         (dsh-bridge-view-activity t))
+    (with-temp-buffer
+      (dsh-bridge-view-mode)
+      (setq-local dsh-bridge--view-activity t)
+      (should (equal (dsh-bridge-test--view-turn-body open)
+                     (concat "\u22ef thinking (in progress): "
+                             (dsh-bridge--view-literal "live thought") "\n")))
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (dsh-bridge--view-render (dsh-bridge--view-turn-items open)))
+      (should (equal (get-text-property (point-min) 'dsh-bridge-activity)
+                     '(inflight-thinking "live-1" . 0))))
+    (with-temp-buffer
+      (dsh-bridge-view-mode)
+      (setq-local dsh-bridge--view-activity t)
+      (should (equal (dsh-bridge-test--view-turn-body closed)
+                     (concat "\u22ef thinking: "
+                             (dsh-bridge--view-literal "settled thought") "\n")))
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (dsh-bridge--view-render (dsh-bridge--view-turn-items closed)))
+      (should (equal (get-text-property (point-min) 'dsh-bridge-activity)
+                     (cons 10 0))))))
+
+(ert-deftest dsh-bridge-view-inflight-item-key ()
+  "A transient identity never matches a committed one or another summary.
+The summary and revision are part of the key so a coarse refresh cannot
+splice a stale live line in place."
+  (let* ((live (cons 'thinking
+                     (dsh-bridge-test--view-inflight-thinking
+                      "first" "live-1" 0 1 1000 2)))
+         (updated (cons 'thinking
+                        (dsh-bridge-test--view-inflight-thinking
+                         "first line" "live-1" 0 1 1000 3)))
+         (committed (cons 'thinking
+                          (dsh-bridge-test--view-thinking "first" 10 0 1 1000))))
+    (should (equal (dsh-bridge--view-item-key live)
+                   '(inflight-thinking "live-1" 0 2 "first")))
+    (should-not (equal (dsh-bridge--view-item-key live)
+                       (dsh-bridge--view-item-key committed)))
+    (should-not (equal (dsh-bridge--view-item-key live)
+                       (dsh-bridge--view-item-key updated)))))
+
+(ert-deftest dsh-bridge-view-inflight-summary-refresh-rebuilds ()
+  "A coarse live summary update cannot splice; the fill rebuilds whole.
+The transient entry is the tail, and its changed key invalidates the
+recorded provenance, so the old line is replaced rather than left stale."
+  (let* ((first (dsh-bridge-test--view-inflight-thinking
+                 "first" "live-1" 0 1 7000100 2))
+         (updated (dsh-bridge-test--view-inflight-thinking
+                   "first line" "live-1" 0 1 7000100 3))
+         (one (dsh-bridge-test--view-turn
+               7 7000000 (list (dsh-bridge-test--view-segment "reply" 7000050 1))
+               nil nil nil (list first)))
+         (two (dsh-bridge-test--view-turn
+               7 7000000 (list (dsh-bridge-test--view-segment "reply" 7000050 1))
+               nil nil nil (list updated)))
+         (dsh-bridge--turns-cache (dsh-bridge-test--view-cache (list two one)))
+         (dsh-bridge-view-activity t))
+    (with-temp-buffer
+      (dsh-bridge-view-mode)
+      (dsh-bridge--view-fill "s1" one nil t)
+      (let ((probe (copy-marker 3)))
+        (dsh-bridge--view-fill "s1" two nil t t)
+        (should (equal (marker-position probe) (point-min)))
+        (set-marker probe nil))
+      (should (equal (substring-no-properties (buffer-string))
+                     (substring-no-properties
+                      (dsh-bridge-test--view-turn-render two "s1"))))
+      (should-not (string-match-p "thinking (in progress): first\n"
+                                  (buffer-string))))))
+
+(ert-deftest dsh-bridge-turns-newest-seq-skips-trailing-live-entry ()
+  "The newest committed seq ignores a trailing seq-less live entry."
+  (let* ((think (dsh-bridge-test--view-thinking "committed" 10 0 1 1000))
+         (live (dsh-bridge-test--view-inflight-thinking "live" "live-1" 0 1 2000))
+         (turn (dsh-bridge-test--view-turn 7 1000 nil nil nil nil (list think live))))
+    (should (= (dsh-bridge--turns-activity-newest-seq turn) 10))
+    (should (null (dsh-bridge--turns-activity-newest-seq
+                   (dsh-bridge-test--view-turn
+                    7 1000 nil nil nil nil (list live)))))))
+
+(ert-deftest dsh-bridge-turns-live-stale-ordering ()
+  "Activity revisions order live snapshots, including abandoned attempts.
+A bridge instance change resets the comparison, since revisions are only
+meaningful within one instance."
+  (let* ((live (dsh-bridge-test--view-inflight-thinking
+                "one" "live-1" 0 1 2000 2))
+         (committed (dsh-bridge-test--view-thinking "one" 10 0 1 1000))
+         (with-live (append (dsh-bridge-test--view-turn
+                             7 1000 nil nil nil nil (list committed live))
+                            '((activityEpoch . "bridge-1")
+                              (activityRevision . 4))))
+         (newer-live (append (dsh-bridge-test--view-turn
+                              7 1000 nil nil nil nil (list committed live))
+                             '((activityEpoch . "bridge-1")
+                               (activityRevision . 5))))
+         (abandoned (append (dsh-bridge-test--view-turn
+                             7 1000 nil nil nil nil (list committed))
+                            '((activityEpoch . "bridge-1")
+                              (activityRevision . 6))))
+         (restarted (append (dsh-bridge-test--view-turn
+                             7 1000 nil nil nil nil (list committed))
+                            '((activityEpoch . "bridge-2")
+                              (activityRevision . 0)))))
+    (should (dsh-bridge--turns-record-stale-p with-live newer-live))
+    (should-not (dsh-bridge--turns-record-stale-p newer-live with-live))
+    (should-not (dsh-bridge--turns-record-stale-p with-live with-live))
+    ;; No new committed item is needed to remove an abandoned live line.
+    (should-not (dsh-bridge--turns-record-stale-p abandoned with-live))
+    (should (dsh-bridge--turns-record-stale-p with-live abandoned))
+    ;; A response from another bridge instance cannot be ordered by revision.
+    (should-not (dsh-bridge--turns-record-stale-p restarted with-live))))
+
 (provide 'dsh-bridge-tests)
 ;;; dsh-bridge-tests.el ends here

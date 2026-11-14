@@ -15,7 +15,7 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-import { timingSafeEqual } from 'node:crypto'
+import { randomUUID, timingSafeEqual } from 'node:crypto'
 import { existsSync } from 'node:fs'
 import { isAbsolute, join, resolve } from 'node:path'
 
@@ -346,9 +346,14 @@ function nonNegativeIntParam(value: string | undefined): number | undefined {
  * The record list keeps that property, but a turn's *activity* entries do
  * not: `MAX_ACTIVITY_TURNS` can drop an older turn's entries between fetches,
  * and turns below `since` are never re-sent, so an Emacs client can hold
- * phantom activity for them until a full (non-incremental) refetch.  That is
- * a bounded display lag, not a correctness hole — `/turns` remains the
- * authority whenever it is refetched in full.
+ * phantom activity for them until a full (non-incremental) refetch.  A live
+ * activity entry additionally *shrinks* at settlement: the transient entry is
+ * removed and replaced by the committed one, so an equal epoch does not mean
+ * the boundary turn's activity can only have grown.  That is sound anyway
+ * because `since` is inclusive and the boundary turn is re-sent in full; a
+ * turn below `since` only loses phantom activity, a bounded display lag, not a
+ * correctness hole — `/turns` remains the authority whenever it is refetched
+ * in full.
  */
 export function turnsSince(
   turns: readonly AssistantTurn[],
@@ -870,9 +875,35 @@ export interface ActivityToolResult extends ActivityEntryBase {
 export interface ActivityThinking extends ActivityEntryBase {
   kind: 'thinking'
   summary: string
+  /** A committed entry always has a log seq; the explicit false keeps the
+   * live variant's `inFlight: true` discriminant narrowable. */
+  inFlight?: false
 }
 
-export type ActivityEntry = ActivityToolCall | ActivityToolResult | ActivityThinking
+/**
+ * The active assistant attempt's reasoning block, reduced to a one-line
+ * summary.  It has no `seq`: log-sequence identity belongs to committed
+ * events, so the transient identity is the bridge-minted `inFlightId` plus
+ * the committed-style `ord`.  Never returned by `turnActivity`; the host's
+ * process-local registry supplies it to the `/turns` merge.
+ */
+export interface ActivityInFlightThinking {
+  kind: 'thinking'
+  inFlight: true
+  /** The bridge's opaque selector for this attempt, minted per accepted start. */
+  inFlightId: string
+  /** The harness attempt id (`session-id:attempt-counter`). */
+  attemptId: string
+  /** The attempt's latest stream revision. */
+  revision: number
+  ord: number
+  time: number
+  turn: number
+  step: number
+  summary: string
+}
+
+export type ActivityEntry = ActivityToolCall | ActivityToolResult | ActivityThinking | ActivityInFlightThinking
 
 /** One turn's bounded activity stream. */
 export interface TurnActivity {
@@ -1122,8 +1153,9 @@ export function withActivityTurns(
   for (const [turn, act] of activity) {
     if (present.has(turn) || act.entries.length === 0) continue
     const visible = act.messageSeqs.some(seq => surfaceSeqs.has(seq))
-      || act.entries.some(entry => (entry.kind === 'tool-result' || entry.kind === 'thinking')
-        && surfaceSeqs.has(entry.seq))
+      || act.entries.some(entry => entry.kind === 'thinking' && entry.inFlight === true
+        ? !boundaries.ends.has(entry.turn)
+        : (entry.kind === 'tool-result' || entry.kind === 'thinking') && surfaceSeqs.has(entry.seq))
     if (!visible) continue
     const start = boundaries.starts.get(turn) ?? act.entries[0]?.time
     if (start === undefined) continue
@@ -1185,6 +1217,681 @@ export function activityRelevantEvent(event: SessionEventLike): boolean {
     && block.type === 'reasoning'
     && typeof block.text === 'string'
     && block.text.trim() !== '')
+}
+
+// -- In-flight reasoning (process-local assistant streams) -------------------
+//
+// The durable log carries no text until an assistant attempt settles, so the
+// host accumulates the harness's transient `agent/assistant-stream` frames
+// itself.  This section is the whole bounded model: a per-session record with
+// one active attempt, bounded reasoning text per attempt, and a small
+// metadata-only handoff list that lets a selector opened before
+// settlement resolve to the committed item afterwards.
+//
+// The live path exposes reasoning only.  Streaming tool-call blocks are
+// not-yet-executed proposals with incomplete arguments, and assistant text is
+// not turn activity; both stay out.  Nothing here produces full text for
+// `/turns` or SSE: `entries` is summary-only, and the retained prefix leaves
+// the process only through the explicit `/details/item` read.
+
+/** Total reasoning bytes retained for one active attempt, across its blocks. */
+export const MAX_INFLIGHT_REASONING_BYTES = 1024 * 1024
+
+/** Cap on one block's retained pieces; a full block is coalesced into one. */
+export const MAX_INFLIGHT_PIECES_PER_BLOCK = 64
+
+/** Session records (active text plus handoffs) retained process-wide, LRU. */
+export const MAX_INFLIGHT_SESSIONS = 8
+
+/** Settled-attempt handoffs retained per session, oldest evicted. */
+export const MAX_INFLIGHT_HANDOFFS_PER_SESSION = 8
+
+/** Settled survivor ordinals retained per handoff (interrupted translation). */
+export const MAX_INFLIGHT_HANDOFF_SURVIVORS = 256
+
+/** Maximum accepted `inFlightId` length, in characters. */
+export const MAX_INFLIGHT_ID_CHARS = 128
+
+/** The bounded first-line buffer used only to detect summary transitions. */
+const MAX_INFLIGHT_FIRST_LINE_CHARS = 512
+
+/** One reasoning block of the active attempt. */
+interface InFlightReasoningBlock {
+  /** The raw stream block index (counts text and tool-call blocks too). */
+  streamIndex: number
+  /** Zero-based reasoning ordinal, matching the committed fold. */
+  ord: number
+  firstTime: number
+  /** Retained text pieces; joined only on a read, never on every delta. */
+  pieces: string[]
+  bytes: number
+  /** Whether any non-whitespace text was observed, retained or discarded. */
+  hasNonWhitespace: boolean
+  /** This block's retained prefix hit the attempt's byte cap. */
+  truncated: boolean
+  closed: boolean
+  sawDelta: boolean
+  /** Bounded first line, for summary and first-line-completion transitions. */
+  firstLine: string
+  firstLineDone: boolean
+  summaryNotified: boolean
+  newlineNotified: boolean
+}
+
+/** One active assistant attempt. */
+interface InFlightAttempt {
+  /** Bridge-minted selector, independent of the harness attempt id. */
+  inFlightId: string
+  attemptId: string
+  revision: number
+  turn: number
+  step: number
+  /** The next expected dense chunk index. */
+  nextIndex: number
+  /** Total bytes retained by every block of this attempt. */
+  retainedBytes: number
+  blocks: Map<number, InFlightReasoningBlock>
+  /** Raw indexes a `block-start` declared non-reasoning. */
+  otherBlocks: Set<number>
+  ordCounter: number
+}
+
+/** One settled attempt's metadata; never contains settled text. */
+export interface InFlightHandoff {
+  inFlightId: string
+  turn: number
+  eventType?: 'assistant/message' | 'assistant/attempt'
+  seq?: number
+  abandoned: boolean
+  /** Live reasoning ordinals that observed non-whitespace text. */
+  survivors: number[]
+}
+
+/** One session's process-local in-flight state. */
+interface InFlightSessionRecord {
+  /** The agent that established this record; a replaced agent cannot borrow it. */
+  owner?: unknown
+  active?: InFlightAttempt
+  handoffs: InFlightHandoff[]
+}
+
+/** One registry operation's notification decision. */
+export interface InFlightEffect {
+  /** Refetch the named session's `/turns` (summary changed, or entry removed). */
+  nudge: boolean
+  /** The affected attempt's turn, informational to the nudge. */
+  turn?: number
+  /** A record evicted by the session LRU whose visible entry disappeared. */
+  evicted?: { sessionId: string; turn?: number }
+}
+
+const NO_INFLIGHT_EFFECT: InFlightEffect = { nudge: false }
+
+/** The latest retained text of one live block. */
+function inFlightBlockText(block: InFlightReasoningBlock): string {
+  return block.pieces.join('')
+}
+
+/** The attempt's visible (summary-producing) entry exists. */
+function inFlightAttemptVisible(attempt: InFlightAttempt): boolean {
+  for (const block of attempt.blocks.values()) {
+    if (activityThinkingSummary(inFlightBlockText(block)) !== '') return true
+  }
+  return false
+}
+
+/** The survivor ordinals of an attempt, bounded and sorted. */
+function inFlightSurvivors(attempt: InFlightAttempt): number[] {
+  return [...attempt.blocks.values()]
+    .filter(block => block.hasNonWhitespace)
+    .map(block => block.ord)
+    .sort((a, b) => a - b)
+    .slice(0, MAX_INFLIGHT_HANDOFF_SURVIVORS)
+}
+
+/** A safe non-negative integer. */
+function isSafeCount(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
+}
+
+/** One live block snapshot selected for `/details/item`. */
+export interface InFlightLiveItem {
+  kind: 'live'
+  inFlightId: string
+  attemptId: string
+  revision: number
+  turn: number
+  step: number
+  ord: number
+  time: number
+  /** The retained prefix at read time, not a continuation. */
+  text: string
+  /** The host's retention cap discarded later text from this block. */
+  truncated: boolean
+  /** Retained UTF-8 bytes (the known size; the full stream size is unknown). */
+  retainedBytes: number
+}
+
+/** One selective lookup result for a transient `inFlightId`. */
+export type InFlightSelection =
+  | ({ ok: true } & InFlightLiveItem)
+  | {
+    ok: true
+    kind: 'committed'
+    turn: number
+    seq: number
+    /** The live ordinal the caller asked for. */
+    liveOrd: number
+    /** Live ordinals that survived an interrupted assembly, for translation. */
+    survivors: readonly number[]
+  }
+  | { ok: false; status: 404 | 409; reason: string; message: string }
+
+/**
+ * The bounded process-local in-flight store.  One instance lives in the host
+ * plugin; tests drive it directly.  Every decision (acceptance, retention,
+ * ordinal allocation, nudge, eviction) is here so `index.ts` stays wiring.
+ */
+export class InFlightActivityRegistry {
+  /** Identifies this bridge instance in activity snapshot versions. */
+  readonly activityEpoch = randomUUID()
+  private readonly records = new Map<string, InFlightSessionRecord>()
+  private readonly revisions = new Map<string, number>()
+
+  /** @param mintId - selector factory; overridable for deterministic tests. */
+  constructor(private readonly mintId: () => string = randomUUID) {}
+
+  /** The session's monotonically increasing activity snapshot revision. */
+  revision(sessionId: string): number {
+    return this.revisions.get(sessionId) ?? 0
+  }
+
+  /** The number of session records retained (tests and diagnostics). */
+  get size(): number {
+    return this.records.size
+  }
+
+  /** Whether a session record is retained. */
+  has(sessionId: string): boolean {
+    return this.records.has(sessionId)
+  }
+
+  /** The active attempt's summary entries, in reasoning-ordinal order. */
+  entries(sessionId: string): ActivityInFlightThinking[] {
+    const attempt = this.records.get(sessionId)?.active
+    if (attempt === undefined) return []
+    const entries: ActivityInFlightThinking[] = []
+    const blocks = [...attempt.blocks.values()].sort((a, b) => a.ord - b.ord)
+    for (const block of blocks) {
+      const summary = activityThinkingSummary(inFlightBlockText(block))
+      if (summary === '') continue
+      entries.push({
+        kind: 'thinking',
+        inFlight: true,
+        inFlightId: attempt.inFlightId,
+        attemptId: attempt.attemptId,
+        revision: attempt.revision,
+        ord: block.ord,
+        time: block.firstTime,
+        turn: attempt.turn,
+        step: attempt.step,
+        summary,
+      })
+    }
+    return entries
+  }
+
+  /**
+   * The retained piece count of one live block (diagnostics/tests).  The
+   * append path coalesces pieces at {@link MAX_INFLIGHT_PIECES_PER_BLOCK}, so
+   * one-character deltas cannot create unbounded per-delta overhead.
+   */
+  retainedPieces(sessionId: string, ord: number): number {
+    const attempt = this.records.get(sessionId)?.active
+    if (attempt === undefined) return 0
+    for (const block of attempt.blocks.values()) {
+      if (block.ord === ord) return block.pieces.length
+    }
+    return 0
+  }
+
+  /**
+   * Feed one `agent/assistant-stream` frame.  AGENT is the frame's agent,
+   * REGISTERED the session's currently registered agent.  A start is accepted
+   * only from REGISTERED; every accepted frame moves the session to the LRU
+   * front.  Returns the nudge/eviction decision.
+   */
+  accept(sessionId: string, agent: unknown, registeredAgent: unknown, frame: unknown): InFlightEffect {
+    if (!isRecord(frame)) return NO_INFLIGHT_EFFECT
+    const type = frame.type
+    const attemptId = frame.attemptId
+    if (typeof attemptId !== 'string' || attemptId === '') return NO_INFLIGHT_EFFECT
+    if (type === 'start') return this.acceptStart(sessionId, agent, registeredAgent, frame, attemptId)
+    if (type !== 'chunk' && type !== 'end') return NO_INFLIGHT_EFFECT
+    const record = this.records.get(sessionId)
+    if (record === undefined || record.owner !== agent) return NO_INFLIGHT_EFFECT
+    const attempt = record.active
+    if (attempt === undefined || attempt.attemptId !== attemptId) return NO_INFLIGHT_EFFECT
+    if (type === 'chunk') return this.acceptChunk(sessionId, record, attempt, frame)
+    return this.acceptEnd(sessionId, record, attempt, frame)
+  }
+
+  private acceptStart(
+    sessionId: string,
+    agent: unknown,
+    registeredAgent: unknown,
+    frame: Record<string, unknown>,
+    attemptId: string,
+  ): InFlightEffect {
+    // The registry is the authority for replacement: a late start from a
+    // disposed agent must not steal the session, and a first start must be the
+    // currently registered agent, not merely some agent.
+    if (registeredAgent === undefined || agent !== registeredAgent) return NO_INFLIGHT_EFFECT
+    let record = this.records.get(sessionId)
+    if (record !== undefined && record.owner !== undefined && record.owner !== agent) {
+      return NO_INFLIGHT_EFFECT
+    }
+    const turn = frame.turn
+    const step = frame.step
+    const revision = frame.revision
+    if (!isSafeCount(turn) || !isSafeCount(step) || !isSafeCount(revision) || revision < 1) {
+      return NO_INFLIGHT_EFFECT
+    }
+    if (record === undefined) record = { handoffs: [] }
+    record.owner = agent
+    const previous = record.active
+    const effect: InFlightEffect = previous !== undefined && inFlightAttemptVisible(previous)
+      ? { nudge: true, turn: previous.turn }
+      : { nudge: false }
+    // A replaced attempt is a known abandonment, not an unknown selector: an
+    // inspector still holding its id sees 409 rather than 404.
+    if (previous !== undefined) {
+      this.pushHandoff(record, {
+        inFlightId: previous.inFlightId,
+        turn: previous.turn,
+        abandoned: true,
+        survivors: [],
+      })
+    }
+    record.active = {
+      inFlightId: this.mintId(),
+      attemptId,
+      revision,
+      turn,
+      step,
+      nextIndex: 0,
+      retainedBytes: 0,
+      blocks: new Map(),
+      otherBlocks: new Set(),
+      ordCounter: 0,
+    }
+    this.touch(sessionId, record, effect)
+    return effect
+  }
+
+  private acceptChunk(
+    sessionId: string,
+    record: InFlightSessionRecord,
+    attempt: InFlightAttempt,
+    frame: Record<string, unknown>,
+  ): InFlightEffect {
+    const revision = frame.revision
+    const index = frame.index
+    const time = frame.time
+    const chunk = frame.chunk
+    if (!isSafeCount(revision) || !isSafeCount(index) || !isSafeCount(time) || !isRecord(chunk)) {
+      return this.invalidate(sessionId, record)
+    }
+    if (revision !== attempt.revision + 1 || index !== attempt.nextIndex) {
+      return this.invalidate(sessionId, record)
+    }
+    attempt.revision = revision
+    attempt.nextIndex = index + 1
+    const nudge = this.applyChunk(attempt, chunk, time)
+    const effect: InFlightEffect = { nudge, turn: attempt.turn }
+    this.touch(sessionId, record, effect)
+    return effect
+  }
+
+  private acceptEnd(
+    sessionId: string,
+    record: InFlightSessionRecord,
+    attempt: InFlightAttempt,
+    frame: Record<string, unknown>,
+  ): InFlightEffect {
+    const revision = frame.revision
+    const index = frame.index
+    if (!isSafeCount(revision) || !isSafeCount(index)) return this.invalidate(sessionId, record)
+    if (revision !== attempt.revision + 1 || index !== attempt.nextIndex) {
+      return this.invalidate(sessionId, record)
+    }
+    const outcome = isRecord(frame.outcome) ? frame.outcome : undefined
+    if (outcome === undefined) return this.invalidate(sessionId, record)
+    if (outcome.kind === 'committed') {
+      const eventType = outcome.eventType
+      const seq = outcome.seq
+      if ((eventType !== 'assistant/message' && eventType !== 'assistant/attempt')
+        || !isSafeCount(seq)) {
+        return this.invalidate(sessionId, record)
+      }
+      const visible = inFlightAttemptVisible(attempt)
+      record.active = undefined
+      this.pushHandoff(record, {
+        inFlightId: attempt.inFlightId,
+        turn: attempt.turn,
+        eventType,
+        seq,
+        abandoned: false,
+        survivors: inFlightSurvivors(attempt),
+      })
+      const effect: InFlightEffect = { nudge: visible, turn: attempt.turn }
+      this.touch(sessionId, record, effect)
+      return effect
+    }
+    if (outcome.kind !== 'abandoned') return this.invalidate(sessionId, record)
+    const visible = inFlightAttemptVisible(attempt)
+    record.active = undefined
+    this.pushHandoff(record, {
+      inFlightId: attempt.inFlightId,
+      turn: attempt.turn,
+      abandoned: true,
+      survivors: [],
+    })
+    const effect: InFlightEffect = { nudge: visible, turn: attempt.turn }
+    this.touch(sessionId, record, effect)
+    return effect
+  }
+
+  /** The attempt closed at `turn/end` without a stream end. */
+  turnEnded(sessionId: string, turn: number): InFlightEffect {
+    const record = this.records.get(sessionId)
+    if (record === undefined || record.active?.turn !== turn) return NO_INFLIGHT_EFFECT
+    return this.invalidate(sessionId, record)
+  }
+
+  /**
+   * The agent was disposed.  Its active text is dropped and its owner cleared,
+   * but the metadata-only handoffs survive so a just-opened inspector can still
+   * follow a recent settlement.  A disposal for a replaced agent is ignored.
+   */
+  agentDisposed(sessionId: string, agent: unknown): InFlightEffect {
+    const record = this.records.get(sessionId)
+    if (record === undefined || record.owner !== agent) return NO_INFLIGHT_EFFECT
+    const effect = this.invalidate(sessionId, record)
+    record.owner = undefined
+    return effect
+  }
+
+  /** Drop a disposed session's whole record (active text and handoffs). */
+  sessionDisposed(sessionId: string): void {
+    this.records.delete(sessionId)
+    this.revisions.delete(sessionId)
+  }
+
+  /** Drop every record (plugin effect disposal / hot reload). */
+  clear(): void {
+    this.records.clear()
+    this.revisions.clear()
+  }
+
+  /**
+   * Resolve an explicit `inFlightId + ord` selector.  A committed handoff
+   * reports its committed seq and survivor metadata; the caller translates the
+   * ordinal for an interrupted message.
+   */
+  select(sessionId: string, inFlightId: string, turn: number, ord: number): InFlightSelection {
+    const record = this.records.get(sessionId)
+    if (record === undefined) return unknownInFlightItem(inFlightId)
+    const attempt = record.active
+    if (attempt !== undefined && attempt.inFlightId === inFlightId) {
+      if (attempt.turn !== turn) return wrongInFlightTurn(inFlightId, turn)
+      const block = [...attempt.blocks.values()].find(candidate => candidate.ord === ord)
+      const text = block === undefined ? '' : inFlightBlockText(block)
+      if (block === undefined || text.trim() === '') {
+        return {
+          ok: false,
+          status: 404,
+          reason: 'unknown-item',
+          message: `in-flight thinking block ${ord} has no retained text`,
+        }
+      }
+      return {
+        ok: true,
+        kind: 'live',
+        inFlightId,
+        attemptId: attempt.attemptId,
+        revision: attempt.revision,
+        turn: attempt.turn,
+        step: attempt.step,
+        ord,
+        time: block.firstTime,
+        text,
+        truncated: block.truncated,
+        retainedBytes: block.bytes,
+      }
+    }
+    const handoff = record.handoffs.find(candidate => candidate.inFlightId === inFlightId)
+    if (handoff === undefined) return unknownInFlightItem(inFlightId)
+    if (handoff.turn !== turn) return wrongInFlightTurn(inFlightId, turn)
+    if (handoff.abandoned || handoff.eventType === 'assistant/attempt' || handoff.seq === undefined) {
+      return {
+        ok: false,
+        status: 409,
+        reason: 'not-visible',
+        message: `in-flight thinking ${inFlightId} has no visible committed item`,
+      }
+    }
+    return {
+      ok: true,
+      kind: 'committed',
+      turn: handoff.turn,
+      seq: handoff.seq,
+      liveOrd: ord,
+      survivors: handoff.survivors,
+    }
+  }
+
+  /** Drop the active attempt and record an abandoned handoff. */
+  private invalidate(sessionId: string, record: InFlightSessionRecord): InFlightEffect {
+    const attempt = record.active
+    if (attempt === undefined) return NO_INFLIGHT_EFFECT
+    const visible = inFlightAttemptVisible(attempt)
+    record.active = undefined
+    this.pushHandoff(record, {
+      inFlightId: attempt.inFlightId,
+      turn: attempt.turn,
+      abandoned: true,
+      survivors: [],
+    })
+    const effect: InFlightEffect = { nudge: visible, turn: attempt.turn }
+    this.touch(sessionId, record, effect)
+    return effect
+  }
+
+  /** Move SESSION-ID to the LRU front, evicting the oldest record when over cap. */
+  private touch(sessionId: string, record: InFlightSessionRecord, effect: InFlightEffect): void {
+    this.revisions.set(sessionId, this.revision(sessionId) + 1)
+    this.records.delete(sessionId)
+    this.records.set(sessionId, record)
+    while (this.records.size > MAX_INFLIGHT_SESSIONS) {
+      const oldest = this.records.keys().next().value
+      if (oldest === undefined || oldest === sessionId) break
+      const evicted = this.records.get(oldest)
+      this.records.delete(oldest)
+      if (evicted?.active !== undefined) {
+        this.revisions.set(oldest, this.revision(oldest) + 1)
+        if (inFlightAttemptVisible(evicted.active)) {
+          effect.evicted = { sessionId: oldest, turn: evicted.active.turn }
+        }
+      }
+    }
+  }
+
+  /** Append one handoff, evicting the oldest beyond the per-session cap. */
+  private pushHandoff(record: InFlightSessionRecord, handoff: InFlightHandoff): void {
+    record.handoffs.push(handoff)
+    while (record.handoffs.length > MAX_INFLIGHT_HANDOFFS_PER_SESSION) record.handoffs.shift()
+  }
+
+  /** Allocate the reasoning ordinal for INDEX on first observation. */
+  private ensureBlock(attempt: InFlightAttempt, index: number, time: number): InFlightReasoningBlock {
+    const existing = attempt.blocks.get(index)
+    if (existing !== undefined) return existing
+    const block: InFlightReasoningBlock = {
+      streamIndex: index,
+      ord: attempt.ordCounter,
+      firstTime: time,
+      pieces: [],
+      bytes: 0,
+      hasNonWhitespace: false,
+      truncated: false,
+      closed: false,
+      sawDelta: false,
+      firstLine: '',
+      firstLineDone: false,
+      summaryNotified: false,
+      newlineNotified: false,
+    }
+    attempt.ordCounter += 1
+    attempt.blocks.set(index, block)
+    return block
+  }
+
+  /** Apply one accepted stream chunk; returns whether Emacs should refetch. */
+  private applyChunk(attempt: InFlightAttempt, chunk: Record<string, unknown>, time: number): boolean {
+    const index = chunk.index
+    if (!isSafeCount(index)) return false
+    if (chunk.type === 'block-start') {
+      if (typeof chunk.blockType !== 'string') return false
+      if (chunk.blockType === 'reasoning') this.ensureBlock(attempt, index, time)
+      else attempt.otherBlocks.add(index)
+      return false
+    }
+    if (chunk.type === 'reasoning-delta') {
+      if (typeof chunk.text !== 'string' || attempt.otherBlocks.has(index)) return false
+      const block = this.ensureBlock(attempt, index, time)
+      if (block.closed) return false
+      block.sawDelta = true
+      return this.appendBlockText(attempt, block, chunk.text)
+    }
+    if (chunk.type === 'block-end') {
+      if (attempt.otherBlocks.has(index)) return false
+      const payload = isRecord(chunk.block) ? chunk.block : undefined
+      if (payload?.type !== 'reasoning') return false
+      const block = this.ensureBlock(attempt, index, time)
+      if (block.closed) return false
+      block.closed = true
+      const text = typeof payload.text === 'string' ? payload.text : ''
+      if (block.sawDelta) {
+        if (text.trim() !== '') block.hasNonWhitespace = true
+        return false
+      }
+      return this.appendBlockText(attempt, block, text)
+    }
+    return false
+  }
+
+  /**
+   * Retain TEXT for BLOCK within the attempt budget, track the coarsely
+   * summarized first line, and report the two coarse transitions: the first
+   * non-empty summary, and (once more) the first completed first line.
+   */
+  private appendBlockText(
+    attempt: InFlightAttempt,
+    block: InFlightReasoningBlock,
+    text: string,
+  ): boolean {
+    let newlineNow = false
+    if (!block.firstLineDone) {
+      const newline = text.indexOf('\n')
+      if (newline === -1) {
+        block.firstLine = (block.firstLine + text).slice(0, MAX_INFLIGHT_FIRST_LINE_CHARS)
+      } else {
+        block.firstLine = (block.firstLine + text.slice(0, newline))
+          .slice(0, MAX_INFLIGHT_FIRST_LINE_CHARS)
+        block.firstLineDone = true
+        newlineNow = true
+      }
+    }
+    if (text.trim() !== '') block.hasNonWhitespace = true
+    if (!block.truncated) {
+      const bytes = Buffer.byteLength(text, 'utf8')
+      if (attempt.retainedBytes + bytes > MAX_INFLIGHT_REASONING_BYTES) {
+        block.truncated = true
+      } else {
+        if (block.pieces.length >= MAX_INFLIGHT_PIECES_PER_BLOCK) {
+          block.pieces = [block.pieces.join('')]
+        }
+        block.pieces.push(text)
+        block.bytes += bytes
+        attempt.retainedBytes += bytes
+      }
+    }
+    const hasSummary = activityThinkingSummary(block.firstLine) !== ''
+    let nudge = false
+    if (hasSummary && !block.summaryNotified) {
+      block.summaryNotified = true
+      nudge = true
+    }
+    if (hasSummary && newlineNow && !block.newlineNotified) {
+      block.newlineNotified = true
+      nudge = true
+    }
+    return nudge
+  }
+}
+
+function unknownInFlightItem(inFlightId: string): InFlightSelection {
+  return {
+    ok: false,
+    status: 404,
+    reason: 'unknown-item',
+    message: `no in-flight thinking item ${inFlightId}`,
+  }
+}
+
+function wrongInFlightTurn(inFlightId: string, turn: number): InFlightSelection {
+  return {
+    ok: false,
+    status: 404,
+    reason: 'unknown-item',
+    message: `in-flight thinking ${inFlightId} is not in turn ${turn}`,
+  }
+}
+
+/**
+ * Merge the active attempt's live summary entries into the committed activity
+ * fold.  A live entry is offered only for a turn with no `turn/end` (live
+ * state never resurrects, synthesizes, or extends a closed turn), and both
+ * admission bounds are applied after the merge.  Entries keep log order: the
+ * attempt is the open turn's tail, so its blocks append in ordinal order.
+ */
+export function withInFlightActivity(
+  activity: ReadonlyMap<number, TurnActivity>,
+  live: readonly ActivityInFlightThinking[],
+  boundaries: TurnBoundaries,
+): Map<number, TurnActivity> {
+  const merged = new Map<number, TurnActivity>()
+  for (const [turn, value] of activity) {
+    merged.set(turn, { entries: [...value.entries], messageSeqs: [...value.messageSeqs] })
+  }
+  for (const entry of live) {
+    if (boundaries.ends.has(entry.turn)) continue
+    let value = merged.get(entry.turn)
+    if (value === undefined) {
+      value = { entries: [], messageSeqs: [] }
+      merged.set(entry.turn, value)
+    }
+    if (value.entries.length >= MAX_ACTIVITY_ENTRIES_PER_TURN) value.entries.shift()
+    value.entries.push(entry)
+  }
+  if (merged.size > MAX_ACTIVITY_TURNS) {
+    const keep = new Set([...merged.keys()].sort((a, b) => a - b).slice(-MAX_ACTIVITY_TURNS))
+    for (const turn of [...merged.keys()]) {
+      if (!keep.has(turn)) merged.delete(turn)
+    }
+  }
+  return merged
 }
 
 /** One entry in the merged session inventory handed to Emacs. */
@@ -1638,13 +2345,15 @@ export function repliesChangedMessage(sessionId: string, turn?: number): string 
 }
 
 /**
- * One SSE `data:` frame announcing that a session's turn activity grew (a
+ * One SSE `data:` frame announcing that a session's turn activity changed (a
  * `tool/call`, an append `tool/result`, or an `assistant/message` carrying
- * reasoning was committed mid-turn). Emitted at most once per debounce window
- * per session: activity arrives in bursts, and the frame is only a nudge to
- * re-pull `GET /turns`. TURN names the turn that grew; it is informational
- * (Emacs refreshes the session's turn cache, not a turn-specific entry), and
- * the browser ignores the non-`draft` kind.
+ * reasoning was committed mid-turn, or a live reasoning attempt gained,
+ * replaced, or lost its transient summary entry). Emitted at most once per
+ * debounce window per session: activity arrives in bursts, and the frame is
+ * only a nudge to re-pull `GET /turns`. TURN names the affected turn; it is
+ * informational (Emacs refreshes the session's turn cache, not a turn-specific
+ * entry), and the browser ignores the non-`draft` kind. The payload never
+ * carries reasoning text or a live selector.
  */
 export function activityChangedMessage(sessionId: string, turn?: number): string {
   return `data: ${JSON.stringify({
@@ -2996,7 +3705,10 @@ export interface DetailItemRequest {
   sessionId: string
   turn: number
   kind: DetailItemKind
+  /** A committed reasoning message's seq; mutually exclusive with inFlightId. */
   seq?: number
+  /** A live-attempt selector, minted by the host for one accepted start. */
+  inFlightId?: string
   ord?: number
   callId?: string
   full?: true
@@ -3069,21 +3781,39 @@ export function parseDetailItemQuery(params: DetailQueryParams): DetailQueryPars
   if (ordSingle.error !== undefined) return { ok: false, error: ordSingle.error }
   const callSingle = singleQueryParam(params, 'callId')
   if (callSingle.error !== undefined) return { ok: false, error: callSingle.error }
+  const inFlightSingle = singleQueryParam(params, 'inFlightId')
+  if (inFlightSingle.error !== undefined) return { ok: false, error: inFlightSingle.error }
   let seq: number | undefined
+  let inFlightId: string | undefined
   let ord: number | undefined
   let callId: string | undefined
   if (kind === 'thinking') {
     if (callSingle.value !== undefined) return { ok: false, error: 'callId is not valid for thinking' }
-    if (seqSingle.value === undefined) return { ok: false, error: 'seq is required for thinking' }
     if (ordSingle.value === undefined) return { ok: false, error: 'ord is required for thinking' }
-    const parsedSeq = queryInteger(seqSingle.value)
+    if (seqSingle.value !== undefined && inFlightSingle.value !== undefined) {
+      return { ok: false, error: 'seq and inFlightId are mutually exclusive' }
+    }
+    if (seqSingle.value === undefined && inFlightSingle.value === undefined) {
+      return { ok: false, error: 'one of seq or inFlightId is required for thinking' }
+    }
     const parsedOrd = queryInteger(ordSingle.value)
-    if (parsedSeq === null) return { ok: false, error: 'seq must be a non-negative integer' }
     if (parsedOrd === null) return { ok: false, error: 'ord must be a non-negative integer' }
-    seq = parsedSeq
     ord = parsedOrd
+    if (inFlightSingle.value !== undefined) {
+      if (inFlightSingle.value === ''
+        || inFlightSingle.value.length > MAX_INFLIGHT_ID_CHARS
+        || /[\u0000-\u001f\u007f]/.test(inFlightSingle.value)) {
+        return { ok: false, error: `inFlightId must be a single non-empty string of at most ${MAX_INFLIGHT_ID_CHARS} characters` }
+      }
+      inFlightId = inFlightSingle.value
+    } else {
+      const parsedSeq = queryInteger(seqSingle.value)
+      if (parsedSeq === null) return { ok: false, error: 'seq must be a non-negative integer' }
+      seq = parsedSeq
+    }
   } else {
     if (seqSingle.value !== undefined) return { ok: false, error: 'seq is only valid for thinking' }
+    if (inFlightSingle.value !== undefined) return { ok: false, error: 'inFlightId is only valid for thinking' }
     if (ordSingle.value !== undefined) return { ok: false, error: 'ord is only valid for thinking' }
     if (callSingle.value === undefined || callSingle.value === '') {
       return { ok: false, error: 'callId must be a single non-empty string' }
@@ -3111,6 +3841,7 @@ export function parseDetailItemQuery(params: DetailQueryParams): DetailQueryPars
       turn: turn.value as number,
       kind: kind as DetailItemKind,
       ...seq === undefined ? {} : { seq },
+      ...inFlightId === undefined ? {} : { inFlightId },
       ...ord === undefined ? {} : { ord },
       ...callId === undefined ? {} : { callId },
       ...fullSingle.value === undefined ? {} : { full: true as const },
@@ -3221,6 +3952,26 @@ export interface DetailThinkingItem extends DetailItemContext {
   time: number
   step: number
   text: string
+  /** A committed item has no live selector; explicit false for narrowing. */
+  inFlight?: false
+}
+
+/**
+ * One live reasoning block and the prefix retained at read time.  It has no
+ * `seq`; the transient identity is the bridge-minted `inFlightId`, and
+ * `truncated` means this block's later text was discarded by the host cap.
+ */
+export interface DetailInFlightThinkingItem extends DetailItemContext {
+  kind: 'thinking'
+  inFlight: true
+  inFlightId: string
+  attemptId: string
+  revision: number
+  ord: number
+  time: number
+  step: number
+  text: string
+  truncated?: true
 }
 
 /** One tool call fact in the fold, with the directory in effect at the call. */
@@ -3269,7 +4020,11 @@ export interface DetailOrphanResultItem extends DetailItemContext {
 }
 
 /** The raw selected item, before its parts and diffs are rendered. */
-export type DetailItem = DetailThinkingItem | DetailToolItem | DetailOrphanResultItem
+export type DetailItem =
+  | DetailThinkingItem
+  | DetailInFlightThinkingItem
+  | DetailToolItem
+  | DetailOrphanResultItem
 
 /** The outcome of one direct item selection. */
 export type DetailItemResult =
@@ -3701,6 +4456,105 @@ export function buildDetailItem(args: {
   return notVisible
 }
 
+/** The boundary facts available without folding the turn's items. */
+function detailBoundaryContext(turn: number, boundaries: TurnBoundaries): DetailItemContext {
+  const end = boundaries.ends.get(turn)
+  return {
+    turn,
+    open: end === undefined,
+    ...boundaries.starts.has(turn) ? { startedAt: boundaries.starts.get(turn) } : {},
+    ...end === undefined ? {} : { endedAt: end.time },
+    ...end?.reason === undefined ? {} : { reason: end.reason },
+    ...end?.failure === undefined ? {} : { failure: end.failure },
+  }
+}
+
+/**
+ * Resolve one transient `inFlightId + ord` selector.  A live attempt yields
+ * its retained snapshot; a settled one is translated onto the committed
+ * item (directly for a normal message, through the survivor rule for an
+ * interrupted message) and goes through the ordinary visibility checks.  A
+ * log-only or abandoned settlement is 409 `not-visible`.
+ */
+export function buildInFlightDetailItem(args: {
+  registry: InFlightActivityRegistry
+  sessionId: string
+  turn: number
+  ord: number
+  inFlightId: string
+  events: readonly SessionEventLike[]
+  surfaceSeqs: ReadonlySet<number>
+  boundaries: TurnBoundaries
+  headerCwd?: string
+  projection?: DetailItemProjection
+}): DetailItemResult {
+  const selection = args.registry.select(args.sessionId, args.inFlightId, args.turn, args.ord)
+  if (!selection.ok) return selection
+  const context = detailBoundaryContext(args.turn, args.boundaries)
+  if (selection.kind === 'live') {
+    return {
+      ok: true,
+      item: {
+        ...context,
+        kind: 'thinking',
+        inFlight: true,
+        inFlightId: selection.inFlightId,
+        attemptId: selection.attemptId,
+        revision: selection.revision,
+        ord: selection.ord,
+        time: selection.time,
+        step: selection.step,
+        text: selection.text,
+        ...selection.truncated ? { truncated: true as const } : {},
+      },
+    }
+  }
+  const event = eventAtSeq(args.events, selection.seq)
+  if (event === undefined || event.type !== 'assistant/message' || eventTurn(event) !== args.turn) {
+    return {
+      ok: false,
+      status: 409,
+      reason: 'not-visible',
+      message: `in-flight thinking ${args.inFlightId} has no visible committed item`,
+    }
+  }
+  const data = isRecord(event.data) ? event.data : undefined
+  const interrupted = data?.interrupted === true
+  if (interrupted && !selection.survivors.includes(selection.liveOrd)) {
+    return {
+      ok: false,
+      status: 409,
+      reason: 'not-visible',
+      message: `in-flight thinking block ${selection.liveOrd} did not survive the interrupted assembly`,
+    }
+  }
+  const ord = interrupted
+    ? selection.survivors.filter(candidate => candidate < selection.liveOrd).length
+    : selection.liveOrd
+  const result = buildDetailItem({
+    turn: args.turn,
+    events: args.events,
+    surfaceSeqs: args.surfaceSeqs,
+    boundaries: args.boundaries,
+    ...args.headerCwd === undefined ? {} : { headerCwd: args.headerCwd },
+    kind: 'thinking',
+    seq: selection.seq,
+    ord,
+    ...args.projection === undefined ? {} : { projection: args.projection },
+  })
+  // A translated ordinal that names no committed item is a visibility loss,
+  // not a malformed selector: the transient id is known and settled.
+  if (!result.ok && result.status === 404) {
+    return {
+      ok: false,
+      status: 409,
+      reason: 'not-visible',
+      message: `in-flight thinking ${args.inFlightId} is no longer visible`,
+    }
+  }
+  return result
+}
+
 /** Bounded display output for one file, supplied by the pure route caller's
  * `detail.ts` adapter without making `logic.ts` import the diff dependency. */
 export interface DetailDiffRender {
@@ -3757,6 +4611,21 @@ export interface DetailThinkingResponse extends DetailResponseBase {
   parts: { reasoning?: DetailTextPart }
 }
 
+/** One live attempt's selected block: the retained prefix, no committed seq. */
+export interface DetailInFlightThinkingResponse extends DetailResponseBase {
+  kind: 'thinking'
+  inFlight: true
+  inFlightId: string
+  attemptId: string
+  revision: number
+  ord: number
+  time: number
+  step: number
+  /** This block's later text was discarded by the host retention cap. */
+  truncated?: true
+  parts: { reasoning?: DetailTextPart }
+}
+
 export interface DetailToolResponse extends DetailResponseBase {
   kind: 'tool'
   seq: number
@@ -3794,7 +4663,11 @@ export interface DetailOrphanResultResponse extends DetailResponseBase {
 }
 
 /** The tagged response union returned by a probe or full read. */
-export type DetailItemResponse = DetailThinkingResponse | DetailToolResponse | DetailOrphanResultResponse
+export type DetailItemResponse =
+  | DetailThinkingResponse
+  | DetailInFlightThinkingResponse
+  | DetailToolResponse
+  | DetailOrphanResultResponse
 
 export type DetailItemReadResult =
   | { ok: true; response: DetailItemResponse }
@@ -3926,10 +4799,28 @@ export function buildDetailItemResponse(args: {
 
   let response: DetailItemResponse
   if (item.kind === 'thinking') {
-    response = {
-      ...base,
-      kind: 'thinking', seq: item.seq, ord: item.ord, time: item.time, step: item.step,
-      parts: { reasoning: detailTextPart(item.text) },
+    if (item.inFlight === true) {
+      // The live branch is separate so the committed branch below stays
+      // byte-for-byte identical.
+      response = {
+        ...base,
+        kind: 'thinking',
+        inFlight: true,
+        inFlightId: item.inFlightId,
+        attemptId: item.attemptId,
+        revision: item.revision,
+        ord: item.ord,
+        time: item.time,
+        step: item.step,
+        ...item.truncated === true ? { truncated: true as const } : {},
+        parts: { reasoning: detailTextPart(item.text) },
+      }
+    } else {
+      response = {
+        ...base,
+        kind: 'thinking', seq: item.seq, ord: item.ord, time: item.time, step: item.step,
+        parts: { reasoning: detailTextPart(item.text) },
+      }
     }
   } else if (item.kind === 'tool') {
     const call = item.call

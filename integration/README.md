@@ -83,11 +83,12 @@ integration/
 | `tests/models.spec.ts` | mock-LLM fidelity: advertised modalities behind the image-support precheck (text-only model → 400 `MODEL_DOES_NOT_SUPPORT_IMAGES`; the default stays image-capable), fragmented `tool-call-delta` argument assembly, and a model error ending the turn with reason `error` |
 | `tests/turns-incremental.spec.ts` | the `/turns` epoch contract incremental DSH-View filling relies on: a running turn grows segment by segment under a stable epoch, the inclusive `since` fetch re-sends the boundary turn in full, and a stale epoch forces the full-list fallback |
 | `tests/turn-activity.spec.ts` | the turn-activity fold behind DSH-View process lines: `tool/call` → `tool/result` pairing plus a one-line summary per reasoning block (summary-only — the later reasoning paragraphs stay host-side), the debounced `activity-changed` frame, and the live activity-only record (`segments: []`) for a first step with no text, with or without reasoning |
+| `tests/live-reasoning.spec.ts` | the process-local in-flight reasoning path: `/turns` carries one summary-only transient thinking entry (opaque `inFlightId`, no `seq`, later reasoning paragraphs absent), `/details/item?inFlightId=&ord=` serves the retained prefix on explicit bearer-authenticated request and grows it after a test-released batch, and settlement replaces the transient entry with exactly one committed summary while the old transient selector resolves to the canonical committed item; unknown/wrong-turn/empty-ordinal/combined-selector statuses |
 | `tests/plan-goal.spec.ts` | plan mode and the goal lifecycle over the mutation seams: POST `/plan-mode` through the preset's entry-local `planMode` controller (the report's live `plan` section follows), the `/goal/*` lifecycle (create, edit with the round cap, pause, resume, clear) with its CAS and `GOAL_NOT_FOUND` failure semantics, and the 400 validation of the set body and the `active` flag |
 | `tests/changes.spec.ts` | the changed-files fold behind the DSH-View footer on a scratch workspace: a real `write` + `edit` turn is attributed to its turn in `GET /turns`, deduped by path with the first operation preserved, and the incremental suffix carries the same attribution |
 | `tests/compact.spec.ts` | user-triggered compaction through the live slash-command registry (`ctx.commands.execute(agent, '/compact', …)`): the empty-session no-op (200 carrying the harness's own text, with no `compaction` frame), a real compaction's 200 text plus `compaction` SSE frames carrying `sourceCommandId` and the summary's reclaimed token count, the end frame observed before the 200 resolves, and the summarizer's auxiliary `purpose: 'compaction'` call |
 | `tests/working-directory.spec.ts` | the effective working directory behind every reported session directory: a scripted `working_directory` call commits a `working-directory/change`, and the moved `cwd` reaches `GET /turns` (which attributes no file to the directory tool), the `/session` report, and the `/sessions` roster — the header keeps only the original project |
-| `dsh-bridge-it.el` | the live-Emacs seats of the ask-user path (submit and decline), `C-c C-a` attachment staging plus send-time tag stripping, DSH-Describe rendering live host statistics, turn branching, incremental DSH-View filling (in-place segment append with a surviving marker, first-reply tailing, and the newer-turn rebuild), live turn-activity streaming plus the buffer-local toggle, stopping a hung turn through `/sessions/stop` (the turn closes `aborted` and a second stop is a no-op), SSE reconnect resilience across a same-port fixture restart, the DSH-Sessions list over live data, outbox receive + ack draining, cold-session resume driven from Emacs, the plan/goal commands driven from a live DSH-Prompt buffer (create on a goal-less session, edit with the round cap, pause, resume, toggle, clear, and the no-goal refusal, with the host report, the header cell, the menu item, and the command's message checked at each step), the plan-mode toggle, and an out-of-band goal mutation reaching the caches over the SSE frames alone |
+| `dsh-bridge-it.el` | the live-Emacs seats of the ask-user path (submit and decline), `C-c C-a` attachment staging plus send-time tag stripping, DSH-Describe rendering live host statistics, turn branching, incremental DSH-View filling (in-place segment append with a surviving marker, first-reply tailing, and the newer-turn rebuild), live turn-activity streaming plus the buffer-local toggle, the in-progress reasoning line and its snapshot inspector (RET sees only the retained prefix, `g` grows it, settlement promotes the selector), stopping a hung turn through `/sessions/stop` (the turn closes `aborted` and a second stop is a no-op), SSE reconnect resilience across a same-port fixture restart, the DSH-Sessions list over live data, outbox receive + ack draining, cold-session resume driven from Emacs, the plan/goal commands driven from a live DSH-Prompt buffer (create on a goal-less session, edit with the round cap, pause, resume, toggle, clear, and the no-goal refusal, with the host report, the header cell, the menu item, and the command's message checked at each step), the plan-mode toggle, and an out-of-band goal mutation reaching the caches over the SSE frames alone |
 
 `tests/cold-sessions.spec.ts` boots a second host against a persisted
 `dshHome` (the launcher's `dshHome` option) to cover the cold roster; the
@@ -109,15 +110,21 @@ lazily per request from `$DSH_HOME/dsh-bridge-token`):
 - `POST /mock-llm/script` — replace the queue (`{script: [...]}`).
 - `POST /mock-llm/push` — append entries.
 - `GET  /mock-llm/requests` — every `GenerateOptions` recorded (with `purpose`).
-- `POST /mock-llm/reset` — clear queue + recording.
+- `POST /mock-llm/reset` — clear queue, recording, and pause gates.
+- `POST /mock-llm/release` — release one named pause gate (`{key}`), even
+  if no stream is waiting on it yet.
 
 Entry kinds: `{kind:'text', text, delayMs?}`, `{kind:'tool-call', name,
 arguments, text?, fragmentArgs?}` (`fragmentArgs: true` splits the arguments
 JSON across several `tool-call-delta` chunks, the way real providers fragment
-them), `{kind:'reasoning', text, toolCall?:{name, arguments}}` (a reasoning
+them), `{kind:'reasoning', text, toolCall?:{name, arguments}, pauses?}` (a reasoning
 block, optionally followed by one tool call; this is what the bridge folds into
-a one-line thinking summary), `{kind:'hang'}`, `{kind:'error', message}` (the
-adapter throws; the turn ends with reason `error`).
+a one-line thinking summary).  `pauses: [{after: CHARACTER-COUNT, key}]` holds
+the stream after that many characters until `POST /mock-llm/release` names the
+key, so tests can inspect an attempt at a deterministic mid-stream prefix
+without a wall-clock race; the wait aborts with the attempt.  The remaining
+kinds are `{kind:'hang'}` and `{kind:'error', message}` (the adapter throws;
+the turn ends with reason `error`).
 
 ## Failure bounds
 

@@ -84,6 +84,8 @@ class MockAdapter {
     this.requests = []
     /** Script queue, one entry per main-turn call. */
     this.script = []
+    /** Named pause gates for test-controlled reasoning streams. */
+    this.gates = new Map()
   }
 
   providerInfo(provider) {
@@ -157,6 +159,94 @@ class MockAdapter {
     }
   }
 
+  /**
+   * Await the named pause gate, or return immediately when already released.
+   * Aborts reject so cancellation settles the attempt instead of wedging it.
+   */
+  waitGate(key, signal) {
+    return new Promise((resolve, reject) => {
+      if (signal?.aborted) { reject(new Error('aborted')); return }
+      if (typeof key !== 'string' || key === '') { resolve(); return }
+      let gate = this.gates.get(key)
+      if (gate === undefined) {
+        gate = { released: false, waiters: [] }
+        this.gates.set(key, gate)
+      }
+      if (gate.released) { resolve(); return }
+      const waiter = () => { cleanup(); resolve() }
+      const onAbort = () => { cleanup(); reject(new Error('aborted')) }
+      const cleanup = () => {
+        signal?.removeEventListener('abort', onAbort)
+        gate.waiters = gate.waiters.filter(candidate => candidate !== waiter)
+      }
+      gate.waiters.push(waiter)
+      signal?.addEventListener('abort', onAbort, { once: true })
+    })
+  }
+
+  /** Release one pause gate, whether or not a stream is waiting on it yet. */
+  releaseGate(key) {
+    let gate = this.gates.get(key)
+    if (gate === undefined) {
+      gate = { released: false, waiters: [] }
+      this.gates.set(key, gate)
+    }
+    gate.released = true
+    for (const waiter of gate.waiters.splice(0)) waiter()
+  }
+
+  /**
+   * One reasoning block, optionally holding at test-controlled gates.
+   * `pauses` is `[{ after: CHARACTER-COUNT, key }]`, in order; the stream
+   * emits that many characters, waits for `key`, and continues.  The final
+   * `block-end` carries the complete text, like a real provider.
+   */
+  async *reasoningStream(entry, signal) {
+    const text = typeof entry.text === 'string' ? entry.text : ''
+    const chars = Array.from(text)
+    const pauses = (Array.isArray(entry.pauses) ? entry.pauses : [])
+      .filter(pause => pause !== null && typeof pause === 'object'
+        && Number.isSafeInteger(pause.after) && pause.after >= 0)
+      .sort((a, b) => a.after - b.after)
+    let emitted = 0
+    yield { type: 'block-start', index: 0, blockType: 'reasoning' }
+    for (const pause of pauses) {
+      const target = Math.min(chars.length, pause.after)
+      while (emitted < target) {
+        if (signal?.aborted) throw new Error('aborted')
+        yield { type: 'reasoning-delta', index: 0, text: chars[emitted] }
+        emitted += 1
+      }
+      await this.waitGate(pause.key, signal)
+    }
+    while (emitted < chars.length) {
+      if (signal?.aborted) throw new Error('aborted')
+      yield { type: 'reasoning-delta', index: 0, text: chars[emitted] }
+      emitted += 1
+    }
+    let outputTokens = chars.length
+    const chunks = [{ type: 'block-end', index: 0, block: { type: 'reasoning', text } }]
+    if (entry.toolCall !== undefined) {
+      const argumentsJson = JSON.stringify(entry.toolCall.arguments ?? {})
+      const callId = mockCallId()
+      chunks.push(
+        { type: 'block-start', index: 1, blockType: 'tool-call' },
+        { type: 'tool-call-delta', index: 1, id: callId, name: entry.toolCall.name, argumentsDelta: argumentsJson },
+        {
+          type: 'block-end',
+          index: 1,
+          block: { type: 'tool-call', id: callId, name: entry.toolCall.name, arguments: argumentsJson },
+        },
+      )
+      outputTokens += 5
+    }
+    chunks.push(
+      { type: 'usage', usage: { inputTokens: 10, outputTokens } },
+      { type: 'finish', reason: { kind: entry.toolCall === undefined ? 'stop' : 'tool-calls' } },
+    )
+    for (const chunk of chunks) yield chunk
+  }
+
   async *hang(options) {
     yield { type: 'block-start', index: 0, blockType: 'text' }
     yield { type: 'text-delta', index: 0, text: 'partial' }
@@ -197,6 +287,10 @@ class MockAdapter {
         return
       }
       case 'reasoning': {
+        if (Array.isArray(entry.pauses) && entry.pauses.length > 0) {
+          yield* this.reasoningStream(entry, options.signal)
+          return
+        }
         yield* this.paced(
           reasoningChunks(
             typeof entry.text === 'string' ? entry.text : '',
@@ -266,9 +360,23 @@ export function apply(ctx) {
         sendJson(res, 200, { requests: adapter.requests })
         return
       }
+      if (req.method === 'POST' && pathname === '/mock-llm/release') {
+        const body = (await readJson(req)) ?? {}
+        if (typeof body.key !== 'string' || body.key === '') {
+          sendJson(res, 400, { error: 'body.key must be a non-empty string' })
+          return
+        }
+        adapter.releaseGate(body.key)
+        sendJson(res, 200, { ok: true })
+        return
+      }
       if (req.method === 'POST' && pathname === '/mock-llm/reset') {
         adapter.script = []
         adapter.requests = []
+        // Release any paused stream first, so a reset between cases cannot
+        // leave a generator waiting on a gate that no longer exists.
+        for (const key of [...adapter.gates.keys()]) adapter.releaseGate(key)
+        adapter.gates.clear()
         sendJson(res, 200, { ok: true })
         return
       }

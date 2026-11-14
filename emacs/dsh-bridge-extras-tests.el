@@ -590,6 +590,154 @@ list of requests in invocation order."
   (let ((dsh-bridge-extras-markdown-byte-limit 4))
     (should-not (dsh-bridge-extras--fontify-markdown "longer than four"))))
 
+
+;;; In-flight reasoning
+
+(defun dsh-bridge-extras-tests--inflight-response (&optional text)
+  "Build a live thinking item containing TEXT (no committed seq)."
+  `((kind . "thinking") (sessionId . "s1") (turn . 3) (epoch . 2) (cursor . 20)
+    (cwd . "/work") (inFlight . t) (inFlightId . "live-1") (attemptId . "s:1")
+    (revision . 3) (ord . 0) (step . 1) (time . 1000)
+    (parts . ((reasoning . ,(dsh-bridge-extras-tests--page
+                             (or text "live reasoning\n")))))))
+
+(ert-deftest dsh-bridge-extras-inflight-selector-mapping ()
+  "A transient DSH-View property maps to an inFlightId query and back.
+The id is carried as a string and no seq is ever invented."
+  (with-temp-buffer
+    (dsh-bridge-view-mode)
+    (let ((inhibit-read-only t))
+      (insert (propertize "live\n" 'dsh-bridge-activity
+                          '(inflight-thinking "live-1" . 0))))
+    (goto-char (point-min))
+    (let ((selector (dsh-bridge-extras--identity-at-point)))
+      (should (equal selector
+                     '(:kind thinking :in-flight-id "live-1" :ord 0)))
+      (should (equal (dsh-bridge-extras--selector-params selector)
+                     '(("kind" . "thinking")
+                       ("inFlightId" . "live-1")
+                       ("ord" . "0"))))
+      (should (equal (dsh-bridge-extras--activity-key selector)
+                     '(inflight-thinking "live-1" . 0)))
+      (let ((path (dsh-bridge-extras--item-path "s1" 3 selector)))
+        (should (string-match-p "inFlightId=live-1" path))
+        (should-not (string-match-p "seq=" path))))))
+
+(ert-deftest dsh-bridge-extras-inflight-title-and-truncation ()
+  "A live item is titled in progress and labels a truncated snapshot."
+  (let ((live (dsh-bridge-extras-tests--inflight-response "retained text")))
+    (setf (alist-get 'truncated live) t
+          (alist-get 'totalBytes live) 1024)
+    (with-temp-buffer
+      (dsh-bridge-extras-mode)
+      (setq dsh-bridge-extras--session "s1"
+            dsh-bridge-extras--turn 3
+            dsh-bridge-extras--selector '(:kind thinking :in-flight-id "live-1" :ord 0))
+      (dsh-bridge-extras--handle-item (cons 200 live))
+      (let ((text (buffer-string)))
+        (should (string-match-p "^Thinking (in progress) — step 1$" text))
+        (should (string-match-p "Stream       revision 3" text))
+        (should (string-match-p "Showing 1k retained by the host" text))
+        (should (string-match-p "later in-flight text was discarded" text))
+        (should (string-match-p "retained text" text))
+        (should-not (string-match-p "\\bseq\\b" text))))))
+
+(ert-deftest dsh-bridge-extras-inflight-refresh-and-revert ()
+  "Refresh and revert both issue fresh snapshot requests.
+`revert-buffer' goes through the mode's wrapper, which ignores its args."
+  (let ((buffer (generate-new-buffer "*test-dsh-live*")))
+    (unwind-protect
+        (with-current-buffer buffer
+          (dsh-bridge-extras-mode)
+          (setq dsh-bridge-extras--session "s1"
+                dsh-bridge-extras--turn 3
+                dsh-bridge-extras--selector '(:kind thinking :in-flight-id "live-1" :ord 0)
+                dsh-bridge-extras--generation 1)
+          (dsh-bridge-extras--handle-item
+           (cons 200 (dsh-bridge-extras-tests--inflight-response "first")))
+          ;; No request arrives without an explicit refresh.
+          (should-not dsh-bridge-extras--inflight)
+          (let ((requests
+                 (dsh-bridge-extras-tests--with-requests
+                     (lambda (_path)
+                       (cons 200 (dsh-bridge-extras-tests--inflight-response "second")))
+                   (dsh-bridge-extras-refresh))))
+            (should (= (length requests) 1))
+            (should (string-match-p "inFlightId=live-1" (cadr (car requests))))
+            (should (string-match-p "second" (buffer-string)))
+            (should-not (string-match-p "first" (buffer-string))))
+          (let ((requests
+                 (dsh-bridge-extras-tests--with-requests
+                     (lambda (_path)
+                       (cons 200 (dsh-bridge-extras-tests--inflight-response "third")))
+                   (revert-buffer nil t))))
+            (should (= (length requests) 1))
+            (should (string-match-p "inFlightId=live-1" (cadr (car requests))))
+            (should (string-match-p "third" (buffer-string)))))
+      (kill-buffer buffer))))
+
+(ert-deftest dsh-bridge-extras-inflight-promotion-follows-settlement ()
+  "A committed response promotes the transient selector to seq and its
+translated ordinal.  Later refreshes keep using the committed identity."
+  (with-temp-buffer
+    (dsh-bridge-extras-mode)
+    (setq dsh-bridge-extras--session "s1"
+          dsh-bridge-extras--turn 3
+          dsh-bridge-extras--selector '(:kind thinking :in-flight-id "live-1" :ord 1)
+          dsh-bridge-extras--generation 1)
+    (dsh-bridge-extras--handle-item
+     (cons 200 (dsh-bridge-extras-tests--inflight-response "live")))
+    (should-not (alist-get 'seq dsh-bridge-extras--item))
+    (dsh-bridge-extras-tests--with-requests
+        (lambda (_path)
+          (cons 200 (dsh-bridge-extras-tests--thinking-response "committed")))
+      (dsh-bridge-extras-refresh))
+    (should (equal dsh-bridge-extras--selector '(:kind thinking :seq 4 :ord 0)))
+    (let ((requests
+           (dsh-bridge-extras-tests--with-requests
+               (lambda (_path)
+                 (cons 200 (dsh-bridge-extras-tests--thinking-response "committed")))
+             (dsh-bridge-extras-refresh))))
+      (should (string-match-p "seq=4" (cadr (car requests))))
+      (should-not (string-match-p "inFlightId" (cadr (car requests)))))))
+
+(ert-deftest dsh-bridge-extras-inflight-failed-refresh-keeps-snapshot ()
+  "An abandoned/failed refresh keeps the last successful live snapshot."
+  (with-temp-buffer
+    (dsh-bridge-extras-mode)
+    (setq dsh-bridge-extras--session "s1"
+          dsh-bridge-extras--turn 3
+          dsh-bridge-extras--selector '(:kind thinking :in-flight-id "live-1" :ord 0)
+          dsh-bridge-extras--generation 1)
+    (dsh-bridge-extras--handle-item
+     (cons 200 (dsh-bridge-extras-tests--inflight-response "kept live snapshot")))
+    (dsh-bridge-extras-tests--with-requests
+        (lambda (_path) (cons 409 '((error . "not visible"))))
+      (dsh-bridge-extras-refresh))
+    (should (string-match-p "kept live snapshot" (buffer-string)))
+    (should (string-match-p "not visible" (buffer-string)))
+    (should (equal dsh-bridge-extras--selector
+                   '(:kind thinking :in-flight-id "live-1" :ord 0)))))
+
+(ert-deftest dsh-bridge-extras-inflight-show-in-view-finds-live-line ()
+  "Show-in-view reaches a transient line by its opaque identity."
+  (let ((view (dsh-bridge-extras-tests--view
+               "show-live" 3
+               '(("live" . (inflight-thinking "live-1" . 0))))))
+    (unwind-protect
+        (with-temp-buffer
+          (dsh-bridge-extras-mode)
+          (setq-local dsh-bridge-extras--session "show-live"
+                      dsh-bridge-extras--turn 3
+                      dsh-bridge-extras--selector
+                      '(:kind thinking :in-flight-id "live-1" :ord 0))
+          (cl-letf (((symbol-function 'pop-to-buffer)
+                     (lambda (buffer &rest _) (set-buffer buffer))))
+            (dsh-bridge-extras-show-in-view)))
+      (with-current-buffer view
+        (should (= (line-number-at-pos) 1)))
+      (kill-buffer view))))
+
 (provide 'dsh-bridge-extras-tests)
 
 ;;; dsh-bridge-extras-tests.el ends here

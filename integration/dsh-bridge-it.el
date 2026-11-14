@@ -1142,6 +1142,124 @@ then with) the activity lines."
           (should (equal (buffer-string)
                          (dsh-bridge-it--turn-render record session-id))))))))
 
+(ert-deftest dsh-bridge-it-inflight-reasoning-snapshot ()
+  "A followed DSH-View shows live reasoning and RET snapshots it on demand.
+The mock holds the attempt after its first line, then after the later
+paragraph.  The view's in-progress line appears before settlement; RET loads
+only the retained first line; releasing more chunks does not mutate the open
+inspector until `g`; settlement replaces the view line and promotes the
+inspector on refresh."
+  (dsh-bridge-it--with-fixture
+    (let* ((first-line "LIVE-SUMMARY first line.")
+           (marker "LIVE-SECOND-PARAGRAPH-MARKER")
+           (cot (concat first-line "\n\n" marker))
+           (session-id nil)
+           (extras-buffer nil))
+      (dsh-bridge-it--script-mock
+       (vector
+        (list :kind "reasoning" :text cot
+              :pauses (vector (list :after (length first-line) :key "it-prefix")
+                              (list :after (length cot) :key "it-rest")))))
+      (setq session-id (dsh-bridge-it--create-session
+                        (expand-file-name "../" dsh-bridge-it--directory)))
+      (unwind-protect
+          (let ((dsh-bridge-view-activity t))
+            (dsh-bridge-it--notifications-start)
+            (dsh-bridge-it--prompt-send session-id "Think live.")
+            ;; The in-progress line is visible while the attempt is paused.
+            (should (dsh-bridge-it--wait
+                     (lambda ()
+                       (let ((text (dsh-bridge-it--view-text session-id)))
+                         (and text
+                              (string-match-p "thinking (in progress):" text)
+                              (string-match-p first-line text))))
+                     30000))
+            (should-not (string-match-p marker (dsh-bridge-it--view-text session-id)))
+            ;; RET opens the snapshot: the retained first line only.
+            (with-current-buffer (dsh-bridge-it--view session-id)
+              (goto-char (point-min))
+              (search-forward "thinking (in progress):")
+              (dsh-bridge-view-enter))
+            (should (dsh-bridge-it--wait
+                     (lambda ()
+                       (let ((buffer (get-buffer dsh-bridge-extras-buffer-name)))
+                         (and buffer
+                              (equal (alist-get 'kind
+                                                (buffer-local-value
+                                                 'dsh-bridge-extras--item buffer))
+                                     "thinking"))))
+                     15000))
+            (setq extras-buffer (get-buffer dsh-bridge-extras-buffer-name))
+            (with-current-buffer extras-buffer
+              (should (string-match-p "Thinking (in progress)" (buffer-string)))
+              (should (string-match-p first-line (buffer-string)))
+              (should-not (string-match-p marker (buffer-string))))
+            ;; Release the later paragraph.  The inspector is a stable
+            ;; snapshot: it changes only when the user asks for another one.
+            (should (eq (alist-get 'ok (dsh-bridge-it--parse-json
+                                        (dsh-bridge-it--post
+                                         "/mock-llm/release"
+                                         '((key . "it-prefix")))))
+                        t))
+            (should (dsh-bridge-it--wait
+                     (lambda ()
+                       (with-current-buffer extras-buffer
+                         (let* ((path (dsh-bridge-extras--item-path
+                                       session-id dsh-bridge-extras--turn
+                                       dsh-bridge-extras--selector))
+                                (result (dsh-bridge--request "GET" path nil))
+                                (parts (alist-get 'parts (cdr result)))
+                                (reasoning (alist-get 'reasoning parts))
+                                (text (alist-get 'text reasoning)))
+                           (and (eq (car result) 200)
+                                (string-match-p marker text)))))
+                     15000))
+            (with-current-buffer extras-buffer
+              (should-not (string-match-p marker (buffer-string))))
+            ;; g fetches the larger snapshot.
+            (with-current-buffer extras-buffer
+              (dsh-bridge-extras-refresh))
+            (should (dsh-bridge-it--wait
+                     (lambda ()
+                       (with-current-buffer extras-buffer
+                         (string-match-p marker (buffer-string))))
+                     15000))
+            ;; Settlement replaces the view line with the committed one.
+            (should (eq (alist-get 'ok (dsh-bridge-it--parse-json
+                                        (dsh-bridge-it--post
+                                         "/mock-llm/release"
+                                         '((key . "it-rest")))))
+                        t))
+            (should (dsh-bridge-it--wait
+                     (lambda ()
+                       (let ((text (dsh-bridge-it--view-text session-id)))
+                         (and text
+                              (string-match-p "thinking: " text)
+                              (not (string-match-p "in progress" text))
+                              (dsh-bridge-it--view-settled-p session-id))))
+                     30000))
+            (with-current-buffer (dsh-bridge-it--view session-id)
+              (should-not (string-match-p marker (buffer-string)))
+              (should (= (length (seq-filter
+                                  (lambda (entry)
+                                    (eq (alist-get 'inFlight entry) t))
+                                  (alist-get 'activity
+                                             (car (dsh-bridge--turns-cache-turns
+                                                   session-id)))))
+                         0)))
+            ;; A refresh promotes the transient selector to the committed item.
+            (with-current-buffer extras-buffer
+              (dsh-bridge-extras-refresh))
+            (should (dsh-bridge-it--wait
+                     (lambda ()
+                       (with-current-buffer extras-buffer
+                         (and (string-match-p "^Thinking — step" (buffer-string))
+                              (not (string-match-p "in progress" (buffer-string)))
+                              (string-match-p marker (buffer-string)))))
+                     15000)))
+        (when (and extras-buffer (buffer-live-p extras-buffer))
+          (kill-buffer extras-buffer))))))
+
 (ert-deftest dsh-bridge-it-inspect-activity-items ()
   "RET inspects only the live activity item at point, through the real host.
 The first reasoning inspection loads extras through its autoload and reveals

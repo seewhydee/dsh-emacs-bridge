@@ -84,8 +84,9 @@ replayed cold; it is not part of the item inspector.
 ## New Feature Candidates
 
 Ordered by recommended sequence, but out-of-sequence implementation is
-acceptable based on user needs. Harness seams were last verified
-against DSH 0.2.2-rc.2 plus post-release commits; the peer floor remains
+acceptable based on user needs. Harness seams (including the
+`agent/assistant-stream` publication) were last verified against DSH
+0.2.2-rc.2 plus post-release commits; the peer floor remains
 `^0.2.0-rc.1`, while the dev dependencies are set to `^0.2.2-rc.2` and
 the matching vendor set (cordis 4.1.0, schemastery 3.19.0). The two
 ranges are deliberately not in lockstep — the peers are the
@@ -105,41 +106,38 @@ the next minor line. The harness does not warn about a mismatch:
 hard `incompatible-version` refusal at install or enable, exemptible
 only per exact version.
 
-### 1. In-flight reasoning visibility
+### 1. In-flight reasoning visibility (implemented)
 
-- **Problem** — DSH-View activity lines and the item inspector only see
-  reasoning after the step's `assistant/message` commits. The web UI shows
-  thinking text while it is still streaming, so a long reasoning block is
-  invisible in Emacs until it finishes.
-- **Why it is not a rendering tweak** — the activity fold walks committed
-  session events and only recognizes `assistant/message`
-  (`activityRelevantEvent`/`turnActivity`); `/details/item` selects reasoning
-  blocks from committed events and their surface seqs. Live reasoning arrives
-  as the host's process-local `agent/assistant-stream` frames; the bridge does
-  not consume them, and the log-only `assistant/attempt` event is appended only
-  at settlement, so neither path can serve a block in flight.
-- **Shape** — host-side, listen to `agent/assistant-stream` per live agent and
-  keep bounded per-session/per-step in-flight reasoning state (attempt id,
-  revision, accumulated text, first-line summary; reset on replacement, drop on
-  end/abort). Publish a summary-only SSE nudge so DSH-View can draw an in-flight
-  thinking line; keep full text off SSE, as today. Expose the accumulated block
-  through an explicit read-only, bearer-authenticated observation/route (extend
-  `/details/item` with a live in-flight selector, or add a sibling route) with
-  the same size-probe/full-load bounds. The inspector fetches it only
-  when the user opens or refreshes that item.
-- **Emacs** — stable identity for the in-flight block; incremental activity-line
-  update; partial Markdown fontification; refresh until the committed block
-  replaces it without duplication. Cold/archived sessions keep today's
-  committed-only behavior.
-- **Privacy and bounds** — in-flight reasoning is raw model output, so the read
-  route must preserve the inspector's explicit-disclosure rules; update
-  README's "Security Matters", the route inventory, and the `logic.ts` bounds.
-  Cap accumulated bytes per attempt and live attempts per session, and drop state
-  when the agent/turn ends.
-- **Acceptance** — a mock-LLM scripted reasoning stream surfaces a thinking line
-  in DSH-View before the step settles; the inspector can open that line and
-  paginate its text; on completion the transient item hands off to the committed
-  block with no duplicate line; stale/aborted attempts disappear.
+- **Problem** — DSH-View activity lines and the item inspector only saw
+  reasoning after the step's `assistant/message` committed, so a long
+  reasoning block was invisible in Emacs until it finished.
+- **Shape** — the host accumulates the process-local
+  `agent/assistant-stream` frames in a bounded registry (`logic.ts`), and
+  an open turn's active attempt contributes summary-only thinking entries
+  to `/turns` with an opaque `inFlightId` and no `seq`. RET opens the
+  retained prefix through the existing `/details/item` route with
+  `inFlightId + ord`; `g` and `revert-buffer` fetch a fresh snapshot, never
+  a continuation. At settlement the transient entry is removed, the
+  committed message's entry appears, and the old transient selector
+  resolves to the canonical committed item (an interrupted message uses
+  the non-whitespace-survivor ordinal mapping). Per-turn
+  `activityEpoch`/`activityRevision` pairs reject out-of-order live
+  snapshots, including removal when an abandoned attempt commits nothing.
+  Abandoned and log-only attempts report 409, never a partial item.
+- **Deliberate limits** — reasoning only: streaming tool-call proposals and
+  assistant text stay out. No text on SSE; no streaming renderer, inspector
+  timer, or incremental inspector insertion. DSH-View updates at most twice
+  per block (first summary, first-line completion) and otherwise on manual
+  refresh. The host retains 1 MiB per active attempt, one active attempt per
+  session, 8 session records (LRU), 8 metadata-only handoffs per session,
+  and reports per-block truncation.
+- **Acceptance** — the integration suites hold a mock attempt mid-stream:
+  a followed DSH-View shows the in-progress line, RET loads only the current
+  snapshot, further output does not mutate the inspector until `g`, and
+  settlement leaves exactly one committed line and promotes the inspector.
+- **Out of scope** — raw `assistant/attempt` history, live non-reasoning
+  chunks, and live state for cold/archived sessions (they stay
+  committed-only and non-resuming).
 
 ### 2. Permission mode (display only, implemented)
 

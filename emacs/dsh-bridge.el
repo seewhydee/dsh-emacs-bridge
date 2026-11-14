@@ -1103,7 +1103,8 @@ Currently supported events are:
   was committed mid-turn; the frame's `turn' names the turn that grew).
 - `activity-changed': refresh the turn cache and refill following views when
   any live view of the session renders activity (a tool call, a tool result,
-  or a thinking summary was committed mid-turn); ignored otherwise, since the
+  a committed thinking summary, or a still-running thinking summary that
+  appeared, was replaced, or disappeared); ignored otherwise, since the
   frames are only a nudge and activity is not displayed in that case.
 - `context': update `dsh-bridge--session-context' and re-render header
   lines reporting that data.
@@ -2607,17 +2608,27 @@ record is an alist:
   (endedAt . MS-EPOCH)		; absent while the turn is open
   (reason . KIND-STRING)	; absent while the turn is open
   (endSeq . SEQ)		; absent while the turn is open; the fork anchor
+  (activityEpoch . STRING)	; identifies the bridge instance
+  (activityRevision . NUMBER)	; orders activity snapshots within it
   (segments . ((text . STRING) (time . MS-EPOCH) (step . NUMBER)) ...)
   (files . ((path . STRING) (op . STRING)) ...)	; absent when none
   (activity . ((kind . STRING)			; absent when none
 	       (seq . NUMBER) (ord . NUMBER)
 	       (time . MS-EPOCH) (turn . NUMBER) (step . NUMBER)
 	       (callId . STRING) (name . STRING) (summary . STRING)
-	       (isError . BOOLEAN)) ...)
+	       (isError . BOOLEAN)
+	       (inFlight . BOOLEAN)		; transient thinking only
+	       (inFlightId . STRING)		; transient thinking only
+	       (attemptId . STRING)		; transient thinking only
+	       (revision . NUMBER)) ...)	; transient thinking only
 
 Each activity entry is one tool call, one tool result, or one reasoning
 block's one-line summary (kind \"tool-call\", \"tool-result\", or \"thinking\");
-the full reasoning text is never part of the record.
+the full reasoning text is never part of the record.  A thinking entry for
+the turn's still-running assistant attempt carries `inFlight' t, an opaque
+`inFlightId', the harness `attemptId' and the stream `revision', and has no
+`seq'; it is only ever present for an open turn, and settlement replaces it
+with the committed entry.
 
 An entry may have TURNS nil, which refers to a session folded to no
 turns, e.g. after a compaction.")
@@ -2871,13 +2882,19 @@ visits the file."
 ;; an activity line) or `dsh-bridge--view-segment-divider' (if
 ;; preceded by another segment).  Each activity line is assigned a
 ;; `dsh-bridge-activity' property, up to and including its terminal
-;; newline; its value is the thinking summary's (SEQ . ORD) identity,
-;; a call's callId string, or a `(tool-result . CALLID)' marker on an
-;; unpaired tool-call result.
+;; newline; its value is the thinking summary's (SEQ . ORD) identity, a
+;; transient thinking summary's (inflight-thinking INFLIGHT-ID . ORD)
+;; identity, a call's callId string, or a `(tool-result . CALLID)' marker
+;; on an unpaired tool-call result.
 
 (defconst dsh-bridge--view-thinking-prefix
   (dsh-bridge--fontify "\u22ef thinking: " 'dsh-bridge-view-activity-face)
   "Prefix of a thinking-summary activity line.")
+
+(defconst dsh-bridge--view-inflight-thinking-prefix
+  (dsh-bridge--fontify "\u22ef thinking (in progress): "
+		       'dsh-bridge-view-activity-face)
+  "Prefix of a still-running thinking summary's activity line.")
 
 (defconst dsh-bridge--view-tool-call-prefix
   (dsh-bridge--fontify "\u2192 " 'dsh-bridge-view-activity-face)
@@ -2945,14 +2962,20 @@ then the trimmed text, followed by two newlines (i.e., a blank line)."
       (insert text "\n\n"))))
 
 (defun dsh-bridge--view-insert-thinking (activity)
-  "Insert the text for thinking ACTIVITY in the DSH-View buffer.
-The summary uses `dsh-bridge-view-thinking-face'; the prefix uses
-`dsh-bridge-view-activity-face'.  The line's `dsh-bridge-activity'
-property is the thinking block's (SEQ . ORD) identity."
-  (let ((start (point))
-	(text (dsh-bridge--view-literal (alist-get 'summary activity)))
-	(key (cons (alist-get 'seq activity) (alist-get 'ord activity))))
-    (insert dsh-bridge--view-thinking-prefix
+  "Insert thinking ACTIVITY in the DSH-View buffer.
+Its `dsh-bridge-activity' property identifies either the committed block
+or the transient in-progress block."
+  (let* ((start (point))
+	 (in-flight (eq (alist-get 'inFlight activity) t))
+	 (text (dsh-bridge--view-literal (alist-get 'summary activity)))
+	 (key (if in-flight
+		  (cons 'inflight-thinking
+			(cons (alist-get 'inFlightId activity)
+			      (alist-get 'ord activity)))
+		(cons (alist-get 'seq activity) (alist-get 'ord activity)))))
+    (insert (if in-flight
+		dsh-bridge--view-inflight-thinking-prefix
+	      dsh-bridge--view-thinking-prefix)
 	    (dsh-bridge--fontify text 'dsh-bridge-view-thinking-face)
 	    "\n")
     (add-text-properties start (point) `(dsh-bridge-activity ,key))))
@@ -3236,17 +3259,22 @@ Note that this does not include an open turn, which contains a
 
 (defun dsh-bridge--view-item-key (item)
   "The identity of render ITEM `(KIND . CONTENT)'.
-Segments use their `(STEP . TIME)' pair; activity uses its kind and
-sequence identity.  Only the boundary items' keys are recorded and
-compared, so this is cheap to call on every fill."
+Transient thinking includes its revision and summary so a coarse refresh
+invalidates the recorded provenance.  Only boundary keys are compared."
   (let ((kind (car item))
 	(entry (cdr item)))
     (cond ((eq kind 'segment)
 	   (dsh-bridge--view-segment-key entry))
 	  ((eq kind 'thinking)
-	   (list 'thinking
-		 (alist-get 'seq entry)
-		 (alist-get 'ord entry)))
+	   (if (eq (alist-get 'inFlight entry) t)
+	       (list 'inflight-thinking
+		     (alist-get 'inFlightId entry)
+		     (alist-get 'ord entry)
+		     (alist-get 'revision entry)
+		     (alist-get 'summary entry))
+	     (list 'thinking
+		   (alist-get 'seq entry)
+		   (alist-get 'ord entry))))
 	  (t
 	   (cons kind (alist-get 'callId entry))))))
 
@@ -4185,16 +4213,29 @@ distinguish via `dsh-bridge--turns-cache-entry'."
     (and entry (cdr entry))))
 
 (defun dsh-bridge--turns-activity-newest-seq (turn)
-  "The `seq' of TURN's newest activity entry, or nil when it has none."
-  (alist-get 'seq (car (last (alist-get 'activity turn)))))
+  "The newest committed activity `seq' of TURN, or nil when it has none."
+  (let ((activity (reverse (alist-get 'activity turn)))
+	(seq nil))
+    (while (and activity (null seq))
+      (let ((candidate (alist-get 'seq (car activity))))
+	(when (numberp candidate) (setq seq candidate)))
+      (setq activity (cdr activity)))
+    seq))
 
 (defun dsh-bridge--turns-record-stale-p (candidate reference)
-  "Whether CANDIDATE is a stale view of the same turn as REFERENCE.
-CANDIDATE is stale if it has fewer segments than REFERENCE (since a turn
-should only ever grow), or its newest activity entry predates that of
-REFERENCE's, or it drops the `endedAt' recorded in REFERENCE."
+  "Whether CANDIDATE is an older view of the same turn as REFERENCE.
+This covers segment counts, committed activity, turn completion, and
+process-local activity snapshots from the same bridge instance."
   (or (< (length (alist-get 'segments candidate))
 	 (length (alist-get 'segments reference)))
+      (let ((candidate-epoch (alist-get 'activityEpoch candidate))
+	    (candidate-revision (alist-get 'activityRevision candidate))
+	    (reference-revision (alist-get 'activityRevision reference)))
+	(and (stringp candidate-epoch)
+	     (equal candidate-epoch (alist-get 'activityEpoch reference))
+	     (numberp candidate-revision)
+	     (numberp reference-revision)
+	     (< candidate-revision reference-revision)))
       (let ((candidate-seq (dsh-bridge--turns-activity-newest-seq candidate))
 	    (reference-seq (dsh-bridge--turns-activity-newest-seq reference)))
 	(and (numberp reference-seq)
