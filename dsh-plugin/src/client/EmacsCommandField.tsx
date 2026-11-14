@@ -112,7 +112,7 @@ export function EmacsCommandField({ view, form, t }: EmacsCommandFieldProps) {
     setSaving(true)
     setFailed(false)
     form.mutate(ops, revision)
-      .then((accepted) => {
+      .then((accepted: boolean) => {
         setSaving(false)
         if (!accepted) setFailed(true)
       })

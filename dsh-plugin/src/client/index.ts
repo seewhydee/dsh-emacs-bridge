@@ -18,7 +18,9 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 import type { Context as ClientContext } from '@deepseek-ai/cordis'
-import type { ISessions } from '@deepseek-ai/dsh-api-session-controller/client'
+// Type-only: pulls the sessions Context merge (ctx.sessions).
+import type {} from '@deepseek-ai/dsh-api-session-controller/client'
+import type { SessionId } from '@deepseek-ai/dsh-session/types'
 // Type-only: pulls the ui-chat SlotMap merge so the assistant-actions
 // seat is known to the slot registry.
 import type {} from '@deepseek-ai/dsh-client-ui-chat/client'
@@ -31,6 +33,7 @@ import type {} from '@deepseek-ai/dsh-client-ui-plugin-manager/client'
 import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 import { en, zh } from './locales.ts'
 import { matchApprovalDismissRecord, type ApprovalDismissRecord } from './approval-dismiss.ts'
+import { appendDismissRecord, expireDismissRecords } from './dismiss-records.ts'
 import { matchDismissRecord, questionDismissalOf, type DismissRecord } from './question-dismiss.ts'
 import { callBridge, getToken } from './bridge.ts'
 import { EmacsInstall } from './EmacsInstall.tsx'
@@ -70,7 +73,7 @@ let draftSource: EventSource | null = null
 
 /** Push one draft onto a session's composer, if that session is loaded in the browser. */
 function applyDraft(ctx: ClientContext, sessionId: string, text: string): void {
-  const actx = (ctx.get('sessions') as ISessions).scope(sessionId)
+  const actx = ctx.sessions.scope(sessionId as SessionId)
   if (actx === undefined) return
   const conversation = actx.get('conversation') as ConversationService | undefined
   if (conversation === undefined) return
@@ -125,6 +128,7 @@ const approvalDismissRecords: ApprovalDismissRecord[] = []
 
 /** How long an unmatched resolution record is retried before being dropped. */
 const DISMISS_RECORD_TTL_MS = 120_000
+const DISMISS_RECORD_CAP = 32
 
 /** Cancel any browser panel whose interaction the host already resolved. */
 function dismissResolvedInteractions(ctx: ClientContext): void {
@@ -133,18 +137,8 @@ function dismissResolvedInteractions(ctx: ClientContext): void {
   // when Emacs answered), so a much later re-ask of the same identity is not
   // dismissed by a stale record.
   const now = Date.now()
-  for (let index = dismissRecords.length - 1; index >= 0; index -= 1) {
-    const record = dismissRecords[index]
-    if (record?.at !== undefined && now - record.at > DISMISS_RECORD_TTL_MS) {
-      dismissRecords.splice(index, 1)
-    }
-  }
-  for (let index = approvalDismissRecords.length - 1; index >= 0; index -= 1) {
-    const record = approvalDismissRecords[index]
-    if (record?.at !== undefined && now - record.at > DISMISS_RECORD_TTL_MS) {
-      approvalDismissRecords.splice(index, 1)
-    }
-  }
+  expireDismissRecords(dismissRecords, now, DISMISS_RECORD_TTL_MS)
+  expireDismissRecords(approvalDismissRecords, now, DISMISS_RECORD_TTL_MS)
   const uiSession = ctx.get('uiSession') as UiSessionService | undefined
   if (uiSession === undefined) return
   for (const status of uiSession.sessionStatus.getSnapshot().values()) {
@@ -177,10 +171,7 @@ function dismissResolvedInteractions(ctx: ClientContext): void {
 /** Remember a host-resolved question and dismiss its panel if it is already up. */
 function noteResolvedQuestion(ctx: ClientContext, sessionId: string, questionIds: string[]): void {
   if (questionIds.length === 0) return
-  dismissRecords.push({ sessionId, questionIds, at: Date.now() })
-  // Bound the retry list: an unmatched record can only matter until its panel
-  // appears, and a long-lived tab must not accumulate stale entries.
-  if (dismissRecords.length > 32) dismissRecords.shift()
+  appendDismissRecord(dismissRecords, { sessionId, questionIds, at: Date.now() }, DISMISS_RECORD_CAP)
   dismissResolvedInteractions(ctx)
 }
 
@@ -192,8 +183,11 @@ function noteResolvedApproval(
   callId: string | undefined,
 ): void {
   if (toolName === '') return
-  approvalDismissRecords.push({ sessionId, toolName, callId, at: Date.now() })
-  if (approvalDismissRecords.length > 32) approvalDismissRecords.shift()
+  appendDismissRecord(
+    approvalDismissRecords,
+    { sessionId, toolName, callId, at: Date.now() },
+    DISMISS_RECORD_CAP,
+  )
   dismissResolvedInteractions(ctx)
 }
 

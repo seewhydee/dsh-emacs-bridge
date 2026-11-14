@@ -242,8 +242,12 @@ import type {} from '@deepseek-ai/dsh-user-approval'
 import type { ApprovalOutcome } from '@deepseek-ai/dsh-user-approval'
 // The request-event type itself is exported only from the ./types subpath.
 import type { ApprovalRequestEvent } from '@deepseek-ai/dsh-user-approval/types'
+// Type-only: contributed session-event and domain-event declarations.
+import type {} from '@deepseek-ai/dsh-compaction'
+import type {} from '@deepseek-ai/dsh-session-title'
+import type {} from '@deepseek-ai/dsh-storage-domain'
 import { Outbox } from './outbox.ts'
-import { renderFileChanges } from './detail.ts'
+import { renderFileChange } from './detail.ts'
 import {
   answerMatchesQuestions,
   activityChangedMessage,
@@ -273,7 +277,7 @@ import {
   compactExecutionSettled,
   compactionFrame,
   contextMessage,
-  contextUsedTokens,
+  contextOccupancy,
   currentModelSelection,
   draftMessage,
   effectiveCwd,
@@ -856,7 +860,7 @@ function readJson(req: IncomingMessage): Promise<unknown> {
       try {
         resolve(body === '' ? undefined : JSON.parse(body))
       } catch (error: unknown) {
-        reject(new BridgeError(400, `invalid JSON: ${error instanceof Error ? error.message : String(error)}`))
+        reject(new BridgeError(400, `invalid JSON: ${errorMessage(error)}`))
       }
     })
     req.on('error', reject)
@@ -868,6 +872,36 @@ function sendJson(res: ServerResponse, status: number, value: unknown): void {
   const payload = JSON.stringify(value)
   res.writeHead(status, { 'content-type': 'application/json' })
   res.end(payload)
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}
+
+function sendError(
+  res: ServerResponse,
+  status: number,
+  error: unknown,
+  details: Record<string, unknown> = {},
+): void {
+  sendJson(res, status, { ...details, error: errorMessage(error) })
+}
+
+function sendBridgeError(res: ServerResponse, error: unknown): void {
+  sendError(res, bridgeErrorStatus(error), error)
+}
+
+/** Read an optional session id, rejecting a present value of the wrong type. */
+function optionalSessionId(
+  body: { sessionId?: unknown } | undefined,
+  nonEmpty = false,
+): string | undefined {
+  const value = body?.sessionId
+  if (value === undefined || value === null) return undefined
+  if (typeof value !== 'string' || (nonEmpty && value === '')) {
+    throw new BridgeError(400, nonEmpty ? 'sessionId must be a non-empty string' : 'sessionId must be a string')
+  }
+  return value
 }
 
 /** One attachment request after `stat` and content sniffing. */
@@ -1058,7 +1092,7 @@ function runEmacs(
     } catch (error: unknown) {
       // Synchronous spawn failures (invalid arguments); ENOENT arrives via
       // the 'error' event below.
-      resolve({ kind: 'spawn-error', error: error instanceof Error ? error.message : String(error) })
+      resolve({ kind: 'spawn-error', error: errorMessage(error) })
       return
     }
     let output = ''
@@ -1104,6 +1138,26 @@ function runEmacs(
 /** Render a parsed Emacs version for the response (`29.1`). */
 function formatEmacsVersion(version: EmacsVersion): string {
   return `${version.major}.${version.minor}`
+}
+
+async function preflightEmacs(
+  argv: readonly string[],
+): Promise<
+  | { ok: true; version: EmacsVersion }
+  | { ok: false; report: Record<string, unknown> }
+> {
+  const preflight = classifyEmacsVersionProbe(
+    await runEmacs(argv, ['--version'], EMACS_PREFLIGHT_TIMEOUT_MS))
+  if (preflight.ok) return { ok: true, version: preflight.version }
+  return {
+    ok: false,
+    report: {
+      problem: preflight.problem,
+      ...preflight.version === undefined
+        ? {}
+        : { emacsVersion: formatEmacsVersion(preflight.version) },
+    },
+  }
 }
 
 export function apply(ctx: Context, config?: Config): void {
@@ -1482,7 +1536,7 @@ export function apply(ctx: Context, config?: Config): void {
         ok: false,
         error: {
           code: 'internal',
-          message: `RPC ${method} unavailable: browser-auth cookie mint failed: ${error instanceof Error ? error.message : String(error)}`,
+          message: `RPC ${method} unavailable: browser-auth cookie mint failed: ${errorMessage(error)}`,
         },
       }
     }
@@ -1504,7 +1558,7 @@ export function apply(ctx: Context, config?: Config): void {
         ok: false,
         error: {
           code: 'internal',
-          message: `RPC ${method} unreachable: ${error instanceof Error ? error.message : String(error)}`,
+          message: `RPC ${method} unreachable: ${errorMessage(error)}`,
         },
       }
     }
@@ -1535,16 +1589,7 @@ export function apply(ctx: Context, config?: Config): void {
   /** Read the session's live context occupancy from the projection registry, or undefined when unknown. */
   function readContextPressure(session: Session): { usedTokens: number; contextWindow: number } | undefined {
     const registry = ctx.get('sessionProjections') as SessionProjectionRegistryService | undefined
-    const pressure = registry?.snapshot(session).values.contextPressure as
-      { pressureTokens?: unknown; projectedTokens?: unknown; contextWindow?: unknown } | undefined
-    if (pressure === undefined) return undefined
-    const used = contextUsedTokens(
-      typeof pressure.pressureTokens === 'number' ? pressure.pressureTokens : undefined,
-      typeof pressure.projectedTokens === 'number' ? pressure.projectedTokens : undefined,
-    )
-    const window = typeof pressure.contextWindow === 'number' ? pressure.contextWindow : undefined
-    if (used === undefined || window === undefined) return undefined
-    return { usedTokens: used, contextWindow: window }
+    return contextOccupancy(registry?.snapshot(session).values.contextPressure)
   }
 
   /** Live sessions the bridge may target, shaped for the pure logic. */
@@ -2000,20 +2045,29 @@ export function apply(ctx: Context, config?: Config): void {
     }
   })
 
-  /** Refine a plan projection value with the live controller's wanted direction. */
-  function livePlanSection(session: Session, value: unknown): SessionReportPlan | null {
-    const durable = reportPlan(value)
-    const agent = ctx.agents.get(session.id)
+  function readPlanLive(agent: Agent | undefined): PlanGoalLive['plan'] {
     const presets = ctx.get('agentPresets') as AgentPresetsService | undefined
-    if (agent === undefined || presets === undefined) return durable
+    if (agent === undefined || presets === undefined) return undefined
     try {
       const controller = presets.serviceFor(agent, 'planMode') as PlanModeControllerLike | undefined
-      // A confirmed absence is definitive (the session's preset mounts no plan
-      // mode); a faulting read degrades to the durable projection.
-      return controller === undefined ? null : refinePlanSection(durable, controller.get(agent))
+      return controller === undefined ? null : controller.get(agent)
     } catch {
-      return durable
+      return undefined
     }
+  }
+
+  function readGoalActivation(agent: Agent): PlanGoalLive['goalActivation'] {
+    try {
+      const activation = (ctx.get('goals') as GoalServiceLike | undefined)?.get(agent)?.activation
+      return activation === 'armed' || activation === 'disarmed' ? activation : undefined
+    } catch {
+      return undefined
+    }
+  }
+
+  /** Refine a plan projection value with the live controller's wanted direction. */
+  function livePlanSection(session: Session, value: unknown): SessionReportPlan | null {
+    return refinePlanSection(reportPlan(value), readPlanLive(ctx.agents.get(session.id)))
   }
 
   /** Refine a goal projection value with the process-local live activation. */
@@ -2022,13 +2076,8 @@ export function apply(ctx: Context, config?: Config): void {
     if (durable === null) return null
     const agent = ctx.agents.get(session.id)
     if (agent === undefined) return durable
-    try {
-      const activation = (ctx.get('goals') as GoalServiceLike | undefined)?.get(agent)?.activation
-      if (activation === 'armed' || activation === 'disarmed') return { ...durable, activation }
-    } catch {
-      // Unknown activation stays absent, never fabricated.
-    }
-    return durable
+    const activation = readGoalActivation(agent)
+    return activation === undefined ? durable : { ...durable, activation }
   }
 
   // Push live context occupancy, plan mode, and goal state onto the SSE stream.
@@ -2045,16 +2094,9 @@ export function apply(ctx: Context, config?: Config): void {
       if (isSubagentChild(session.header.origin)) return
       const id = String(session.id)
       if (key === 'contextPressure') {
-        const pressure = value as
-          { pressureTokens?: unknown; projectedTokens?: unknown; contextWindow?: unknown } | undefined
-        if (pressure === undefined) return
-        const used = contextUsedTokens(
-          typeof pressure.pressureTokens === 'number' ? pressure.pressureTokens : undefined,
-          typeof pressure.projectedTokens === 'number' ? pressure.projectedTokens : undefined,
-        )
-        const window = typeof pressure.contextWindow === 'number' ? pressure.contextWindow : undefined
-        if (used === undefined || window === undefined) return
-        broadcast(contextMessage(id, used, window))
+        const occupancy = contextOccupancy(value)
+        if (occupancy === undefined) return
+        broadcast(contextMessage(id, occupancy.usedTokens, occupancy.contextWindow))
         return
       }
       if (key === 'plan') {
@@ -2403,7 +2445,7 @@ export function apply(ctx: Context, config?: Config): void {
     try {
       snapshot = await sessionPersistence.stat(sessionId)
     } catch (error: unknown) {
-      throw new BridgeError(500, `cannot inspect session ${sessionId}: ${error instanceof Error ? error.message : String(error)}`)
+      throw new BridgeError(500, `cannot inspect session ${sessionId}: ${errorMessage(error)}`)
     }
     if (snapshot === undefined) throw new BridgeError(404, `session ${sessionId} is not live`)
     if (isSubagentChild(snapshot.header.origin)) {
@@ -2414,16 +2456,16 @@ export function apply(ctx: Context, config?: Config): void {
     if (cached !== undefined && revision !== undefined && cached.revision === revision) {
       return cached.observation
     }
-    let events: readonly SessionEventLike[]
+    let events: readonly SessionEvent[]
     try {
       const handle = await sessionPersistence.open(sessionId, 'read')
       try {
-        events = (await handle.read()).events as readonly SessionEventLike[]
+        events = (await handle.read()).events as readonly SessionEvent[]
       } finally {
         await handle.close()
       }
     } catch (error: unknown) {
-      throw new BridgeError(500, `cannot read session ${sessionId}: ${error instanceof Error ? error.message : String(error)}`)
+      throw new BridgeError(500, `cannot read session ${sessionId}: ${errorMessage(error)}`)
     }
     let surfaceSeqs: ReadonlySet<number>
     let epoch: number
@@ -2432,7 +2474,7 @@ export function apply(ctx: Context, config?: Config): void {
       surfaceSeqs = new Set<number>(surface.nodes as readonly number[])
       epoch = surface.replacements.length
     } catch (error: unknown) {
-      throw new BridgeError(500, `cannot fold session ${sessionId}: ${error instanceof Error ? error.message : String(error)}`)
+      throw new BridgeError(500, `cannot fold session ${sessionId}: ${errorMessage(error)}`)
     }
     const cwd = effectiveCwd(snapshot.header, events)
     const observation: DetailObservation = {
@@ -2539,22 +2581,10 @@ export function apply(ctx: Context, config?: Config): void {
     const agent = ctx.agents.get(id as SessionId)
     if (agent === undefined) return {}
     const live: PlanGoalLive = {}
-    const presets = ctx.get('agentPresets') as AgentPresetsService | undefined
-    if (presets !== undefined) {
-      try {
-        const controller = presets.serviceFor(agent, 'planMode') as PlanModeControllerLike | undefined
-        if (controller === undefined) live.plan = null
-        else live.plan = controller.get(agent)
-      } catch {
-        // A faulting service read degrades to the durable projection.
-      }
-    }
-    try {
-      const activation = (ctx.get('goals') as GoalServiceLike | undefined)?.get(agent)?.activation
-      if (activation === 'armed' || activation === 'disarmed') live.goalActivation = activation
-    } catch {
-      // Unknown activation stays absent, never fabricated.
-    }
+    const plan = readPlanLive(agent)
+    if (plan !== undefined) live.plan = plan
+    const activation = readGoalActivation(agent)
+    if (activation !== undefined) live.goalActivation = activation
     return live
   }
 
@@ -2726,7 +2756,7 @@ export function apply(ctx: Context, config?: Config): void {
         try {
           sendJson(res, 200, { sessions: await listSessions() })
         } catch (error: unknown) {
-          sendJson(res, 500, { error: error instanceof Error ? error.message : String(error) })
+          sendError(res, 500, error)
         }
         return
       }
@@ -2744,9 +2774,7 @@ export function apply(ctx: Context, config?: Config): void {
           }
           sendJson(res, 200, await readSessionReport(ids[0]))
         } catch (error: unknown) {
-          sendJson(res, bridgeErrorStatus(error), {
-            error: error instanceof Error ? error.message : String(error),
-          })
+          sendBridgeError(res, error)
         }
         return
       }
@@ -2786,7 +2814,7 @@ export function apply(ctx: Context, config?: Config): void {
           pending.settle({ ok: true, answers })
           sendJson(res, 200, { accepted: true })
         } catch (error: unknown) {
-          sendJson(res, bridgeErrorStatus(error), { error: error instanceof Error ? error.message : String(error) })
+          sendBridgeError(res, error)
         }
         return
       }
@@ -2818,7 +2846,7 @@ export function apply(ctx: Context, config?: Config): void {
           pending.settle(body.decision)
           sendJson(res, 200, { accepted: true })
         } catch (error: unknown) {
-          sendJson(res, bridgeErrorStatus(error), { error: error instanceof Error ? error.message : String(error) })
+          sendBridgeError(res, error)
         }
         return
       }
@@ -2831,14 +2859,7 @@ export function apply(ctx: Context, config?: Config): void {
             sendJson(res, 400, { error: 'text is required' })
             return
           }
-          let explicitId: string | undefined
-          if (body?.sessionId !== undefined && body.sessionId !== null) {
-            if (typeof body.sessionId !== 'string') {
-              sendJson(res, 400, { error: 'sessionId must be a string' })
-              return
-            }
-            explicitId = body.sessionId
-          }
+          const explicitId = optionalSessionId(body)
           // The draft push targets the browser's composer, so it needs a
           // browser draft stream subscribed (an Emacs-only connection cannot
           // consume drafts).
@@ -2857,7 +2878,7 @@ export function apply(ctx: Context, config?: Config): void {
             cwd: sessionCwd(target.session),
           })
         } catch (error: unknown) {
-          sendJson(res, bridgeErrorStatus(error), { error: error instanceof Error ? error.message : String(error) })
+          sendBridgeError(res, error)
         }
         return
       }
@@ -2902,7 +2923,7 @@ export function apply(ctx: Context, config?: Config): void {
           broadcast(notice)
           sendJson(res, 200, { ok: true, evicted })
         } catch (error: unknown) {
-          sendJson(res, bridgeErrorStatus(error), { error: error instanceof Error ? error.message : String(error) })
+          sendBridgeError(res, error)
         }
         return
       }
@@ -2916,7 +2937,7 @@ export function apply(ctx: Context, config?: Config): void {
           outbox.ack(ids)
           sendJson(res, 200, { ok: true, acked: ids.length })
         } catch (error: unknown) {
-          sendJson(res, bridgeErrorStatus(error), { error: error instanceof Error ? error.message : String(error) })
+          sendBridgeError(res, error)
         }
         return
       }
@@ -2948,14 +2969,7 @@ export function apply(ctx: Context, config?: Config): void {
             sendJson(res, 501, { error: 'profile lacks an attachment store; cannot send attachments' })
             return
           }
-          let explicitId: string | undefined
-          if (body?.sessionId !== undefined && body.sessionId !== null) {
-            if (typeof body.sessionId !== 'string') {
-              sendJson(res, 400, { error: 'sessionId must be a string' })
-              return
-            }
-            explicitId = body.sessionId
-          }
+          const explicitId = optionalSessionId(body)
           // Validate every path before resolving the target, so a doomed
           // request never resumes a cold session as a side effect.
           const prepared: PreparedAttachment[] = []
@@ -3024,13 +3038,10 @@ export function apply(ctx: Context, config?: Config): void {
         } catch (error: unknown) {
           const failure = store === undefined ? undefined : attachmentFailure(error, store)
           if (failure !== undefined) {
-            sendJson(res, failure.status, {
-              error: error instanceof Error ? error.message : String(error),
-              reason: failure.reason,
-            })
+            sendError(res, failure.status, error, { reason: failure.reason })
             return
           }
-          sendJson(res, bridgeErrorStatus(error), { error: error instanceof Error ? error.message : String(error) })
+          sendBridgeError(res, error)
         }
         return
       }
@@ -3043,10 +3054,10 @@ export function apply(ctx: Context, config?: Config): void {
             title: sessionTitle(target.session.snapshotEvents()),
             cwd: sessionCwd(target.session),
             text: latestAssistantText(target.agent.session.deriveMessages()),
-            running: ctx.agents.get(String(target.session.id))?.status === 'running',
+            running: ctx.agents.get(target.session.id)?.status === 'running',
           })
         } catch (error: unknown) {
-          sendJson(res, bridgeErrorStatus(error), { error: error instanceof Error ? error.message : String(error) })
+          sendBridgeError(res, error)
         }
         return
       }
@@ -3060,7 +3071,7 @@ export function apply(ctx: Context, config?: Config): void {
             prompts: userPrompts(target.agent.session.deriveMessages()).reverse(),
           })
         } catch (error: unknown) {
-          sendJson(res, bridgeErrorStatus(error), { error: error instanceof Error ? error.message : String(error) })
+          sendBridgeError(res, error)
         }
         return
       }
@@ -3140,12 +3151,12 @@ export function apply(ctx: Context, config?: Config): void {
             cwd: sessionCwd(session),
             turns,
             incremental,
-            running: ctx.agents.get(String(session.id))?.status === 'running',
+            running: ctx.agents.get(session.id)?.status === 'running',
             archived: isArchivedSession(String(session.id)),
             epoch,
           })
         } catch (error: unknown) {
-          sendJson(res, bridgeErrorStatus(error), { error: error instanceof Error ? error.message : String(error) })
+          sendBridgeError(res, error)
         }
         return
       }
@@ -3202,24 +3213,11 @@ export function apply(ctx: Context, config?: Config): void {
             ...observation.cwd === undefined ? {} : { cwd: observation.cwd },
             item: selected.item,
             request,
-            renderDiff(file) {
-              const rendered = renderFileChanges([file])
-              const metadata = rendered.files[0]
-              if (metadata === undefined) throw new Error('file diff renderer returned no file')
-              return {
-                text: rendered.text,
-                render: metadata.render,
-                added: metadata.added,
-                removed: metadata.removed,
-                truncated: rendered.truncated,
-              }
-            },
+            renderDiff: renderFileChange,
           })
           sendJson(res, 200, response)
         } catch (error: unknown) {
-          sendJson(res, bridgeErrorStatus(error), {
-            error: error instanceof Error ? error.message : String(error),
-          })
+          sendBridgeError(res, error)
         }
         return
       }
@@ -3248,7 +3246,7 @@ export function apply(ctx: Context, config?: Config): void {
             { lastUsed?: unknown; next?: unknown } | undefined
           sendJson(res, 200, { ...catalog, current: currentModelSelection(catalog.default, view) })
         } catch (error: unknown) {
-          sendJson(res, bridgeErrorStatus(error), { error: error instanceof Error ? error.message : String(error) })
+          sendBridgeError(res, error)
         }
         return
       }
@@ -3265,14 +3263,7 @@ export function apply(ctx: Context, config?: Config): void {
             sendJson(res, 400, { error: 'provider and model are required' })
             return
           }
-          let explicitId: string | undefined
-          if (body?.sessionId !== undefined && body.sessionId !== null) {
-            if (typeof body.sessionId !== 'string') {
-              sendJson(res, 400, { error: 'sessionId must be a string' })
-              return
-            }
-            explicitId = body.sessionId
-          }
+          const explicitId = optionalSessionId(body)
           const target = await resolveTarget(explicitId)
           const payload: { sessionId: string; provider: string; model: string; reasoningEffort?: string } = {
             sessionId: String(target.session.id),
@@ -3294,7 +3285,7 @@ export function apply(ctx: Context, config?: Config): void {
           const selected = (result.value as { selected?: unknown } | undefined)?.selected
           sendJson(res, 200, { ok: true, sessionId: payload.sessionId, selected })
         } catch (error: unknown) {
-          sendJson(res, bridgeErrorStatus(error), { error: error instanceof Error ? error.message : String(error) })
+          sendBridgeError(res, error)
         }
         return
       }
@@ -3311,14 +3302,7 @@ export function apply(ctx: Context, config?: Config): void {
             sendJson(res, 400, { error: 'active must be a boolean' })
             return
           }
-          let explicitId: string | undefined
-          if (body?.sessionId !== undefined && body.sessionId !== null) {
-            if (typeof body.sessionId !== 'string' || body.sessionId === '') {
-              sendJson(res, 400, { error: 'sessionId must be a non-empty string' })
-              return
-            }
-            explicitId = body.sessionId
-          }
+          const explicitId = optionalSessionId(body, true)
           const presets = ctx.get('agentPresets') as AgentPresetsService | undefined
           if (presets === undefined) {
             sendJson(res, 501, { error: 'profile lacks an agent preset roster (no plan mode)' })
@@ -3345,7 +3329,7 @@ export function apply(ctx: Context, config?: Config): void {
             outcome,
           })
         } catch (error: unknown) {
-          sendJson(res, bridgeErrorStatus(error), { error: error instanceof Error ? error.message : String(error) })
+          sendBridgeError(res, error)
         }
         return
       }
@@ -3362,14 +3346,7 @@ export function apply(ctx: Context, config?: Config): void {
           }
           const body = (await readJson(req)) as
             { sessionId?: unknown; objective?: unknown; maxGoalRounds?: unknown } | undefined
-          let explicitId: string | undefined
-          if (body?.sessionId !== undefined && body.sessionId !== null) {
-            if (typeof body.sessionId !== 'string' || body.sessionId === '') {
-              sendJson(res, 400, { error: 'sessionId must be a non-empty string' })
-              return
-            }
-            explicitId = body.sessionId
-          }
+          const explicitId = optionalSessionId(body, true)
           const goals = ctx.get('goals') as GoalServiceLike | undefined
           if (goals === undefined) {
             sendJson(res, 501, { error: 'profile lacks a goal service' })
@@ -3437,12 +3414,9 @@ export function apply(ctx: Context, config?: Config): void {
         } catch (error: unknown) {
           const code = goalErrorCode(error)
           if (code !== undefined) {
-            sendJson(res, goalErrorStatus(code), {
-              error: error instanceof Error ? error.message : String(error),
-              code,
-            })
+            sendError(res, goalErrorStatus(code), error, { code })
           } else {
-            sendJson(res, bridgeErrorStatus(error), { error: error instanceof Error ? error.message : String(error) })
+            sendBridgeError(res, error)
           }
         }
         return
@@ -3460,7 +3434,7 @@ export function apply(ctx: Context, config?: Config): void {
           }
           sendJson(res, 200, { sessionId: String(target.session.id), ...context })
         } catch (error: unknown) {
-          sendJson(res, bridgeErrorStatus(error), { error: error instanceof Error ? error.message : String(error) })
+          sendBridgeError(res, error)
         }
         return
       }
@@ -3483,7 +3457,7 @@ export function apply(ctx: Context, config?: Config): void {
           })
           broadcastSessionsChanged(String(target.session.id))
         } catch (error: unknown) {
-          sendJson(res, bridgeErrorStatus(error), { error: error instanceof Error ? error.message : String(error) })
+          sendBridgeError(res, error)
         }
         return
       }
@@ -3508,7 +3482,7 @@ export function apply(ctx: Context, config?: Config): void {
           broadcastSessionsChanged(id)
         } catch (error: unknown) {
           const status = isSessionTitleInvalidError(error) ? 400 : bridgeErrorStatus(error)
-          sendJson(res, status, { error: error instanceof Error ? error.message : String(error) })
+          sendError(res, status, error)
         }
         return
       }
@@ -3539,14 +3513,11 @@ export function apply(ctx: Context, config?: Config): void {
           broadcastSessionsChanged(id)
         } catch (error: unknown) {
           if (isWorkspaceActiveSessionError(error)) {
-            sendJson(res, 409, {
-              error: error instanceof Error ? error.message : String(error),
-              reason: 'WORKSPACE_ACTIVE_SESSION',
-            })
+            sendError(res, 409, error, { reason: 'WORKSPACE_ACTIVE_SESSION' })
             return
           }
           const status = isWorkspaceUnknownSessionError(error) ? 404 : bridgeErrorStatus(error)
-          sendJson(res, status, { error: error instanceof Error ? error.message : String(error) })
+          sendError(res, status, error)
         }
         return
       }
@@ -3572,7 +3543,7 @@ export function apply(ctx: Context, config?: Config): void {
           sendJson(res, 200, { ok: true, sessionId: id })
           broadcastSessionsChanged(id)
         } catch (error: unknown) {
-          sendJson(res, bridgeErrorStatus(error), { error: error instanceof Error ? error.message : String(error) })
+          sendBridgeError(res, error)
         }
         return
       }
@@ -3589,7 +3560,7 @@ export function apply(ctx: Context, config?: Config): void {
             ? { queued: 0, steering: 0 }
             : queueCounts(agent.inbox))
         } catch (error: unknown) {
-          sendJson(res, 500, { error: error instanceof Error ? error.message : String(error) })
+          sendError(res, 500, error)
         }
         return
       }
@@ -3614,9 +3585,7 @@ export function apply(ctx: Context, config?: Config): void {
           sessionController.cancel({ sessionId: id as SessionId })
           sendJson(res, 200, { accepted: true, running: wasRunning })
         } catch (error: unknown) {
-          sendJson(res, stopErrorStatus(error), {
-            error: error instanceof Error ? error.message : String(error),
-          })
+          sendError(res, stopErrorStatus(error), error)
         }
         return
       }
@@ -3633,14 +3602,7 @@ export function apply(ctx: Context, config?: Config): void {
       if (req.method === 'POST' && pathname === '/dsh-bridge/sessions/compact') {
         try {
           const body = (await readJson(req)) as { sessionId?: unknown } | undefined
-          let explicitId: string | undefined
-          if (body?.sessionId !== undefined && body.sessionId !== null) {
-            if (typeof body.sessionId !== 'string' || body.sessionId === '') {
-              sendJson(res, 400, { error: 'sessionId must be a non-empty string' })
-              return
-            }
-            explicitId = body.sessionId
-          }
+          const explicitId = optionalSessionId(body, true)
           const commands = ctx.get('commands') as CommandsServiceLike | undefined
           if (commands === undefined) {
             sendJson(res, 501, { error: 'profile lacks a commands service (no compaction)' })
@@ -3667,9 +3629,7 @@ export function apply(ctx: Context, config?: Config): void {
             sendJson(res, settledOutcome.status, { error: settledOutcome.text })
           }
         } catch (error: unknown) {
-          sendJson(res, bridgeErrorStatus(error), {
-            error: error instanceof Error ? error.message : String(error),
-          })
+          sendBridgeError(res, error)
         }
         return
       }
@@ -3684,7 +3644,7 @@ export function apply(ctx: Context, config?: Config): void {
           const workspaces = workspaceRegistry.list().map(w => ({ id: w.id, title: w.title, path: w.path }))
           sendJson(res, 200, { workspaces })
         } catch (error: unknown) {
-          sendJson(res, 500, { error: error instanceof Error ? error.message : String(error) })
+          sendError(res, 500, error)
         }
         return
       }
@@ -3733,7 +3693,7 @@ export function apply(ctx: Context, config?: Config): void {
           sendJson(res, 200, { ok: true, workspaceId, title: normalized })
           broadcastSessionsChanged()
         } catch (error: unknown) {
-          sendJson(res, bridgeErrorStatus(error), { error: error instanceof Error ? error.message : String(error) })
+          sendBridgeError(res, error)
         }
         return
       }
@@ -3840,7 +3800,7 @@ export function apply(ctx: Context, config?: Config): void {
           broadcastSessionsChanged(String(sessionId))
         } catch (error: unknown) {
           const status = isSessionTitleInvalidError(error) ? 400 : bridgeErrorStatus(error)
-          sendJson(res, status, { error: error instanceof Error ? error.message : String(error) })
+          sendError(res, status, error)
         }
         return
       }
@@ -3856,14 +3816,7 @@ export function apply(ctx: Context, config?: Config): void {
       if (req.method === 'POST' && pathname === '/dsh-bridge/fork') {
         try {
           const body = (await readJson(req)) as { sessionId?: unknown; atSeq?: unknown } | undefined
-          let explicitId: string | undefined
-          if (body?.sessionId !== undefined && body.sessionId !== null) {
-            if (typeof body.sessionId !== 'string') {
-              sendJson(res, 400, { error: 'sessionId must be a string' })
-              return
-            }
-            explicitId = body.sessionId
-          }
+          const explicitId = optionalSessionId(body)
           let atSeq: number | undefined
           if (body?.atSeq !== undefined && body.atSeq !== null) {
             if (typeof body.atSeq !== 'number' || !Number.isSafeInteger(body.atSeq) || body.atSeq < 0) {
@@ -3932,10 +3885,7 @@ export function apply(ctx: Context, config?: Config): void {
             && typeof details?.sessionId === 'string'
             ? { sessionId: details.sessionId }
             : {}
-          sendJson(res, status, {
-            error: error instanceof Error ? error.message : String(error),
-            ...childId,
-          })
+          sendError(res, status, error, childId)
         }
         return
       }
@@ -3954,16 +3904,8 @@ export function apply(ctx: Context, config?: Config): void {
           const emacs = normalizeEmacsCommand(config?.emacsCommand.get())
           const bundledVersion = pluginVersion()
           const report = await emacsInstalls.runExclusive('emacs-install', async (): Promise<Record<string, unknown>> => {
-            const preflight = classifyEmacsVersionProbe(
-              await runEmacs(emacs, ['--version'], EMACS_PREFLIGHT_TIMEOUT_MS))
-            if (!preflight.ok) {
-              return {
-                problem: preflight.problem,
-                ...preflight.version === undefined
-                  ? {}
-                  : { emacsVersion: formatEmacsVersion(preflight.version) },
-              }
-            }
+            const preflight = await preflightEmacs(emacs)
+            if (!preflight.ok) return preflight.report
             // An unreadable own-version is a broken installation; there is no
             // bundled version to compare against, so the probe cannot answer.
             if (bundledVersion === null) return { problem: 'probe-failed' }
@@ -3986,7 +3928,7 @@ export function apply(ctx: Context, config?: Config): void {
           })
           sendJson(res, 200, { bundledVersion, emacs, ...report })
         } catch (error: unknown) {
-          sendJson(res, 500, { error: error instanceof Error ? error.message : String(error) })
+          sendError(res, 500, error)
         }
         return
       }
@@ -4019,17 +3961,8 @@ export function apply(ctx: Context, config?: Config): void {
           const emacs = normalizeEmacsCommand(config?.emacsCommand.get())
           const timeoutMs = config?.emacsInstallTimeoutMs.get() ?? 120_000
           const report = await emacsInstalls.runExclusive('emacs-install', async (): Promise<Record<string, unknown>> => {
-            const preflight = classifyEmacsVersionProbe(
-              await runEmacs(emacs, ['--version'], EMACS_PREFLIGHT_TIMEOUT_MS))
-            if (!preflight.ok) {
-              return {
-                ok: false,
-                problem: preflight.problem,
-                ...preflight.version === undefined
-                  ? {}
-                  : { emacsVersion: formatEmacsVersion(preflight.version) },
-              }
-            }
+            const preflight = await preflightEmacs(emacs)
+            if (!preflight.ok) return { ok: false, ...preflight.report }
             const result = await runEmacs(emacs,
               ['--batch', '--eval', buildEmacsInstallForm(bundledPath)], timeoutMs)
             const outcome = classifyEmacsInstall(result)
@@ -4043,7 +3976,7 @@ export function apply(ctx: Context, config?: Config): void {
           })
           sendJson(res, 200, { emacs, bundledPath, ...report })
         } catch (error: unknown) {
-          sendJson(res, 500, { error: error instanceof Error ? error.message : String(error) })
+          sendError(res, 500, error)
         }
         return
       }

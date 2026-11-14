@@ -54,12 +54,12 @@ make build     # build the plugin → dsh-plugin/lib/index.js + lib/client.js
 make package   # stage dsh-bridge-<version>.tar (pure-elisp Emacs package; no Node toolchain needed)
 make release   # build, then pack + stage both release artifacts in .release/ (publish per "Release procedure")
 make publish   # upload the staged plugin tarball to npm (refuses unless HEAD is the release tag)
-make test      # pnpm test; ERT; descriptor/no-eager-load/autoload checks
+make test      # strict TypeScript check; pnpm test; ERT; descriptor/no-eager-load/autoload checks
 make integration-test   # seam harness in integration/
 make clean     # remove .package/, .release/, dsh-bridge-*.tar, and the packed .tgz
 ```
 
-Inside `dsh-plugin/`: `pnpm install`, `pnpm build`, `pnpm test`. `make build` falls back to invoking `tsdown` directly when `pnpm build` refuses a symlinked `node_modules`; preserve that fallback.
+Inside `dsh-plugin/`: `pnpm install`, `pnpm build`, `pnpm typecheck`, `pnpm test`. `make build` falls back to invoking `tsdown` directly when `pnpm build` refuses a symlinked `node_modules`; preserve that fallback.
 
 Do not do `git commit` or `git push` unless the user explicitly instructs.  In the usual workflow, after a change is made, the user and/or other agents will review before a commit is made.
 
@@ -143,6 +143,7 @@ README.md is a short introduction and quickstart, not an exhaustive user manual,
 ## Testing
 
 - Pure plugin logic: Vitest (`dsh-plugin/tests/*.spec.ts`); spec `logic.ts`, `outbox.ts`, and the detail/diff folds' behavior, not `index.ts` wiring. The packaging spec exercises the staging helper in a temp tree.
+- TypeScript: `pnpm typecheck` runs strict host and client programs separately because their Cordis `Context` service merges conflict; it is part of `make test`.
 - Elisp: ERT (`emacs/dsh-bridge-tests.el`, `emacs/dsh-bridge-extras-tests.el`), run headless via `make test`. The fresh-process no-eager-load and generated-autoload checks are Makefile targets, deliberately separate from the ERT suites.
 - The unit tests describe behavior: when you alter observable behavior, update its test in the same change.
 - A change is complete when `make build && make test` passes.

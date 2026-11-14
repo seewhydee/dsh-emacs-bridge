@@ -27,7 +27,7 @@
 // call, the same approach the web UI's diff card uses.
 
 import { structuredPatch } from 'diff'
-import type { DetailFileChange, DetailDiffStatus } from './logic.ts'
+import type { DetailFileChange, DetailDiffRender, DetailDiffStatus } from './logic.ts'
 
 /** Maximum UTF-8 bytes accepted from one side of a fragment before diffing. */
 export const MAX_DIFF_INPUT_BYTES = 256 * 1024
@@ -263,5 +263,19 @@ export function renderFileChanges(
     text: out.toString(),
     files: rendered,
     truncated: out.truncated || rendered.some(file => file.droppedFragments > 0),
+  }
+}
+
+/** Render one file in the form `buildDetailItemResponse` consumes. */
+export function renderFileChange(file: DetailFileChange): DetailDiffRender {
+  const rendered = renderFileChanges([file])
+  const metadata = rendered.files[0]
+  if (metadata === undefined) throw new Error('file diff renderer returned no file')
+  return {
+    text: rendered.text,
+    render: metadata.render,
+    added: metadata.added,
+    removed: metadata.removed,
+    truncated: rendered.truncated,
   }
 }

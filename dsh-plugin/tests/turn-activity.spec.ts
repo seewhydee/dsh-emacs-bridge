@@ -32,21 +32,9 @@ import {
   type AssistantTurn,
   type SessionEventLike,
 } from '../src/logic.ts'
+import { log } from './event-log.ts'
 
 // -- Fixtures ----------------------------------------------------------------
-
-/** A unique event seq per event, assigned in append order. */
-function log(): { events: SessionEventLike[]; add: (event: SessionEventLike) => SessionEventLike } {
-  const events: SessionEventLike[] = []
-  return {
-    events,
-    add(event) {
-      const withSeq = { ...event, seq: event.seq ?? events.length }
-      events.push(withSeq)
-      return withSeq
-    },
-  }
-}
 
 function turnStart(turn: number, time = turn * 1000): SessionEventLike {
   return { time, type: 'turn/start', data: { turn } }

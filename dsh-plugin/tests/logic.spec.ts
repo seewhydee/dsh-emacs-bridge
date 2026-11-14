@@ -32,6 +32,7 @@ import {
   compactExecutionSettled,
   compactionFrame,
   contextMessage,
+  contextOccupancy,
   contextUsedTokens,
   currentModelSelection,
   draftMessage,
@@ -1158,6 +1159,16 @@ describe('contextUsedTokens', () => {
     expect(contextUsedTokens(12000, undefined)).toBe(12000)
     expect(contextUsedTokens(undefined, 11500)).toBe(11500)
     expect(contextUsedTokens(undefined, undefined)).toBeUndefined()
+  })
+})
+
+describe('contextOccupancy', () => {
+  it('narrows a complete projection and rejects incomplete or malformed values', () => {
+    expect(contextOccupancy({ pressureTokens: 12000, projectedTokens: 11500, contextWindow: 100000 }))
+      .toEqual({ usedTokens: 11500, contextWindow: 100000 })
+    expect(contextOccupancy({ pressureTokens: 12000 })).toBeUndefined()
+    expect(contextOccupancy({ pressureTokens: '12000', contextWindow: 100000 })).toBeUndefined()
+    expect(contextOccupancy(undefined)).toBeUndefined()
   })
 })
 

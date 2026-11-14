@@ -19,8 +19,8 @@ import { en, zh } from '../src/client/locales.ts'
 
 describe('locale dictionaries', () => {
   it('en mirrors the zh key set exactly (zh is the source of truth)', () => {
-    // The `satisfies Record<DshBridgeKey, string>` check is type-only and no
-    // build/test command runs it, so the mirror invariant is pinned at runtime.
+    // The typecheck enforces the `satisfies` projection; this also pins the
+    // mirror invariant at runtime.
     expect(Object.keys(en).sort()).toEqual(Object.keys(zh).sort())
   })
 

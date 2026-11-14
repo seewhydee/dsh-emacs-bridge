@@ -4,9 +4,11 @@
     "lib": ["ES2024", "ESNext.Disposable"],
     "module": "ESNext",
     "moduleResolution": "Bundler",
+    "allowImportingTsExtensions": true,
+    "allowJs": true,
     "strict": true,
     "noEmit": true,
     "skipLibCheck": true
   },
-  "include": ["src", "tests", "vitest.config.ts"]
+  "files": []
 }

@@ -40,7 +40,8 @@
   "scripts": {
     "build": "node scripts/stage-emacs.mjs && tsdown && tsdown --config tsdown.client.config.ts",
     "prepack": "node scripts/prepack.mjs",
-    "test": "vitest run"
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.host.json --noEmit && tsc -p tsconfig.client.json --noEmit"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1 || ^4.0.5-alpha.2",
@@ -54,15 +55,28 @@
   "devDependencies": {
     "@deepseek-ai/cordis": "^4.1.0",
     "@deepseek-ai/dsh-agent": "^0.2.2-rc.2",
+    "@deepseek-ai/dsh-api-session-controller": "^0.2.2-rc.2",
+    "@deepseek-ai/dsh-client-locale": "^0.2.2-rc.2",
+    "@deepseek-ai/dsh-client-ui-chat": "^0.2.2-rc.2",
     "@deepseek-ai/dsh-client-ui-plugin-manager": "^0.2.2-rc.2",
+    "@deepseek-ai/dsh-client-ui-primitives": "^0.2.2-rc.2",
+    "@deepseek-ai/dsh-client-ui-renderer": "^0.2.2-rc.2",
+    "@deepseek-ai/dsh-client-ui-slots": "^0.2.2-rc.2",
+    "@deepseek-ai/dsh-compaction": "^0.2.2-rc.2",
     "@deepseek-ai/dsh-home-paths": "^0.2.2-rc.2",
     "@deepseek-ai/dsh-llm": "^0.2.2-rc.2",
     "@deepseek-ai/dsh-session": "^0.2.2-rc.2",
+    "@deepseek-ai/dsh-session-title": "^0.2.2-rc.2",
+    "@deepseek-ai/dsh-storage-domain": "^0.2.2-rc.2",
     "@deepseek-ai/dsh-user-approval": "^0.2.2-rc.2",
     "@deepseek-ai/dsh-user-questions": "^0.2.2-rc.2",
     "@deepseek-ai/dsh-workspace": "^0.2.2-rc.2",
     "@deepseek-ai/schemastery": "^3.19.0",
+    "@types/node": "^22.20.5",
+    "@types/react": "^18.3.31",
+    "react": "^18.3.1",
     "tsdown": "^0.22.2",
+    "typescript": "^5.9.3",
     "vitest": "^4.1.8"
   },
   "dependencies": {

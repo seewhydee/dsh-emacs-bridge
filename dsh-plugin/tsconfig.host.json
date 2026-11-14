@@ -1,0 +1,12 @@
+{
+  "extends": "./tsconfig.json",
+  "include": [
+    "src/index.ts",
+    "src/logic.ts",
+    "src/outbox.ts",
+    "src/detail.ts",
+    "tests",
+    "vitest.config.ts",
+    "tsdown.config.ts"
+  ]
+}

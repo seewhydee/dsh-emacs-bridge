@@ -16,6 +16,9 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+// Type-only: resolves the registry module augmented below.
+import type {} from '@deepseek-ai/dsh-client-ui-slots'
+
 /** Simplified Chinese dictionary (the key-set source of truth). */
 export const zh = {
   'sendToEmacs': '发送到 Emacs',

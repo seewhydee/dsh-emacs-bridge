@@ -32,6 +32,7 @@ import {
   type SessionEventLike,
   type TurnActivity,
 } from '../src/logic.ts'
+import { log } from './event-log.ts'
 
 // -- Fixtures ----------------------------------------------------------------
 
@@ -330,18 +331,6 @@ describe('InFlightActivityRegistry bounds', () => {
 
 // -- The `/turns` merge ------------------------------------------------------
 
-function log(): { events: SessionEventLike[]; add: (event: SessionEventLike) => SessionEventLike } {
-  const events: SessionEventLike[] = []
-  return {
-    events,
-    add(event) {
-      const withSeq = { ...event, seq: event.seq ?? events.length }
-      events.push(withSeq)
-      return withSeq
-    },
-  }
-}
-
 function liveEntry(overrides: Partial<{
   inFlightId: string
   ord: number
@@ -635,6 +624,7 @@ describe('buildInFlightDetailItem', () => {
     expect(response).toMatchObject({
       kind: 'thinking', truncated: true, totalBytes: MAX_INFLIGHT_REASONING_BYTES,
     })
+    if (response.kind !== 'thinking') throw new Error('missing thinking response')
     expect(response.parts.reasoning?.text)
       .toBe('a'.repeat(MAX_INFLIGHT_REASONING_BYTES))
   })
@@ -665,6 +655,7 @@ describe('buildInFlightDetailItem', () => {
       item: selected.item, request: { full: true },
       renderDiff: () => ({ text: '', render: 'ok', added: 0, removed: 0, truncated: false }),
     })
+    if (full.kind !== 'thinking') throw new Error('missing thinking response')
     expect(full.parts.reasoning?.text).toBe(large)
     expect(full).not.toHaveProperty('deferred')
   })

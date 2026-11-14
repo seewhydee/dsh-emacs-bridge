@@ -581,6 +581,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
+function recordOf(value: unknown): Record<string, unknown> | undefined {
+  return isRecord(value) ? value : undefined
+}
+
 /** The pairing facts of one `tool/call` event, or null. */
 function toolCallFact(event: SessionEventLike): ToolCallFact | null {
   if (event.type !== 'tool/call') return null
@@ -999,6 +1003,19 @@ export function activityThinkingSummary(text: string): string {
   return normalizeActivityDetail(line.replaceAll('**', ''), MAX_ACTIVITY_THINKING_CHARS)
 }
 
+function appendActivityEntry(activity: TurnActivity, entry: ActivityEntry): void {
+  if (activity.entries.length >= MAX_ACTIVITY_ENTRIES_PER_TURN) activity.entries.shift()
+  activity.entries.push(entry)
+}
+
+function retainActivityTurns(activity: Map<number, TurnActivity>): void {
+  if (activity.size <= MAX_ACTIVITY_TURNS) return
+  const keep = new Set([...activity.keys()].sort((a, b) => a - b).slice(-MAX_ACTIVITY_TURNS))
+  for (const turn of [...activity.keys()]) {
+    if (!keep.has(turn)) activity.delete(turn)
+  }
+}
+
 /**
  * Fold a session log into its turn activity: the tool calls dispatched, their
  * results, and one-line reasoning summaries, grouped by turn and in log order.
@@ -1026,14 +1043,8 @@ export function turnActivity(events: readonly SessionEventLike[]): Map<number, T
     return activity
   }
 
-  /** Append ENTRY, sliding the window: once the turn is at its cap the oldest
-   * entry is dropped so the newest activity always survives. */
   const push = (entry: ActivityEntry): void => {
-    const activity = activityFor(entry.turn)
-    if (activity.entries.length >= MAX_ACTIVITY_ENTRIES_PER_TURN) {
-      activity.entries.shift()
-    }
-    activity.entries.push(entry)
+    appendActivityEntry(activityFor(entry.turn), entry)
   }
 
   for (let index = 0; index < events.length; index += 1) {
@@ -1112,12 +1123,7 @@ export function turnActivity(events: readonly SessionEventLike[]): Map<number, T
   // The retention window is applied last, newest turn first, so the live turn
   // is never the one dropped. Turns dropped here simply have no activity, like
   // a turn whose per-turn window has slid past its start.
-  if (byTurn.size > MAX_ACTIVITY_TURNS) {
-    const keep = new Set([...byTurn.keys()].sort((a, b) => a - b).slice(-MAX_ACTIVITY_TURNS))
-    for (const turn of [...byTurn.keys()]) {
-      if (!keep.has(turn)) byTurn.delete(turn)
-    }
-  }
+  retainActivityTurns(byTurn)
   return byTurn
 }
 
@@ -1879,15 +1885,9 @@ export function withInFlightActivity(
       value = { entries: [], messageSeqs: [] }
       merged.set(entry.turn, value)
     }
-    if (value.entries.length >= MAX_ACTIVITY_ENTRIES_PER_TURN) value.entries.shift()
-    value.entries.push(entry)
+    appendActivityEntry(value, entry)
   }
-  if (merged.size > MAX_ACTIVITY_TURNS) {
-    const keep = new Set([...merged.keys()].sort((a, b) => a - b).slice(-MAX_ACTIVITY_TURNS))
-    for (const turn of [...merged.keys()]) {
-      if (!keep.has(turn)) merged.delete(turn)
-    }
-  }
+  retainActivityTurns(merged)
   return merged
 }
 
@@ -2267,12 +2267,16 @@ export function tokenRequestsSameOrigin(host: string | undefined, origin: string
   return true
 }
 
+function sseMessage(payload: unknown): string {
+  return `data: ${JSON.stringify(payload)}\n\n`
+}
+
 /**
  * One SSE `data:` frame for a composer-draft push. The payload names the target
  * session so the browser routes the draft to the right composer scope.
  */
 export function draftMessage(sessionId: string, text: string): string {
-  return `data: ${JSON.stringify({ kind: 'draft', sessionId, text })}\n\n`
+  return sseMessage({ kind: 'draft', sessionId, text })
 }
 
 /**
@@ -2281,7 +2285,7 @@ export function draftMessage(sessionId: string, text: string): string {
  * outbox themselves, keeping the ack/redelivery semantics in one place.
  */
 export function outboxMessage(): string {
-  return 'data: {"kind":"outbox"}\n\n'
+  return sseMessage({ kind: 'outbox' })
 }
 
 /**
@@ -2292,12 +2296,12 @@ export function outboxMessage(): string {
  * ignores the non-`draft` kind.
  */
 export function turnStartMessage(sessionId: string, time: number, turn?: number): string {
-  return `data: ${JSON.stringify({
+  return sseMessage({
     kind: 'turn-start',
     sessionId,
     time,
     ...(turn === undefined ? {} : { turn }),
-  })}\n\n`
+  })
 }
 
 /**
@@ -2314,14 +2318,14 @@ export function turnStartMessage(sessionId: string, time: number, turn?: number)
  * "failed — <message>" promptly, ahead of any `/turns` refetch.
  */
 export function turnCompleteMessage(sessionId: string, reason: string, time: number, turn?: number, failure?: TurnFailure): string {
-  return `data: ${JSON.stringify({
+  return sseMessage({
     kind: 'turn-complete',
     sessionId,
     reason,
     time,
     ...(turn === undefined ? {} : { turn }),
     ...(failure === undefined ? {} : { failure }),
-  })}\n\n`
+  })
 }
 
 /**
@@ -2334,11 +2338,11 @@ export function turnCompleteMessage(sessionId: string, reason: string, time: num
  * `GET /turns`; the browser ignores the non-`draft` kind.
  */
 export function repliesChangedMessage(sessionId: string, turn?: number): string {
-  return `data: ${JSON.stringify({
+  return sseMessage({
     kind: 'replies-changed',
     sessionId,
     ...(turn === undefined ? {} : { turn }),
-  })}\n\n`
+  })
 }
 
 /**
@@ -2353,11 +2357,11 @@ export function repliesChangedMessage(sessionId: string, turn?: number): string 
  * carries reasoning text or a live selector.
  */
 export function activityChangedMessage(sessionId: string, turn?: number): string {
-  return `data: ${JSON.stringify({
+  return sseMessage({
     kind: 'activity-changed',
     sessionId,
     ...(turn === undefined ? {} : { turn }),
-  })}\n\n`
+  })
 }
 
 /**
@@ -2385,7 +2389,7 @@ export function sessionsChangedMessage(sessionId?: string): string {
   const payload = sessionId === undefined
     ? { kind: 'sessions-changed' }
     : { kind: 'sessions-changed', sessionId }
-  return `data: ${JSON.stringify(payload)}\n\n`
+  return sseMessage(payload)
 }
 
 /** One client-request RPC envelope: the POST /api/<method> body. RPC-ID is the caller-minted correlation id echoed in the response. */
@@ -2436,9 +2440,23 @@ export function contextUsedTokens(
   return projectedTokens ?? pressureTokens
 }
 
+/** Narrow a context-pressure projection into displayable occupancy, or undefined when incomplete. */
+export function contextOccupancy(value: unknown): { usedTokens: number; contextWindow: number } | undefined {
+  const pressure = recordOf(value)
+  if (pressure === undefined) return undefined
+  const usedTokens = contextUsedTokens(
+    typeof pressure.pressureTokens === 'number' ? pressure.pressureTokens : undefined,
+    typeof pressure.projectedTokens === 'number' ? pressure.projectedTokens : undefined,
+  )
+  const contextWindow = typeof pressure.contextWindow === 'number' ? pressure.contextWindow : undefined
+  return usedTokens === undefined || contextWindow === undefined
+    ? undefined
+    : { usedTokens, contextWindow }
+}
+
 /** One SSE `data:` frame carrying a session's context occupancy, matching the web meter. */
 export function contextMessage(sessionId: string, usedTokens: number, contextWindow: number): string {
-  return `data: ${JSON.stringify({ kind: 'context', sessionId, usedTokens, contextWindow })}\n\n`
+  return sseMessage({ kind: 'context', sessionId, usedTokens, contextWindow })
 }
 
 /**
@@ -2447,7 +2465,7 @@ export function contextMessage(sessionId: string, usedTokens: number, contextWin
  * a projection-only section carries the direction-less `queued`.
  */
 export function planChangedMessage(sessionId: string, plan: SessionReportPlan): string {
-  return `data: ${JSON.stringify({ kind: 'plan', sessionId, plan })}\n\n`
+  return sseMessage({ kind: 'plan', sessionId, plan })
 }
 
 /**
@@ -2456,7 +2474,7 @@ export function planChangedMessage(sessionId: string, plan: SessionReportPlan): 
  * supplied it (absent means unknown, never `null`).
  */
 export function goalChangedMessage(sessionId: string, goal: SessionReportGoal | null): string {
-  return `data: ${JSON.stringify({ kind: 'goal', sessionId, goal })}\n\n`
+  return sseMessage({ kind: 'goal', sessionId, goal })
 }
 
 /**
@@ -2471,13 +2489,13 @@ export function goalActivationChangedMessage(
   goalId?: string,
   revision?: number,
 ): string {
-  return `data: ${JSON.stringify({
+  return sseMessage({
     kind: 'goal-activation',
     sessionId,
     activation,
     ...(goalId === undefined ? {} : { goalId }),
     ...(revision === undefined ? {} : { revision }),
-  })}\n\n`
+  })
 }
 
 /**
@@ -2499,14 +2517,14 @@ export function compactionFrame(args: {
   tokensReclaimed?: number
 }): string {
   const { sessionId, phase, sourceCommandId, error, tokensReclaimed } = args
-  return `data: ${JSON.stringify({
+  return sseMessage({
     kind: 'compaction',
     sessionId,
     phase,
     ...(sourceCommandId === undefined ? {} : { sourceCommandId }),
     ...(error === undefined ? {} : { error }),
     ...(tokensReclaimed === undefined ? {} : { tokensReclaimed }),
-  })}\n\n`
+  })
 }
 
 /**
@@ -2591,7 +2609,7 @@ export function askUserMessage(
   sessionId: string,
   questions: readonly AskUserQuestionItemLike[],
 ): string {
-  return `data: ${JSON.stringify({ kind: 'ask-user', questionId, sessionId, questions })}\n\n`
+  return sseMessage({ kind: 'ask-user', questionId, sessionId, questions })
 }
 
 /**
@@ -2606,7 +2624,7 @@ export function askUserResolvedMessage(
   outcome: 'answered' | 'cancelled',
   questionIds: readonly string[] = [],
 ): string {
-  return `data: ${JSON.stringify({ kind: 'ask-user-resolved', sessionId, questionId, outcome, questionIds })}\n\n`
+  return sseMessage({ kind: 'ask-user-resolved', sessionId, questionId, outcome, questionIds })
 }
 
 /**
@@ -2725,7 +2743,7 @@ export function approvalMessage(
   reason: string | undefined,
   detail: ApprovalToolCallDetail | undefined,
 ): string {
-  return `data: ${JSON.stringify({ kind: 'approval', approvalId, sessionId, toolName, callId, reason, detail })}\n\n`
+  return sseMessage({ kind: 'approval', approvalId, sessionId, toolName, callId, reason, detail })
 }
 
 /**
@@ -2741,7 +2759,7 @@ export function approvalResolvedMessage(
   toolName: string,
   callId: string | undefined,
 ): string {
-  return `data: ${JSON.stringify({ kind: 'approval-resolved', approvalId, sessionId, outcome, toolName, callId })}\n\n`
+  return sseMessage({ kind: 'approval-resolved', approvalId, sessionId, outcome, toolName, callId })
 }
 
 /**
@@ -2957,57 +2975,37 @@ export interface SessionReport {
   goal: SessionReportGoal | null
 }
 
-function asObject(value: unknown): Record<string, unknown> | undefined {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
-    ? value as Record<string, unknown>
-    : undefined
-}
-
 function asNumber(value: unknown): number | null {
   return typeof value === 'number' && Number.isFinite(value) ? value : null
 }
 
-function reportStats(value: unknown): SessionReportStats | null {
-  const source = asObject(value)
+function numericReport<K extends string>(value: unknown, keys: readonly K[]): Record<K, number> | null {
+  const source = recordOf(value)
   if (source === undefined) return null
-  const keys = ['turns', 'steps', 'llmMs', 'toolMs', 'ttftMs', 'ttftSteps', 'decodeMs', 'decodeTokens'] as const
-  const stats = {} as Record<(typeof keys)[number], number>
+  const result: Partial<Record<K, number>> = {}
   for (const key of keys) {
     const number = asNumber(source[key])
     if (number === null) return null
-    stats[key] = number
+    result[key] = number
   }
-  return stats as SessionReportStats
+  return result as Record<K, number>
+}
+
+function reportStats(value: unknown): SessionReportStats | null {
+  return numericReport(value,
+    ['turns', 'steps', 'llmMs', 'toolMs', 'ttftMs', 'ttftSteps', 'decodeMs', 'decodeTokens'])
 }
 
 function reportTokens(value: unknown): SessionReportTokens | null {
-  const source = asObject(value)
-  if (source === undefined) return null
-  const keys = ['uncachedInputTokens', 'outputTokens', 'cacheReadTokens', 'cacheWriteTokens'] as const
-  const tokens = {} as Record<(typeof keys)[number], number>
-  for (const key of keys) {
-    const number = asNumber(source[key])
-    if (number === null) return null
-    tokens[key] = number
-  }
-  return tokens as SessionReportTokens
+  return numericReport(value, ['uncachedInputTokens', 'outputTokens', 'cacheReadTokens', 'cacheWriteTokens'])
 }
 
 function reportBreakdown(value: unknown): SessionReportBreakdown | null {
-  const source = asObject(value)
-  if (source === undefined) return null
-  const keys = ['systemTokens', 'toolsTokens', 'messageTokens'] as const
-  const breakdown = {} as Record<(typeof keys)[number], number>
-  for (const key of keys) {
-    const number = asNumber(source[key])
-    if (number === null) return null
-    breakdown[key] = number
-  }
-  return breakdown as SessionReportBreakdown
+  return numericReport(value, ['systemTokens', 'toolsTokens', 'messageTokens'])
 }
 
 function reportContext(value: unknown): SessionReportContext | null {
-  const source = asObject(value)
+  const source = recordOf(value)
   if (source === undefined) return null
   const context: SessionReportContext = {}
   const pressure = asNumber(source.pressureTokens)
@@ -3031,10 +3029,10 @@ function reportContext(value: unknown): SessionReportContext | null {
  * a corrupt projection is reported, not silently repaired from an older value.
  */
 function reportModel(value: unknown): SessionReportModel | null {
-  const view = asObject(value)
+  const view = recordOf(value)
   const selection = view?.next == null
-    ? asObject(view?.lastUsed)
-    : asObject(view.next)
+    ? recordOf(view?.lastUsed)
+    : recordOf(view.next)
   if (selection === undefined) return null
   const provider = selection.provider
   const model = selection.model
@@ -3046,14 +3044,14 @@ function reportModel(value: unknown): SessionReportModel | null {
 }
 
 function reportPermissions(value: unknown): SessionReportPermissions | null {
-  const view = asObject(value)
+  const view = recordOf(value)
   if (view === undefined) return null
   const currentValue = view.currentValue
   const options = view.options
   if (typeof currentValue !== 'string' || !Array.isArray(options)) return null
   const parsed: SessionReportPermissionOption[] = []
   for (const raw of options) {
-    const option = asObject(raw)
+    const option = recordOf(raw)
     if (option === undefined) continue
     const optionValue = option.value
     const name = option.name
@@ -3073,7 +3071,7 @@ function reportPermissions(value: unknown): SessionReportPermissions | null {
  * wanted direction) is filled by the live refinement, never here.
  */
 export function reportPlan(value: unknown): SessionReportPlan | null {
-  const source = asObject(value)
+  const source = recordOf(value)
   if (source === undefined) return null
   if (typeof source.active !== 'boolean' || typeof source.pending !== 'boolean') return null
   return source.pending ? { active: source.active, queued: true } : { active: source.active }
@@ -3086,9 +3084,9 @@ export function reportPlan(value: unknown): SessionReportPlan | null {
  * live refinement, never here.
  */
 export function reportGoal(value: unknown): SessionReportGoal | null {
-  const source = asObject(value)
+  const source = recordOf(value)
   if (source === undefined) return null
-  const snapshot = asObject(source.goal)
+  const snapshot = recordOf(source.goal)
   const roundsStarted = asNumber(source.roundsStarted)
   const createdAt = asNumber(source.createdAt)
   const updatedAt = asNumber(source.updatedAt)
@@ -3102,7 +3100,7 @@ export function reportGoal(value: unknown): SessionReportGoal | null {
   if (typeof maxGoalRounds !== 'number' || !Number.isInteger(maxGoalRounds) || maxGoalRounds <= 0) return null
   const goal: SessionReportGoalSnapshot = { id, revision, objective, phase, maxGoalRounds }
   if (Object.hasOwn(snapshot, 'blockedReason') && snapshot.blockedReason !== undefined) {
-    const reason = asObject(snapshot.blockedReason)
+    const reason = recordOf(snapshot.blockedReason)
     if (reason === undefined
       || typeof reason.code !== 'string' || typeof reason.message !== 'string') return null
     goal.blockedReason = { code: reason.code, message: reason.message }
@@ -3166,7 +3164,7 @@ export function sessionReport(
     ? typeof rawPreset === 'string' && rawPreset !== '' ? rawPreset : null
     : sessionPreset(observation.header, observation.events ?? []) ?? null
 
-  const metadata = asObject(values?.sessionListMetadata)
+  const metadata = recordOf(values?.sessionListMetadata)
 
   return {
     sessionId: observation.header.id,
@@ -3295,15 +3293,15 @@ export function catalogModelName(
   provider: string,
   model: string,
 ): string | null {
-  const groups = asObject(catalog)?.groups
+  const groups = recordOf(catalog)?.groups
   if (!Array.isArray(groups)) return null
   for (const rawGroup of groups) {
-    const group = asObject(rawGroup)
+    const group = recordOf(rawGroup)
     if (group?.id !== provider) continue
     const models = group.models
     if (!Array.isArray(models)) return null
     for (const rawModel of models) {
-      const entry = asObject(rawModel)
+      const entry = recordOf(rawModel)
       if (entry?.id !== model) continue
       const name = entry.name
       return typeof name === 'string' && name !== '' ? name : null

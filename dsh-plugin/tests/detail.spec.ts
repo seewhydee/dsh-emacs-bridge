@@ -29,21 +29,10 @@ import {
   type DetailQueryParams,
   type SessionEventLike,
 } from '../src/logic.ts'
-import { renderFileChanges } from '../src/detail.ts'
+import { renderFileChange, renderFileChanges } from '../src/detail.ts'
+import { log } from './event-log.ts'
 
 // -- Fixtures ----------------------------------------------------------------
-
-function log(): { events: SessionEventLike[]; add: (event: SessionEventLike) => SessionEventLike } {
-  const events: SessionEventLike[] = []
-  return {
-    events,
-    add(event) {
-      const withSeq = { ...event, seq: event.seq ?? events.length }
-      events.push(withSeq)
-      return withSeq
-    },
-  }
-}
 
 function turnStart(turn: number): SessionEventLike {
   return { time: turn * 1000, type: 'turn/start', data: { turn } }
@@ -137,18 +126,7 @@ function itemOf(
   })
 }
 
-function renderDiff(file: DetailFileChange) {
-  const rendered = renderFileChanges([file])
-  const metadata = rendered.files[0]
-  if (metadata === undefined) throw new Error('missing rendered file')
-  return {
-    text: rendered.text,
-    render: metadata.render,
-    added: metadata.added,
-    removed: metadata.removed,
-    truncated: rendered.truncated,
-  }
-}
+const renderDiff = renderFileChange
 
 function responseOf(
   events: readonly SessionEventLike[], turn: number, kind: DetailItemKind, selector: Selector,
@@ -626,10 +604,11 @@ describe('detail item query parsing', () => {
 
   it('rejects the removed pagination parameters', () => {
     const base = { sessionId: 's', turn: '1', kind: 'tool', callId: 'c' }
-    for (const legacy of [
+    const removed: Record<string, string>[] = [
       { epoch: '2' }, { cursor: '8' }, { part: 'arguments' },
       { byteOffset: '0' }, { fileIndex: '0' },
-    ]) {
+    ]
+    for (const legacy of removed) {
       expect(parseDetailItemQuery(params({ ...base, ...legacy }))).toMatchObject({ ok: false })
     }
   })

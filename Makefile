@@ -142,6 +142,7 @@ publish:
 	@$(SHA256) $(RELEASE_DIR)/$(PLUGIN_TGZ)
 
 test: no-stale-elc descriptor-check no-eager-load autoload-check
+	cd dsh-plugin && pnpm typecheck
 	cd dsh-plugin && pnpm test
 	emacs --batch -L emacs -l emacs/dsh-bridge-tests.el \
 	      -l emacs/dsh-bridge-extras-tests.el \
