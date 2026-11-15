@@ -15,9 +15,12 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 //
 // Routes (all require `Authorization: Bearer <token>` — except the token-vend
-// and browser-SSE routes; see logic.ts for the pure decision logic).  There is
-// no host-side target pin: the host resolves "no sessionId" to last-active
-// (see the UX plan, Section 3.2), so `/select` and `/current` do not exist.
+// and browser-SSE routes; see logic.ts for the pure decision logic).  The
+// `/dsh-bridge` prefix is registered `auth: 'anonymous'` with the host's route
+// admission, because the bearer token above, not a DSH browser credential, is
+// what admits Emacs.  There is no host-side target pin: the host resolves "no
+// sessionId" to last-active (see the UX plan, Section 3.2), so `/select` and
+// `/current` do not exist.
 //   GET  /dsh-bridge/token                          -> vend the token (loopback-fenced)
 //   GET  /dsh-bridge/status                         -> { name, version } (loopback-fenced)
 //   GET  /dsh-bridge/events?token=                  -> EventSource (composer-draft push)
@@ -413,14 +416,13 @@ interface WebServerService {
     kind: 'exact' | 'prefix'
     path: string
     handler: (req: IncomingMessage, res: ServerResponse) => void | Promise<void>
+    /**
+     * Host-side route admission. The bridge owns its credential (the shared
+     * bearer token), so its route is `anonymous`; older hosts have no route
+     * admission and ignore the field.
+     */
+    auth?: 'anonymous' | 'required' | 'deny'
   }): () => void
-  /**
-   * The bound listener's origin, such as `http://127.0.0.1:3080`. Optional: a
-   * host predating `getOrigin` exposes only `port`.
-   */
-  getOrigin?(): string
-  /** The listening port (the OS-assigned value when config.port is 0), undefined before `listen`. */
-  port: number | undefined
 }
 
 /** Minimal face of the `sessions` service: live sessions and detached surface replay. */
@@ -1103,97 +1105,55 @@ export function apply(ctx: Context, config?: Config): void {
     }
   }
 
-  /**
-   * Base URL of the web server the plugin is mounted on (the /api RPC carrier).
-   * Read lazily: the listener may bind after this plugin loads, so `port` can
-   * still be undefined at apply time. `getOrigin` is preferred because it
-   * reflects the actual bind address; the loopback fallback matches older hosts.
-   */
-  function webBaseUrl(): string {
-    return webServer.getOrigin?.() ?? `http://127.0.0.1:${String(webServer.port)}`
-  }
-
   /** The business result of one host RPC self-call. */
   type RpcResult = { ok: true; value: unknown } | { ok: false; error: { code: string; message: string } }
 
   /**
-   * Minimal face of the optional `connection` service: mint the launch-token
-   * URL whose 303 response carries the signed browser cookie. The /api
-   * channel is browser-authenticated (Host/Origin fence + authority-bound
-   * cookie), so an in-process caller must mint the same cookie a browser
-   * would; a profile without the service degrades RPC proxying to an error.
+   * Minimal face of the optional `connection` service: the trusted in-process
+   * owner Peer and the shared `/api` Fetch handler. Dispatching through that
+   * handler reaches the same Typert Remote interceptor as a browser's `/api`
+   * call, without an HTTP hop, so an in-process caller never has to mint a
+   * browser credential. (The former HTTP self-call minted one through
+   * `authenticatedUrl`; newer hosts no longer expose that method, and their
+   * `/api` route requires a browser-authenticated Peer.)
    */
   interface ConnectionService {
-    authenticatedUrl(baseUrl: string): string
-  }
-
-  /** The minted browser cookie for /api self-calls, cached per plugin instance. */
-  let rpcCookie: string | undefined
-
-  /**
-   * Mint (once) the browser-auth cookie for /api self-calls: fetch the
-   * launch-token URL without following its redirect and lift the authority-bound
-   * cookie pair out of the `set-cookie` header — the same exchange a browser
-   * performs on first load. Returns undefined when the exchange succeeds but
-   * carries no cookie; a transport failure propagates to the caller.
-   */
-  async function ensureRpcCookie(connection: ConnectionService): Promise<string | undefined> {
-    if (rpcCookie !== undefined) return rpcCookie
-    const response = await fetch(connection.authenticatedUrl(webBaseUrl()), { redirect: 'manual' })
-    const cookies = typeof response.headers.getSetCookie === 'function'
-      ? response.headers.getSetCookie()
-      : [response.headers.get('set-cookie') ?? '']
-    const pair = cookies[0]?.split(';', 1)[0]
-    if (pair === undefined || pair === '') return undefined
-    rpcCookie = pair
-    return pair
+    readonly browserPeer: unknown
+    createSharedFetchHandler(channel: '/api'): {
+      fetch(request: Request, peer: unknown): Promise<Response>
+    }
   }
 
   /**
-   * Self-call one host RPC over loopback HTTP and unwrap its result. The
-   * bridge proxies `session/modelCatalog`/`session/selectModel` through the
-   * genuine Typert Remote handlers, so selection state and validation stay
-   * host-owned and parity with the web UI is exact. METHOD is the slash-form
-   * endpoint (`namespace/method`); PAYLOAD must already be the `{ args }`
+   * Dispatch one host RPC in-process and unwrap its result. The bridge proxies
+   * `session/modelCatalog`/`session/selectModel` through the genuine Typert
+   * Remote handlers, so selection state and validation stay host-owned and
+   * parity with the web UI is exact. METHOD is the slash-form endpoint
+   * (`namespace/method`); PAYLOAD must already be the `{ args }`
    * named-argument wrapper (see rpcArgsPayload). Returns an error branch for
-   * carrier/unreachable failures, and null only for a well-formed HTTP
-   * response whose body is not a valid server-response. A 401 means the
-   * minted cookie went stale (secret rotation): re-mint once.
+   * dispatch failures, and null only for a well-formed response whose body is
+   * not a valid server-response.
    */
-  async function rpcCall(method: string, payload: unknown, allowRefresh = true): Promise<RpcResult | null> {
+  async function rpcCall(method: string, payload: unknown): Promise<RpcResult | null> {
     const rpcId = randomUUID()
     const connection = ctx.get('connection') as ConnectionService | undefined
-    if (connection === undefined) {
-      return {
-        ok: false,
-        error: { code: 'internal', message: `RPC ${method} unavailable: profile lacks the connection service` },
-      }
-    }
-    let cookie: string | undefined
-    try {
-      cookie = await ensureRpcCookie(connection)
-    } catch (error: unknown) {
+    if (connection === undefined || typeof connection.createSharedFetchHandler !== 'function') {
       return {
         ok: false,
         error: {
           code: 'internal',
-          message: `RPC ${method} unavailable: browser-auth cookie mint failed: ${errorMessage(error)}`,
+          message: `RPC ${method} unavailable: profile lacks the in-process connection service`,
         },
-      }
-    }
-    if (cookie === undefined) {
-      return {
-        ok: false,
-        error: { code: 'internal', message: `RPC ${method} unavailable: browser-auth cookie exchange carried no cookie` },
       }
     }
     let response: Response
     try {
-      response = await fetch(`${webBaseUrl()}/api/${method}`, {
+      const request = new Request(`http://localhost/api/${method}`, {
         method: 'POST',
-        headers: { 'content-type': 'application/json', cookie },
+        headers: { 'content-type': 'application/json' },
         body: rpcRequestFrame(method, rpcId, payload),
       })
+      response = await connection.createSharedFetchHandler('/api').fetch(request, connection.browserPeer)
     } catch (error: unknown) {
       return {
         ok: false,
@@ -1205,10 +1165,6 @@ export function apply(ctx: Context, config?: Config): void {
     }
     const text = await response.text()
     if (!response.ok) {
-      if (response.status === 401 && allowRefresh) {
-        rpcCookie = undefined
-        return rpcCall(method, payload, false)
-      }
       return {
         ok: false,
         error: { code: 'internal', message: `RPC ${method} failed: HTTP ${response.status}` },
@@ -2305,9 +2261,19 @@ export function apply(ctx: Context, config?: Config): void {
 
   // Registered inside an effect so a config hot-reload disposes the route
   // before re-applying — a duplicate (kind, path) registration throws.
+  //
+  // `auth: 'anonymous'` keeps the bridge reachable without a DSH browser
+  // credential: its credential is the shared bearer token checked below (and
+  // the loopback/origin fence on the two pre-token routes). A host with route
+  // admission defaults a route to `required`, which denies Emacs's credential-
+  // free request 401 before the handler runs; url.el reads a 401 without a
+  // `WWW-Authenticate` header as a Basic challenge, so the user would see an
+  // unexpected username/password prompt. The host still applies its source
+  // (Host/Origin) policy to an anonymous route.
   ctx.effect(() => webServer.register({
     kind: 'prefix',
     path: '/dsh-bridge',
+    auth: 'anonymous',
     handler: async (req, res) => {
       const url = new URL(req.url ?? '/', 'http://localhost')
       const pathname = url.pathname

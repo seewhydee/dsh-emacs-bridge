@@ -78,7 +78,11 @@ describe('loopback token-vend fence (/token and /status)', () => {
     for (const path of ['/dsh-bridge/token', '/dsh-bridge/status']) {
       const hostile = await raw(fixture, 'GET', path, { origin: HOSTILE_ORIGIN })
       expect(hostile.status, `${path} with a hostile origin`).toBe(403)
-      expect(hostile.body.error).toBe('forbidden')
+      // A host that applies its own source policy refuses the request before
+      // the bridge handler runs, so the body is the host's plain text; hosts
+      // that dispatch the route first reach the bridge's JSON fence.
+      expect(hostile.body === 'forbidden' || hostile.body?.error === 'forbidden',
+        `${path} hostile-origin refusal`).toBe(true)
 
       // The same route without the Origin header (the loopback peer arm is
       // unchanged) still succeeds.

@@ -325,10 +325,14 @@ export function apply(ctx) {
   ctx.llm.registerAdapter(['mock'], adapter)
 
   // Control routes. Registered inside an effect so hot-reload re-applies them
-  // without a duplicate (kind, path) registration throw.
+  // without a duplicate (kind, path) registration throw. `auth: 'anonymous'`
+  // keeps them reachable with only the bridge token: a host with route
+  // admission defaults to `required` and would deny a credential-free test
+  // client 401 before the bearer check below runs.
   ctx.effect(() => webServer.register({
     kind: 'prefix',
     path: '/mock-llm',
+    auth: 'anonymous',
     handler: async (req, res) => {
       const url = new URL(req.url ?? '/', 'http://localhost')
       const pathname = url.pathname
