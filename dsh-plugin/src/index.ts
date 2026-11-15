@@ -206,13 +206,10 @@
 //        contributes NOTHING to the command line or the elisp form; both
 //        routes serialize under 'emacs-install'.
 
-import { spawn } from 'node:child_process'
-import type { ChildProcess } from 'node:child_process'
-import { createReadStream, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
-import { open, readFile, stat } from 'node:fs/promises'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { randomBytes, randomUUID } from 'node:crypto'
 import type { IncomingMessage, ServerResponse } from 'node:http'
-import { basename, dirname, isAbsolute, join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { Context, Volatile } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
@@ -248,6 +245,7 @@ import type {} from '@deepseek-ai/dsh-session-title'
 import type {} from '@deepseek-ai/dsh-storage-domain'
 import { Outbox } from './outbox.ts'
 import { renderFileChange } from './detail.ts'
+import { parseDetailItemQuery } from './detail-query.ts'
 import {
   answerMatchesQuestions,
   activityChangedMessage,
@@ -260,19 +258,13 @@ import {
   assistantMessageHasText,
   assistantTurnForMessage,
   assistantTurns,
-  attachmentErrorHttpStatus,
-  buildEmacsInstallForm,
   buildDetailItem,
   buildDetailItemProjection,
   buildDetailItemResponse,
   buildInFlightDetailItem,
-  buildEmacsStatusForm,
   cachedTitleValue,
   catalogModelName,
   changedFiles,
-  classifyEmacsInstall,
-  classifyEmacsProbeOutput,
-  classifyEmacsVersionProbe,
   classifySessionId,
   compactExecutionSettled,
   compactionFrame,
@@ -283,9 +275,6 @@ import {
   effectiveCwd,
   goalActivationChangedMessage,
   goalChangedMessage,
-  goalErrorCode,
-  goalErrorStatus,
-  goalSetAction,
   imageInputUnsupported,
   isCompletedTurnAnchor,
   isLoopbackAddress,
@@ -293,33 +282,23 @@ import {
   isSubagentChild,
   latestAssistantText,
   manifestVersion,
-  MAX_ATTACHMENT_FILE_BYTES,
   mergeSessionRows,
-  normalizeEmacsCommand,
   outboxMessage,
   outboxSessionId,
   parseAttachmentRequests,
   parseBearerAuthorization,
-  parseDetailItemQuery,
   parseSendMode,
   planChangedMessage,
   queueCounts,
-  refinePlanGoal,
-  refinePlanSection,
   repliesChangedMessage,
-  reportGoal,
-  reportPlan,
-  resolveBundledEmacsPackage,
   resolveReadTargetId,
   resolveTargetId,
   rpcArgsPayload,
   rpcRequestFrame,
   rpcUnwrapResponse,
   sessionPreset,
-  sessionReport,
   sessionTitle,
   sessionsChangedMessage,
-  sniffImageMediaType,
   tokenRequestsSameOrigin,
   tokensEqual,
   toolCallForId,
@@ -336,33 +315,69 @@ import {
   workspaceTitleConflict,
   InFlightActivityRegistry,
   KeyedSerial,
-  type AttachmentRequest,
   type ApprovalDecision,
   type ApprovalResolution,
   type ApprovalToolCallDetail,
-  type BridgeImageMediaType,
   type DetailItemProjection,
   type CompactCommandResultLike,
   type CompactExecutionOutcome,
-  type EmacsRunResult,
-  type EmacsVersion,
   type LiveSessionLike,
   type AskUserAnswerItemLike,
   type AskUserQuestionItemLike,
   type MessageBlockLike,
-  type PlanGoalLive,
   type ReadTargetResult,
   type ResolveTargetResult,
   type SessionEventLike,
   type SessionHeaderLike,
+  type SessionRow,
+  type WorkspaceLike,
+} from './logic.ts'
+import {
+  goalErrorCode,
+  goalErrorStatus,
+  goalSetAction,
+  refinePlanGoal,
+  refinePlanSection,
+  reportGoal,
+  reportPlan,
+  sessionReport,
+  type PlanGoalLive,
   type SessionObservationLike,
   type SessionReport,
   type SessionReportExtras,
   type SessionReportGoal,
   type SessionReportPlan,
-  type SessionRow,
-  type WorkspaceLike,
-} from './logic.ts'
+} from './session-report.ts'
+import {
+  buildEmacsInstallForm,
+  buildEmacsStatusForm,
+  classifyEmacsInstall,
+  classifyEmacsProbeOutput,
+  normalizeEmacsCommand,
+  resolveBundledEmacsPackage,
+} from './emacs-logic.ts'
+import { BridgeError, errorMessage } from './errors.ts'
+import {
+  attachmentFailure,
+  prepareAttachments,
+  stageAttachments,
+  type AttachmentStoreService,
+  type StagedAttachment,
+} from './attachments.ts'
+import {
+  bridgeErrorStatus,
+  optionalSessionId,
+  readJson,
+  sendBridgeError,
+  sendError,
+  sendJson,
+} from './http.ts'
+import {
+  EMACS_PROBE_TIMEOUT_MS,
+  formatEmacsVersion,
+  preflightEmacs,
+  runEmacs,
+} from './emacs.ts'
 
 export const name = 'dsh-bridge'
 
@@ -659,44 +674,6 @@ interface SessionControllerService {
 }
 
 /**
- * Minimal face of the optional `attachments` service (`AttachmentStore`).
- * Read via `ctx.get`; a profile without it answers an attachment-bearing
- * `/send` with 501 while plain text sends are unaffected. The store is part
- * of the harness base bundle, so the `web` profile carries it.
- */
-interface AttachmentStoreService {
-  /** Deployment-resolved image admission limits (source bytes and pixels). */
-  readonly imageLimits: {
-    maxImageBytes: number
-    maxImagesPerMessage: number
-    maxMessageImageBytes: number
-    maxImagePixels: number
-    maxImageDimension: number
-  }
-  /** Validate every member before committing any; reject with an AttachmentError. */
-  saveImages(inputs: readonly {
-    data: Uint8Array
-    mediaType: BridgeImageMediaType
-    name?: string
-  }[]): Promise<readonly {
-    attachmentId: string
-    mediaType: BridgeImageMediaType
-    bytes: number
-    width: number
-    height: number
-    name?: string
-  }[]>
-  /** Streaming verbatim commit; `data` is consumed once, in bounded chunks. */
-  saveFileStream(input: { data: AsyncIterable<Uint8Array>; signal?: AbortSignal; name?: string }): Promise<{
-    attachmentId: string
-    name: string
-    bytes: number
-  }>
-  /** Stable-code membership test over the store's own failure taxonomy. */
-  isAttachmentError(error: unknown): boolean
-}
-
-/**
  * Minimal face of the optional `llm` service, used only for the image
  * modality pre-check. Read via `ctx.get`; without it the check is skipped
  * and the harness's own text-model image projection takes over.
@@ -704,14 +681,6 @@ interface AttachmentStoreService {
 interface LlmServiceLike {
   resolveModelInfo(provider: string, model: string, signal?: AbortSignal):
     Promise<{ inputModalities?: readonly string[] }>
-}
-
-/** A bridge-scoped error carrying the HTTP status Emacs maps to. */
-class BridgeError extends Error {
-  constructor(readonly status: number, message: string) {
-    super(message)
-    this.name = 'BridgeError'
-  }
 }
 
 /** Whether an error is the session-title service's invalid-title rejection. */
@@ -727,13 +696,6 @@ function isWorkspaceUnknownSessionError(error: unknown): error is Error {
 /** Whether an error is the workspace registry's active-session archive refusal. */
 function isWorkspaceActiveSessionError(error: unknown): error is Error {
   return error instanceof Error && error.name === 'WorkspaceActiveSessionError'
-}
-
-/** The HTTP status for a propagated bridge/transport error: BridgeError → its status, an oversize body → 413, else 500. */
-function bridgeErrorStatus(error: unknown): number {
-  if (error instanceof BridgeError) return error.status
-  if (error instanceof PayloadTooLargeError) return 413
-  return 500
 }
 
 /**
@@ -780,22 +742,6 @@ function stopErrorStatus(error: unknown): number {
   return 500
 }
 
-/**
- * The HTTP status and reason for an attachment-store failure. The store's
- * stable code decides (pure `attachmentErrorHttpStatus`: caller-correctable
- * limits 400/413, a file-incapable backend 501, storage faults 500); a value
- * the store does not recognize falls through to the caller's 500.
- */
-function attachmentFailure(
-  error: unknown,
-  store: AttachmentStoreService,
-): { status: number; reason: string } | undefined {
-  if (!store.isAttachmentError(error)) return undefined
-  const code = (error as { code?: unknown }).code
-  if (typeof code !== 'string') return undefined
-  return { status: attachmentErrorHttpStatus(code), reason: code }
-}
-
 /** The target of a bridge operation: a live session plus its live agent. */
 interface BridgeTarget {
   session: Session
@@ -825,196 +771,6 @@ function loadOrCreateToken(path: string): string {
   return token
 }
 
-const MAX_BODY_BYTES = 1024 * 1024
-
-/** Thrown by `readJson` when the body exceeds `MAX_BODY_BYTES`; reported as 413. */
-class PayloadTooLargeError extends Error {
-  constructor() {
-    super('request body too large')
-    this.name = 'PayloadTooLargeError'
-  }
-}
-
-/**
- * Read a bounded JSON request body; rejects malformed input as 400 and
- * oversize input as 413. An oversize body is NOT socket-destroyed: the
- * remaining bytes are drained and discarded so the caller can still write
- * the 413 response on the same
- * connection.
- */
-function readJson(req: IncomingMessage): Promise<unknown> {
-  return new Promise((resolve, reject) => {
-    let body = ''
-    let oversize = false
-    req.setEncoding('utf8')
-    req.on('data', (chunk: string) => {
-      if (oversize) return
-      body += chunk
-      if (Buffer.byteLength(body) > MAX_BODY_BYTES) {
-        oversize = true
-        body = ''
-        reject(new PayloadTooLargeError())
-      }
-    })
-    req.on('end', () => {
-      try {
-        resolve(body === '' ? undefined : JSON.parse(body))
-      } catch (error: unknown) {
-        reject(new BridgeError(400, `invalid JSON: ${errorMessage(error)}`))
-      }
-    })
-    req.on('error', reject)
-  })
-}
-
-/** Write one JSON response. */
-function sendJson(res: ServerResponse, status: number, value: unknown): void {
-  const payload = JSON.stringify(value)
-  res.writeHead(status, { 'content-type': 'application/json' })
-  res.end(payload)
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error)
-}
-
-function sendError(
-  res: ServerResponse,
-  status: number,
-  error: unknown,
-  details: Record<string, unknown> = {},
-): void {
-  sendJson(res, status, { ...details, error: errorMessage(error) })
-}
-
-function sendBridgeError(res: ServerResponse, error: unknown): void {
-  sendError(res, bridgeErrorStatus(error), error)
-}
-
-/** Read an optional session id, rejecting a present value of the wrong type. */
-function optionalSessionId(
-  body: { sessionId?: unknown } | undefined,
-  nonEmpty = false,
-): string | undefined {
-  const value = body?.sessionId
-  if (value === undefined || value === null) return undefined
-  if (typeof value !== 'string' || (nonEmpty && value === '')) {
-    throw new BridgeError(400, nonEmpty ? 'sessionId must be a non-empty string' : 'sessionId must be a string')
-  }
-  return value
-}
-
-/** One attachment request after `stat` and content sniffing. */
-interface PreparedAttachment {
-  request: AttachmentRequest
-  /** Sniffed image type, or undefined for the verbatim file arm. */
-  mediaType?: BridgeImageMediaType
-}
-
-/** One staged attachment, echoed back to the client. */
-interface StagedAttachment {
-  name: string
-  kind: 'image' | 'file'
-  bytes: number
-  mediaType?: BridgeImageMediaType
-  attachmentId: string
-}
-
-/** The leading bytes read for content sniffing; any accepted signature fits. */
-const SNIFF_BYTES = 32
-
-/**
- * Sniff PATH's image type from its leading bytes. The caller has already
- * `stat`ed the path; a race that empties or removes it surfaces as a read or
- * store failure, never as a misdeclared image.
- */
-async function sniffPathImageType(path: string, size: number): Promise<BridgeImageMediaType | undefined> {
-  const handle = await open(path, 'r')
-  try {
-    const length = Math.min(size, SNIFF_BYTES)
-    if (length === 0) return undefined
-    const buffer = Buffer.alloc(length)
-    const { bytesRead } = await handle.read(buffer, 0, length, 0)
-    return sniffImageMediaType(buffer.subarray(0, bytesRead))
-  } finally {
-    await handle.close()
-  }
-}
-
-/**
- * Stage every prepared attachment into the durable store and return the
- * ordered content blocks plus the client echo. Images are one `saveImages`
- * batch (all-or-nothing validation); files stream from disk one at a time.
- * Both arms keep the exact ref objects the store returned.
- */
-async function stageAttachments(
-  store: AttachmentStoreService,
-  prepared: readonly PreparedAttachment[],
-): Promise<{ blocks: unknown[]; echo: StagedAttachment[] }> {
-  const refByIndex = new Map<number, unknown>()
-  const imageIndexes = prepared
-    .map((item, index) => (item.mediaType === undefined ? -1 : index))
-    .filter(index => index >= 0)
-  if (imageIndexes.length > 0) {
-    const inputs = await Promise.all(imageIndexes.map(async (index) => {
-      const item = prepared[index] as PreparedAttachment
-      return {
-        data: await readFile(item.request.path),
-        mediaType: item.mediaType as BridgeImageMediaType,
-        name: item.request.name ?? basename(item.request.path),
-      }
-    }))
-    const refs = await store.saveImages(inputs)
-    imageIndexes.forEach((index, position) => { refByIndex.set(index, refs[position]) })
-  }
-  for (let index = 0; index < prepared.length; index += 1) {
-    const item = prepared[index] as PreparedAttachment
-    if (item.mediaType !== undefined) continue
-    const stream = createReadStream(item.request.path)
-    try {
-      const ref = await store.saveFileStream({
-        data: stream,
-        name: item.request.name ?? basename(item.request.path),
-      })
-      refByIndex.set(index, ref)
-    } finally {
-      // A store that rejects before consuming the iterable never closes the
-      // eagerly-opened fd; a consumed stream is already destroyed.
-      stream.destroy()
-    }
-  }
-  const blocks: unknown[] = []
-  const echo: StagedAttachment[] = []
-  for (let index = 0; index < prepared.length; index += 1) {
-    const item = prepared[index] as PreparedAttachment
-    const ref = refByIndex.get(index) as {
-      attachmentId: string
-      name?: string
-      bytes: number
-      mediaType?: BridgeImageMediaType
-    }
-    if (item.mediaType !== undefined) {
-      blocks.push({ type: 'image', attachment: ref })
-      echo.push({
-        name: ref.name ?? basename(item.request.path),
-        kind: 'image',
-        bytes: ref.bytes,
-        mediaType: ref.mediaType ?? item.mediaType,
-        attachmentId: ref.attachmentId,
-      })
-    } else {
-      blocks.push({ type: 'file', attachment: ref })
-      echo.push({
-        name: ref.name ?? basename(item.request.path),
-        kind: 'file',
-        bytes: ref.bytes,
-        attachmentId: ref.attachmentId,
-      })
-    }
-  }
-  return { blocks, echo }
-}
-
 /**
  * The plugin's own version, read lazily from its installed package.json.
  * Deliberately defensive: the `/status` route is a diagnostic nicety, and a
@@ -1042,121 +798,6 @@ function pluginPackageDir(): string | null {
     return fileURLToPath(new URL('..', import.meta.url))
   } catch {
     return null
-  }
-}
-
-/** Hard bound on captured subprocess output (stdout + stderr combined), in
- *  JavaScript string units: a close-enough guard on how much a chatty or
- *  looping child can hold in memory. */
-const EMACS_OUTPUT_CAP = 64 * 1024
-
-/**
- * Fixed timeout for the `emacs --version` preflight, independent of the
- * configured install timeout: a healthy Emacs answers in well under a second,
- * and the preflight must not inherit a generous install budget.
- */
-const EMACS_PREFLIGHT_TIMEOUT_MS = 15_000
-
-/** Fixed timeout for the batch status probe (same reasoning as the preflight). */
-const EMACS_PROBE_TIMEOUT_MS = 60_000
-
-/** Grace between SIGTERM and SIGKILL when a run exceeds its timeout. */
-const EMACS_KILL_GRACE_MS = 5_000
-
-/**
- * Run Emacs (ARGV[0] plus its leading arguments) with ARGS appended, batch or
- * `--version` alike. Never throws: every failure mode settles as an
- * `EmacsRunResult`, so the routes can word it for the card. stdin is ignored
- * (a batch Emacs must never block on input); stdout+stderr are captured
- * together up to `EMACS_OUTPUT_CAP`, after which appending stops — the
- * output is diagnostic, not a success signal, so a flood must not grow
- * memory; past the timeout the child is killed (SIGKILL after a grace), so a
- * wedged Emacs cannot strand the serialized install section.
- */
-function runEmacs(
-  argv: readonly string[],
-  args: readonly string[],
-  timeoutMs: number,
-): Promise<EmacsRunResult> {
-  return new Promise((resolve) => {
-    if (argv.length === 0) {
-      resolve({ kind: 'spawn-error', error: 'empty emacs command' })
-      return
-    }
-    let child: ChildProcess
-    try {
-      child = spawn(argv[0] as string, [...argv.slice(1), ...args], {
-        shell: false,
-        stdio: ['ignore', 'pipe', 'pipe'],
-      })
-    } catch (error: unknown) {
-      // Synchronous spawn failures (invalid arguments); ENOENT arrives via
-      // the 'error' event below.
-      resolve({ kind: 'spawn-error', error: errorMessage(error) })
-      return
-    }
-    let output = ''
-    let timedOut = false
-    let settled = false
-    let killTimer: ReturnType<typeof setTimeout> | undefined
-    const timer = setTimeout(() => {
-      timedOut = true
-      child.kill('SIGTERM')
-      killTimer = setTimeout(() => { child.kill('SIGKILL') }, EMACS_KILL_GRACE_MS)
-    }, timeoutMs)
-    const finish = (result: EmacsRunResult): void => {
-      if (settled) return
-      settled = true
-      clearTimeout(timer)
-      if (killTimer !== undefined) clearTimeout(killTimer)
-      resolve(result)
-    }
-    // Listeners keep draining past the cap so the child never blocks on a
-    // full pipe; only appending stops.
-    const append = (chunk: Buffer): void => {
-      if (output.length >= EMACS_OUTPUT_CAP) return
-      output += chunk.toString('utf8')
-      if (output.length > EMACS_OUTPUT_CAP) output = output.slice(0, EMACS_OUTPUT_CAP)
-    }
-    child.stdout?.on('data', append)
-    child.stderr?.on('data', append)
-    child.on('error', (error: Error & { code?: string }) => {
-      finish({
-        kind: 'spawn-error',
-        error: error.message,
-        ...error.code === undefined ? {} : { code: error.code },
-      })
-    })
-    child.on('close', (code: number | null) => {
-      finish(timedOut
-        ? { kind: 'timeout', output }
-        : { kind: 'ok', exitStatus: code, output })
-    })
-  })
-}
-
-/** Render a parsed Emacs version for the response (`29.1`). */
-function formatEmacsVersion(version: EmacsVersion): string {
-  return `${version.major}.${version.minor}`
-}
-
-async function preflightEmacs(
-  argv: readonly string[],
-): Promise<
-  | { ok: true; version: EmacsVersion }
-  | { ok: false; report: Record<string, unknown> }
-> {
-  const preflight = classifyEmacsVersionProbe(
-    await runEmacs(argv, ['--version'], EMACS_PREFLIGHT_TIMEOUT_MS))
-  if (preflight.ok) return { ok: true, version: preflight.version }
-  return {
-    ok: false,
-    report: {
-      problem: preflight.problem,
-      ...preflight.version === undefined
-        ? {}
-        : { emacsVersion: formatEmacsVersion(preflight.version) },
-    },
   }
 }
 
@@ -2972,30 +2613,7 @@ export function apply(ctx: Context, config?: Config): void {
           const explicitId = optionalSessionId(body)
           // Validate every path before resolving the target, so a doomed
           // request never resumes a cold session as a side effect.
-          const prepared: PreparedAttachment[] = []
-          for (const request of requests) {
-            let info
-            try {
-              info = await stat(request.path)
-            } catch {
-              throw new BridgeError(400, `cannot read attachment: ${request.path}`)
-            }
-            if (!info.isFile()) {
-              throw new BridgeError(400, `attachment is not a regular file: ${request.path}`)
-            }
-            const mediaType = await sniffPathImageType(request.path, info.size)
-            if (mediaType !== undefined && store !== undefined
-              && info.size > store.imageLimits.maxImageBytes) {
-              throw new BridgeError(413, `image exceeds the ${store.imageLimits.maxImageBytes}-byte limit: ${request.path}`)
-            }
-            if (mediaType === undefined && info.size > MAX_ATTACHMENT_FILE_BYTES) {
-              throw new BridgeError(413, `file exceeds the ${MAX_ATTACHMENT_FILE_BYTES}-byte limit: ${request.path}`)
-            }
-            prepared.push({
-              request,
-              ...(mediaType === undefined ? {} : { mediaType }),
-            })
-          }
+          const prepared = await prepareAttachments(requests, store)
           // Refuse before resolving, so a doomed prompt does not resume an
           // archived session as a side effect; the post-resolution check
           // covers a session archived in the race after resolution (the

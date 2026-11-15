@@ -24,7 +24,6 @@ import {
   MAX_INFLIGHT_PIECES_PER_BLOCK,
   MAX_INFLIGHT_REASONING_BYTES,
   MAX_INFLIGHT_SESSIONS,
-  parseDetailItemQuery,
   turnActivity,
   turnBoundaries,
   withActivityTurns,
@@ -32,6 +31,7 @@ import {
   type SessionEventLike,
   type TurnActivity,
 } from '../src/logic.ts'
+import { parseDetailItemQuery } from '../src/detail-query.ts'
 import { log } from './event-log.ts'
 
 // -- Fixtures ----------------------------------------------------------------

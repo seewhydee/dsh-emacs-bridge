@@ -68,9 +68,6 @@ async function depositOutbox(sessionId: string, messageId: string): Promise<void
   if (!ok) throw new Error(`HTTP ${status}`)
 }
 
-/** The live EventSource, so an HMR reload can drop the previous one. */
-let draftSource: EventSource | null = null
-
 /** Push one draft onto a session's composer, if that session is loaded in the browser. */
 function applyDraft(ctx: ClientContext, sessionId: string, text: string): void {
   const actx = ctx.sessions.scope(sessionId as SessionId)
@@ -191,57 +188,63 @@ function noteResolvedApproval(
   dismissResolvedInteractions(ctx)
 }
 
-/** Subscribe to the composer-draft SSE stream and apply drafts to the target session. */
-async function connectDraftStream(ctx: ClientContext): Promise<void> {
-  let token: string
-  try {
-    token = await getToken()
-  } catch (error) {
+/** Own one composer-draft SSE stream until its plugin effect is disposed. */
+function connectDraftStream(ctx: ClientContext): () => void {
+  let disposed = false
+  let source: EventSource | null = null
+  void getToken().then((token) => {
+    if (disposed) return
+    // `purpose=draft` identifies this connection as the browser's draft stream:
+    // the host's answerers must not count it as an Emacs client (this stream
+    // exists whenever the web UI is open and never answers). It does receive
+    // the host's resolution frames, which is how a question or an approval
+    // answered in Emacs dismisses the web UI's own panel.
+    source = new EventSource(
+      `${location.origin}/dsh-bridge/events?token=${encodeURIComponent(token)}&purpose=draft`)
+    source.addEventListener('message', (event: MessageEvent<string>) => {
+      if (disposed) return
+      let payload: {
+        kind?: unknown; sessionId?: unknown; text?: unknown; questionIds?: unknown
+        toolName?: unknown; callId?: unknown
+      }
+      try {
+        payload = JSON.parse(event.data) as typeof payload
+      } catch {
+        return
+      }
+      if (payload.kind === 'ask-user-resolved' && typeof payload.sessionId === 'string') {
+        // The frame carries the asker's question ids as plain strings (unlike a
+        // pending interaction's `questions`, which are objects).
+        const questionIds = Array.isArray(payload.questionIds)
+          ? payload.questionIds.filter((id): id is string => typeof id === 'string')
+          : []
+        noteResolvedQuestion(ctx, payload.sessionId, questionIds)
+        return
+      }
+      if (payload.kind === 'approval-resolved' && typeof payload.sessionId === 'string') {
+        // The frame carries the asker's own tool identity; there is no shared
+        // bridge-minted id, so the panel matches on session + tool (+ call id).
+        const toolName = typeof payload.toolName === 'string' ? payload.toolName : ''
+        const callId = typeof payload.callId === 'string' ? payload.callId : undefined
+        noteResolvedApproval(ctx, payload.sessionId, toolName, callId)
+        return
+      }
+      if (payload.kind !== 'draft' || typeof payload.sessionId !== 'string' || typeof payload.text !== 'string') return
+      applyDraft(ctx, payload.sessionId, payload.text)
+    })
+  }).catch((error: unknown) => {
+    if (disposed) return
     // No token, no stream — the draft push stays unavailable until a vend
     // succeeds. Fire-and-forget.
     // eslint-disable-next-line no-console
     console.error('[dsh-bridge] draft stream unavailable', error)
-    return
-  }
-  draftSource?.close()
-  // `purpose=draft` identifies this connection as the browser's draft stream:
-  // the host's answerers must not count it as an Emacs client (this stream
-  // exists whenever the web UI is open and never answers). It does receive
-  // the host's resolution frames, which is how a question or an approval
-  // answered in Emacs dismisses the web UI's own panel.
-  const source = new EventSource(
-    `${location.origin}/dsh-bridge/events?token=${encodeURIComponent(token)}&purpose=draft`)
-  draftSource = source
-  source.addEventListener('message', (event: MessageEvent<string>) => {
-    let payload: {
-      kind?: unknown; sessionId?: unknown; text?: unknown; questionIds?: unknown
-      toolName?: unknown; callId?: unknown
-    }
-    try {
-      payload = JSON.parse(event.data) as typeof payload
-    } catch {
-      return
-    }
-    if (payload.kind === 'ask-user-resolved' && typeof payload.sessionId === 'string') {
-      // The frame carries the asker's question ids as plain strings (unlike a
-      // pending interaction's `questions`, which are objects).
-      const questionIds = Array.isArray(payload.questionIds)
-        ? payload.questionIds.filter((id): id is string => typeof id === 'string')
-        : []
-      noteResolvedQuestion(ctx, payload.sessionId, questionIds)
-      return
-    }
-    if (payload.kind === 'approval-resolved' && typeof payload.sessionId === 'string') {
-      // The frame carries the asker's own tool identity; there is no shared
-      // bridge-minted id, so the panel matches on session + tool (+ call id).
-      const toolName = typeof payload.toolName === 'string' ? payload.toolName : ''
-      const callId = typeof payload.callId === 'string' ? payload.callId : undefined
-      noteResolvedApproval(ctx, payload.sessionId, toolName, callId)
-      return
-    }
-    if (payload.kind !== 'draft' || typeof payload.sessionId !== 'string' || typeof payload.text !== 'string') return
-    applyDraft(ctx, payload.sessionId, payload.text)
   })
+  return () => {
+    disposed = true
+    source?.close()
+    dismissRecords.length = 0
+    approvalDismissRecords.length = 0
+  }
 }
 
 /**
@@ -302,5 +305,5 @@ export function apply(ctx: ClientContext): void {
       dispose()
     }
   })
-  void connectDraftStream(ctx)
+  ctx.effect(() => connectDraftStream(ctx), 'dsh-bridge: composer-draft stream')
 }

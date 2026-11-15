@@ -29,7 +29,7 @@ import {
   normalizeEmacsCommand,
   parseEmacsVersionOutput,
   resolveBundledEmacsPackage,
-} from '../src/logic.ts'
+} from '../src/emacs-logic.ts'
 
 describe('normalizeEmacsCommand', () => {
   it('falls back to plain emacs for nil, empty, and blank values', () => {

@@ -206,6 +206,7 @@ export function renderFileChanges(
   const out = new BoundedText(options.maxOutputBytes, options.maxOutputLines)
   const rendered: RenderedFileChange[] = []
   for (const file of files) {
+    if (out.truncated) break
     let render: DiffRenderStatus = 'ok'
     let added = 0
     let removed = 0
@@ -219,12 +220,16 @@ export function renderFileChanges(
     }
     if (file.status === 'applied') {
       out.line('  Applied per-call fragments (display only; not an appliable patch):')
-      file.fragments.forEach((fragment, index) => {
+      for (const [index, fragment] of file.fragments.entries()) {
+        if (out.truncated) {
+          truncated = true
+          break
+        }
         const result = renderFragment(fragment, options)
         if (result.status === 'too-large') {
           render = 'too-large'
           out.line(`  fragment ${index + 1}: too large to diff`)
-          return
+          continue
         }
         if (result.status === 'coarse' && render === 'ok') render = 'coarse'
         added += result.added
@@ -236,7 +241,7 @@ export function renderFileChanges(
             break
           }
         }
-      })
+      }
     } else {
       const note = statusNote(file.status)
       if (note !== '') out.line(note)

@@ -14,23 +14,31 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-import { describe, expect, it } from 'vitest'
+import { structuredPatch } from 'diff'
+import { describe, expect, it, vi } from 'vitest'
 import {
   buildDetailItem,
   buildDetailItemProjection,
   buildDetailItemResponse,
-  parseDetailItemQuery,
   turnBoundaries,
   DETAIL_FULL_LOAD_BYTES,
   MAX_DETAIL_FILE_CHANGES,
   MAX_DETAIL_FILE_FRAGMENTS,
   type DetailFileChange,
-  type DetailItemKind,
-  type DetailQueryParams,
   type SessionEventLike,
 } from '../src/logic.ts'
+import {
+  parseDetailItemQuery,
+  type DetailItemKind,
+  type DetailQueryParams,
+} from '../src/detail-query.ts'
 import { renderFileChange, renderFileChanges } from '../src/detail.ts'
 import { log } from './event-log.ts'
+
+vi.mock('diff', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('diff')>()
+  return { ...actual, structuredPatch: vi.fn(actual.structuredPatch) }
+})
 
 // -- Fixtures ----------------------------------------------------------------
 
@@ -761,5 +769,16 @@ describe('renderFileChanges', () => {
     expect(rendered.truncated).toBe(true)
     expect(Buffer.byteLength(rendered.text, 'utf8')).toBeLessThan(120)
     expect(rendered.text).toContain('truncated')
+  })
+
+  it('stops diffing fragments after the output bound trips', () => {
+    const before = vi.mocked(structuredPatch).mock.calls.length
+    const rendered = renderFileChanges([applied([
+      { oldText: 'a', newText: 'b' },
+      { oldText: 'c', newText: 'd' },
+      { oldText: 'e', newText: 'f' },
+    ])], { maxOutputLines: 6 })
+    expect(rendered.truncated).toBe(true)
+    expect(vi.mocked(structuredPatch).mock.calls.length - before).toBe(1)
   })
 })
