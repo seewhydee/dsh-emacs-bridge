@@ -103,9 +103,16 @@ interface UiSessionStatusLike {
  * Minimal face of the client UI-session service: the per-session status
  * registry. One status carries the session's highest-precedence pending
  * interaction, which is the only fact this plugin consumes.
+ *
+ * `sessionStatus` is a nested service (`uiSession.sessionStatus`) that a
+ * separate client plugin provides; a harness generation before that split
+ * carried it on `uiSession` itself. Either way it stays optional here: a
+ * profile that mounts `uiSession` without the status plugin must not fault
+ * this plugin, it just leaves Emacs-side dismissals to the user closing the
+ * panel.
  */
 interface UiSessionService {
-  readonly sessionStatus: {
+  readonly sessionStatus?: {
     getSnapshot(): ReadonlyMap<string, UiSessionStatusLike>
     subscribe(listener: () => void): () => void
   }
@@ -137,8 +144,9 @@ function dismissResolvedInteractions(ctx: ClientContext): void {
   expireDismissRecords(dismissRecords, now, DISMISS_RECORD_TTL_MS)
   expireDismissRecords(approvalDismissRecords, now, DISMISS_RECORD_TTL_MS)
   const uiSession = ctx.get('uiSession') as UiSessionService | undefined
-  if (uiSession === undefined) return
-  for (const status of uiSession.sessionStatus.getSnapshot().values()) {
+  const sessionStatus = uiSession?.sessionStatus
+  if (sessionStatus === undefined) return
+  for (const status of sessionStatus.getSnapshot().values()) {
     const pending = status.pendingInteraction
     if (pending === undefined) continue
     if (pending.kind === 'approval') {
@@ -260,9 +268,9 @@ export function apply(ctx: ClientContext): void {
   // optional collaborator here — without it, the web panel simply is not
   // dismissed by Emacs (the user can still close it).
   ctx.inject(['uiSession'], (scope: ClientContext) => {
-    const uiSession = scope.get('uiSession') as UiSessionService | undefined
-    if (uiSession === undefined) return
-    scope.effect(() => uiSession.sessionStatus.subscribe(() => {
+    const sessionStatus = (scope.get('uiSession') as UiSessionService | undefined)?.sessionStatus
+    if (sessionStatus === undefined) return
+    scope.effect(() => sessionStatus.subscribe(() => {
       dismissResolvedInteractions(scope)
     }))
   })

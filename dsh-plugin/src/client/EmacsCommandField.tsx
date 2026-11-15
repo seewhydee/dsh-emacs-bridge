@@ -98,7 +98,9 @@ export function EmacsCommandField({ view, form, t }: EmacsCommandFieldProps) {
 
   const save = () => {
     if (!dirty || timeoutInvalid || saving) return
-    const ops: ({ op: 'set'; path: string[]; value: unknown } | { op: 'unset'; path: string[] })[] = []
+    // Both fields write JSON scalars; the form's op view types `value` as a
+    // JSON value, so never widen this to `unknown`.
+    const ops: ({ op: 'set'; path: string[]; value: string | number } | { op: 'unset'; path: string[] })[] = []
     if (draftCommand !== null) {
       ops.push(draftCommand.trim() === ''
         ? { op: 'unset', path: ['emacsCommand'] }
