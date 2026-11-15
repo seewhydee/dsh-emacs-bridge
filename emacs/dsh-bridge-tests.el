@@ -2997,13 +2997,106 @@ render."
       (should-not (text-property-any (point-min) (point-max)
                                      'dsh-bridge-turn-marker t)))))
 
+(ert-deftest dsh-bridge-view-fill-tails-a-non-selected-window ()
+  "A DSH-View displayed in a non-selected window still follows its tail.
+Each window has its own point, so the fill's `goto-char' moves only the
+buffer's point.  A window parked at the end, or anywhere on the terminal
+furniture, must chase the new tail; a window parked in the body keeps its
+place."
+  (let* ((seg1 (dsh-bridge-test--view-segment "first" 7001000 1))
+         (seg2 (dsh-bridge-test--view-segment "second" 7002000 2))
+         (one (dsh-bridge-test--view-turn 7 7000000 (list seg1)))
+         (two (dsh-bridge-test--view-turn 7 7000000 (list seg1 seg2)))
+         (dsh-bridge--turns-cache (dsh-bridge-test--view-cache (list two one)))
+         (view (generate-new-buffer " *dsh-bridge-view-window*"))
+         (other (generate-new-buffer " *dsh-bridge-other-window*"))
+         (config (current-window-configuration))
+         (view-window nil))
+    (unwind-protect
+        (progn
+          (delete-other-windows)
+          (set-window-buffer (selected-window) view)
+          (with-current-buffer view
+            (dsh-bridge-view-mode)
+            (dsh-bridge--view-fill "s1" one nil t)
+            (setq-local dsh-bridge--view-follow t)
+            (goto-char (point-max)))
+          (setq view-window (selected-window))
+          ;; Display something else in a second, selected window.  The
+          ;; view's window keeps the tail as its own saved point.
+          (select-window (split-window))
+          (set-window-buffer (selected-window) other)
+          (should-not (eq view-window (selected-window)))
+          (should (= (window-point view-window)
+                     (with-current-buffer view (point-max))))
+          ;; Appending a segment moves the window's point to the new tail.
+          (with-current-buffer view
+            (dsh-bridge--view-fill "s1" two nil t t))
+          (should (= (window-point view-window)
+                     (with-current-buffer view (point-max))))
+          ;; Point anywhere on the "(continuing...)" furniture follows too.
+          (set-window-point view-window
+                            (with-current-buffer view (1- (point-max))))
+          (with-current-buffer view
+            (dsh-bridge--view-fill "s1" two nil t t))
+          (should (= (window-point view-window)
+                     (with-current-buffer view (point-max))))
+          ;; A window parked in the body is not dragged to the tail.
+          (set-window-point view-window 3)
+          (with-current-buffer view
+            (dsh-bridge--view-fill "s1" two nil t t))
+          (should (= (window-point view-window) 3)))
+      (set-window-configuration config)
+      (kill-buffer view)
+      (kill-buffer other))))
+
+(ert-deftest dsh-bridge-view-fill-rebuild-tails-a-non-selected-window ()
+  "A full rebuild leaves a non-selected tail window at the new tail.
+`erase-buffer' collapses every marker to `point-min', so the rebuild has
+to remember which displayed windows were parked on the tail; the
+buffer's `goto-char' cannot reach them."
+  (let* ((seg1 (dsh-bridge-test--view-segment "first" 7001000 1))
+         (one (dsh-bridge-test--view-turn 7 7000000 (list seg1)))
+         (other-turn (dsh-bridge-test--view-turn
+                      8 8000000
+                      (list (dsh-bridge-test--view-segment "other" 8001000 1))))
+         (dsh-bridge--turns-cache
+          (dsh-bridge-test--view-cache (list other-turn one)))
+         (view (generate-new-buffer " *dsh-bridge-view-window*"))
+         (other (generate-new-buffer " *dsh-bridge-other-window*"))
+         (config (current-window-configuration))
+         (view-window nil))
+    (unwind-protect
+        (progn
+          (delete-other-windows)
+          (set-window-buffer (selected-window) view)
+          (with-current-buffer view
+            (dsh-bridge-view-mode)
+            (dsh-bridge--view-fill "s1" one nil t)
+            (setq-local dsh-bridge--view-follow t)
+            (goto-char (point-max)))
+          (setq view-window (selected-window))
+          (select-window (split-window))
+          (set-window-buffer (selected-window) other)
+          ;; A different turn rebuilds the body instead of splicing it.
+          (with-current-buffer view
+            (dsh-bridge--view-fill "s1" other-turn nil t t))
+          (should (= (window-point view-window)
+                     (with-current-buffer view (point-max))))
+          (select-window view-window)
+          (should (= (point) (point-max))))
+      (set-window-configuration config)
+      (kill-buffer view)
+      (kill-buffer other))))
+
 (ert-deftest dsh-bridge-view-fill-falls-back-on-divergence ()
   "Every recorded-identity mismatch rebuilds the whole body instead of splicing.
 A text marker planted in the body survives a splice and collapses to
 `point-min' on a rebuild, which distinguishes the two.  The record holds the
 length and the boundary identities, so a middle insertion or an edit inside
-the body is not detected; a recorded boundary that no longer matches, and a
-terminal suffix whose marker property does not reach `point-max', are."
+the body is not detected; a recorded boundary that no longer matches is.
+Text appended after the terminal suffix is not a reason to rebuild: the
+buffer is renderer-owned, so the splice deletes it with the suffix."
   (let* ((seg1 (dsh-bridge-test--view-segment "first" 7001000 1))
          (seg2 (dsh-bridge-test--view-segment "second" 7002000 2))
          (one (dsh-bridge-test--view-turn 7 7000000 (list seg1)))
@@ -3046,14 +3139,15 @@ terminal suffix whose marker property does not reach `point-max', are."
           (should (refill gap))
           (should (equal (marker-position probe) (point-min)))
           (set-marker probe nil))
-        ;; A marker region that does not reach the end -> rebuild.
+        ;; Text after the suffix is deleted with it, not a reason to
+        ;; rebuild.
         (refill one)
         (let ((probe (copy-marker 3)))
           (let ((inhibit-read-only t))
             (goto-char (point-max))
             (insert "stray"))
           (should (refill two))
-          (should (equal (marker-position probe) (point-min)))
+          (should (equal (marker-position probe) 3))
           (set-marker probe nil))
         ;; A different turn -> rebuild.
         (refill one)

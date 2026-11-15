@@ -4734,6 +4734,42 @@ entries were pending, only the latest is shown."
 	(when (alist-get 'overflowed alist)
 	  (message "dsh-bridge: old messages dropped (outbox overflow)")))))))
 
+(defun dsh-bridge--view-suffix-start ()
+  "Return the start of this DSH-View buffer's terminal suffix, or nil.
+The suffix is the last run of text with the `dsh-bridge-turn-marker'
+property; any text after may be deleted when the buffer updates."
+  (let ((start (previous-single-property-change
+		(point-max) 'dsh-bridge-turn-marker)))
+    ;; A change to nil means the last marked run stopped before
+    ;; `point-max'; step back to where that run began.
+    (and start
+	 (null (get-text-property start 'dsh-bridge-turn-marker))
+	 (setq start (previous-single-property-change
+		      start 'dsh-bridge-turn-marker)))
+    (cond (start start)
+	  ;; No change before `point-max': either the whole buffer is
+	  ;; marked (suffix starts at `point-min'), or nothing is.
+	  ((and (> (point-max) (point-min))
+		(get-text-property (point-min)
+				   'dsh-bridge-turn-marker))
+	   (point-min)))))
+
+(defun dsh-bridge--view-tail-windows (&optional suffix-start)
+  "Return non-selected windows tailing the current DSH-View buffer.
+A window is considered to be tailing the buffer if it is at `point-max',
+or anywhere on a terminal suffix like \"(continuing...)\".
+
+SUFFIX-START, if non-nil, should be a number (the precomputed start of
+the suffix) or t (meaning to search for the start of the suffix)."
+  (if (eq suffix-start t)
+      (setq suffix-start (dsh-bridge--view-suffix-start)))
+  (let ((threshold (or suffix-start (point-max))))
+    (seq-filter
+     (lambda (window)
+       (and (not (eq window (selected-window)))
+	    (>= (window-point window) threshold)))
+     (get-buffer-window-list (current-buffer) nil t))))
+
 (defun dsh-bridge--view-splice-turn (session-id turn epoch items)
   "Try to splice new content into the current DSH-View buffer.
 SESSION-ID is the session id, TURN is the turn record, EPOCH is the
@@ -4750,23 +4786,7 @@ call line to settle."
     ;; Check if we can splice: the buffer must hold a prefix of the
     ;; new turn, with the same activity state.
     (let* ((prov dsh-bridge--view-provenance)
-	   ;; If any suffix exists, it should be demarcated by a
-	   ;; non-nil `dsh-bridge-turn-marker' property (covering the
-	   ;; separator, changed-files list, and furniture text),
-	   ;; extending up to point-max.
-	   ;; `previous-single-property-change' returns nil when the
-	   ;; property starts at `point-min' and runs to the end, so
-	   ;; recognize that case explicitly.
-	   (suffix-start
-	    (or (previous-single-property-change
-		 (point-max) 'dsh-bridge-turn-marker)
-		(and (> (point-max) (point-min))
-		     (get-text-property (point-min)
-					'dsh-bridge-turn-marker)
-		     (point-min))))
-	   (suffix (and suffix-start
-			(get-text-property suffix-start
-					   'dsh-bridge-turn-marker)))
+	   (suffix-start (dsh-bridge--view-suffix-start))
 	   (nold (plist-get prov :length))
 	   ;; Total length is implied by ITEMS; the boundary identities
 	   ;; below detect a displaced window.
@@ -4787,14 +4807,14 @@ call line to settle."
 			  (equal (plist-get prov :last)
 				 (dsh-bridge--view-item-key
 				  (nth (1- nold) items)))))
-		 (dsh-bridge--view-splice-settleable-p items nold)
-		 (or (null suffix-start) suffix))
+		 (dsh-bridge--view-splice-settleable-p items nold))
 	;; Ready: do the splice.
-	(let (tail-p)
+	(let ((tail-windows (dsh-bridge--view-tail-windows suffix-start))
+	      tail-p)
 	  (let ((inhibit-read-only t))
 	    ;; Delete the suffix.  If point was in the suffix (or
 	    ;; after, at point-max), this leaves it at point-max.
-	    (if suffix (delete-region suffix-start (point-max)))
+	    (if suffix-start (delete-region suffix-start (point-max)))
 	    (setq tail-p (= (point) (point-max)))
 	    ;; Append the new items and reinsert the suffix at the end,
 	    ;; all under `inhibit-read-only' and inside the excursion so
@@ -4805,7 +4825,11 @@ call line to settle."
 	  (setq-local dsh-bridge--view-provenance
 		      (dsh-bridge--view-provenance-make session-id
 							epoch turn items))
-	  (if tail-p (goto-char (point-max)))
+	  (when tail-p (goto-char (point-max)))
+	  ;; Follow the tail in all windows displaying the buffer, not
+	  ;; just the selected window.
+	  (dolist (window tail-windows)
+	    (set-window-point window (point-max)))
 	  t)))))
 
 (defun dsh-bridge--view-fill (session-id turn &optional cwd no-turns-refresh splice)
@@ -4851,19 +4875,27 @@ match the cached turn data, do a full re-render instead."
     (unless (and splice
 		 (dsh-bridge--view-splice-turn session-id turn
 					       epoch items))
-      ;; ... or fill from scratch.
-      (let ((inhibit-read-only t))
-	(erase-buffer)
-	(if (null turn)
-	    (setq-local dsh-bridge--view-provenance nil)
-	  (dsh-bridge--view-render items)
-	  (dsh-bridge--view-insert-suffix turn session-id)
-	  (setq-local dsh-bridge--view-provenance
-		      (dsh-bridge--view-provenance-make
-		       session-id epoch turn items))))
-      (goto-char (if (and dsh-bridge--view-follow splice)
-		     (point-max)
-		   (point-min)))))
+      ;; ... or fill from scratch.  Record the windows parked on the
+      ;; tail first, since erasing the buffer collapses their point
+      ;; markers to `point-min', and a window that is not selected has
+      ;; a point of its own that `goto-char' does not reach.
+      (let ((tail-windows (and dsh-bridge--view-follow splice
+			       (dsh-bridge--view-tail-windows t))))
+	(let ((inhibit-read-only t))
+	  (erase-buffer)
+	  (if (null turn)
+	      (setq-local dsh-bridge--view-provenance nil)
+	    (dsh-bridge--view-render items)
+	    (dsh-bridge--view-insert-suffix turn session-id)
+	    (setq-local dsh-bridge--view-provenance
+			(dsh-bridge--view-provenance-make
+			 session-id epoch turn items))))
+	(if (and dsh-bridge--view-follow splice)
+	    (progn
+	      (goto-char (point-max))
+	      (dolist (window tail-windows)
+		(set-window-point window (point-max))))
+	  (goto-char (point-min))))))
   (setq header-line-format dsh-bridge--view-header-line-format)
   (dsh-bridge--view-ticker-ensure))
 
