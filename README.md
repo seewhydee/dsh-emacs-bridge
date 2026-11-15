@@ -326,34 +326,10 @@ loopback peers and same-origin pages.  Any third party with access to
 the token can do everything this Emacs package can (send prompts, read
 session logs, answer queries and approval requests, etc.).
 
-Request bodies are capped at 1 MiB, and messages waiting for Emacs sit
-in a bounded outbox.  The turn activity reporter, `/turns`, carries at
-most 500 of the latest activity entries per turn, and activity for at
-most the newest 40 turns; it remains summary-only.  The optional detail
-inspector's read-only `/details/item` route is the one place that serves
-complete committed reasoning, raw tool arguments, result content, and
-durable per-call diff fragments.  It also serves the retained prefix of
-a still-running reasoning block named by its opaque in-flight selector.
-The host keeps at most 1 MiB per active attempt across its blocks, at
-most 8 session records (least-recently-used eviction), and only metadata
-for the 8 most recent settled attempts.  A capped block is reported as
-truncated; `full=1` cannot recover discarded bytes.  The route is
-loopback-only, bearer-authenticated, and non-resuming.  It is fetched
-only for an activity item at point, an explicit inspector refresh, or a
-confirmed full-load request; detail text never travels over SSE.
-An item above the 256 KiB confirmation threshold withholds its text on
-the first response and asks before the inspector fetches it whole;
-diffs are bounded to 256 KiB of input per side and 128 KiB of rendered
-text.  Provider `AUTH` failure diagnostics remain suppressed exactly
-as they are in `/turns`; malformed or unreadable diff metadata is
-labeled `unavailable` rather than decoded loosely.
-
 The *Install Emacs package* button in the plugin configuration card is
-the one place that spawns a process.  Clicking it runs `emacs` in
-batch mode, with fixed arguments, to install the bundled versioned
-package directory (the baseline library, the optional companion, and
-the generated package descriptor) into the [Emacs packaging
-system](https://www.gnu.org/software/emacs/manual/html_node/emacs/Packages.html).
+the only place in this package that spawns a process.  Clicking it
+runs Emacs in batch mode, with fixed arguments, to install the
+bundled `dsh-bridge` Emacs library via the [Emacs packaging system](https://www.gnu.org/software/emacs/manual/html_node/emacs/Packages.html).
 
 ## License
 
