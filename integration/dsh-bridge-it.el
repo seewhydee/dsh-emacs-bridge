@@ -1602,5 +1602,81 @@ the stream's connect, since the frames are not replayed."
                       (dsh-bridge--header-goal-cell session-id))
                      "paused: frame it")))))
 
+(ert-deftest dsh-bridge-it-queue-history ()
+  "The prompt history surfaces a live queue, and steer/withdraw act by id.
+A hanging turn parks two queued prompts and one steering prompt; M-p from
+the draft reaches the prelude, C-c C-w withdraws the first queued prompt
+while keeping its text as the draft, and C-c C-t steers the second.  The
+host's /prompts response proves the exact occurrences were mutated."
+  (dsh-bridge-it--with-fixture
+    (dsh-bridge-it--script-mock (vector (list :kind "hang")))
+    (let ((session-id (dsh-bridge-it--create-session
+                       (expand-file-name "../" dsh-bridge-it--directory))))
+      (dsh-bridge-it--send-text session-id "Never finish.")
+      ;; Wait until the hanging turn is running, so later sends park.
+      (should (dsh-bridge-it--wait
+               (lambda ()
+                 (let* ((rows (alist-get 'sessions
+                                         (dsh-bridge-it--get "/dsh-bridge/sessions")))
+                        (row (seq-find
+                              (lambda (candidate)
+                                (equal (alist-get 'id candidate) session-id))
+                              rows)))
+                   (and row (eq (alist-get 'running row) t))))
+               20000))
+      (with-current-buffer (dsh-bridge--prompt-buffer session-id)
+        (dsh-bridge-send-text "first queued")
+        (dsh-bridge-send-text "second queued")
+        (dsh-bridge-send-text "steer me" nil nil 'steer))
+      ;; The prelude is steering first, then queued FIFO.
+      (with-current-buffer (dsh-bridge--prompt-buffer session-id)
+        (dsh-bridge-prompt-previous-history)
+        (should (equal (buffer-string) "steer me"))
+        (should (string-match-p
+                 "steering"
+                 (substring-no-properties (dsh-bridge--prompt-history-position))))
+        (dsh-bridge-prompt-previous-history)
+        (should (equal (buffer-string) "first queued"))
+        (should (string-match-p
+                 "queued 1/2"
+                 (substring-no-properties (dsh-bridge--prompt-history-position))))
+        (dsh-bridge-prompt-previous-history)
+        (should (equal (buffer-string) "second queued"))
+        (should (string-match-p
+                 "queued 2/2"
+                 (substring-no-properties (dsh-bridge--prompt-history-position))))
+        ;; Withdraw the first queued prompt; its text stays as the draft.
+        (dsh-bridge-prompt-next-history)
+        (should (equal (buffer-string) "first queued"))
+        (cl-letf (((symbol-function 'yes-or-no-p) (lambda (_prompt) t)))
+          (dsh-bridge-prompt-withdraw))
+        (should (equal (buffer-string) "first queued"))
+        (should (null dsh-bridge--prompt-history-index))
+        (should (buffer-modified-p))
+        ;; Its queue count drops; the steering count is unchanged.
+        (should (equal (cdr (assoc session-id dsh-bridge--session-queue-counts))
+                       '(1 . 1)))
+        ;; The refreshed prelude now has one queued prompt left.
+        (dsh-bridge-prompt-previous-history)
+        (should (equal (buffer-string) "steer me"))
+        (dsh-bridge-prompt-previous-history)
+        (should (equal (buffer-string) "second queued"))
+        (dsh-bridge-prompt-steer)
+        (should (equal (cdr (assoc session-id dsh-bridge--session-queue-counts))
+                       '(0 . 2)))
+        (should (string-match-p
+                 "steering"
+                 (substring-no-properties (dsh-bridge--prompt-history-position)))))
+      ;; The host agrees: the first queued text is gone and both survivors
+      ;; are steering.
+      (let ((body (dsh-bridge-it--get
+                   (format "/dsh-bridge/prompts?sessionId=%s" session-id))))
+        (should (equal (mapcar (lambda (item) (alist-get 'text item))
+                               (alist-get 'pending body))
+                       '("steer me" "second queued")))
+        (should (equal (mapcar (lambda (item) (alist-get 'placement item))
+                               (alist-get 'pending body))
+                       '("steering" "steering")))))))
+
 (provide 'dsh-bridge-it)
 ;;; dsh-bridge-it.el ends here

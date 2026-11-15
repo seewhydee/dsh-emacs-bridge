@@ -500,6 +500,13 @@ Used by the plan cell in DSH-View and DSH-Prompt header lines and by
 the `Plan mode' row of the DSH-Describe report."
   :group 'dsh-bridge)
 
+(defface dsh-bridge-queue-face
+  '((t :inherit font-lock-keyword-face))
+  "Face for pending-prompt indicators.
+Used by the queued/steering cells and the per-entry state badge in the
+DSH-Prompt header line."
+  :group 'dsh-bridge)
+
 (defface dsh-bridge-goal-face
   '((t :inherit font-lock-constant-face))
   "Face for goal indicators.
@@ -681,6 +688,12 @@ Each entry has the form (SESSION-ID . (USED-TOKENS . CONTEXT-WINDOW)).")
 
 (defvar dsh-bridge--sessions-compacting nil
   "List of session ids currently being compacted.")
+
+(defvar dsh-bridge--session-queue-counts nil
+  "Alist of (SESSION-ID . (QUEUED . STEERING)) pending-prompt counts.
+Seeded by `GET /sessions/queue' when a DSH-Prompt buffer opens, updated
+by `queue-changed' frames, and read only by the header lines, which do
+no HTTP of their own.")
 
 (defvar dsh-bridge--session-plan nil
   "Alist of (SESSION-ID . PLAN) entries caching session plans.
@@ -1120,6 +1133,9 @@ Currently supported events are:
 - `approval-resolved': retire a pending approval (allowed, rejected, or
   cancelled).
 - `compaction': observe a compaction lifecycle edge.
+- `queue-changed': update the cached pending-prompt counts, redraw the
+  headers, and schedule a pending-history refetch for a prompt buffer at a
+  draft.  A walking buffer's text is never touched.
 - `sessions-changed': update existing DSH-Sessions buffers."
   (when (seq-some (lambda (e) (equal (alist-get 'kind e) "sessions-changed"))
 		  events)
@@ -1183,6 +1199,12 @@ Currently supported events are:
 	  (run-at-time 0 nil #'dsh-bridge--turns-changed id)))
        ((equal kind "compaction")
 	(dsh-bridge--compaction-notify id event))
+       ((equal kind "queue-changed")
+	(let ((queued (alist-get 'queued event))
+	      (steering (alist-get 'steering event)))
+	  (when (and (numberp queued) (numberp steering))
+	    (dsh-bridge--queue-counts-store id queued steering)
+	    (dsh-bridge--prompt-pending-schedule id))))
        ((equal kind "context")
 	(let ((used (alist-get 'usedTokens event))
 	      (window (alist-get 'contextWindow event)))
@@ -2182,6 +2204,19 @@ PROMPTS is a list of prompt strings, newest first.  This is a local
 cache for the authoritative DSH-side history; each entry is updated when
 `dsh-bridge--prompt-history-refresh' is called for that session.")
 
+(defvar dsh-bridge--prompt-pending nil
+  "Alist of (SESSION-ID . ENTRIES) for the pending prompt queue.
+ENTRIES is the `pending' array of the session's last `GET /prompts'
+response, in action order: steering entries first, then queued entries
+in FIFO order (the next to run first).  Each entry is a JSON alist with
+`id', `placement', `text', `textOnly', `attachments', and, for queued
+entries, `position'.")
+
+(defvar dsh-bridge--prompt-pending-timers nil
+  "Alist of (SESSION-ID . TIMER) for deferred pending-history refetches.
+A `queue-changed' frame schedules one per session so a prompt buffer at
+a draft picks up the new pending list without blocking the SSE filter.")
+
 (defvar dsh-bridge--last-sent nil
   "Alist of (SESSION-ID . (TEXT . TS)) for the most recent prompt send.
 TEXT is the sent prompt; TS is the float-time it was sent.  This
@@ -2189,47 +2224,152 @@ variable is updated by `dsh-bridge--prompt-history-record-send', and
 used by the prompt header and the resend guard.	 A composer draft push
 is not recorded, so the guard never mistakes one for a resend.")
 
-;; Prompt history is tracked with two buffer-local variables.
+;; Prompt history is tracked with four buffer-local variables.
 ;; Whenever `dsh-bridge--prompt-session' is reset, they must be reset.
 
 (defvar-local dsh-bridge--prompt-history-index nil
-  "Index into the current buffer's prompt list (newest first).
+  "Index into the current buffer's prompt walk.
+The pending prelude is in action order; committed prompts are newest first.
 A nil value means the buffer holds a draft (i.e., not history).")
 
 (defvar-local dsh-bridge--prompt-draft nil
   "Unsent buffer content saved when browsing prompt history, or nil.")
 
+(defvar-local dsh-bridge--prompt-history-session nil
+  "The host-resolved session id of the current prompt history walk.
+Set by `dsh-bridge--prompt-history-refresh' from the response's
+`sessionId'.  It differs from `dsh-bridge--prompt-session' when the buffer
+follows the pinned target or the host resolves last-active; the history
+cache and the pending prelude are keyed by it.")
+
+(defvar-local dsh-bridge--prompt-pending-snapshot nil
+  "Pending entries captured for this buffer's current history walk.
+A walk uses this private snapshot rather than the session-wide cache, so
+a refresh in another prompt buffer cannot change which message id the
+shown text represents.  This value is consulted only while walking.")
+
+(defun dsh-bridge--prompt-history-id ()
+  "Return the session id the current buffer's prompt history is keyed by.
+Prefer the host-resolved id from the last fetch, then the buffer's explicit
+binding, the pinned target, and the last-active prediction used when the
+prompt metadata is seeded."
+  (or dsh-bridge--prompt-history-session
+      dsh-bridge--prompt-session
+      dsh-bridge-pinned-target
+      (car-safe dsh-bridge--last-resolved-active)
+      (dsh-bridge--cache-last-active)))
+
+(defun dsh-bridge--buffer-prompt-pending ()
+  "Return the pending queue entries for the current prompt buffer, or nil.
+A walk uses its private snapshot; a draft uses the session-wide cache."
+  (if dsh-bridge--prompt-history-index
+      dsh-bridge--prompt-pending-snapshot
+    (let ((session (dsh-bridge--prompt-history-id)))
+      (and session (cdr-safe (assoc session dsh-bridge--prompt-pending))))))
+
+(defun dsh-bridge--prompt-pending-count (pending placement)
+  "Count PENDING entries whose placement is PLACEMENT."
+  (seq-count (lambda (entry) (equal (alist-get 'placement entry) placement))
+             pending))
+
+(defun dsh-bridge--prompt-current-pending ()
+  "Return the pending queue entry at the current history position, or nil.
+Entries in the pending prelude come before the committed prompts; an
+index past the prelude names a committed prompt."
+  (let ((index dsh-bridge--prompt-history-index)
+        (pending (dsh-bridge--buffer-prompt-pending)))
+    (and (integerp index)
+         (>= index 0)
+         (< index (length pending))
+         (nth index pending))))
+
+(defun dsh-bridge--prompt-pending-label (entry pending)
+  "Return the short header label for pending queue ENTRY in PENDING.
+PENDING is the session's pending list, used for the queued FIFO total.
+The label names the placement, the queued position when more than one
+prompt is queued, and the attachment state."
+  (let* ((placement (alist-get 'placement entry))
+         (text (alist-get 'text entry))
+         (attachments (alist-get 'attachments entry))
+         (count (if (listp attachments) (length attachments) 0))
+         (queued (dsh-bridge--prompt-pending-count pending "queued"))
+         (position (alist-get 'position entry))
+         (name (if (equal placement "steering") "steering" "queued"))
+         (empty (or (null text) (string-empty-p text))))
+    (concat name
+            (if (and (equal placement "queued")
+                     (integerp position)
+                     (> queued 1)
+                     (> position 0))
+                (format " %d/%d" position queued)
+              "")
+            (cond
+             ((> count 0)
+              (if empty
+                  ", attachments only"
+                (format ", %d attachment%s" count (if (= count 1) "" "s"))))
+             (empty
+              ", no text")))))
+
 (defun dsh-bridge--buffer-prompt-history ()
-  "Return the list of prompts for the current buffer's session, or nil."
-  (and dsh-bridge--prompt-session
-       (cdr-safe (assoc dsh-bridge--prompt-session
-			dsh-bridge--prompt-history))))
+  "Return the current buffer's walk: pending entries, then committed prompts.
+The pending prelude is first, so the next prompt to act on is reachable
+with the first `M-p'; the committed prompts keep their newest-first order."
+  (let ((session (dsh-bridge--prompt-history-id)))
+    (append
+     (mapcar (lambda (entry) (or (alist-get 'text entry) ""))
+	     (dsh-bridge--buffer-prompt-pending))
+     (and session (cdr-safe (assoc session dsh-bridge--prompt-history))))))
 
 (defun dsh-bridge--prompt-history-position ()
-  "Return the indicator string \" (k/n)\" for the prompt history.
-Newest-first, 1-indexed (`(1/n)' is the newest).  This function uses the
-buffer-local index and the cached list; no I/O."
+  "Return the 1-indexed indicator string \" (k/n)\" for the prompt walk.
+The pending queue prelude comes first, in action order, followed by
+committed prompts newest first.  A pending entry appends its state, queued
+position, and attachment state.  This function uses the buffer-local walk
+and cached lists; no I/O."
   (let ((list (and dsh-bridge--prompt-history-index
 		   (dsh-bridge--buffer-prompt-history))))
     (if list
-	(format " (%d/%d)" (1+ dsh-bridge--prompt-history-index) (length list))
+	(let* ((pending (dsh-bridge--buffer-prompt-pending))
+	       (entry (dsh-bridge--prompt-current-pending))
+	       (label (and entry (dsh-bridge--prompt-pending-label entry pending))))
+	  (concat (format " (%d/%d" (1+ dsh-bridge--prompt-history-index)
+			  (length list))
+		  (if label
+		      (concat " · " (propertize label 'face 'dsh-bridge-queue-face))
+		    "")
+		  ")"))
       "")))
 
-(defun dsh-bridge--prompt-history-refresh ()
+(defun dsh-bridge--prompt-history-refresh (&optional session-id)
   "Fetch the prompt history for this DSH-Prompt buffer.
-This obtains a fresh history for the effective session via a HTTP
-request, updates `dsh-bridge--prompt-history', and returns the value of
-that variable."
-  (let* ((path (dsh-bridge--path "/prompts" (dsh-bridge--effective-session)))
+With SESSION-ID, fetch that session (the notification handler's exact
+session); otherwise use the effective session.  Update
+`dsh-bridge--prompt-history' and `dsh-bridge--prompt-pending', record the
+response's session id in `dsh-bridge--prompt-history-session', and return
+the committed prompt list."
+  (let* ((path (dsh-bridge--path "/prompts"
+				 (or session-id (dsh-bridge--effective-session))))
 	 (result (dsh-bridge--request "GET" path nil))
 	 (alist (cdr result))
-	 (session-id (and alist (alist-get 'sessionId alist))))
-    (unless session-id
+	 (resolved (and alist (alist-get 'sessionId alist))))
+    (unless resolved
       (error "dsh-bridge: failed to fetch prompt history"))
-    ;; Inject fetched history into `dsh-bridge--prompt-history'.
-    (setq dsh-bridge--prompt-history
-	  (cons (cons session-id (or (alist-get 'prompts alist) '()))
-		(assoc-delete-all session-id dsh-bridge--prompt-history)))))
+    (let ((pending (or (alist-get 'pending alist) '())))
+      ;; Inject the fetched history and pending queue into their caches.
+      (setq dsh-bridge--prompt-history
+	    (cons (cons resolved (or (alist-get 'prompts alist) '()))
+		  (assoc-delete-all resolved dsh-bridge--prompt-history)))
+      (setq dsh-bridge--prompt-pending
+	    (cons (cons resolved pending)
+		  (assoc-delete-all resolved dsh-bridge--prompt-pending)))
+      (setq-local dsh-bridge--prompt-history-session resolved)
+      ;; Keep the header counts in step with the fetched pending list.
+      (dsh-bridge--queue-counts-store
+       resolved
+       (dsh-bridge--prompt-pending-count pending "queued")
+       (dsh-bridge--prompt-pending-count pending "steering"))
+      (cdr (assoc resolved dsh-bridge--prompt-history)))))
 
 (defun dsh-bridge--prompt-show-history (&optional prompts)
   "Replace buffer contents from the prompt history.
@@ -2268,9 +2408,11 @@ contents, stash it in `dsh-bridge--prompt-draft', so that a future
     (cond
      ((null prompts)
       (message "No earlier prompts."))
-     ;; Stash the draft.
+     ;; Stash the draft and freeze the pending prelude for this walk.
      ((null dsh-bridge--prompt-history-index)
       (setq-local dsh-bridge--prompt-draft (buffer-string))
+      (setq-local dsh-bridge--prompt-pending-snapshot
+		  (copy-tree (dsh-bridge--buffer-prompt-pending)))
       (setq-local dsh-bridge--prompt-history-index 0)
       (dsh-bridge--prompt-show-history prompts))
      ;; If we edited a history prompt, disallow walking to avoid
@@ -2301,7 +2443,216 @@ stashed in `dsh-bridge-prompt-previous-history'."
     (setq-local dsh-bridge--prompt-history-index
 		(unless (zerop dsh-bridge--prompt-history-index)
 		  (1- dsh-bridge--prompt-history-index)))
+    (unless dsh-bridge--prompt-history-index
+      (setq-local dsh-bridge--prompt-pending-snapshot nil))
     (dsh-bridge--prompt-show-history))))
+
+(defun dsh-bridge--prompt-pending-context ()
+  "Return (SESSION-ID . ENTRY) for the pending entry at the walk position."
+  (let ((entry (dsh-bridge--prompt-current-pending))
+	(session (dsh-bridge--prompt-history-id)))
+    (and entry session (cons session entry))))
+
+(defun dsh-bridge--prompt-queue-mutate (session-id item-id action)
+  "Post ACTION (\"steer\" or \"remove\") for ITEM-ID in SESSION-ID.
+Return non-nil on a 200, else report the host's error and return nil.
+The item id is the durable message id, so the exact occurrence is
+addressed even when another prompt has identical text."
+  (let* ((result (dsh-bridge--request
+		  "POST" "/sessions/queue"
+		  `((sessionId . ,session-id)
+		    (itemId . ,item-id)
+		    (action . ,action))))
+	 (status (car result))
+	 (alist (cdr result)))
+    (cond
+     ((eq status 200) t)
+     ((null status)
+      (message "dsh-bridge: queue request failed")
+      nil)
+     (t
+      (message "dsh-bridge: %s"
+	       (or (and (listp alist) (alist-get 'error alist))
+		   (format "queue action failed (HTTP %s)" status)))
+      nil))))
+
+(defun dsh-bridge--prompt-pending-remove (session-id item-id)
+  "Remove ITEM-ID from SESSION-ID's cached pending list."
+  (let ((cell (assoc session-id dsh-bridge--prompt-pending)))
+    (when cell
+      (setcdr cell
+	      (seq-remove (lambda (entry)
+			    (equal (alist-get 'id entry) item-id))
+			  (cdr cell))))))
+
+(defun dsh-bridge--prompt-pending-renumber (pending)
+  "Restore one-based FIFO positions in the queued entries of PENDING."
+  (let ((position 0))
+    (dolist (entry pending)
+      (when (equal (alist-get 'placement entry) "queued")
+	(setf (alist-get 'position entry) (cl-incf position))))))
+
+(defun dsh-bridge--prompt-pending-mark-steering (pending item-id)
+  "Mark ITEM-ID as steering in PENDING and renumber its queued entries."
+  (dolist (entry pending)
+    (when (equal (alist-get 'id entry) item-id)
+      (setf (alist-get 'placement entry) "steering")
+      (setf (alist-get 'position entry) nil)))
+  (dsh-bridge--prompt-pending-renumber pending))
+
+(defun dsh-bridge--prompt-pending-recount (session-id)
+  "Recount SESSION-ID's header counts from its cached pending list."
+  (let ((pending (cdr-safe (assoc session-id dsh-bridge--prompt-pending))))
+    (dsh-bridge--queue-counts-store
+     session-id
+     (dsh-bridge--prompt-pending-count pending "queued")
+     (dsh-bridge--prompt-pending-count pending "steering"))))
+
+(defun dsh-bridge--prompt-pending-invalidate-others (session-id)
+  "Reset the walk position in other prompt buffers showing SESSION-ID.
+Their cached list has just changed; the text they display stays put, but
+the next `M-p' must refetch rather than trust a stale index."
+  (dolist (buffer (buffer-list))
+    (unless (eq buffer (current-buffer))
+      (with-current-buffer buffer
+	(when (and (derived-mode-p 'dsh-bridge-prompt-mode)
+		   (equal session-id (dsh-bridge--prompt-history-id)))
+	  (setq-local dsh-bridge--prompt-history-index nil)
+	  (setq-local dsh-bridge--prompt-pending-snapshot nil))))))
+
+(defun dsh-bridge-prompt-steer ()
+  "Steer the queued prompt shown in the prompt history.
+Only a queued (not already steering) entry can be steered; the host
+decides whether the running turn still accepts steering.  A refused or
+stale item leaves the buffer and its text untouched."
+  (interactive)
+  (unless (derived-mode-p 'dsh-bridge-prompt-mode)
+    (user-error "Not in a DSH-Prompt buffer"))
+  (let* ((context (dsh-bridge--prompt-pending-context))
+	 (session (car-safe context))
+	 (entry (cdr-safe context))
+	 (item-id (and entry (alist-get 'id entry))))
+    (unless entry
+      (user-error "This prompt is not waiting in the queue"))
+    (unless (equal (alist-get 'placement entry) "queued")
+      (user-error "This prompt is already steering"))
+    (unless (stringp item-id)
+      (user-error "Queued prompt has no message id"))
+    (when (dsh-bridge--prompt-queue-mutate session item-id "steer")
+      ;; The walk and the session cache may have diverged since the walk
+      ;; started; update both without changing the walk's ordering.
+      (dsh-bridge--prompt-pending-mark-steering
+       dsh-bridge--prompt-pending-snapshot item-id)
+      (dsh-bridge--prompt-pending-mark-steering
+       (cdr-safe (assoc session dsh-bridge--prompt-pending)) item-id)
+      (dsh-bridge--prompt-pending-recount session)
+      (dsh-bridge--prompt-pending-invalidate-others session)
+      (message "dsh-bridge: steering requested"))))
+
+(defun dsh-bridge-prompt-withdraw ()
+  "Withdraw the pending prompt shown in the prompt history.
+Any prompt text is kept in the buffer as an unsent draft, ready to edit
+and send again.  An attachment-bearing prompt loses its attachments; the
+confirmation warns that they will be discarded.  A stale item leaves the
+buffer and its text untouched."
+  (interactive)
+  (unless (derived-mode-p 'dsh-bridge-prompt-mode)
+    (user-error "Not in a DSH-Prompt buffer"))
+  (let* ((context (dsh-bridge--prompt-pending-context))
+	 (session (car-safe context))
+	 (entry (cdr-safe context))
+	 (item-id (and entry (alist-get 'id entry)))
+	 (attachments (and entry (alist-get 'attachments entry)))
+	 (count (if (listp attachments) (length attachments) 0))
+	 (placement (and entry (alist-get 'placement entry))))
+    (unless entry
+      (user-error "This prompt is not waiting in the queue"))
+    (unless (stringp item-id)
+      (user-error "Queued prompt has no message id"))
+    (when (yes-or-no-p
+	   (format "Withdraw this %s prompt%s? %s%s"
+		   (if (equal placement "steering") "steering" "queued")
+		   (if (> count 0)
+		       (format " with %d attachment%s"
+			       count (if (= count 1) "" "s"))
+		     "")
+		   (if (string-empty-p (buffer-string))
+		       "There is no prompt text to keep. "
+		     "The buffer text stays as a draft. ")
+		   (cond
+		    ((= count 0) "")
+		    ((= count 1) "The attachment will be discarded. ")
+		    (t "The attachments will be discarded. "))))
+      (when (dsh-bridge--prompt-queue-mutate session item-id "remove")
+	(dsh-bridge--prompt-pending-remove session item-id)
+	(dsh-bridge--prompt-pending-renumber
+	 (cdr-safe (assoc session dsh-bridge--prompt-pending)))
+	(dsh-bridge--prompt-pending-recount session)
+	;; The text now lives on as the draft; do not erase or re-show it.
+	(setq-local dsh-bridge--prompt-history-index nil)
+	(setq-local dsh-bridge--prompt-pending-snapshot nil)
+	(setq-local dsh-bridge--prompt-draft nil)
+	(set-buffer-modified-p (not (string-empty-p (buffer-string))))
+	(when (equal (car-safe (cdr-safe (assoc session dsh-bridge--last-sent)))
+		     (buffer-string))
+	  (setq dsh-bridge--last-sent
+		(assoc-delete-all session dsh-bridge--last-sent)))
+	(dsh-bridge--prompt-pending-invalidate-others session)
+	(dsh-bridge--header-refresh)
+	(message (if (string-empty-p (buffer-string))
+		     "dsh-bridge: prompt withdrawn"
+		   "dsh-bridge: prompt withdrawn; text kept as draft"))))))
+
+(defun dsh-bridge--queue-counts-store (session-id queued steering)
+  "Cache SESSION-ID's pending prompt counts and redraw the headers."
+  (setq dsh-bridge--session-queue-counts
+	(cons (cons session-id (cons queued steering))
+	      (assoc-delete-all session-id dsh-bridge--session-queue-counts)))
+  (dsh-bridge--header-refresh))
+
+(defun dsh-bridge--queue-counts-refresh (session-id)
+  "Read SESSION-ID's pending prompt counts into the header cache.
+One small request on prompt open; a failure leaves the last known value."
+  (when session-id
+    (let ((counts (dsh-bridge--pending-prompt-counts session-id)))
+      (when counts
+	(dsh-bridge--queue-counts-store session-id (car counts) (cdr counts))))))
+
+(defun dsh-bridge--prompt-pending-buffer-for (session-id)
+  "Return a live DSH-Prompt buffer for SESSION-ID at a draft, or nil."
+  (seq-find (lambda (buffer)
+	      (with-current-buffer buffer
+		(and (derived-mode-p 'dsh-bridge-prompt-mode)
+		     (null dsh-bridge--prompt-history-index)
+		     (equal session-id (dsh-bridge--prompt-history-id)))))
+	    (buffer-list)))
+
+(defun dsh-bridge--prompt-pending-refresh (session-id)
+  "Refetch SESSION-ID's history and pending caches without touching text."
+  (setq dsh-bridge--prompt-pending-timers
+	(assoc-delete-all session-id dsh-bridge--prompt-pending-timers))
+  (let ((buffer (dsh-bridge--prompt-pending-buffer-for session-id)))
+    (when buffer
+      (with-current-buffer buffer
+	(condition-case nil
+	    (dsh-bridge--prompt-history-refresh session-id)
+	  (error nil))))))
+
+(defun dsh-bridge--prompt-pending-schedule (session-id)
+  "Schedule a debounced pending-cache refetch for SESSION-ID.
+Only a live DSH-Prompt buffer at a draft is refreshed: a walking buffer
+may be showing text the user is reading or editing, and its list stays
+frozen."
+  (let ((cell (assoc session-id dsh-bridge--prompt-pending-timers)))
+    (when (timerp (cdr-safe cell))
+      (cancel-timer (cdr cell))))
+  (setq dsh-bridge--prompt-pending-timers
+	(assoc-delete-all session-id dsh-bridge--prompt-pending-timers))
+  (when (dsh-bridge--prompt-pending-buffer-for session-id)
+    (push (cons session-id
+		(run-at-time 0.3 nil #'dsh-bridge--prompt-pending-refresh
+			     session-id))
+	  dsh-bridge--prompt-pending-timers)))
 
 (defun dsh-bridge--prompt-history-record-send (session-id text)
   "Update prompt history cache with TEXT for SESSION-ID.
@@ -2316,12 +2667,17 @@ This may be called from any buffer (not only DSH-Prompt)."
     (setq dsh-bridge--last-sent
 	  (cons `(,session-id . (,text . ,(float-time)))
 		(assoc-delete-all session-id dsh-bridge--last-sent)))
-    ;; Invalidate history for any buffer tracking this session.
+    ;; Invalidate history for any buffer tracking this session.  A buffer
+    ;; following the pin or the last-active prediction tracks it through the
+    ;; resolved history id even though its explicit binding is nil.
     (dolist (buf (buffer-list))
       (with-current-buffer buf
-	(when (equal session-id dsh-bridge--prompt-session)
+	(when (and (derived-mode-p 'dsh-bridge-prompt-mode)
+		   (or (equal session-id dsh-bridge--prompt-session)
+		       (equal session-id (dsh-bridge--prompt-history-id))))
 	  (setq-local dsh-bridge--prompt-history-index nil)
-	  (setq-local dsh-bridge--prompt-draft nil))))))
+	  (setq-local dsh-bridge--prompt-draft nil)
+	  (setq-local dsh-bridge--prompt-pending-snapshot nil))))))
 
 (defun dsh-bridge--revert-prompt-buffer (_ignore-auto _noconfirm)
   "Function to perform `revert-buffer' for DSH-Prompt buffers.
@@ -2337,6 +2693,7 @@ If walking through the prompt history, then:
    (t
     ;; Return to the draft.
     (setq-local dsh-bridge--prompt-history-index nil)
+    (setq-local dsh-bridge--prompt-pending-snapshot nil)
     (dsh-bridge--prompt-show-history))))
 
 ;;; Text senders (internal)
@@ -3880,6 +4237,30 @@ goal, or resumes and rearms a stopped one (see
 		       dsh-bridge--header-goal-map help session-id))
 	      (list text t))))))))
 
+(defun dsh-bridge--header-queue-cell (text)
+  "Return the pending-prompt count cell TEXT.
+The cell is a plain indicator, not a button; `M-p' walks the prompt
+history into the pending prelude."
+  (list (propertize text
+		    'face 'dsh-bridge-queue-face
+		    'help-echo "pending prompts; M-p walks the prompt history")))
+
+(defun dsh-bridge--header-queue-cells (session-id)
+  "The header queued/steering count cells for SESSION-ID, or nil.
+Zero counts are omitted; the header join supplies the separators."
+  (let ((counts (cdr (assoc session-id dsh-bridge--session-queue-counts))))
+    (when (consp counts)
+      (let ((queued (car counts))
+	    (steering (cdr counts)))
+	(delq nil
+	      (list
+	       (and (numberp queued) (> queued 0)
+		    (dsh-bridge--header-queue-cell
+		     (format "%d queued" queued)))
+	       (and (numberp steering) (> steering 0)
+		    (dsh-bridge--header-queue-cell
+		     (format "%d steering" steering)))))))))
+
 (defun dsh-bridge--view-header-line (&optional width)
   "Return the header line for a DSH-View buffer.
 Header line format:
@@ -4503,10 +4884,18 @@ prefix argument STEER, always steer.  An idle session is sent to
 normally, and the prefix argument is then silently ignored.
 
 After a successful send, pop to a DSH-View buffer following the session
-and bury the buffer (see `dsh-bridge--prompt-exit')."
+and bury the buffer (see `dsh-bridge--prompt-exit').
+
+While the prompt history is showing a pending queue entry, this command
+refuses: sending would queue a second copy of a prompt that is already
+waiting.  Use `\\[dsh-bridge-prompt-steer]' to steer it or
+`\\[dsh-bridge-prompt-withdraw]' to withdraw it and keep its text as a
+draft."
   (interactive "P")
   (unless (derived-mode-p 'dsh-bridge-prompt-mode)
     (user-error "Not in a DSH-Prompt buffer"))
+  (when (dsh-bridge--prompt-current-pending)
+    (user-error "Prompt is still queued; use C-c C-t to steer or C-c C-w to withdraw"))
   (let* ((parsed (dsh-bridge--parse-attachments ; strip attachments
 		  (substring-no-properties (buffer-string))))
 	 (text (car parsed))
@@ -6144,7 +6533,8 @@ failure leaves the header segment empty until the next trigger."
     (when session
       (dsh-bridge--fetch-models session)
       (dsh-bridge--fetch-context session)
-      (dsh-bridge--plan-goal-refresh session t))))
+      (dsh-bridge--plan-goal-refresh session t)
+      (dsh-bridge--queue-counts-refresh session))))
 
 (defun dsh-bridge--select-model-apply (session-id provider model effort)
   "POST /model for SESSION-ID and refresh the model cache on success."
@@ -6275,6 +6665,7 @@ Discard it? "))
 	  (erase-buffer))
 	(setq-local dsh-bridge--prompt-history-index nil)
 	(setq-local dsh-bridge--prompt-draft nil)
+	(setq-local dsh-bridge--prompt-pending-snapshot nil)
 	(set-buffer-modified-p nil))
       (dsh-bridge-set-prompt-session session-id))
     buffer))
@@ -6735,13 +7126,15 @@ bound session, and one reached through `dsh-bridge-pinned-target' (the
 send does carry that target), are unqualified.
 
 The model and context segments stay empty until their first successful
-fetch.	The plan and goal cells sit directly after the workspace and are
-clickable: mouse-1 turns plan mode off, or pauses and resumes the goal
-(see `dsh-bridge--header-plan-at-mouse' and
+fetch.	The queued/steering count cells follow the workspace and show the
+session's pending prompt totals; the plan and goal cells follow them and
+are clickable: mouse-1 turns plan mode off, or pauses and resumes the
+goal (see `dsh-bridge--header-plan-at-mouse' and
 `dsh-bridge--header-goal-at-mouse').  Editing the text clears the sent
-marker.	 The `(k/n)' segment
-appears when walking the prompt history.  Attachments are not shown here:
-their tag lines are visible in the buffer itself."
+marker.  The `(k/n)' segment appears when walking the prompt history; a
+pending queue entry appends its state and attachment summary.
+Attachments are not shown here: their tag lines are visible in the
+buffer itself."
   (let* ((session dsh-bridge--prompt-session)
 	 (qualifier ""))
     ;; The waterfall names the session a target-less send would be
@@ -6774,8 +7167,11 @@ their tag lines are visible in the buffer itself."
 		     (dsh-bridge--prompt-context-label session)))
 	   (plan (and session (dsh-bridge--header-plan-cell session)))
 	   (goal (and session (dsh-bridge--header-goal-cell session)))
+	   (queue (and session (dsh-bridge--header-queue-cells session)))
 	   (compacting (and session (dsh-bridge--header-compacting-cell session)))
-	   (sent (dsh-bridge--prompt-sent-marker session))
+	   ;; "sent" would contradict the pending badge on a queued prompt.
+	   (sent (unless (dsh-bridge--prompt-current-pending)
+		   (dsh-bridge--prompt-sent-marker session)))
 	   (hist (dsh-bridge--prompt-history-position))
 	   (suffix (concat qualifier hist))
 	   (identity (if (dsh-bridge--normalized-string label)
@@ -6785,13 +7181,14 @@ their tag lines are visible in the buffer itself."
 	   (prefix (if (string-empty-p status) " " (concat " " status " "))))
       (concat prefix
 	      (dsh-bridge--header-line-join
-	       (list identity
-		     (list workspace t)
-		     plan
-		     goal
-		     compacting
-		     (list model)
-		     (list context))
+	       (append (list identity
+			     (list workspace t))
+		       queue
+		       (list plan
+			     goal
+			     compacting
+			     (list model)
+			     (list context)))
 	       (and width
 		    (max 1 (- width (string-width prefix) (string-width sent)))))
 	      sent))))
@@ -6841,6 +7238,8 @@ session, attaching a file, selecting a model, etc.
   "C-c C-s" #'dsh-bridge-set-prompt-session
   "C-c C-l" #'dsh-bridge-list-sessions
   "C-c C-o" #'dsh-bridge-compact-session
+  "C-c C-t" #'dsh-bridge-prompt-steer
+  "C-c C-w" #'dsh-bridge-prompt-withdraw
   "M-p" #'dsh-bridge-prompt-previous-history
   "M-n" #'dsh-bridge-prompt-next-history)
 
@@ -6876,7 +7275,8 @@ discarded rather than restored by `dsh-bridge-prompt-next-history'."
     ;; The walk describes text that no longer exists; a later M-n must not
     ;; restore the draft discarded with it.
     (setq-local dsh-bridge--prompt-history-index nil)
-    (setq-local dsh-bridge--prompt-draft nil)))
+    (setq-local dsh-bridge--prompt-draft nil)
+    (setq-local dsh-bridge--prompt-pending-snapshot nil)))
 
 (defun dsh-bridge-prompt-stop-or-erase (&optional force)
   "Stop the prompt buffer's running session, or else erase the prompt.
@@ -6898,10 +7298,42 @@ FORCE argument of `dsh-bridge-stop-session'."
       (dsh-bridge-stop-session force (dsh-bridge--effective-session))
     (dsh-bridge-erase-prompt)))
 
+(defun dsh-bridge--menu-prompt-pending ()
+  "The pending queue entry shown in the current DSH-Prompt walk, or nil."
+  (and (derived-mode-p 'dsh-bridge-prompt-mode)
+       (dsh-bridge--prompt-current-pending)))
+
+(defun dsh-bridge--menu-prompt-send-enabled ()
+  "Whether the Send menu item can act.
+A pending queue entry is refused by `dsh-bridge-send-and-exit'."
+  (not (dsh-bridge--menu-prompt-pending)))
+
+(defun dsh-bridge--menu-prompt-previous-enabled ()
+  "Whether the Previous Prompt menu item can act.
+A modified history entry blocks the walk, as `M-p' does."
+  (not (and dsh-bridge--prompt-history-index (buffer-modified-p))))
+
+(defun dsh-bridge--menu-prompt-next-enabled ()
+  "Whether the Next Prompt menu item can act.
+There is no newer prompt at a draft, and a modified entry blocks the walk."
+  (and dsh-bridge--prompt-history-index
+       (not (buffer-modified-p))))
+
+(defun dsh-bridge--menu-prompt-steer-enabled ()
+  "Whether the Steer Queued Prompt menu item can act.
+Only a queued (not already steering) pending entry is steerable."
+  (let ((entry (dsh-bridge--menu-prompt-pending)))
+    (and entry (equal (alist-get 'placement entry) "queued"))))
+
+(defun dsh-bridge--menu-prompt-withdraw-enabled ()
+  "Whether the Withdraw Queued Prompt menu item can act."
+  (and (dsh-bridge--menu-prompt-pending) t))
+
 (easy-menu-define dsh-bridge-prompt-menu dsh-bridge-prompt-mode-map
   "Menu bar menu for the DSH-Prompt buffer."
   `("DSH Bridge"
     ["Send" dsh-bridge-send-and-exit
+     :enable (dsh-bridge--menu-prompt-send-enabled)
      :help "Send the whole buffer to DSH and bury the prompt buffer"]
     ["Erase Prompt" dsh-bridge-erase-prompt
      :help "Clear the prompt buffer"]
@@ -6932,10 +7364,21 @@ FORCE argument of `dsh-bridge-stop-session'."
     "---"
     ["Previous Prompt" dsh-bridge-prompt-previous-history
      :keys "M-p"
+     :enable (dsh-bridge--menu-prompt-previous-enabled)
      :help "Recall the previous prompt sent to this session"]
     ["Next Prompt" dsh-bridge-prompt-next-history
      :keys "M-n"
+     :enable (dsh-bridge--menu-prompt-next-enabled)
      :help "Move forward through the prompt history"]
+    "---"
+    ["Steer Queued Prompt" dsh-bridge-prompt-steer
+     :keys "C-c C-t"
+     :enable (dsh-bridge--menu-prompt-steer-enabled)
+     :help "Steer the queued prompt shown into the running turn"]
+    ["Withdraw Queued Prompt" dsh-bridge-prompt-withdraw
+     :keys "C-c C-w"
+     :enable (dsh-bridge--menu-prompt-withdraw-enabled)
+     :help "Withdraw the pending prompt shown, keeping its text as a draft"]
     "---"
     ["Pin Target…" dsh-bridge-pin-target
      :help "Set the bridge-wide pinned target (completing-read)"]))
@@ -6974,7 +7417,9 @@ prompt-history walk when the binding changes."
   (unless (equal session-id dsh-bridge--prompt-session)
     ;; The history walk refers to the old session; reset it.
     (setq-local dsh-bridge--prompt-history-index nil)
-    (setq-local dsh-bridge--prompt-draft nil))
+    (setq-local dsh-bridge--prompt-draft nil)
+    (setq-local dsh-bridge--prompt-history-session nil)
+    (setq-local dsh-bridge--prompt-pending-snapshot nil))
   (setq-local dsh-bridge--prompt-session session-id)
   (setq header-line-format dsh-bridge--prompt-header-line-format)
   (dsh-bridge--apply-session-directory session-id nil (current-buffer))

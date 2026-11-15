@@ -2103,6 +2103,500 @@ draft when the entry shown is pristine."
     (should (equal (cdr (assoc "s1" dsh-bridge--prompt-history))
                    (list "hello")))))
 
+;;; The pending prompt queue in the prompt history
+
+(defun dsh-bridge-test--pending-entry (id placement text &optional extra)
+  "Build one `GET /prompts' pending entry for tests.
+EXTRA alist pairs replace or add to the default fields."
+  (let ((entry (list (cons 'id id) (cons 'placement placement)
+		     (cons 'text text) (cons 'textOnly t)
+		     (cons 'attachments nil))))
+    (dolist (pair extra)
+      (setf (alist-get (car pair) entry) (cdr pair)))
+    entry))
+
+(ert-deftest dsh-bridge-prompt-history-pending-prelude ()
+  "M-p walks steering, then queued, then committed history."
+  (let ((dsh-bridge-pinned-target "s1")
+	(dsh-bridge--prompt-history nil)
+	(dsh-bridge--prompt-pending nil)
+	(dsh-bridge--session-queue-counts nil))
+    (with-temp-buffer
+      (dsh-bridge-prompt-mode)
+      (setq-local dsh-bridge--prompt-session "s1")
+      (cl-letf (((symbol-function 'dsh-bridge--request)
+		 (lambda (_method _path _payload)
+		   (cons 200
+			 (list (cons 'sessionId "s1")
+			       (cons 'prompts (list "committed"))
+			       (cons 'pending
+				     (list (dsh-bridge-test--pending-entry
+					    "m1" "steering" "steer")
+					   (dsh-bridge-test--pending-entry
+					    "m2" "queued" "queued"))))))))
+	(insert "draft")
+	(dsh-bridge-prompt-previous-history)
+	(should (equal (buffer-string) "steer"))
+	(should (equal dsh-bridge--prompt-draft "draft"))
+	(should (equal (substring-no-properties (dsh-bridge--prompt-history-position))
+		       " (1/3 · steering)"))
+	(dsh-bridge-prompt-previous-history)
+	(should (equal (buffer-string) "queued"))
+	(should (equal (substring-no-properties (dsh-bridge--prompt-history-position))
+		       " (2/3 · queued)"))
+	(dsh-bridge-prompt-previous-history)
+	(should (equal (buffer-string) "committed"))
+	(should (equal (substring-no-properties (dsh-bridge--prompt-history-position))
+		       " (3/3)"))
+	(dsh-bridge-prompt-previous-history)
+	(should (equal (buffer-string) "committed"))
+	(dotimes (_ 3)
+	  (dsh-bridge-prompt-next-history))
+	(should (equal (buffer-string) "draft"))
+	(should (null dsh-bridge--prompt-history-index))))))
+
+(ert-deftest dsh-bridge-prompt-pending-badge-and-header ()
+  "The pending badge names placement, queued position, and attachments;
+the header totals come from the counts cache with no HTTP."
+  (let ((dsh-bridge--prompt-history nil)
+	(dsh-bridge--prompt-pending
+	 (list (cons "s1"
+		     (list (dsh-bridge-test--pending-entry "m3" "steering" "steer")
+			   (dsh-bridge-test--pending-entry
+			    "m1" "queued" "one" '((position . 1)))
+			   (dsh-bridge-test--pending-entry
+			    "m2" "queued" ""
+			    '((textOnly) (position . 2)
+			      (attachments . (((kind . "file")
+					       (name . "notes.txt")
+					       (bytes . 12))))))))))
+	(dsh-bridge--session-queue-counts '(("s1" . (2 . 1))))
+	(dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t))))
+	(dsh-bridge--last-sent '(("s1" "one" . 1.0))))
+    (with-temp-buffer
+      (dsh-bridge-prompt-mode)
+      (setq-local dsh-bridge--prompt-session "s1")
+      (setq-local dsh-bridge--prompt-history-session "s1")
+      (setq-local dsh-bridge--prompt-pending-snapshot
+		  (copy-tree (dsh-bridge--buffer-prompt-pending)))
+      (setq-local dsh-bridge--prompt-history-index 1)
+      (insert "one")
+      (should (equal (substring-no-properties (dsh-bridge--prompt-history-position))
+		     " (2/3 · queued 1/2)"))
+      (setq-local dsh-bridge--prompt-history-index 2)
+      (should (equal (substring-no-properties (dsh-bridge--prompt-history-position))
+		     " (3/3 · queued 2/2, attachments only)"))
+      (setq-local dsh-bridge--prompt-history-index 1)
+      (insert "one")
+      (cl-letf (((symbol-function 'dsh-bridge--request)
+		 (lambda (&rest _) (error "header must not perform HTTP"))))
+	(let ((header (dsh-bridge--prompt-header-line)))
+	  (should (string-match-p "2 queued" header))
+	  (should (string-match-p "1 steering" header))
+	  (should-not (string-match-p "✓ sent" header)))))))
+
+(ert-deftest dsh-bridge-prompt-open-seeds-queue-counts ()
+  "Opening a prompt buffer seeds the header counts from the queue route."
+  (let ((dsh-bridge--session-queue-counts nil))
+    (with-temp-buffer
+      (dsh-bridge-prompt-mode)
+      (setq-local dsh-bridge--prompt-session "s1")
+      (cl-letf (((symbol-function 'dsh-bridge--fetch-models) #'ignore)
+		((symbol-function 'dsh-bridge--fetch-context) #'ignore)
+		((symbol-function 'dsh-bridge--plan-goal-refresh) #'ignore)
+		((symbol-function 'dsh-bridge--pending-prompt-counts)
+		 (lambda (_session) '(2 . 1))))
+	(dsh-bridge--refresh-prompt-metadata))
+      (should (equal (cdr (assoc "s1" dsh-bridge--session-queue-counts))
+		     '(2 . 1))))))
+
+(ert-deftest dsh-bridge-prompt-history-unbound-session-resolution ()
+  "A prompt buffer following the pin walks the host-resolved session."
+  (let ((dsh-bridge-pinned-target "s1")
+	(dsh-bridge--prompt-history nil)
+	(dsh-bridge--prompt-pending nil)
+	(dsh-bridge--session-queue-counts nil))
+    (with-temp-buffer
+      (dsh-bridge-prompt-mode)
+      (cl-letf (((symbol-function 'dsh-bridge--request)
+		 (lambda (_method _path _payload)
+		   (cons 200 (list (cons 'sessionId "s1")
+				   (cons 'prompts (list "new" "old")))))))
+	(insert "draft")
+	(dsh-bridge-prompt-previous-history)
+	(should (equal (buffer-string) "new"))
+	(should (equal dsh-bridge--prompt-history-session "s1"))
+	(dsh-bridge-prompt-previous-history)
+	(should (equal (buffer-string) "old"))))))
+
+(ert-deftest dsh-bridge-prompt-steer-sends-exact-item ()
+  "C-c C-t posts the shown item's id and flips it to steering."
+  (let ((dsh-bridge--prompt-pending
+	 (list (cons "s1"
+		     (list (dsh-bridge-test--pending-entry
+			    "m1" "queued" "text" '((position . 1)))))))
+	(dsh-bridge--session-queue-counts '(("s1" . (1 . 0))))
+	(calls nil))
+    (with-temp-buffer
+      (dsh-bridge-prompt-mode)
+      (setq-local dsh-bridge--prompt-session "s1")
+      (setq-local dsh-bridge--prompt-history-session "s1")
+      (setq-local dsh-bridge--prompt-pending-snapshot
+		  (copy-tree (dsh-bridge--buffer-prompt-pending)))
+      (setq-local dsh-bridge--prompt-history-index 0)
+      (insert "text")
+      (cl-letf (((symbol-function 'dsh-bridge--request)
+		 (lambda (method path payload)
+		   (push (list method path payload) calls)
+		   (cons 200 (list (cons 'accepted t))))))
+	(dsh-bridge-prompt-steer))
+      (should (equal (nreverse calls)
+		     (list (list "POST" "/sessions/queue"
+				 '((sessionId . "s1")
+				   (itemId . "m1")
+				   (action . "steer"))))))
+      (should (equal (alist-get 'placement
+				(car (cdr (assoc "s1" dsh-bridge--prompt-pending))))
+		     "steering"))
+      (should (equal (cdr (assoc "s1" dsh-bridge--session-queue-counts))
+		     '(0 . 1))))))
+
+(ert-deftest dsh-bridge-prompt-steer-refuses-non-queued ()
+  "C-c C-t refuses a steering entry and a committed history entry."
+  (let ((dsh-bridge--prompt-pending
+	 (list (cons "s1"
+		     (list (dsh-bridge-test--pending-entry "m1" "steering" "text")))))
+	(dsh-bridge--session-queue-counts nil)
+	(dsh-bridge--prompt-history '(("s1" "committed"))))
+    (with-temp-buffer
+      (dsh-bridge-prompt-mode)
+      (setq-local dsh-bridge--prompt-session "s1")
+      (setq-local dsh-bridge--prompt-history-session "s1")
+      (setq-local dsh-bridge--prompt-pending-snapshot
+		  (copy-tree (dsh-bridge--buffer-prompt-pending)))
+      (setq-local dsh-bridge--prompt-history-index 0)
+      (cl-letf (((symbol-function 'dsh-bridge--request)
+		 (lambda (&rest _) (error "must not post"))))
+	(should-error (dsh-bridge-prompt-steer) :type 'user-error))
+      (setq-local dsh-bridge--prompt-history-index 1)
+      (cl-letf (((symbol-function 'dsh-bridge--request)
+		 (lambda (&rest _) (error "must not post"))))
+	(should-error (dsh-bridge-prompt-steer) :type 'user-error)))))
+
+(ert-deftest dsh-bridge-prompt-steer-stale-keeps-text ()
+  "A 409 from the host leaves the entry and the buffer untouched."
+  (let ((dsh-bridge--prompt-pending
+	 (list (cons "s1"
+		     (list (dsh-bridge-test--pending-entry "m1" "queued" "text"))))))
+    (with-temp-buffer
+      (dsh-bridge-prompt-mode)
+      (setq-local dsh-bridge--prompt-session "s1")
+      (setq-local dsh-bridge--prompt-history-session "s1")
+      (setq-local dsh-bridge--prompt-pending-snapshot
+		  (copy-tree (dsh-bridge--buffer-prompt-pending)))
+      (setq-local dsh-bridge--prompt-history-index 0)
+      (insert "text")
+      (cl-letf (((symbol-function 'dsh-bridge--request)
+		 (lambda (&rest _)
+		   (cons 409 (list (cons 'error "queued item is no longer pending"))))))
+	(dsh-bridge-prompt-steer))
+      (should (equal (buffer-string) "text"))
+      (should (equal (alist-get 'placement
+				(car (cdr (assoc "s1" dsh-bridge--prompt-pending))))
+		     "queued")))))
+
+(ert-deftest dsh-bridge-prompt-withdraw-keeps-text-and-clears-sent ()
+  "C-c C-w removes the item but leaves its text as a modified draft."
+  (let ((dsh-bridge--prompt-pending
+	 (list (cons "s1"
+		     (list (dsh-bridge-test--pending-entry "m1" "queued" "withdraw me")))))
+	(dsh-bridge--session-queue-counts '(("s1" . (1 . 0))))
+	(dsh-bridge--last-sent '(("s1" "withdraw me" . 1.0))))
+    (with-temp-buffer
+      (dsh-bridge-prompt-mode)
+      (setq-local dsh-bridge--prompt-session "s1")
+      (setq-local dsh-bridge--prompt-history-session "s1")
+      (setq-local dsh-bridge--prompt-pending-snapshot
+		  (copy-tree (dsh-bridge--buffer-prompt-pending)))
+      (setq-local dsh-bridge--prompt-history-index 0)
+      (insert "withdraw me")
+      (set-buffer-modified-p nil)
+      (cl-letf (((symbol-function 'dsh-bridge--request)
+		 (lambda (&rest _) (cons 200 (list (cons 'accepted t)))))
+		((symbol-function 'yes-or-no-p) (lambda (_prompt) t)))
+	(dsh-bridge-prompt-withdraw))
+      (should (equal (buffer-string) "withdraw me"))
+      (should (null dsh-bridge--prompt-history-index))
+      (should (buffer-modified-p))
+      (should (null (cdr (assoc "s1" dsh-bridge--prompt-pending))))
+      (should (null (assoc "s1" dsh-bridge--last-sent)))
+      (should (equal (cdr (assoc "s1" dsh-bridge--session-queue-counts))
+		     '(0 . 0))))))
+
+(ert-deftest dsh-bridge-prompt-withdraw-stale-keeps-entry ()
+  "A 409 from the host leaves the walk position and the text untouched."
+  (let ((dsh-bridge--prompt-pending
+	 (list (cons "s1"
+		     (list (dsh-bridge-test--pending-entry "m1" "queued" "text")))))
+	(dsh-bridge--session-queue-counts '(("s1" . (1 . 0)))))
+    (with-temp-buffer
+      (dsh-bridge-prompt-mode)
+      (setq-local dsh-bridge--prompt-session "s1")
+      (setq-local dsh-bridge--prompt-history-session "s1")
+      (setq-local dsh-bridge--prompt-pending-snapshot
+		  (copy-tree (dsh-bridge--buffer-prompt-pending)))
+      (setq-local dsh-bridge--prompt-history-index 0)
+      (insert "text")
+      (cl-letf (((symbol-function 'dsh-bridge--request)
+		 (lambda (&rest _)
+		   (cons 409 (list (cons 'error "queued item is no longer pending")))))
+		((symbol-function 'yes-or-no-p) (lambda (_prompt) t)))
+	(dsh-bridge-prompt-withdraw))
+      (should (equal (buffer-string) "text"))
+      (should (equal dsh-bridge--prompt-history-index 0))
+      (should (consp (assoc "s1" dsh-bridge--prompt-pending))))))
+
+(ert-deftest dsh-bridge-send-and-exit-refuses-pending ()
+  "C-c C-c on a pending history entry must not queue a second copy."
+  (let ((dsh-bridge--prompt-pending
+	 (list (cons "s1"
+		     (list (dsh-bridge-test--pending-entry "m1" "queued" "text"))))))
+    (with-temp-buffer
+      (dsh-bridge-prompt-mode)
+      (setq-local dsh-bridge--prompt-session "s1")
+      (setq-local dsh-bridge--prompt-history-session "s1")
+      (setq-local dsh-bridge--prompt-pending-snapshot
+		  (copy-tree (dsh-bridge--buffer-prompt-pending)))
+      (setq-local dsh-bridge--prompt-history-index 0)
+      (insert "text")
+      (cl-letf (((symbol-function 'dsh-bridge--http)
+		 (lambda (&rest _) (error "must not send"))))
+	(should-error (dsh-bridge-send-and-exit) :type 'user-error)))))
+
+(ert-deftest dsh-bridge-queue-changed-updates-counts-and-schedules ()
+  "A queue-changed frame updates counts and schedules an at-draft refetch."
+  (let ((dsh-bridge--session-queue-counts nil)
+	(timers nil))
+    (with-temp-buffer
+      (dsh-bridge-prompt-mode)
+      (setq-local dsh-bridge--prompt-session "s1")
+      (setq-local dsh-bridge--prompt-history-session "s1")
+      (insert "draft")
+      (cl-letf (((symbol-function 'run-at-time)
+		 (lambda (_secs _repeat function &rest args)
+		   (push (cons function args) timers)
+		   'fake-timer)))
+	(dsh-bridge--notification-handle-events
+	 '(((kind . "queue-changed") (sessionId . "s1")
+	    (queued . 2) (steering . 1)))))
+      (should (equal (cdr (assoc "s1" dsh-bridge--session-queue-counts))
+		     '(2 . 1)))
+      (should (equal (car timers)
+		     (cons #'dsh-bridge--prompt-pending-refresh '("s1")))))))
+
+(ert-deftest dsh-bridge-queue-changed-leaves-walking-buffer-alone ()
+  "A queue-changed frame updates counts but never schedules a walking refetch."
+  (let ((dsh-bridge--session-queue-counts nil)
+	(dsh-bridge--prompt-pending
+	 (list (cons "s1"
+		     (list (dsh-bridge-test--pending-entry "m1" "queued" "queued text")))))
+	(timers nil))
+    (with-temp-buffer
+      (dsh-bridge-prompt-mode)
+      (setq-local dsh-bridge--prompt-session "s1")
+      (setq-local dsh-bridge--prompt-history-session "s1")
+      (setq-local dsh-bridge--prompt-pending-snapshot
+		  (copy-tree (dsh-bridge--buffer-prompt-pending)))
+      (setq-local dsh-bridge--prompt-history-index 0)
+      (insert "queued text")
+      (cl-letf (((symbol-function 'run-at-time)
+		 (lambda (&rest _) (push t timers) 'fake-timer)))
+	(dsh-bridge--notification-handle-events
+	 '(((kind . "queue-changed") (sessionId . "s1")
+	    (queued . 2) (steering . 1)))))
+      (should (equal (cdr (assoc "s1" dsh-bridge--session-queue-counts))
+		     '(2 . 1)))
+      (should (equal (buffer-string) "queued text"))
+      (should (null timers)))))
+
+(ert-deftest dsh-bridge-prompt-walk-keeps-pending-identity-across-refresh ()
+  "Another buffer's refresh cannot retarget a frozen pending walk."
+  (let ((dsh-bridge--prompt-history nil)
+	(dsh-bridge--session-queue-counts nil)
+	(dsh-bridge--prompt-pending
+	 (list (cons "s1"
+		     (list (dsh-bridge-test--pending-entry "m1" "queued" "first")
+			   (dsh-bridge-test--pending-entry "m2" "queued" "second")))))
+	(walker (generate-new-buffer " *dsh-queue-walker*"))
+	(draft (generate-new-buffer " *dsh-queue-draft*")))
+    (unwind-protect
+	(progn
+	  (dolist (buffer (list walker draft))
+	    (with-current-buffer buffer
+	      (dsh-bridge-prompt-mode)
+	      (setq-local dsh-bridge--prompt-session "s1")
+	      (setq-local dsh-bridge--prompt-history-session "s1")))
+	  (with-current-buffer walker
+	    (setq-local dsh-bridge--prompt-pending-snapshot
+			(copy-tree (dsh-bridge--buffer-prompt-pending)))
+	    (setq-local dsh-bridge--prompt-history-index 0)
+	    (insert "first"))
+	  (with-current-buffer draft
+	    (insert "draft"))
+	  (cl-letf (((symbol-function 'dsh-bridge--request)
+		     (lambda (&rest _)
+		       (cons 200
+			     (list (cons 'sessionId "s1")
+				   (cons 'prompts nil)
+				   (cons 'pending
+					 (list (dsh-bridge-test--pending-entry
+						"m2" "queued" "second"))))))))
+	    (dsh-bridge--prompt-pending-refresh "s1"))
+	  (with-current-buffer walker
+	    (should (equal (buffer-string) "first"))
+	    (should (equal (alist-get 'id (dsh-bridge--prompt-current-pending))
+			   "m1")))
+	  (should (equal (mapcar (lambda (entry) (alist-get 'id entry))
+				 (cdr (assoc "s1" dsh-bridge--prompt-pending)))
+			 '("m2"))))
+      (kill-buffer walker)
+      (kill-buffer draft))))
+
+(ert-deftest dsh-bridge-prompt-steer-renumbers-queued-snapshot ()
+  "Steering one of three queued prompts leaves positions one and two."
+  (let ((dsh-bridge--prompt-pending
+	 (list (cons "s1"
+		     (cl-loop for i from 1 to 3
+			      collect (dsh-bridge-test--pending-entry
+				       (format "m%d" i) "queued" (format "text %d" i)
+				       (list (cons 'position i)))))))
+	(dsh-bridge--session-queue-counts nil))
+    (with-temp-buffer
+      (dsh-bridge-prompt-mode)
+      (setq-local dsh-bridge--prompt-session "s1")
+      (setq-local dsh-bridge--prompt-history-session "s1")
+      (setq-local dsh-bridge--prompt-pending-snapshot
+		  (copy-tree (dsh-bridge--buffer-prompt-pending)))
+      (setq-local dsh-bridge--prompt-history-index 0)
+      (insert "text 1")
+      (cl-letf (((symbol-function 'dsh-bridge--request)
+		 (lambda (&rest _) (cons 200 (list (cons 'accepted t))))))
+	(dsh-bridge-prompt-steer))
+      (should (equal (mapcar (lambda (entry) (alist-get 'placement entry))
+			     dsh-bridge--prompt-pending-snapshot)
+		     '("steering" "queued" "queued")))
+      (should (equal (mapcar (lambda (entry) (alist-get 'position entry))
+			     dsh-bridge--prompt-pending-snapshot)
+		     '(nil 1 2)))
+      (should (equal (cdr (assoc "s1" dsh-bridge--session-queue-counts))
+		     '(2 . 1))))))
+
+(ert-deftest dsh-bridge-prompt-withdraw-renumbers-queued-cache ()
+  "Withdrawing the first of three queued prompts renumbers the survivors."
+  (let ((dsh-bridge--prompt-pending
+	 (list (cons "s1"
+		     (cl-loop for i from 1 to 3
+			      collect (dsh-bridge-test--pending-entry
+				       (format "m%d" i) "queued" (format "text %d" i)
+				       (list (cons 'position i)))))))
+	(dsh-bridge--session-queue-counts nil))
+    (with-temp-buffer
+      (dsh-bridge-prompt-mode)
+      (setq-local dsh-bridge--prompt-session "s1")
+      (setq-local dsh-bridge--prompt-history-session "s1")
+      (setq-local dsh-bridge--prompt-pending-snapshot
+		  (copy-tree (dsh-bridge--buffer-prompt-pending)))
+      (setq-local dsh-bridge--prompt-history-index 0)
+      (insert "text 1")
+      (cl-letf (((symbol-function 'dsh-bridge--request)
+		 (lambda (&rest _) (cons 200 (list (cons 'accepted t)))))
+		((symbol-function 'yes-or-no-p) (lambda (_prompt) t)))
+	(dsh-bridge-prompt-withdraw))
+      (let ((pending (cdr (assoc "s1" dsh-bridge--prompt-pending))))
+	(should (equal (mapcar (lambda (entry) (alist-get 'id entry)) pending)
+		       '("m2" "m3")))
+	(should (equal (mapcar (lambda (entry) (alist-get 'position entry)) pending)
+		       '(1 2)))))))
+
+(ert-deftest dsh-bridge-prompt-withdraw-confirms-attachment-loss ()
+  "The withdrawal confirmation discloses attachment and text retention."
+  (let ((dsh-bridge--prompt-pending
+	 (list (cons "s1"
+		     (list (dsh-bridge-test--pending-entry
+			    "m1" "queued" ""
+			    '((textOnly)
+			      (attachments . (((kind . "file")
+					       (name . "notes.txt")
+					       (bytes . 12))))))))))
+	(confirmation nil))
+    (with-temp-buffer
+      (dsh-bridge-prompt-mode)
+      (setq-local dsh-bridge--prompt-session "s1")
+      (setq-local dsh-bridge--prompt-history-session "s1")
+      (setq-local dsh-bridge--prompt-pending-snapshot
+		  (copy-tree (dsh-bridge--buffer-prompt-pending)))
+      (setq-local dsh-bridge--prompt-history-index 0)
+      (cl-letf (((symbol-function 'dsh-bridge--request)
+		 (lambda (&rest _) (error "declined withdrawal must not post")))
+		((symbol-function 'yes-or-no-p)
+		 (lambda (prompt) (setq confirmation prompt) nil)))
+	(dsh-bridge-prompt-withdraw))
+      (should (string-match-p "no prompt text to keep" confirmation))
+      (should (string-match-p "attachment will be discarded" confirmation)))))
+
+(ert-deftest dsh-bridge-prompt-menu-enable-states ()
+  "The prompt menu enables Send, navigation, and queue actions by walk state."
+  (let ((dsh-bridge--prompt-history '(("s1" "committed")))
+	(dsh-bridge--prompt-pending
+	 (list (cons "s1"
+		     (list (dsh-bridge-test--pending-entry "m1" "queued" "queued text")
+			   (dsh-bridge-test--pending-entry
+			    "m2" "steering" "steering text")))))
+	(dsh-bridge--session-queue-counts nil))
+    (with-temp-buffer
+      (dsh-bridge-prompt-mode)
+      (setq-local dsh-bridge--prompt-session "s1")
+      (setq-local dsh-bridge--prompt-history-session "s1")
+      ;; A draft: Send and Previous can act; there is no newer prompt and
+      ;; no pending queue entry under the cursor.
+      (should (dsh-bridge--menu-prompt-send-enabled))
+      (should (dsh-bridge--menu-prompt-previous-enabled))
+      (should-not (dsh-bridge--menu-prompt-next-enabled))
+      (should-not (dsh-bridge--menu-prompt-steer-enabled))
+      (should-not (dsh-bridge--menu-prompt-withdraw-enabled))
+      ;; Walking the queued entry: both navigation directions and both queue
+      ;; actions can act; Send would duplicate the pending prompt.
+      (setq-local dsh-bridge--prompt-pending-snapshot
+		  (copy-tree (dsh-bridge--buffer-prompt-pending)))
+      (setq-local dsh-bridge--prompt-history-index 0)
+      (insert "queued text")
+      (set-buffer-modified-p nil)
+      (should-not (dsh-bridge--menu-prompt-send-enabled))
+      (should (dsh-bridge--menu-prompt-next-enabled))
+      (should (dsh-bridge--menu-prompt-previous-enabled))
+      (should (dsh-bridge--menu-prompt-steer-enabled))
+      (should (dsh-bridge--menu-prompt-withdraw-enabled))
+      ;; A steering entry can be withdrawn, not steered again.
+      (erase-buffer)
+      (insert "steering text")
+      (set-buffer-modified-p nil)
+      (setq-local dsh-bridge--prompt-history-index 1)
+      (should-not (dsh-bridge--menu-prompt-steer-enabled))
+      (should (dsh-bridge--menu-prompt-withdraw-enabled))
+      ;; A committed entry: Send acts, the queue actions do not.
+      (erase-buffer)
+      (insert "committed")
+      (set-buffer-modified-p nil)
+      (setq-local dsh-bridge--prompt-history-index 2)
+      (should (dsh-bridge--menu-prompt-send-enabled))
+      (should-not (dsh-bridge--menu-prompt-steer-enabled))
+      (should-not (dsh-bridge--menu-prompt-withdraw-enabled))
+      ;; A modified walk blocks navigation, as M-p/M-n do.
+      (insert " edited")
+      (should-not (dsh-bridge--menu-prompt-previous-enabled))
+      (should-not (dsh-bridge--menu-prompt-next-enabled)))))
+
+
 ;;; The view buffers
 
 (ert-deftest dsh-bridge-view-mode-basics ()

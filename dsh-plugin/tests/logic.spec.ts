@@ -53,8 +53,12 @@ import {
   outboxSessionId,
   parseBearerAuthorization,
   parseSendMode,
+  pendingPrompts,
   planChangedMessage,
+  queueChangedMessage,
   queueCounts,
+  queueCountsFromWire,
+  queueMutationStatus,
   repliesChangedMessage,
   resolveTargetId,
   rpcArgsPayload,
@@ -1104,6 +1108,20 @@ describe('sessionsChangedMessage', () => {
   })
 })
 
+describe('queueChangedMessage', () => {
+  it('emits counts only, never prompt text or attachment details', () => {
+    expect(queueChangedMessage('session-1', { queued: 2, steering: 1 })).toBe(
+      'data: {"kind":"queue-changed","sessionId":"session-1","queued":2,"steering":1}\n\n',
+    )
+  })
+
+  it('emits a frame for an empty queue too (the pending list may have shrunk)', () => {
+    expect(queueChangedMessage('session-1', { queued: 0, steering: 0 })).toBe(
+      'data: {"kind":"queue-changed","sessionId":"session-1","queued":0,"steering":0}\n\n',
+    )
+  })
+})
+
 describe('rpcRequestFrame', () => {
   it('emits a client-request envelope with the method, id, and payload', () => {
     expect(rpcRequestFrame('session/modelCatalog', 'rpc-1', { sessionId: 's1' })).toBe(
@@ -1609,6 +1627,99 @@ describe('queueCounts', () => {
 
   it('reports zeros for an empty inbox', () => {
     expect(queueCounts({ nextTurn: [], nextStep: [] })).toEqual({ queued: 0, steering: 0 })
+  })
+})
+
+describe('pendingPrompts', () => {
+  const text = (id: string, value: string) => ({
+    id,
+    source: { kind: 'user' },
+    content: [{ type: 'text', text: value }],
+  })
+  const context = { id: 'c', source: { kind: 'plugin' }, content: [{ type: 'text', text: 'ctx' }] }
+
+  it('reports steering first, then queued in FIFO order with positions', () => {
+    expect(pendingPrompts({
+      nextStep: [context, text('s1', 'steer me')],
+      nextTurn: [text('q1', 'first'), text('q2', 'second')],
+    })).toEqual([
+      { id: 's1', placement: 'steering', text: 'steer me', textOnly: true, attachments: [] },
+      { id: 'q1', placement: 'queued', text: 'first', textOnly: true, attachments: [], position: 1 },
+      { id: 'q2', placement: 'queued', text: 'second', textOnly: true, attachments: [], position: 2 },
+    ])
+  })
+
+  it('joins text blocks with newlines and keeps an empty text for attachment-only prompts', () => {
+    expect(pendingPrompts({
+      nextStep: [],
+      nextTurn: [
+        { id: 'q1', source: { kind: 'user' }, content: [{ type: 'text', text: 'a' }, { type: 'text', text: 'b' }] },
+        { id: 'q2', source: { kind: 'user' }, content: [{ type: 'file', attachment: { name: 'notes.txt', bytes: 12 } }] },
+      ],
+    })).toEqual([
+      { id: 'q1', placement: 'queued', text: 'a\nb', textOnly: true, attachments: [], position: 1 },
+      {
+        id: 'q2',
+        placement: 'queued',
+        text: '',
+        textOnly: false,
+        attachments: [{ kind: 'file', name: 'notes.txt', bytes: 12 }],
+        position: 2,
+      },
+    ])
+  })
+
+  it('summarizes metadata without reading content bytes, and marks unknown blocks non-text', () => {
+    const [entry] = pendingPrompts({
+      nextStep: [],
+      nextTurn: [{
+        id: 'q1',
+        source: { kind: 'user' },
+        content: [
+          { type: 'text', text: 'look' },
+          { type: 'image', attachment: { bytes: 99 } },
+          { type: 'file', attachment: { name: 'a.bin', bytes: 5 } },
+          { type: 'reasoning', text: 'not a prompt block' },
+        ],
+      }],
+    })
+    expect(entry?.textOnly).toBe(false)
+    expect(entry?.attachments).toEqual([
+      { kind: 'image', bytes: 99 },
+      { kind: 'file', name: 'a.bin', bytes: 5 },
+    ])
+    expect(entry?.text).toBe('look')
+  })
+})
+
+describe('queueCountsFromWire', () => {
+  const user = { source: { kind: 'user' } }
+  const context = { source: { kind: 'plugin' } }
+
+  it('folds the inbox projection wire state', () => {
+    expect(queueCountsFromWire({ 'next-turn': [user], 'next-step': [context, user] }))
+      .toEqual({ queued: 1, steering: 1 })
+  })
+
+  it('returns undefined for a value that is not the inbox state', () => {
+    for (const value of [undefined, null, {}, { 'next-turn': [] }, { 'next-turn': [], 'next-step': {} }]) {
+      expect(queueCountsFromWire(value)).toBeUndefined()
+    }
+  })
+})
+
+describe('queueMutationStatus', () => {
+  it('maps a stale item, unavailable steering, and subagent ownership to 409', () => {
+    for (const code of ['session/queue-item-not-found', 'session/steer-unavailable', 'session/agent-busy']) {
+      expect(queueMutationStatus(code)).toBe(409)
+    }
+  })
+
+  it('maps malformed input to 400, a missing session to 404, and anything else to 500', () => {
+    expect(queueMutationStatus('gateway/bad-request')).toBe(400)
+    expect(queueMutationStatus('session/not-found')).toBe(404)
+    expect(queueMutationStatus('gateway/internal')).toBe(500)
+    expect(queueMutationStatus(undefined)).toBe(500)
   })
 })
 

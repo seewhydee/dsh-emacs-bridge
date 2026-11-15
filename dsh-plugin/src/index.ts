@@ -25,9 +25,9 @@
 //   GET  /dsh-bridge/status                         -> { name, version } (loopback-fenced)
 //   GET  /dsh-bridge/events?token=                  -> EventSource (composer-draft push)
 //        (also carries turn lifecycle, context, plan, goal, goal-activation,
-//        outbox, sessions-changed, replies-changed, activity-changed, and
-//        compaction frames; the payloads are documented on their
-//        constructors in logic.ts)
+//        outbox, sessions-changed, replies-changed, activity-changed,
+//        queue-changed, and compaction frames; the payloads are documented on
+//        their constructors in logic.ts)
 //        (?purpose=draft marks the browser's own draft stream; an unmarked
 //        connection is Emacs and is eligible to answer ask-user questions and
 //        approvals, both of which coexist with the web UI's own panels.  &answer=0
@@ -50,7 +50,12 @@
 //        and goal are live-refined with the preset's planMode controller and
 //        the goals activation; observes live and cold sessions without
 //        resuming, 404 unknown, 409 subagent-owned)
-//   GET  /dsh-bridge/prompts?sessionId=           -> user prompts, newest first
+//   GET  /dsh-bridge/prompts?sessionId=           -> user prompts, newest first,
+//        plus the live agent's pending queue items in action order
+//        ({ id, placement: "queued"|"steering", text, textOnly, attachments,
+//        position? }). Pending ids are durable message ids; attachment entries
+//        carry display metadata only, never bytes. Pending is live-only: the
+//        read adds no resume of its own.
 //   GET  /dsh-bridge/turns?sessionId=             -> turn-aggregated assistant
 //        replies, newest first (each turn: { turn, startedAt, endedAt?,
 //        reason?, endSeq?, failure?: { code?, message }, segments:
@@ -176,6 +181,13 @@
 //        excluded).  An absent, cold, or not-live id reads as zeros: for an
 //        advisory count, absent and empty are the same answer, so there is
 //        deliberately no 404 distinction here.
+//   POST /dsh-bridge/sessions/queue { sessionId, itemId, action }
+//        -> mutate one pending occurrence by durable message id: `action` is
+//        "steer" or "remove" (proxies sessionController.updateQueue; the web
+//        UI's QueueDock seam). No `edit` action: editing is withdraw-then-send.
+//        400 malformed request or supplied text, 409 item no longer pending /
+//        steering unavailable / archived / subagent-owned, 501 without a
+//        session controller.
 //   POST /dsh-bridge/sessions/create { workspaceId | path, workspaceTitle?, title? }
 //        -> create a session in a workspace (exactly one of the two keys);
 //        `title` names the new session when the profile mounts a session
@@ -291,8 +303,12 @@ import {
   parseAttachmentRequests,
   parseBearerAuthorization,
   parseSendMode,
+  pendingPrompts,
   planChangedMessage,
+  queueChangedMessage,
   queueCounts,
+  queueCountsFromWire,
+  queueMutationStatus,
   repliesChangedMessage,
   resolveReadTargetId,
   resolveTargetId,
@@ -663,16 +679,23 @@ interface SessionTitleService {
 }
 
 /**
- * Minimal face of the optional `sessionController` service (fork and stop).
- * Read via `ctx.get`; a profile without the service answers `/fork` and
- * `/sessions/stop` with 501 and the rest of the bridge is unaffected. Call
- * its methods on the service (their prototype methods need the receiver),
- * never destructured. `cancel` is the same seam the web UI's stop button
- * uses, so its subagent-ownership fence applies here too.
+ * Minimal face of the optional `sessionController` service (fork, stop, and
+ * pending-queue mutation). Read via `ctx.get`; a profile without the service
+ * answers `/fork`, `/sessions/stop`, and `/sessions/queue` with 501 and the
+ * rest of the bridge is unaffected. Call its methods on the service (their
+ * prototype methods need the receiver), never destructured. `cancel` is the
+ * same seam the web UI's stop button uses, and `updateQueue` the same exact-item
+ * mutation the web UI's QueueDock uses, so their subagent-ownership fences
+ * apply here too.
  */
 interface SessionControllerService {
   fork(request: { sessionId: SessionId; atSeq?: number }): Promise<{ sessionId: SessionId }>
   cancel(request: { sessionId: SessionId }): { accepted: true }
+  updateQueue(request: {
+    sessionId: SessionId
+    itemId: string
+    action: { kind: 'steer' } | { kind: 'remove' }
+  }): Promise<{ accepted: true }>
 }
 
 /**
@@ -742,6 +765,31 @@ function stopErrorStatus(error: unknown): number {
   if (isRemoteErrorCode(error, 'session/agent-busy')) return 409
   if (isRemoteErrorCode(error, 'gateway/bad-request')) return 400
   return 500
+}
+
+/**
+ * The code carried by a Typert `RemoteError`, or undefined. Uses the same
+ * structural marker as {@link isRemoteErrorCode}; the mapping from code to
+ * status stays pure in `logic.ts` (`queueMutationStatus`).
+ */
+function remoteErrorCode(error: unknown): string | undefined {
+  if (typeof error !== 'object' || error === null
+    || (error as { isDSHRemoteError?: unknown }).isDSHRemoteError !== true) {
+    return undefined
+  }
+  const code = (error as { code?: unknown }).code
+  return typeof code === 'string' ? code : undefined
+}
+
+/**
+ * The HTTP status for a `/sessions/queue` failure: bridge errors keep their
+ * status, and `updateQueue`'s taxonomy (`session/queue-item-not-found`,
+ * `session/steer-unavailable`, `session/agent-busy`) maps to 409, malformed
+ * input to 400, anything else to 500.
+ */
+function queueErrorStatus(error: unknown): number {
+  if (error instanceof BridgeError) return error.status
+  return queueMutationStatus(remoteErrorCode(error))
 }
 
 /** The target of a bridge operation: a live session plus its live agent. */
@@ -1709,6 +1757,15 @@ export function apply(ctx: Context, config?: Config): void {
       }
       if (key === 'goal') {
         broadcast(goalChangedMessage(id, liveGoalSection(session, value)))
+        return
+      }
+      // The inbox projection fires on every durable splice (insert, claim,
+      // remove, edit, clear). Counts only: prompt text and attachment details
+      // stay off SSE, and a same-count change still emits because the pending
+      // list itself may have changed.
+      if (key === 'inbox') {
+        const counts = queueCountsFromWire(value)
+        if (counts !== undefined) broadcast(queueChangedMessage(id, counts))
       }
     }), 'dsh-bridge: projection changes')
   })
@@ -2646,13 +2703,18 @@ export function apply(ctx: Context, config?: Config): void {
         return
       }
 
-      // The prompt buffer's history: the session's user prompts, newest first.
+      // The prompt buffer's history: the session's user prompts, newest first,
+      // plus the live agent's pending queue items in action order. The pending
+      // ids are durable message ids, so Emacs can address one exact occurrence
+      // (duplicate texts, multiple clients, or a concurrently claimed item
+      // cannot confuse it). Attachment bytes never travel here.
       if (req.method === 'GET' && pathname === '/dsh-bridge/prompts') {
         try {
           const target = await resolveTarget(url.searchParams.get('sessionId') ?? undefined)
           sendJson(res, 200, {
             sessionId: String(target.session.id),
             prompts: userPrompts(target.agent.session.deriveMessages()).reverse(),
+            pending: pendingPrompts(target.agent.inbox),
           })
         } catch (error: unknown) {
           sendBridgeError(res, error)
@@ -3145,6 +3207,59 @@ export function apply(ctx: Context, config?: Config): void {
             : queueCounts(agent.inbox))
         } catch (error: unknown) {
           sendError(res, 500, error)
+        }
+        return
+      }
+
+      // Exact-item management of the live agent's pending queue. The item id
+      // is the durable message id, so a duplicate text, another client, or a
+      // concurrently claimed item cannot address the wrong occurrence. There
+      // is deliberately no "last queued item" form and no `edit` action:
+      // editing is a withdraw followed by a fresh send.
+      if (req.method === 'POST' && pathname === '/dsh-bridge/sessions/queue') {
+        try {
+          const body = (await readJson(req)) as {
+            sessionId?: unknown
+            itemId?: unknown
+            action?: unknown
+            text?: unknown
+          } | undefined
+          const id = typeof body?.sessionId === 'string' && body.sessionId !== '' ? body.sessionId : null
+          const itemId = typeof body?.itemId === 'string' && body.itemId !== '' ? body.itemId : null
+          const action = body?.action
+          if (id === null || itemId === null) {
+            sendJson(res, 400, { error: 'sessionId and itemId are required' })
+            return
+          }
+          if (action !== 'steer' && action !== 'remove') {
+            sendJson(res, 400, { error: 'action must be "steer" or "remove"' })
+            return
+          }
+          if (body?.text !== undefined) {
+            sendJson(res, 400, { error: 'text is not accepted for a queue action' })
+            return
+          }
+          const sessionController = ctx.get('sessionController') as SessionControllerService | undefined
+          if (sessionController === undefined) {
+            sendJson(res, 501, { error: 'profile lacks a session controller (no queue support)' })
+            return
+          }
+          // The controller resolves (and may resume) a cold agent before it
+          // locates the item. Fence a doomed archived request first, and a live
+          // subagent child before the controller's own ownership check.
+          assertNotArchived(id)
+          const live = ctx.agents.get(id as SessionId)
+          if (live !== undefined && isSubagentChild(live.session.header.origin)) {
+            throw new BridgeError(409, `session ${id} is owned by a subagent`)
+          }
+          await sessionController.updateQueue({
+            sessionId: id as SessionId,
+            itemId,
+            action: { kind: action },
+          })
+          sendJson(res, 200, { accepted: true })
+        } catch (error: unknown) {
+          sendError(res, queueErrorStatus(error), error)
         }
         return
       }

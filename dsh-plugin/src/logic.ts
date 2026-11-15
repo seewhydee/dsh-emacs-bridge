@@ -2393,6 +2393,23 @@ export function sessionsChangedMessage(sessionId?: string): string {
   return sseMessage(payload)
 }
 
+/**
+ * One SSE `data:` frame announcing that a session's pending-prompt counts
+ * changed (an inbox splice: insert, claim, remove, edit, or clear). Counts
+ * only — prompt text and attachment details never travel on SSE; the prompt
+ * buffer fetches them through `GET /prompts` when it needs them. A same-count
+ * change still emits, because the pending list itself may have changed (an
+ * edit, or one item replaced by another).
+ */
+export function queueChangedMessage(sessionId: string, counts: QueueCounts): string {
+  return sseMessage({
+    kind: 'queue-changed',
+    sessionId,
+    queued: counts.queued,
+    steering: counts.steering,
+  })
+}
+
 /** One client-request RPC envelope: the POST /api/<method> body. RPC-ID is the caller-minted correlation id echoed in the response. */
 export function rpcRequestFrame(method: string, rpcId: string, payload: unknown): string {
   return JSON.stringify({ type: 'client-request', rpcId, method, payload })
@@ -2881,6 +2898,44 @@ export interface PendingMessageLike {
   readonly source: { readonly kind: string }
 }
 
+/** One content block, narrowed to the fields the pending-prompt fold reads. */
+export interface PendingContentBlockLike {
+  readonly type: string
+  readonly text?: string
+  /** Present on `image`/`file` blocks; only display metadata is read. */
+  readonly attachment?: {
+    readonly name?: unknown
+    readonly bytes?: unknown
+  }
+}
+
+/** One pending inbox message, narrowed to the fields the prompt history reads. */
+export interface PendingPromptMessageLike extends PendingMessageLike {
+  readonly id: string
+  readonly content: readonly PendingContentBlockLike[]
+}
+
+/** One attachment summary carried by a pending prompt. */
+export interface PendingPromptAttachment {
+  readonly kind: 'file' | 'image'
+  readonly name?: string
+  readonly bytes?: number
+}
+
+/** One pending prompt as `GET /prompts` reports it to the history walk. */
+export interface PendingPrompt {
+  /** Durable message id, shared with the committed `user/message` once claimed. */
+  readonly id: string
+  readonly placement: 'queued' | 'steering'
+  /** Text blocks joined with newlines; empty for an attachment-only prompt. */
+  readonly text: string
+  /** Whether the message carries only text blocks (false for attachments or unknown blocks). */
+  readonly textOnly: boolean
+  readonly attachments: readonly PendingPromptAttachment[]
+  /** 1-based FIFO position within the queued group; absent for steering. */
+  readonly position?: number
+}
+
 /** A live agent's pending user-prompt counts by placement. */
 export interface QueueCounts {
   /** Prompts queued for their own later turns. */
@@ -2902,6 +2957,112 @@ export function queueCounts(inbox: {
   return {
     queued: inbox.nextTurn.length,
     steering: inbox.nextStep.filter(message => message.source.kind === 'user').length,
+  }
+}
+
+/** One pending message's text: text blocks joined with newlines, matching {@link userPrompts}. */
+function pendingPromptText(content: readonly PendingContentBlockLike[]): string {
+  return content
+    .filter(block => block.type === 'text')
+    .map(block => block.text ?? '')
+    .join('\n')
+}
+
+/** Attachment display metadata in block order; attachment content bytes are never read. */
+function pendingPromptAttachments(
+  content: readonly PendingContentBlockLike[],
+): PendingPromptAttachment[] {
+  const attachments: PendingPromptAttachment[] = []
+  for (const block of content) {
+    if (block.type !== 'file' && block.type !== 'image') continue
+    const attachment = block.attachment
+    if (attachment === undefined) continue
+    const name = typeof attachment.name === 'string' ? attachment.name : undefined
+    const bytes = typeof attachment.bytes === 'number' && Number.isFinite(attachment.bytes)
+      ? attachment.bytes
+      : undefined
+    attachments.push({
+      kind: block.type,
+      ...(name === undefined ? {} : { name }),
+      ...(bytes === undefined ? {} : { bytes }),
+    })
+  }
+  return attachments
+}
+
+/** One pending message as a history entry, before its placement-specific position. */
+function pendingPrompt(
+  message: PendingPromptMessageLike,
+  placement: PendingPrompt['placement'],
+): PendingPrompt {
+  return {
+    id: String(message.id),
+    placement,
+    text: pendingPromptText(message.content),
+    textOnly: message.content.every(block => block.type === 'text'),
+    attachments: pendingPromptAttachments(message.content),
+  }
+}
+
+/**
+ * The live agent's pending prompts in action order: steering items first (they
+ * are claimed at the next step boundary), then queued items in FIFO order (the
+ * next to run first). Every `nextTurn` item is a queued prompt; only
+ * user-sourced `nextStep` items are steering, matching {@link queueCounts}.
+ * Attachment content bytes are never read (only size metadata is copied), and
+ * `textOnly` is false for any non-text block rather than stringifying it.
+ */
+export function pendingPrompts(inbox: {
+  readonly nextTurn: readonly PendingPromptMessageLike[]
+  readonly nextStep: readonly PendingPromptMessageLike[]
+}): PendingPrompt[] {
+  const pending: PendingPrompt[] = []
+  for (const message of inbox.nextStep) {
+    if (message.source.kind !== 'user') continue
+    pending.push(pendingPrompt(message, 'steering'))
+  }
+  let position = 0
+  for (const message of inbox.nextTurn) {
+    position += 1
+    pending.push({ ...pendingPrompt(message, 'queued'), position })
+  }
+  return pending
+}
+
+/**
+ * Fold the `inbox` session projection's hyphenated wire state into the same
+ * counts {@link queueCounts} produces, or undefined for a value that is not
+ * the expected `{ 'next-turn', 'next-step' }` object. The projection's wire
+ * schema validates the message objects, so the counts only read `source`.
+ */
+export function queueCountsFromWire(value: unknown): QueueCounts | undefined {
+  if (typeof value !== 'object' || value === null) return undefined
+  const state = value as { 'next-turn'?: unknown; 'next-step'?: unknown }
+  if (!Array.isArray(state['next-turn']) || !Array.isArray(state['next-step'])) return undefined
+  return queueCounts({
+    nextTurn: state['next-turn'] as readonly PendingMessageLike[],
+    nextStep: state['next-step'] as readonly PendingMessageLike[],
+  })
+}
+
+/**
+ * The HTTP status for a `POST /sessions/queue` failure. The session
+ * controller's taxonomy maps onto the bridge's conventions; anything
+ * unrecognized is 500. A missing or stale item and a turn that no longer
+ * accepts steering are both conflicts, not client errors.
+ */
+export function queueMutationStatus(code: string | undefined): number {
+  switch (code) {
+    case 'session/queue-item-not-found':
+    case 'session/steer-unavailable':
+    case 'session/agent-busy':
+      return 409
+    case 'session/not-found':
+      return 404
+    case 'gateway/bad-request':
+      return 400
+    default:
+      return 500
   }
 }
 

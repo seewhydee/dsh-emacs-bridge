@@ -261,6 +261,8 @@ The following commands are available from the DSH-Prompt buffer:
 * `C-c C-o` — compact the session's context history.
 * `C-c C-f` — open the DSH-View buffer for this session.
 * `C-c C-l` — open the DSH-Sessions buffer.
+* `C-c C-t` — steer the queued prompt shown into the running turn.
+* `C-c C-w` — withdraw the pending prompt shown, keeping its text as a draft.
 * `M-p`/`M-n` — walk the session's prompt history.
 
 When Markdown mode is installed, this buffer derives from it, so most
@@ -275,6 +277,22 @@ unconditionally steer, type `C-u C-c C-c`.
 While walking the prompt history with `M-p`/`M-n`, you may edit
 earlier prompts.  This blocks further history navigation; to resume,
 you must send the prompt first, or revert with `M-x revert-buffer`.
+
+A prompt sent while the session is running — queued, or steered with
+`C-u C-c C-c` — stays visible in the prompt history.  The pending
+prompts come before the committed history that `M-p` walks, and the
+header marks the current entry as `queued` or `steering` and shows the
+session's totals.  From a pending entry, `C-c C-t` steers the queued
+prompt and `C-c C-w` withdraws it.  The withdrawn prompt's text stays in
+the buffer as a draft, so the way to edit a queued prompt is: `C-c C-w`,
+edit, then `C-c C-c`.  While a pending prompt is shown, `C-c C-c`
+refuses to send a second copy.
+
+The history shows only the prompt's text: attachment names and bytes are
+not displayed, and an attachment-only pending prompt appears as an empty
+entry marked `attachments only`.  Withdrawing an attachment-bearing
+prompt loses its attachments; send it again from the prompt buffer if you
+need them.
 
 #### Attachments
 

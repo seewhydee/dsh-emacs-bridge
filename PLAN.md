@@ -156,25 +156,35 @@ risk acknowledgement. See [Deferred](#deferred).  Answering an on-demand
 `approval/request` (a one-shot sandbox escalation or hook-gated tool ask) is
 a separate, implemented feature.
 
-### 3. Queue visibility and queued-item management
+### 3. Queue visibility and queued-item management (implemented)
 
 - **Problem** — a prompt sent from Emacs while a turn runs is queued
   host-side and invisible in Emacs; there is no way to retract, edit, or
   steer it.
-- **Shapes** — two options, not mutually exclusive: (a) surface the host's
-  `inbox` session projection (already wire-visible) as a queue list with
-  per-item steer/remove plus a header count, mirroring the web UI's
-  QueueDock; (b) a minimal retraction path — return the deposited message id
-  from `/send` and expose a single "steer the last queued prompt" command via
-  `sessionController.updateQueue`.  Option (a) is the real fix; (b) is a
-  cheaper stepping stone.
-- **Seed** — the read half already exists: `GET /dsh-bridge/sessions/queue`
-  reports per-session queued/steering counts (added for the stop
-  confirmation).
+- **Shape** — the prompt history is the queue surface, not a new buffer.
+  `GET /prompts` carries the live agent's pending items (action order:
+  steering first, then queued FIFO) alongside the committed prompts, each
+  with its durable message id, placement, text, `textOnly`, and attachment
+  metadata. The DSH-Prompt walk prepends that prelude; the header marks the
+  current entry `queued`/`steering` and shows the session's cached totals.
+  `C-c C-t` steers the shown queued item; `C-c C-w` withdraws a pending
+  item and keeps its text as a draft, so withdraw → edit → send is the
+  editing path. `C-c C-c` refuses to send a second copy while a pending
+  entry is shown.
+- **Host** — `POST /sessions/queue` proxies `sessionController.updateQueue`
+  for exact-item `steer`/`remove` (the web QueueDock seam; no `edit` action),
+  and an `inbox` projection listener emits a counts-only `queue-changed`
+  frame. Prompt text and attachment details never travel on SSE. The DSH-View
+  and DSH-Sessions headers are deliberately unchanged.
+- **Deliberate limits** — no ordered queue list, no atomic in-place edit, no
+  attachment names or thumbnails (an attachment-only pending prompt appears
+  as an empty entry marked `attachments only`), and the counts are advisory
+  while a frozen walk is showing an entry that may have changed elsewhere
+  (a mutation resolves it through the host's 409).
 - **Interaction to settle** — after a stop, a previously queued prompt starts
   a new turn immediately (`cancel` uses `keepInbox: true`), which can make a
   stop look ineffective; the stop confirmation now warns when that is about
-  to happen.
+  to happen. That behavior is unchanged.
 
 ### 4. Ratings/Feedback
 
