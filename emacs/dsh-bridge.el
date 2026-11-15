@@ -8611,15 +8611,19 @@ instead of trusting the cached one."
   (transient-setup 'dsh-bridge))
 
 (defun dsh-bridge--dispatcher-exit ()
-  "Clear the menu-scoped dispatcher state.
-Runs from `transient-exit-hook', after an exiting suffix's body has
-already used the focus."
-  (setq dsh-bridge--focus nil
-	dsh-bridge--focus-cycle nil
-	dsh-bridge--dispatcher-roster nil))
+  "Clear the menu-scoped dispatcher state once the dispatcher is gone.
+This function runs from `transient-exit-hook'.  Note that the hook also
+runs when the menu is only or replaced by a stacked transient, so keep
+the state while a suspended `dsh-bridge' sits on `transient--stack'."
+  (unless (seq-some (lambda (entry) (eq (car entry) 'dsh-bridge))
+                    transient--stack)
+    (setq dsh-bridge--focus nil
+	  dsh-bridge--focus-cycle nil
+	  dsh-bridge--dispatcher-roster nil)))
 
-;; Registered once, at load time: adding it from the prefix body would stack
-;; a duplicate on every menu open.
+;; `transient-exit-hook' is the only exit notification offered by the
+;; transient menu.  Registering it once at load time keeps the prefix
+;; body free of side effects.
 (add-hook 'transient-exit-hook #'dsh-bridge--dispatcher-exit)
 
 ;;; Menu bar (under Tools)

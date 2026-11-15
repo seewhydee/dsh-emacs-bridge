@@ -930,7 +930,8 @@ as an explicitly confirmed focus."
 
 (ert-deftest dsh-bridge-dispatcher-exit-clears-menu-state ()
   "The focus is menu-scoped: the exit hook drops it, not the pin."
-  (let ((dsh-bridge-pinned-target "s1"))
+  (let ((dsh-bridge-pinned-target "s1")
+        (transient--stack nil))
     (setq dsh-bridge--focus (cons "s1" 'pinned))
     (setq dsh-bridge--focus-cycle '(("s1" . "T1"))
           dsh-bridge--dispatcher-roster 'ok)
@@ -939,6 +940,29 @@ as an explicitly confirmed focus."
     (should (null dsh-bridge--focus-cycle))
     (should (null dsh-bridge--dispatcher-roster))
     (should (equal dsh-bridge-pinned-target "s1"))))
+
+(ert-deftest dsh-bridge-dispatcher-exit-defers-while-suspended ()
+  "A suspended dispatcher keeps its state across the exit hook.
+`transient-exit-hook' runs when the dispatcher is only suspended (C-z),
+and transient resumes it without rerunning the prefix body, so the
+focus must outlive that hook run.  A stack left by another transient
+does not protect the state: that dispatcher is gone for good."
+  (let ((dsh-bridge--focus (cons "s2" 'cycled))
+        (dsh-bridge--focus-cycle '("s2" "s1"))
+        (dsh-bridge--dispatcher-roster 'ok)
+        (transient--stack '((dsh-bridge nil nil))))
+    (dsh-bridge--dispatcher-exit)
+    (should (equal dsh-bridge--focus '("s2" . cycled)))
+    (should (equal dsh-bridge--focus-cycle '("s2" "s1")))
+    (should (eq dsh-bridge--dispatcher-roster 'ok)))
+  (let ((dsh-bridge--focus (cons "s2" 'cycled))
+        (dsh-bridge--focus-cycle '("s2" "s1"))
+        (dsh-bridge--dispatcher-roster 'ok)
+        (transient--stack '((other-transient nil nil))))
+    (dsh-bridge--dispatcher-exit)
+    (should (null dsh-bridge--focus))
+    (should (null dsh-bridge--focus-cycle))
+    (should (null dsh-bridge--dispatcher-roster))))
 
 (ert-deftest dsh-bridge-dispatcher-stay-verbs ()
   "Every in-menu verb that acts on a session is declared transient.
