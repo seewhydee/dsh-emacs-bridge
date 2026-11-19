@@ -83,8 +83,8 @@
 //        increases for every accepted live-stream frame, allowing Emacs to
 //        reject out-of-order snapshots even when an attempt leaves no commit.)
 //        plus running, archived, epoch, title and cwd (the session's effective
-//        working directory: the last `working-directory/change`, else the
-//        header's original project).
+//        working directory: the host's `workingDirectory` projection, else the
+//        last directory-move event or the header's original project).
 //        Optional
 //        since=<turn>&epoch=<n> request the incremental suffix: turns with
 //        turn >= since when the epoch matches the surface's replaceGeneration,
@@ -1246,15 +1246,28 @@ export function apply(ctx: Context, config?: Config): void {
         header: { cwd: session.header.cwd, createdAt: session.header.createdAt },
         events: session.snapshotEvents(),
         running: ctx.agents.get(session.id)?.status === 'running',
+        cwd: sessionCwd(session),
       }))
   }
 
   /**
-   * The session's effective working directory, as reported to Emacs: the last
-   * committed `working-directory/change`, else the header's original project.
-   * The header alone is not enough once the model moves the directory.
+   * The session's effective working directory, as reported to Emacs: the
+   * host's own `workingDirectory` projection when it is mounted, else the
+   * raw-log fallback (`effectiveCwd`).
+   *
+   * The projection is the version-agnostic read face: the host applies
+   * whichever directory event its release defines (`working-directory/change`
+   * through `0.2.2-rc.4`, `workspace-root/change` on master), so the bridge
+   * never has to guess the host generation. A key that is present but null is
+   * authoritative ("no directory recorded"), not a reason to fall back.
    */
   function sessionCwd(session: Session): string | null {
+    const registry = ctx.get('sessionProjections') as SessionProjectionRegistryService | undefined
+    const values = registry?.snapshot(session, ['workingDirectory']).values
+    if (values !== undefined && Object.hasOwn(values, 'workingDirectory')) {
+      const value = values.workingDirectory
+      return typeof value === 'string' && value !== '' ? value : null
+    }
     return effectiveCwd(session.header, session.snapshotEvents() as readonly SessionEventLike[]) ?? null
   }
 
@@ -2083,7 +2096,7 @@ export function apply(ctx: Context, config?: Config): void {
         throw new BridgeError(409, `session ${sessionId} is owned by a subagent`)
       }
       const events = live.snapshotEvents() as readonly SessionEventLike[]
-      const cwd = effectiveCwd(live.header, events)
+      const cwd = sessionCwd(live)
       return {
         sessionId,
         events,
@@ -2091,7 +2104,7 @@ export function apply(ctx: Context, config?: Config): void {
         epoch: live.surface.replaceGeneration,
         cursor: logCursor(events),
         ...live.header.cwd === undefined ? {} : { headerCwd: live.header.cwd },
-        ...cwd === undefined ? {} : { cwd },
+        ...cwd === null ? {} : { cwd },
       }
     }
 
@@ -2751,7 +2764,8 @@ export function apply(ctx: Context, config?: Config): void {
           // unlike the surface-walking turn fold it is merged into.  The
           // header's original project is only its starting point: the fold
           // moves the directory it resolves against at each committed
-          // `working-directory/change`.  The activity fold rides the same raw
+          // `workspace-root/change` (or a deprecated `working-directory/change`
+          // in an old log).  The activity fold rides the same raw
           // log; it also supplies synthetic records for activity-bearing turns
           // that have no text yet, so the view can stream activity before the
           // turn's first reply.  The surface set keeps compaction-shadowed

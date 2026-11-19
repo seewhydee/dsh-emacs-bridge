@@ -407,7 +407,7 @@ describe('file-change classification', () => {
     const l = log()
     l.add(turnStart(1))
     if (opts.cwd !== undefined) {
-      l.add({ time: 1000, type: 'working-directory/change', data: { cwd: opts.cwd } })
+      l.add({ time: 1000, type: 'workspace-root/change', data: { cwd: opts.cwd } })
     }
     l.add(assistant(1, 0, [{ type: 'text', text: 'edit' }]))
     l.add(toolCall(1, 0, 'c1', opts.name ?? 'write', args))
@@ -490,17 +490,17 @@ describe('file-change classification', () => {
   it('resolves orphan and fallback paths at their own event directories, not the final cwd', () => {
     const l = log()
     l.add(turnStart(1))
-    l.add({ time: 1000, type: 'working-directory/change', data: { cwd: '/call' } })
+    l.add({ time: 1000, type: 'workspace-root/change', data: { cwd: '/call' } })
     l.add(toolCall(1, 0, 'c1', 'write', { file_path: 'call.txt', content: 'x' }))
-    l.add({ time: 1001, type: 'working-directory/change', data: { cwd: '/result' } })
+    l.add({ time: 1001, type: 'workspace-root/change', data: { cwd: '/result' } })
     l.add(toolResult(1, 0, 'c1', {
       meta: { path: 'call.txt', diffs: [{ path: 'call.txt', oldText: null, newText: 'x' }] },
     }))
-    l.add({ time: 1002, type: 'working-directory/change', data: { cwd: '/orphan' } })
+    l.add({ time: 1002, type: 'workspace-root/change', data: { cwd: '/orphan' } })
     l.add(toolResult(1, 1, 'orphan', {
       meta: { path: 'orphan.txt', diffs: [{ path: 'orphan.txt', oldText: null, newText: 'y' }] },
     }))
-    l.add({ time: 1003, type: 'working-directory/change', data: { cwd: '/final' } })
+    l.add({ time: 1003, type: 'workspace-root/change', data: { cwd: '/final' } })
     l.add(turnEnd(1))
     expect(itemOf(l.events, 1, 'tool', { callId: 'c1' })).toMatchObject({
       ok: true, item: { result: { files: [{ absolute: '/call/call.txt', cwd: '/call' }] } },

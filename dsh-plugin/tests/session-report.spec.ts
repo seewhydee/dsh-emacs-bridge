@@ -243,9 +243,29 @@ describe('sessionReport', () => {
     const report = sessionReport({
       source: 'live',
       header: { id: 's5', createdAt: 5, cwd: '/w' },
-      events: [{ time: 9, type: 'working-directory/change', data: { cwd: '/w/sub' } }],
+      events: [{ time: 9, type: 'workspace-root/change', data: { cwd: '/w/sub' } }],
     })
     expect(report.cwd).toBe('/w/sub')
+  })
+
+  it('prefers the host workingDirectory projection over the folded log', () => {
+    const report = sessionReport({
+      source: 'live',
+      header: { id: 's7', createdAt: 5, cwd: '/w' },
+      events: [{ time: 9, type: 'working-directory/change', data: { cwd: '/w/legacy' } }],
+      projections: { values: { workingDirectory: '/w/projected' } },
+    })
+    expect(report.cwd).toBe('/w/projected')
+  })
+
+  it('treats a present null workingDirectory as no directory, not a missing key', () => {
+    const report = sessionReport({
+      source: 'live',
+      header: { id: 's8', createdAt: 5, cwd: '/w' },
+      events: [{ time: 9, type: 'workspace-root/change', data: { cwd: '/w/moved' } }],
+      projections: { values: { workingDirectory: null } },
+    })
+    expect(report.cwd).toBeNull()
   })
 
   it('serves the header project when the observation carries no events', () => {

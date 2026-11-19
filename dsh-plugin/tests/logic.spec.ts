@@ -98,12 +98,13 @@ import {
   type WorkspaceLike,
 } from '../src/logic.ts'
 
-function liveSession(id: string, opts: { cwd?: string; createdAt?: number; eventTimes?: number[]; events?: SessionEventLike[]; running?: boolean } = {}): LiveSessionLike {
+function liveSession(id: string, opts: { cwd?: string; cwdOverride?: string | null; createdAt?: number; eventTimes?: number[]; events?: SessionEventLike[]; running?: boolean } = {}): LiveSessionLike {
   return {
     id,
     header: { cwd: opts.cwd, createdAt: opts.createdAt ?? 0 },
     events: opts.events ?? (opts.eventTimes ?? []).map(time => ({ time })),
     running: opts.running ?? false,
+    ...opts.cwdOverride === undefined ? {} : { cwd: opts.cwdOverride },
   }
 }
 
@@ -694,6 +695,14 @@ describe('mergeSessionRows', () => {
       [header('b', { cwd: '/w' })],
     )
     expect(rows.map(row => [row.id, row.cwd])).toEqual([['a', '/w/sub'], ['b', '/w']])
+  })
+
+  it('prefers the host projection on a live row, including an authoritative null', () => {
+    const rows = mergeSessionRows([
+      liveSession('a', { cwd: '/w', cwdOverride: '/w/projected' }),
+      liveSession('b', { cwd: '/w', cwdOverride: null }),
+    ], [])
+    expect(rows.map(row => [row.id, row.cwd])).toEqual([['a', '/w/projected'], ['b', null]])
   })
 
   it('serves the header project for a live row with no change logged', () => {
@@ -1861,8 +1870,13 @@ function presented(turn: number, files: string[]): SessionEventLike {
   return { time: 1000, type: 'deliverables/presented', data: { turn, callId: 'c1', files: files.map(path => ({ path })) } }
 }
 
-/** A committed `working-directory/change` event moving the session to CWD. */
+/** A committed `workspace-root/change` event moving the session to CWD. */
 function cwdChange(cwd: unknown): SessionEventLike {
+  return { time: 1000, type: 'workspace-root/change', data: { cwd } }
+}
+
+/** The deprecated `working-directory/change` a pre-move release recorded. */
+function legacyCwdChange(cwd: unknown): SessionEventLike {
   return { time: 1000, type: 'working-directory/change', data: { cwd } }
 }
 
@@ -2031,13 +2045,21 @@ describe('changedFiles', () => {
     expect(result.files[0]!.absolute).toBe('/w/src/a.ts')
   })
 
-  it('ignores a malformed or empty working-directory/change cwd', () => {
+  it('ignores a malformed or empty directory-move cwd', () => {
     const result = changedFiles([
       cwdChange(42),
       cwdChange(''),
       ...writeCall(1, 'c1', 'src/a.ts', 'one'),
     ], '/w')
     expect(result.files[0]!.absolute).toBe('/w/src/a.ts')
+  })
+
+  it('still resolves old calls at the deprecated working-directory/change directory', () => {
+    const result = changedFiles([
+      legacyCwdChange('/w/sub'),
+      ...writeCall(1, 'c1', 'src/a.ts', 'one'),
+    ], '/w')
+    expect(result.files[0]!.absolute).toBe('/w/sub/src/a.ts')
   })
 
   it('bounds the total and per-turn files, reporting truncation', () => {
@@ -2066,16 +2088,25 @@ describe('effectiveCwd', () => {
     expect(effectiveCwd({}, [])).toBeUndefined()
   })
 
-  it('returns the last well-formed working-directory/change', () => {
+  it('returns the last well-formed workspace-root/change', () => {
     expect(effectiveCwd({ cwd: '/w' }, [cwdChange('/w/a'), cwdChange('/w/b')])).toBe('/w/b')
     // A later malformed change does not discard the last good directory.
     expect(effectiveCwd({ cwd: '/w' }, [cwdChange('/w/a'), cwdChange(7), cwdChange(null)])).toBe('/w/a')
     expect(effectiveCwd({ cwd: '/w' }, [cwdChange('')])).toBe('/w')
   })
 
-  it('prefers a change over the header project', () => {
+  it('prefers a workspace-root/change over the header project', () => {
     expect(effectiveCwd({ cwd: '/w' }, [cwdChange('/elsewhere')])).toBe('/elsewhere')
     expect(effectiveCwd({}, [cwdChange('/elsewhere')])).toBe('/elsewhere')
+  })
+
+  it('accepts either directory-move spelling, newest winning', () => {
+    // The compatibility target (0.2.2-rc.4) records only the legacy spelling;
+    // master records workspace-root/change. The fallback serves both.
+    expect(effectiveCwd({ cwd: '/w' }, [legacyCwdChange('/w/old')])).toBe('/w/old')
+    expect(effectiveCwd({}, [legacyCwdChange('/w/old')])).toBe('/w/old')
+    expect(effectiveCwd({ cwd: '/w' }, [legacyCwdChange('/w/old'), cwdChange('/w/new')])).toBe('/w/new')
+    expect(effectiveCwd({ cwd: '/w' }, [cwdChange('/w/new'), legacyCwdChange('/w/old')])).toBe('/w/old')
   })
 })
 

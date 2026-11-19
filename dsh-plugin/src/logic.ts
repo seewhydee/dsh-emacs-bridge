@@ -416,6 +416,13 @@ export interface LiveSessionLike {
   events: readonly SessionEventLike[]
   /** Whether the live agent is actively processing a turn (not yet quiesced). */
   running: boolean
+  /**
+   * The host's own `workingDirectory` projection value, when the caller can
+   * read it: a string, or null for "no directory recorded". Optional so a
+   * caller that only has a header and a log still gets the folded fallback;
+   * an explicit null is authoritative and does not fall through.
+   */
+  cwd?: string | null
 }
 
 /** Structural view of one persisted session header. */
@@ -452,15 +459,20 @@ export function sessionPreset(
 }
 
 /**
- * The session's effective working directory: the last well-formed
- * `working-directory/change` event's cwd, else the header's cwd.
+ * The session's effective working directory, folded from its raw log: the
+ * last well-formed directory-move event's cwd, else the header's cwd.
  *
- * DSH 0.2.1-alpha.2 split the two: the header keeps the *original project* the
- * session was created in, while a committed `working-directory/change` moves
- * the directory subsequent directory-based operations use. This is the in-repo
- * replica of the harness's `workingDirectory` session projection (init
- * `header.cwd`, then each change event overwrites it), which the bridge folds
- * because it reads cold logs rather than live projections.
+ * This is the **fallback** for callers that hold only a header and a log. The
+ * host's own `workingDirectory` session projection is the authoritative read
+ * wherever the bridge has a live Session (see `sessionCwd` in `index.ts`) or an
+ * observation (see `sessionReport`), and it applies whichever directory event
+ * the running host applies. The two spellings are both honored here because
+ * this fallback must serve the compatibility target (`0.2.2-rc.4`, which
+ * records only `working-directory/change`) and master (which records
+ * `workspace-root/change`); newest event wins. On a host that ignores the
+ * deprecated spelling, a stored log whose only moves are legacy reads as its
+ * header project — the one divergence this fallback accepts, and only where no
+ * host projection is available.
  *
  * @param header - a session header carrying the original project directory.
  * @param events - the session's raw event log.
@@ -472,11 +484,29 @@ export function effectiveCwd(
 ): string | undefined {
   for (let index = events.length - 1; index >= 0; index -= 1) {
     const event = events[index]
-    if (event?.type !== 'working-directory/change') continue
+    if (!movesWorkingDirectory(event?.type)) continue
     const cwd = (event.data as { cwd?: unknown } | undefined)?.cwd
     if (typeof cwd === 'string' && cwd !== '') return cwd
   }
   return header.cwd
+}
+
+/**
+ * Whether a session event `type` is a directory move: the current
+ * `workspace-root/change`, or the deprecated `working-directory/change` a
+ * pre-move release recorded.
+ *
+ * Every raw-log fold uses this: the current-directory fallback
+ * (`effectiveCwd`) because it must serve both the compatibility target and
+ * master, and the historical folds (changed files, turn detail) because they
+ * resolve each recorded path against the directory in effect *when it was
+ * written*.
+ *
+ * @param type - a session event's `type`.
+ * @returns whether the event data carries the directory from that point on.
+ */
+function movesWorkingDirectory(type: unknown): boolean {
+  return type === 'workspace-root/change' || type === 'working-directory/change'
 }
 
 /**
@@ -513,9 +543,10 @@ export function isCompletedTurnAnchor(events: readonly SessionEventLike[], seq: 
 // version bump; see AGENTS.md.
 //
 // Relative paths resolve against the directory current *when the call ran*, not
-// the header's original project: each `working-directory/change` moves it for
-// the calls that follow (see `effectiveCwd`). The header cwd is only the
-// starting point.
+// the header's original project: each `workspace-root/change` (or, in an old
+// log, the deprecated `working-directory/change`) moves it for the calls that
+// follow (see `movesWorkingDirectory`). The header cwd is only the starting
+// point.
 
 /** Maximum changed files named by one session's fold. */
 export const MAX_CHANGED_FILES = 200
@@ -705,8 +736,9 @@ function mutationCall(name: string, argsRaw: string): MutationCall | null {
  *
  * @param events - the session's raw event log (log-only events included).
  * @param cwd - the session's original project directory (the header cwd), the
- *   starting point for the `absolute` resolution: each
- *   `working-directory/change` event moves it for the calls that follow.
+ *   starting point for the `absolute` resolution: each directory-move event
+ *   (`workspace-root/change`, or the deprecated `working-directory/change` in
+ *   an old log) moves it for the calls that follow.
  *   Absent (a header without a cwd) keeps the logged path verbatim.
  */
 export function changedFiles(
@@ -728,7 +760,7 @@ export function changedFiles(
   let truncated = false
 
   for (const event of events) {
-    if (event.type === 'working-directory/change') {
+    if (movesWorkingDirectory(event.type)) {
       const next = (event.data as { cwd?: unknown } | undefined)?.cwd
       if (typeof next === 'string' && next !== '') currentCwd = next
       continue
@@ -1987,8 +2019,9 @@ export function cachedTitleValue(block: ProjectionBlockLike | undefined): string
  * Merge live sessions with persisted (cold) headers into one inventory.
  * `live` is already filtered to targetable sessions by the caller; persisted
  * entries are skipped when subagent-owned or already present as live. A live
- * row's cwd is the effective directory folded from its log; a persisted row
- * carries only a header, so it serves the original project.
+ * row's cwd is the host's projection when the caller supplies it, else the
+ * effective directory folded from its log; a persisted row carries only a
+ * header, so it serves the original project.
  */
 export function mergeSessionRows(
   live: readonly LiveSessionLike[],
@@ -2002,7 +2035,9 @@ export function mergeSessionRows(
     rows.push({
       id,
       title: sessionTitle(session.events),
-      cwd: effectiveCwd(session.header, session.events) ?? null,
+      // An explicit cwd is the host's projection and wins even when null; the
+      // fold is the fallback for callers that carry only a header and a log.
+      cwd: session.cwd !== undefined ? session.cwd : effectiveCwd(session.header, session.events) ?? null,
       live: true,
       running: session.running,
       lastActive: session.events.at(-1)?.time ?? session.header.createdAt,
@@ -3789,7 +3824,7 @@ function foldTurnDetail(
   for (let index = 0; index < events.length; index += 1) {
     const event = events[index]
     if (event === undefined) continue
-    if (event.type === 'working-directory/change') {
+    if (movesWorkingDirectory(event.type)) {
       const next = (event.data as { cwd?: unknown } | undefined)?.cwd
       if (typeof next === 'string' && next !== '') currentCwd = next
       continue

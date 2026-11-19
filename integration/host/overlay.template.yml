@@ -3,18 +3,21 @@
 #
 # Rendered by integration/host/launch.mjs into the per-instance temp DSH_HOME.
 # This is a patch overlay applied after the web profile's own layer, in argv
-# order: it mounts the freshly built bridge plugin and the mock-LLM plugin by
-# absolute path, points every new session at the mock provider, and pins the
-# webserver to loopback + a per-instance free port.
+# order: it mounts the freshly built bridge plugin, the mock-LLM plugin, and
+# the mock-Host-operation plugin by absolute path, points every new session at
+# the mock provider, and pins the webserver to loopback + a per-instance free
+# port.
 #
-# {{DSH_HOME}}, {{BRIDGE_ENTRY}}, {{MOCK_LLM_ENTRY}}, {{PORT}} are placeholders
-# the launcher substitutes with concrete values.
+# {{DSH_HOME}}, {{BRIDGE_ENTRY}}, {{MOCK_LLM_ENTRY}}, {{MOCK_HOST_ENTRY}}, {{PORT}}
+# are placeholders the launcher substitutes with concrete values.
 
 - insert:
     - id: dsh-bridge
       name: '{{BRIDGE_ENTRY}}'
     - id: dsh-bridge-mock-llm
       name: '{{MOCK_LLM_ENTRY}}'
+    - id: dsh-bridge-mock-host
+      name: '{{MOCK_HOST_ENTRY}}'
 
 # Route every new session at the mock provider (the base bundle's agent-default-
 # model row has no explicit provider/model, so this override is what reaches the

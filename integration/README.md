@@ -43,7 +43,9 @@ Run a single suite with `node dsh-plugin/node_modules/vitest/vitest.mjs run --co
 
 Agents are instructed by AGENTS.md to run this automated integration
 test suite before committing changes to the DSH plugin, and/or changes
-warranting a version-bump.
+warranting a version-bump. Host-plane changes must pass against both the
+compatibility target recorded in PLAN.md and master: point
+`DSH_BRIDGE_DSH_COMMAND` and `DSH_BRIDGE_FIXTURE_CWD` at each checkout in turn.
 
 An ordinary `make test` only runs the fast unit tests, omitting these
 integration tests.
@@ -56,6 +58,8 @@ integration/
   package.json            type:module, vitest + typescript devDeps (self-contained)
   mock-llm/               plain-ESM mock adapter; no harness imports, so the dsh
                           Loader imports it directly (no node_modules of its own)
+  mock-host/              plain-ESM plugin exposing one Host directory move
+                          (ctx.workingDirectory.set) for the cwd spec
   host/launch.mjs         fixture launcher CLI + library
   host/overlay.template.yml
   scenarios/*.json        scenario data (mock script + human step script)
@@ -87,12 +91,24 @@ integration/
 | `tests/plan-goal.spec.ts` | plan mode and the goal lifecycle over the mutation seams: POST `/plan-mode` through the preset's entry-local `planMode` controller (the report's live `plan` section follows), the `/goal/*` lifecycle (create, edit with the round cap, pause, resume, clear) with its CAS and `GOAL_NOT_FOUND` failure semantics, and the 400 validation of the set body and the `active` flag |
 | `tests/changes.spec.ts` | the changed-files fold behind the DSH-View footer on a scratch workspace: a real `write` + `edit` turn is attributed to its turn in `GET /turns`, deduped by path with the first operation preserved, and the incremental suffix carries the same attribution |
 | `tests/compact.spec.ts` | user-triggered compaction through the live slash-command registry (`ctx.commands.execute(agent, '/compact', …)`): the empty-session no-op (200 carrying the harness's own text, with no `compaction` frame), a real compaction's 200 text plus `compaction` SSE frames carrying `sourceCommandId` and the summary's reclaimed token count, the end frame observed before the 200 resolves, and the summarizer's auxiliary `purpose: 'compaction'` call |
-| `tests/working-directory.spec.ts` | the effective working directory behind every reported session directory: a scripted `working_directory` call commits a `working-directory/change`, and the moved `cwd` reaches `GET /turns` (which attributes no file to the directory tool), the `/session` report, and the `/sessions` roster — the header keeps only the original project |
+| `tests/working-directory.spec.ts` | the effective working directory behind every reported session directory: the fixture's mock-host plugin calls the harness's `ctx.workingDirectory.set` Host operation (the plain web profile mounts no model tool that moves the directory), and the committed directory-move event — `working-directory/change` on the compatibility target, `workspace-root/change` on master — reaches `GET /turns` (which attributes no file to the move), the `/session` report, and the `/sessions` roster — the header keeps only the original project |
 | `dsh-bridge-it.el` | the live-Emacs seats of the ask-user path (submit and decline), `C-c C-a` attachment staging plus send-time tag stripping, DSH-Describe rendering live host statistics, turn branching, incremental DSH-View filling (in-place segment append with a surviving marker, first-reply tailing, and the newer-turn rebuild), live turn-activity streaming plus the buffer-local toggle, the in-progress reasoning line and its snapshot inspector (RET sees only the retained prefix, `g` grows it, settlement promotes the selector), stopping a hung turn through `/sessions/stop` (the turn closes `aborted` and a second stop is a no-op), SSE reconnect resilience across a same-port fixture restart, the DSH-Sessions list over live data, outbox receive + ack draining, cold-session resume driven from Emacs, the plan/goal commands driven from a live DSH-Prompt buffer (create on a goal-less session, edit with the round cap, pause, resume, toggle, clear, and the no-goal refusal, with the host report, the header cell, the menu item, and the command's message checked at each step), the plan-mode toggle, an out-of-band goal mutation reaching the caches over the SSE frames alone, and the live prompt-history queue (`M-p` from the draft reaches the steering-first prelude, `C-c C-w` withdraws one exact item and keeps its text as the draft, `C-c C-t` steers the next, and the host's `/prompts` pending list proves both mutations) |
 
 `tests/cold-sessions.spec.ts` boots a second host against a persisted
 `dshHome` (the launcher's `dshHome` option) to cover the cold roster; the
 describe route's cold arm is exercised there too.
+
+## Mock Host operation
+
+`integration/mock-host/index.js` plays the Host for the one directory operation
+the plain web profile no longer reaches from a model turn: `POST
+/mock-host/working-directory` (`{sessionId, path}`) calls the harness's own
+`ctx.workingDirectory.set(agent, path)` — the SDK `setWorkingDirectory` seam —
+so the session log gains the real directory-move event that host generation
+records (`working-directory/change` through 0.2.2-rc.4, `workspace-root/change`
+on master). It is bearer-guarded
+like the mock-LLM routes and answers 404 when the session is not live and 501
+when the harness exposes no `workingDirectory` service.
 
 ## Mock LLM
 

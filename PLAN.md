@@ -8,8 +8,9 @@ over loopback HTTP without window-switching and copy-paste.
 Usage is documented in [README.md](README.md); the architecture rules and the
 harness seams the plugin depends on are in [AGENTS.md](AGENTS.md). This file
 is forward-looking: settled decisions, candidates, and non-goals. The harness
-is pre-release with no compatibility promise; AGENTS.md owns the version-bump
-re-verification checklist.
+is pre-release with no compatibility promise; the current compatibility target
+and its temporary accommodations are recorded below, and AGENTS.md owns the
+re-verification protocol.
 
 ## Names
 
@@ -29,6 +30,38 @@ separately — it rides inside the plugin tarball and is installed from the
 Plugins-page card. MELPA/ELPA publication is a non-goal: their date-based
 versions fight the exact-version lockstep the two halves verify. Release steps
 live in AGENTS.md.
+
+## Compatibility target
+
+The bridge supports exactly two DSH generations: the **latest published
+release** and the **current `master`**. The release is a compatibility floor,
+so an accommodation made for it is temporary by construction; every entry
+below names the condition that retires it. When the target moves, audit this
+list against the new release before adding anything (AGENTS.md records the
+protocol).
+
+**Target:** `dsh-v0.2.2-rc.4` (`3f321d32bfe382212a8ed8785c1d47a5a300aa23`,
+released 2026-11-17), checked out and built in `../deepseek-harness-release`.
+`master` is verified alongside it.
+
+| Accommodation | Why it exists | Retire when |
+|---|---|---|
+| `effectiveCwd` (the raw-log fallback in `logic.ts`) accepts both `workspace-root/change` and the deprecated `working-directory/change`, newest event winning. | rc.4 records only the legacy spelling; master records `workspace-root/change` and ignores the legacy one on read. The authoritative read is the host's own `workingDirectory` projection — live sessions read it from `sessionProjections.snapshot`, the session report from the observation's projections — so the fold is the fallback for a header/log-only caller. | The target release contains the host-owned directory change, so no supported host writes the legacy event. Keep the legacy arm in the historical folds (`changedFiles`, `foldTurnDetail`) until stored logs containing it are no longer read: those resolve recorded calls, not the current directory. |
+
+No other release-specific accommodations are in the tree. The
+connection-auth route field, in-process RPC, client slot/session-status
+shape, settings op type, and client module-table wrapper were audited against
+rc.4: they use APIs that release already has, or fields it ignores. The
+`peerDependencies` range is the declared install floor, not a tested matrix;
+this section is what has been verified.
+
+**Verification** for the target and for master: `make build && make test`, then
+the integration suite against each checkout (`make integration-test` with
+`DSH_BRIDGE_DSH_COMMAND` and `DSH_BRIDGE_FIXTURE_CWD` pointing at it; see
+`integration/README.md`).
+
+Last verified 2026-11-18: rc.4 and master both green — Vitest 82/82 and the
+batch ERT 22/22 against each, plus `make build && make test`.
 
 ## Single-item detail inspector (implemented, optional)
 
@@ -85,10 +118,10 @@ replayed cold; it is not part of the item inspector.
 
 Ordered by recommended sequence, but out-of-sequence implementation is
 acceptable based on user needs. Harness seams (including the
-`agent/assistant-stream` publication) were last verified against DSH
-0.2.2-rc.2 plus post-release commits; the peer floor remains
-`^0.2.0-rc.1`, while the dev dependencies are set to `^0.2.2-rc.2` and
-the matching vendor set (cordis 4.1.0, schemastery 3.19.0). The two
+`agent/assistant-stream` publication) are verified against the compatibility
+target and master (see above); the peer floor remains `^0.2.0-rc.1`, while
+the dev dependencies are set to `^0.2.2-rc.2` and the matching vendor set
+(cordis 4.1.0, schemastery 3.19.0). The two
 ranges are deliberately not in lockstep — the peers are the
 compatibility floor, the dev dependencies the verified build target.
 The model-selection install seam spans two host generations: before

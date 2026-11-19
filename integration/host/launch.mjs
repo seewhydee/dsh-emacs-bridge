@@ -35,6 +35,7 @@ const INTEGRATION_ROOT = resolve(__dirname, '..')
 const REPO_ROOT = resolve(INTEGRATION_ROOT, '..')
 const BRIDGE_ENTRY = resolve(REPO_ROOT, 'dsh-plugin', 'lib', 'index.js')
 const MOCK_LLM_ENTRY = resolve(INTEGRATION_ROOT, 'mock-llm', 'index.js')
+const MOCK_HOST_ENTRY = resolve(INTEGRATION_ROOT, 'mock-host', 'index.js')
 const OVERLAY_TEMPLATE = join(__dirname, 'overlay.template.yml')
 
 const sleep = (ms) => new Promise((resolvePromise) => setTimeout(resolvePromise, ms))
@@ -90,12 +91,13 @@ async function waitForReady(url, timeoutMs, child) {
  * `disable` names rows to turn off (a degraded profile): each becomes its own
  * `disabled: true` row so the bridge boots with an optional service removed.
  */
-function renderOverlay({ dshHome, bridgeEntry, mockLlmEntry, port, disable }) {
+function renderOverlay({ dshHome, bridgeEntry, mockLlmEntry, mockHostEntry, port, disable }) {
   const template = readFileSync(OVERLAY_TEMPLATE, 'utf8')
   const body = template
     .replaceAll('{{DSH_HOME}}', dshHome)
     .replaceAll('{{BRIDGE_ENTRY}}', bridgeEntry)
     .replaceAll('{{MOCK_LLM_ENTRY}}', mockLlmEntry)
+    .replaceAll('{{MOCK_HOST_ENTRY}}', mockHostEntry)
     .replaceAll('{{PORT}}', String(port))
   const disabled = (disable ?? [])
     .map((id) => `\n- id: ${id}\n  disabled: true\n`)
@@ -125,7 +127,14 @@ export async function launch(options = {}) {
   const overlayPath = join(homeDir, 'overlay.yml')
   writeFileSync(
     overlayPath,
-    renderOverlay({ dshHome: homeDir, bridgeEntry: BRIDGE_ENTRY, mockLlmEntry: MOCK_LLM_ENTRY, port, disable }),
+    renderOverlay({
+      dshHome: homeDir,
+      bridgeEntry: BRIDGE_ENTRY,
+      mockLlmEntry: MOCK_LLM_ENTRY,
+      mockHostEntry: MOCK_HOST_ENTRY,
+      port,
+      disable,
+    }),
   )
   const dshCmd = resolveDshCommand()
   // Launcher flags come first (the CLI stops recognizing its own options at the

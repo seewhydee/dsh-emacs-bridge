@@ -14,12 +14,18 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 //
-// Pins the host-plane seam behind every reported session directory: the base
-// profile mounts `working-directory` and its `working_directory` tool, so a
-// committed `working-directory/change` must move the `cwd` the bridge serves on
-// `/turns`, `/session`, and `/sessions`.  The header keeps only the original
-// project, and the directory tool is not a file mutation.  Runs against a
-// scratch workspace so the repository is never dirtied.
+// Pins the host-plane seam behind every reported session directory.  A
+// Session's directory moves only through a Host operation — the newer harness
+// removed the model's `working_directory` tool, and its releases record the
+// move as `working-directory/change` (through 0.2.2-rc.4) or
+// `workspace-root/change` (master) — and the plain web profile mounts none of
+// those operations.  The fixture's mock-host plugin therefore plays the Host
+// and calls the harness's own `ctx.workingDirectory.set(agent, path)` — the
+// same seam as SDK `setWorkingDirectory` — so the committed event is the real
+// one.  The bridge reads the host's `workingDirectory` projection, so the
+// moved `cwd` must reach `/turns`, `/session`, and `/sessions`; the header
+// keeps only the original project.  Runs against a scratch workspace so the
+// repository is never dirtied.
 
 import { afterAll, describe, expect, it, inject } from 'vitest'
 import { mkdirSync, mkdtempSync, realpathSync, rmSync } from 'node:fs'
@@ -42,26 +48,30 @@ afterAll(() => {
 })
 
 describe('the effective working directory', () => {
-  it('follows a working_directory change in the turns header, report, and roster', async () => {
+  it('follows a Host directory move in the turns header, report, and roster', async () => {
     const fixture = inject('fixture')
     await post(fixture, '/mock-llm/reset', {})
     const dir = tempWorkspace()
     const sub = join(dir, 'sub')
     mkdirSync(sub)
     await scriptMock(fixture, [
-      { kind: 'tool-call', name: 'working_directory', arguments: { cd: sub } },
       { kind: 'text', text: 'Moved into sub.' },
     ])
     const sessionId = await createSession(fixture, dir)
+
+    const moved = await post(fixture, '/mock-host/working-directory', { sessionId, path: sub })
+    expect(moved.status).toBe(200)
+    expect(moved.body.cwd).toBe(sub)
+
     const sse = openSse(fixture, { timeoutMs: 20000 })
     try {
-      const sent = await post(fixture, '/dsh-bridge/send', { text: 'Move into sub.', sessionId })
+      const sent = await post(fixture, '/dsh-bridge/send', { text: 'Where are we?', sessionId })
       expect(sent.status).toBe(200)
       await sse.waitFor('turn-complete')
 
       const turns = await get(fixture, `/dsh-bridge/turns?sessionId=${sessionId}`)
       expect(turns.body.cwd).toBe(sub)
-      // The directory tool changes no file, so the turn carries no attribution.
+      // The move changes no file, so the turn carries no attribution.
       expect(turns.body.turns[0].files).toBeUndefined()
 
       const report = await get(fixture, `/dsh-bridge/session?sessionId=${sessionId}`)

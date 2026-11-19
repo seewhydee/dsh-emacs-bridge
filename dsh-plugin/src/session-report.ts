@@ -345,8 +345,9 @@ export function reportGoal(value: unknown): SessionReportGoal | null {
  * value earns `missing`. The live plan/goal refinement is a separate pure
  * pass ({@link refinePlanGoal}). The fallback folds (title, preset) read the
  * log the caller already materialized when it has no projection value to
- * prefer; `cwd` likewise folds the log when the observation carries events,
- * and otherwise serves the header's original project.
+ * prefer; `cwd` prefers the observation's `workingDirectory` projection (the
+ * host's own value for whichever directory event its release records) and
+ * folds the log only when the observation carries no projections.
  */
 export function sessionReport(
   observation: SessionObservationLike,
@@ -391,6 +392,15 @@ export function sessionReport(
 
   const metadata = recordOf(values?.sessionListMetadata)
 
+  // The host's `workingDirectory` projection is authoritative and applies
+  // whichever directory event its release defines; the raw-log fold is only
+  // the fallback for an observation that carries no projections. A present but
+  // null value is the host saying "no directory recorded", not a missing key.
+  const projectedCwd = values?.workingDirectory
+  const cwd = has('workingDirectory')
+    ? typeof projectedCwd === 'string' && projectedCwd !== '' ? projectedCwd : null
+    : effectiveCwd(observation.header, observation.events ?? []) ?? null
+
   return {
     sessionId: observation.header.id,
     live: observation.source === 'live',
@@ -398,7 +408,7 @@ export function sessionReport(
     basis: observation.projections === undefined ? 'header' : 'observation',
     missing,
     title,
-    cwd: effectiveCwd(observation.header, observation.events ?? []) ?? null,
+    cwd,
     workspace: extras.workspace ?? null,
     workspaceId: extras.workspaceId ?? null,
     archived: extras.archived === true,
