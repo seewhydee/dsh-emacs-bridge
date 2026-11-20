@@ -263,8 +263,8 @@ the DSH-View buffer untouched, apart from updating the status glyph."
 (defcustom dsh-bridge-view-elapsed-ticker t
   "Whether the DSH-View header shows a live elapsed time for a running turn.
 If non-nil, the run duration of the turn a DSH-View buffer displays is
-shown and refreshed by a short repeating timer; if nil, the header says
-only that the turn is running."
+shown and refreshed by a short repeating timer; if nil, the header omits
+the elapsed time for a running turn."
   :type 'boolean
   :group 'dsh-bridge)
 
@@ -685,6 +685,30 @@ what the user answered.	 PLIST is keyed by:
 (defvar dsh-bridge--session-context nil
   "Alist storing the token and context window usage in DSH sessions.
 Each entry has the form (SESSION-ID . (USED-TOKENS . CONTEXT-WINDOW)).")
+
+(defun dsh-bridge--session-context-store (session-id used window)
+  "Cache SESSION-ID's context occupancy as USED tokens of WINDOW.
+Return non-nil when the pair was valid and stored.  USED and WINDOW must
+be numbers, and WINDOW must be positive."
+  (when (and session-id (numberp used) (numberp window) (> window 0))
+    (setq dsh-bridge--session-context
+	  (assoc-delete-all session-id dsh-bridge--session-context))
+    (push (cons session-id (cons used window)) dsh-bridge--session-context)
+    t))
+
+(defun dsh-bridge--context-label (session-id)
+  "The cached context-occupancy label for SESSION-ID, or nil.
+Return the `N%' form (clamped to 100) shared by the prompt and view
+headers.  A caller inserting it into a header line must escape the
+percent sign with `dsh-bridge--header-text'."
+  (let ((entry (and session-id (assoc session-id dsh-bridge--session-context))))
+    (when entry
+      (let ((used (cadr entry))
+	    (window (cddr entry)))
+	(when (and (numberp used) (numberp window) (> window 0))
+	  ;; Same formula as DSH's web UI.
+	  (format "%d%%"
+		  (min 100 (round (* 100.0 (/ used (float window)))))))))))
 
 (defvar dsh-bridge--sessions-compacting nil
   "List of session ids currently being compacted.")
@@ -1208,10 +1232,7 @@ Currently supported events are:
        ((equal kind "context")
 	(let ((used (alist-get 'usedTokens event))
 	      (window (alist-get 'contextWindow event)))
-	  (when (and (numberp used) (numberp window))
-	    (setq dsh-bridge--session-context
-		  (assoc-delete-all id dsh-bridge--session-context))
-	    (push (cons id (cons used window)) dsh-bridge--session-context)
+	  (when (dsh-bridge--session-context-store id used window)
 	    ;; Redraw the prompt and view headers in the same tick.
 	    (force-mode-line-update t))))
        ((equal kind "plan")
@@ -1273,7 +1294,7 @@ the refetches an `end' frame implies."
 	 (err (alist-get 'error event))
 	 (tokens (alist-get 'tokensReclaimed event)))
     ;; Header-line indicator: `start' marks the session as compacting (a
-    ;; `compacting…' cell appears), `end' clears the mark.
+    ;; `compacting' cell appears), `end' clears the mark.
     (cond
      ((null id))
      ((equal phase "start")
@@ -3695,35 +3716,30 @@ last committed segment."
 
 (defun dsh-bridge--view-turn-time-label (session-id)
   "The DSH-View header's turn-time segment for SESSION-ID, or nil.
-The returned string has the format \"done END-TIME\" if the turn is
-finished, or \"running DURATION\" if the turn is open (timed from its
-`startedAt'; DURATION is omitted if `dsh-bridge-view-elapsed-ticker' is
-nil, or the start time is unavailable).
+If the displayed turn has finished and its end time is known, return a
+string of the form \"done END-TIME\".  If it is still running and
+`dsh-bridge-view-elapsed-ticker' is non-nil, and a start time is
+available, return its elapsed run time.
 
-Return nil for an empty view.  This function only reads the turns cache
-and status tracker, and does no I/O."
-  (let ((record (dsh-bridge--view-turn-record session-id))
-	(start (and dsh-bridge-view-elapsed-ticker
-		    (dsh-bridge--status-turn-start session-id))))
+In all other circumstances, return nil.  This function only reads the
+turns cache and status tracker, and does no I/O."
+  (let* ((record (dsh-bridge--view-turn-record session-id))
+	 (turn-open (and record
+			 (dsh-bridge--view-turn-open-p record))))
     (cond
-     ((and record (dsh-bridge--view-turn-open-p record))
-      (let ((started (alist-get 'startedAt record)))
-	(if (and dsh-bridge-view-elapsed-ticker (numberp started))
-	    (format "running %s"
-		    (dsh-bridge--format-duration
-		     (- (* 1000 (float-time)) started) 'compact))
-	  "running")))
-     (record
+     ((and record (not turn-open))
       (let ((end (dsh-bridge--view-turn-end-time record)))
 	(when (numberp end)
 	  (format "done %s" (dsh-bridge--format-clock end)))))
-     (dsh-bridge--view-waiting
-      (if (and dsh-bridge-view-elapsed-ticker (numberp start))
-	  (format "running %s"
-		  (dsh-bridge--format-duration
-		   (- (* 1000 (float-time)) start) 'compact))
-	"running"))
-     (t nil))))
+     ((null dsh-bridge-view-elapsed-ticker) nil)
+     (t
+      (let ((start (cond (turn-open
+			  (alist-get 'startedAt record))
+			 ((and (null record) dsh-bridge--view-waiting)
+			  (dsh-bridge--status-turn-start session-id)))))
+	(when (numberp start)
+	  (dsh-bridge--format-duration (- (* 1000 (float-time)) start)
+				       'compact)))))))
 
 (defun dsh-bridge--view-buffers ()
   "Return all live buffers in `dsh-bridge-view-mode'."
@@ -3976,22 +3992,29 @@ line, then refill every turn-following view."
     (cancel-timer dsh-bridge--view-ticker-timer)
     (setq dsh-bridge--view-ticker-timer nil)))
 
+(defun dsh-bridge--view-turn-running-p (&optional session-id)
+  "Whether the turn displayed by the current DSH-View buffer is running.
+SESSION-ID defaults to the buffer's content session.  An open turn record
+counts, as does a waiting view that has no cached record yet (a new turn
+whose first reply has not arrived)."
+  (let ((record (dsh-bridge--view-turn-record session-id)))
+    (or (and record (dsh-bridge--view-turn-open-p record))
+	(and dsh-bridge--view-waiting (null record)))))
+
 (defun dsh-bridge--view-running-duration-p (&optional buffer)
   "Whether BUFFER's DSH-View header shows a running elapsed duration.
-This is non-nil if `dsh-bridge-view-elapsed-ticker' is non-nil, and the
-displayed turn is running (so the ticker should be ticking)."
+This is non-nil if `dsh-bridge-view-elapsed-ticker' is non-nil, the
+displayed turn is running (or the view is waiting for a new turn's first
+reply), and a numeric start time is available, so the ticker should be
+ticking."
   (with-current-buffer (or buffer (current-buffer))
-    (when dsh-bridge-view-elapsed-ticker
-      (let ((record (dsh-bridge--view-turn-record)))
-	(cond
-	 ((and record (dsh-bridge--view-turn-open-p record))
-	  (numberp (alist-get 'startedAt record)))
-	 ;; If the buffer is awaiting a new turn's first reply, the
-	 ;; ticker ought to tick too.
-	 ((and dsh-bridge--view-waiting (null record))
-	  (numberp (dsh-bridge--status-turn-start
-		    dsh-bridge--view-content-session)))
-	 (t nil))))))
+    (and dsh-bridge-view-elapsed-ticker
+	 (dsh-bridge--view-turn-running-p)
+	 (let ((record (dsh-bridge--view-turn-record)))
+	   (numberp (if record
+			(alist-get 'startedAt record)
+		      (dsh-bridge--status-turn-start
+		       dsh-bridge--view-content-session)))))))
 
 (defun dsh-bridge--view-ticking-buffers ()
   "Live DSH-View buffers showing a running elapsed clock in a visible window."
@@ -4157,12 +4180,24 @@ handler checks the id against the clicked window's session."
 
 (defun dsh-bridge--header-compacting-cell (session-id)
   "The header compaction cell for SESSION-ID, or nil.
-Shows `compacting…' in `dsh-bridge-compacting-face' while SESSION-ID has a
+Shows \"compacting\" in `dsh-bridge-compacting-face' while SESSION-ID has a
 context compaction in flight, so a manual or automatic compaction is
 visible in the header line rather than only in the echo area."
   (and session-id
        (member session-id dsh-bridge--sessions-compacting)
-       (list (propertize "compacting…" 'face 'dsh-bridge-compacting-face))))
+       (list (propertize "compacting" 'face 'dsh-bridge-compacting-face))))
+
+(defun dsh-bridge--view-progress-cell (session-id)
+  "The DSH-View header's shared compaction/context cell for SESSION-ID.
+While a compaction is in flight the cell shows \"compacting\";
+otherwise, while the displayed turn is running, it shows the cached
+context occupancy as `ctx N%'.  Return nil when neither applies."
+  (and session-id
+       (or (dsh-bridge--header-compacting-cell session-id)
+	   (when (dsh-bridge--view-turn-running-p session-id)
+	     (let ((label (dsh-bridge--context-label session-id)))
+	       (when label
+		 (list (dsh-bridge--header-text (concat "ctx " label)))))))))
 
 (defun dsh-bridge--header-refresh ()
   "Force the DSH bridge header lines to recompute.
@@ -4263,25 +4298,22 @@ Zero counts are omitted; the header join supplies the separators."
 
 (defun dsh-bridge--view-header-line (&optional width)
   "Return the header line for a DSH-View buffer.
-Header line format:
+This is a string, %-escaped for `header-line-format', in this format:
 
  <status> <session-pos> <label> · <workspace>
-	 [ · plan][ · goal][ · <time>][ · <await>]
+	 [ · plan][ · goal][ · <context>][ · <time>][ · <await>]
 
 WIDTH, if non-nil, is the display columns available; the session label
 and workspace label are shortened to fit it.
 
-The session-pos segment is the position in the session's turn history (see
-`dsh-bridge--view-turn-position'); the time segment describes the displayed
-turn (see `dsh-bridge--view-turn-time-label'); the archived segment appears
-while the workspace registry hides the session; the plan and goal segments
-report the cached plan-mode and goal state (see
-`dsh-bridge--header-plan-cell' and `dsh-bridge--header-goal-cell') and
-sit between the workspace and the time; the await segment appears while
-a question or approval is pending.  The plan and goal cells are
-clickable (see `dsh-bridge--header-plan-at-mouse' and
-`dsh-bridge--header-goal-at-mouse').  The line is %-escaped for
-`header-line-format'."
+The session-pos segment is the position in the session's turn
+history (see `dsh-bridge--view-turn-position').  The time segment
+describes the displayed turn (see `dsh-bridge--view-turn-time-label').
+The plan and goal segments report the cached plan and goal state (see
+`dsh-bridge--header-plan-cell' and `dsh-bridge--header-goal-cell').
+The context segment shows \"compacting\" if the session is being
+compacted, otherwise the cached context occupancy if running.
+The await segment appears while a question or approval is pending."
   (let* ((id dsh-bridge--view-content-session)
 	 (status (dsh-bridge--status-glyph id))
 	 (pos (string-trim (or (dsh-bridge--view-turn-position) "")))
@@ -4296,7 +4328,7 @@ clickable (see `dsh-bridge--header-plan-at-mouse' and
 	 (time (and id (dsh-bridge--view-turn-time-label id)))
 	 (plan (and id (dsh-bridge--header-plan-cell id)))
 	 (goal (and id (dsh-bridge--header-goal-cell id)))
-	 (compacting (and id (dsh-bridge--header-compacting-cell id)))
+	 (progress (and id (dsh-bridge--view-progress-cell id)))
 	 (await (and id
 		     (cond ((assoc id dsh-bridge--pending-questions)
 			    "awaiting answer")
@@ -4312,7 +4344,7 @@ clickable (see `dsh-bridge--header-plan-at-mouse' and
 		   (list archived)
 		   plan
 		   goal
-		   compacting
+		   progress
 		   (list time nil)
 		   (list await nil))
 	     (and width (max 1 (- width (string-width prefix))))))))
@@ -6479,14 +6511,11 @@ nil when unknown."
     (let* ((result (dsh-bridge--request "GET" (dsh-bridge--path "/context" session-id) nil))
 	   (status (car result))
 	   (alist (cdr result)))
-      (when (and (eq status 200) alist
-		 (numberp (alist-get 'usedTokens alist))
-		 (numberp (alist-get 'contextWindow alist)))
-	(setq dsh-bridge--session-context
-	      (assoc-delete-all session-id dsh-bridge--session-context))
-	(push (cons session-id (cons (alist-get 'usedTokens alist)
-				     (alist-get 'contextWindow alist)))
-	      dsh-bridge--session-context))))
+      (when (and (eq status 200) alist)
+	(dsh-bridge--session-context-store
+	 session-id
+	 (alist-get 'usedTokens alist)
+	 (alist-get 'contextWindow alist)))))
   (cdr (assoc session-id dsh-bridge--session-context)))
 
 (defun dsh-bridge--model-display-name (data provider model)
@@ -6513,13 +6542,7 @@ first GET /models succeeds for the session."
 
 (defun dsh-bridge--prompt-context-label (session-id)
   "The prompt header's context-occupancy segment for SESSION-ID, or nil."
-  (let ((entry (and session-id (assoc session-id dsh-bridge--session-context))))
-    (when entry
-      (let ((used (cadr entry))
-	    (window (cddr entry)))
-	(when (and (numberp used) (numberp window) (> window 0))
-	  ;; Same formula as DSH's web UI.
-	  (format "%d%%" (min 100 (round (* 100.0 (/ used (float window)))))))))))
+  (dsh-bridge--context-label session-id))
 
 (defun dsh-bridge--refresh-prompt-metadata ()
   "Fetch model/context metadata for the prompt buffer's effective session.
@@ -6800,14 +6823,24 @@ ignored; a session with no cached goal is left alone."
 			(assq-delete-all 'activation section))))))))
 
 (defun dsh-bridge--plan-goal-store (session-id report)
-  "Seed the plan/goal cache entries for SESSION-ID from REPORT.
+  "Seed the plan/goal and context caches for SESSION-ID from REPORT.
 REPORT is the alist body of a successful \"/session\" response.  This is
 the write half of `dsh-bridge--plan-goal-refresh', shared with
-`dsh-bridge-describe-session', whose fetch returns the same report."
+`dsh-bridge-describe-session', whose fetch returns the same report.  The
+report's context section seeds `dsh-bridge--session-context' only when
+that cache has no entry, so a `context' frame handled while the request
+was in flight is never overwritten by an older report."
   (setq dsh-bridge--session-plan
 	(cons (cons session-id (alist-get 'plan report))
 	      (assoc-delete-all session-id dsh-bridge--session-plan)))
-  (dsh-bridge--goal-replace session-id (alist-get 'goal report)))
+  (dsh-bridge--goal-replace session-id (alist-get 'goal report))
+  (when (null (assoc session-id dsh-bridge--session-context))
+    (let ((context (alist-get 'context report)))
+      (dsh-bridge--session-context-store
+       session-id
+       (or (alist-get 'projectedTokens context)
+	   (alist-get 'pressureTokens context))
+       (alist-get 'contextWindow context)))))
 
 (defun dsh-bridge--plan-goal-refresh (session-id &optional keep-cache signal-error)
   "Refresh the plan/goal cache entries for SESSION-ID.

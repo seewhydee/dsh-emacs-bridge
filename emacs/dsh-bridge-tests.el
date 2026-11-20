@@ -7278,24 +7278,102 @@ turn no longer cached shows nothing."
 (ert-deftest dsh-bridge-view-header-provenance ()
   "The output header's time segment describes the displayed turn.
 An empty view has none; a settled turn shows its end clock; an open turn
-shows its elapsed run."
+shows its elapsed run, even after it has committed a segment."
   (let ((dsh-bridge--session-status nil)
         (dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t))))
-        (dsh-bridge-status-indicator 'geometric))
-    (with-temp-buffer
-      (dsh-bridge-view-mode)
-      (setq-local dsh-bridge--view-content-session "s1")
-      (should-not (string-match-p "done" (dsh-bridge--view-header-line)))
-      (should-not (string-match-p "running" (dsh-bridge--view-header-line)))
-      (setq-local dsh-bridge--view-turn 2)
-      (setq-local dsh-bridge--turns-cache
-                '(("s1" 1 ((turn . 2) (startedAt . 1000)
-                          (endedAt . 1600000000000)
-                          (reason . "completed") (segments)))))
-      (should (string-match-p " done " (dsh-bridge--view-header-line)))
-      (setq-local dsh-bridge--turns-cache
-                '(("s1" 1 ((turn . 2) (startedAt . 1000) (segments)))))
-      (should (string-match-p " running " (dsh-bridge--view-header-line))))))
+        (dsh-bridge-status-indicator 'geometric)
+        (dsh-bridge--session-context nil)
+        (dsh-bridge--sessions-compacting nil))
+    (cl-letf (((symbol-function 'float-time) (lambda (&rest _) 1065.0)))
+      (with-temp-buffer
+        (dsh-bridge-view-mode)
+        (setq-local dsh-bridge--view-content-session "s1")
+        (should-not (string-match-p "done" (dsh-bridge--view-header-line)))
+        (should-not (string-match-p "running" (dsh-bridge--view-header-line)))
+        (setq-local dsh-bridge--view-turn 2)
+        (setq-local dsh-bridge--turns-cache
+                  '(("s1" 1 ((turn . 2) (startedAt . 1000000)
+                            (endedAt . 1600000000000)
+                            (reason . "completed") (segments)))))
+        (should (string-match-p " done " (dsh-bridge--view-header-line)))
+        ;; A running turn with a committed segment still ticks; its last
+        ;; segment time is not an end time.
+        (setq-local dsh-bridge--turns-cache
+                  '(("s1" 1 ((turn . 2) (startedAt . 1000000)
+                            (segments ((time . 1005000) (text . "hi")))))))
+        (should (string-match-p " · 1m 5s"
+                                (dsh-bridge--view-header-line)))
+        (should-not (string-match-p "done"
+                                    (dsh-bridge--view-header-line)))
+        (should-not (string-match-p "running"
+                                    (dsh-bridge--view-header-line)))
+        ;; With the ticker off, the open turn has no time cell.
+        (let ((dsh-bridge-view-elapsed-ticker nil))
+          (should-not (string-match-p "1m 5s"
+                                      (dsh-bridge--view-header-line))))))))
+
+(ert-deftest dsh-bridge-view-header-context ()
+  "The view header's compaction/context slot shows `ctx N%' only while
+the displayed turn runs, and yields to the compacting indicator."
+  (let ((dsh-bridge--session-status nil)
+        (dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t))))
+        (dsh-bridge-status-indicator 'geometric)
+        (dsh-bridge--session-context '(("s1" . (45000 . 100000))))
+        (dsh-bridge--sessions-compacting nil))
+    (cl-letf (((symbol-function 'float-time) (lambda (&rest _) 1065.0)))
+      (with-temp-buffer
+        (dsh-bridge-view-mode)
+        (setq-local dsh-bridge--view-content-session "s1")
+        (setq-local dsh-bridge--view-turn 2)
+        ;; An open turn shows the cached occupancy before the elapsed time.
+        (setq-local dsh-bridge--turns-cache
+                  '(("s1" 1 ((turn . 2) (startedAt . 1000000)
+                            (segments ((time . 1005000) (text . "hi")))))))
+        (let ((header (dsh-bridge--view-header-line)))
+          (should (string-match-p "ctx 45%%" header))
+          (should (< (string-match "ctx 45%%" header)
+                     (string-match "1m 5s" header))))
+        ;; The ticker option does not gate the context cell.
+        (let ((dsh-bridge-view-elapsed-ticker nil))
+          (should (string-match-p "ctx 45%%"
+                                  (dsh-bridge--view-header-line))))
+        ;; Compaction takes the same slot; the context cell is not shown
+        ;; alongside it.
+        (let ((dsh-bridge--sessions-compacting '("s1")))
+          (let ((header (dsh-bridge--view-header-line)))
+            (should (string-match-p "compacting" header))
+            (should-not (string-match-p "ctx " header))))
+        ;; A settled turn omits the context cell.
+        (setq-local dsh-bridge--turns-cache
+                  '(("s1" 1 ((turn . 2) (startedAt . 1000000)
+                            (endedAt . 1600000000000)
+                            (reason . "completed") (segments)))))
+        (should-not (string-match-p "ctx "
+                                    (dsh-bridge--view-header-line)))
+        ;; Browsing an older settled turn while the session runs omits it.
+        (setq-local dsh-bridge--view-turn 1)
+        (setq-local dsh-bridge--turns-cache
+                  '(("s1" 1 ((turn . 1) (startedAt . 500) (endedAt . 900)
+                            (reason . "completed") (segments))
+                     ((turn . 2) (startedAt . 1000000)
+                      (segments ((time . 1005000) (text . "hi")))))))
+        (should-not (string-match-p "ctx "
+                                    (dsh-bridge--view-header-line)))
+        ;; A waiting turn with no record still shows the cached value.
+        (setq-local dsh-bridge--view-turn 3)
+        (setq-local dsh-bridge--view-waiting t)
+        (setq-local dsh-bridge--turns-cache nil)
+        (should (string-match-p "ctx 45%%"
+                                (dsh-bridge--view-header-line)))
+        ;; No cached entry means no cell; a context frame fills it.
+        (let ((dsh-bridge--session-context nil))
+          (should-not (string-match-p "ctx "
+                                      (dsh-bridge--view-header-line)))
+          (dsh-bridge--notification-handle-events
+           '(((kind . "context") (sessionId . "s1")
+              (usedTokens . 45000) (contextWindow . 100000))))
+          (should (string-match-p "ctx 45%%"
+                                  (dsh-bridge--view-header-line))))))))
 
 (ert-deftest dsh-bridge-view-header-percent-escaped ()
   "A `%' in the session title is escaped for `header-line-format'."
@@ -8486,6 +8564,40 @@ request timeout to the longer describe timeout."
       (should (eq (alist-get 'active (cdr (assoc "s1" dsh-bridge--session-plan))) t))
       (should (= calls 3)))))
 
+(ert-deftest dsh-bridge-plan-goal-store-seeds-context ()
+  "A /session report seeds context occupancy when the cache is empty.
+An existing SSE value is never overwritten, and an incomplete context
+section leaves the cache absent."
+  (let ((dsh-bridge--session-context nil)
+        (dsh-bridge--session-plan nil)
+        (dsh-bridge--session-goal nil))
+    (dsh-bridge--plan-goal-store
+     "s1"
+     '((context . ((pressureTokens . 45)
+                   (projectedTokens . 60)
+                   (contextWindow . 100000)))))
+    (should (equal (assoc "s1" dsh-bridge--session-context)
+                   '("s1" 60 . 100000))))
+  ;; A cached value wins over a report that was fetched while a newer
+  ;; context frame was handled.
+  (let ((dsh-bridge--session-context '(("s1" . (50 . 100000))))
+        (dsh-bridge--session-plan nil)
+        (dsh-bridge--session-goal nil))
+    (dsh-bridge--plan-goal-store
+     "s1"
+     '((context . ((pressureTokens . 45)
+                   (contextWindow . 100000)))))
+    (should (equal (assoc "s1" dsh-bridge--session-context)
+                   '("s1" 50 . 100000))))
+  ;; Without a window there is nothing to display; leave the cache absent.
+  (let ((dsh-bridge--session-context nil)
+        (dsh-bridge--session-plan nil)
+        (dsh-bridge--session-goal nil))
+    (dsh-bridge--plan-goal-store
+     "s1"
+     '((context . ((pressureTokens . 45)))))
+    (should-not (assoc "s1" dsh-bridge--session-context))))
+
 (ert-deftest dsh-bridge-plan-goal-refresh-failure-signal ()
   "A failed read signals only where the caller asked it to.
 A read-through seed must stay silent (a menu evaluation may never error),
@@ -9481,32 +9593,51 @@ declares itself following (so the follow helper sees it)."
 (ert-deftest dsh-bridge-view-turn-time-label ()
   "The time segment describes the displayed turn, not the session.
 An open turn shows its elapsed run (and drives the ticker), a settled turn
-shows its end clock, and an empty view shows nothing."
+shows its end clock, and an empty view shows nothing.  With the ticker
+disabled, a running turn has no time segment."
   ;; `float-time' is frozen so the rendered duration is exact.
   (cl-letf (((symbol-function 'float-time) (lambda (&rest _) 1065.0)))
     (with-temp-buffer
       (dsh-bridge-view-mode)
       (setq-local dsh-bridge--view-content-session "s1")
-      ;; An empty view has no time segment.
+      ;; An empty view has no time segment, ticker or no ticker.
       (should (null (dsh-bridge--view-turn-time-label "s1")))
       (should-not (dsh-bridge--view-running-duration-p))
-      ;; An open turn times from its own startedAt, 65s before the frozen now.
+      (let ((dsh-bridge-view-elapsed-ticker nil))
+        (should (null (dsh-bridge--view-turn-time-label "s1"))))
+      ;; An open turn times from its own startedAt, 65s before the frozen
+      ;; now.  Its committed segment must not make it look settled.
       (setq-local dsh-bridge--view-turn 2)
       (setq-local dsh-bridge--turns-cache
-                '(("s1" 1 ((turn . 2) (startedAt . 1000000) (segments)))))
-      (should (equal (dsh-bridge--view-turn-time-label "s1") "running 1m 5s"))
+                '(("s1" 1 ((turn . 2) (startedAt . 1000000)
+                          (segments ((time . 1005000) (text . "hi")))))))
+      (should (equal (dsh-bridge--view-turn-time-label "s1") "1m 5s"))
       (should (dsh-bridge--view-running-duration-p))
-      ;; Disabling the ticker drops the duration but keeps the state.
+      ;; Disabling the ticker drops the duration entirely.
       (let ((dsh-bridge-view-elapsed-ticker nil))
-        (should (equal (dsh-bridge--view-turn-time-label "s1") "running"))
+        (should (null (dsh-bridge--view-turn-time-label "s1")))
         (should-not (dsh-bridge--view-running-duration-p)))
-      ;; A settled turn shows its end clock and never ticks.
+      ;; A missing or non-numeric start time yields no segment.
+      (setq-local dsh-bridge--turns-cache
+                '(("s1" 1 ((turn . 2) (startedAt . "soon")
+                          (segments ((time . 1005000) (text . "hi")))))))
+      (should (null (dsh-bridge--view-turn-time-label "s1")))
+      (should-not (dsh-bridge--view-running-duration-p))
+      (setq-local dsh-bridge--turns-cache
+                '(("s1" 1 ((turn . 2)
+                          (segments ((time . 1005000) (text . "hi")))))))
+      (should (null (dsh-bridge--view-turn-time-label "s1")))
+      ;; A settled turn shows its end clock and never ticks, with the
+      ;; ticker on or off.
       (setq-local dsh-bridge--turns-cache
                 '(("s1" 1 ((turn . 2) (startedAt . 1000000)
                           (endedAt . 1600000000000) (reason . "completed")
                           (segments)))))
       (should (string-prefix-p "done " (dsh-bridge--view-turn-time-label "s1")))
       (should-not (dsh-bridge--view-running-duration-p))
+      (let ((dsh-bridge-view-elapsed-ticker nil))
+        (should (string-prefix-p "done "
+                                 (dsh-bridge--view-turn-time-label "s1"))))
       ;; Browsing an older settled turn while the session runs a newer one
       ;; still describes the older turn, and does not tick.
       (setq-local dsh-bridge--session-status '(("s1" running . 1000000)))
@@ -9514,15 +9645,28 @@ shows its end clock, and an empty view shows nothing."
       (setq-local dsh-bridge--turns-cache
                 '(("s1" 1 ((turn . 1) (startedAt . 500) (endedAt . 900)
                           (reason . "completed") (segments))
-                   ((turn . 2) (startedAt . 1000000) (segments)))))
+                   ((turn . 2) (startedAt . 1000000)
+                    (segments ((time . 1005000) (text . "hi")))))))
       (should (string-prefix-p "done " (dsh-bridge--view-turn-time-label "s1")))
       (should-not (dsh-bridge--view-running-duration-p))
       ;; A waiting turn without a cached record uses the tracker's start.
       (setq-local dsh-bridge--view-turn 3)
       (setq-local dsh-bridge--view-waiting t)
       (setq-local dsh-bridge--turns-cache nil)
-      (should (equal (dsh-bridge--view-turn-time-label "s1") "running 1m 5s"))
-      (should (dsh-bridge--view-running-duration-p)))))
+      (should (equal (dsh-bridge--view-turn-time-label "s1") "1m 5s"))
+      (should (dsh-bridge--view-running-duration-p))
+      ;; With the ticker off, waiting also has no time segment.
+      (let ((dsh-bridge-view-elapsed-ticker nil))
+        (should (null (dsh-bridge--view-turn-time-label "s1")))
+        (should-not (dsh-bridge--view-running-duration-p)))
+      ;; A cached settled record with no end time stays settled even while
+      ;; the view is waiting; it must not borrow the tracker's start.
+      (setq-local dsh-bridge--view-turn 2)
+      (setq-local dsh-bridge--turns-cache
+                '(("s1" 1 ((turn . 2) (startedAt . 1000000)
+                          (reason . "interrupted") (segments)))))
+      (should (null (dsh-bridge--view-turn-time-label "s1")))
+      (should-not (dsh-bridge--view-running-duration-p)))))
 
 (ert-deftest dsh-bridge-turn-boundary-echo ()
   "Turn boundaries echo when the session has no visible DSH-View ('is
@@ -11571,7 +11715,8 @@ parent-session link describes the parent."
   `(let ((dsh-bridge--sessions-cache '(((id . "s1") (title . "cached") (live . t)
                                         (cwd . "/tmp"))))
          (dsh-bridge--session-plan nil)
-         (dsh-bridge--session-goal nil))
+         (dsh-bridge--session-goal nil)
+         (dsh-bridge--session-context nil))
      (unwind-protect
          (cl-letf (((symbol-function 'dsh-bridge--request)
                     (lambda (_method path &rest _)
@@ -11718,6 +11863,7 @@ pinning the retry to that id."
   (let ((dsh-bridge--sessions-cache nil)
         (dsh-bridge--session-plan nil)
         (dsh-bridge--session-goal nil)
+        (dsh-bridge--session-context nil)
         (titles '("first" "second")))
     (unwind-protect
         (cl-letf (((symbol-function 'dsh-bridge--request)
@@ -12203,6 +12349,7 @@ one must not disturb `l'/`r' navigation."
   (let ((dsh-bridge--sessions-cache '(((id . "s9") (title . "view session") (live . t))))
         (dsh-bridge--session-plan nil)
         (dsh-bridge--session-goal nil)
+        (dsh-bridge--session-context nil)
         (path nil))
     (unwind-protect
         (progn
@@ -13768,7 +13915,7 @@ still refetches."
 
 (ert-deftest dsh-bridge-compaction-auto-start-silent ()
   "An automatic start frame echoes nothing, whether or not a view shows the
-session: the header line's `compacting…' cell is the in-flight feedback."
+session: the header line's `compacting' cell is the in-flight feedback."
   (dolist (displayed '(nil t))
     (let ((out (dsh-bridge-test--frame-feedback
                 '((kind . "compaction") (sessionId . "s1") (phase . "start"))
