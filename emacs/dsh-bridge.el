@@ -9010,13 +9010,11 @@ user-confirmed, so the mutators may still act on it."
 (autoload 'dsh-bridge-extras-inspect-item "dsh-bridge-extras"
   "Inspect the DSH activity item at point." t)
 
-;; An autoload cookie on the `transient-define-prefix' form itself would make
-;; `loaddefs-generate' copy that form verbatim into the package's autoloads
-;; file, where it signals `void-function transient-define-prefix' on any
-;; startup that has not loaded `transient' yet (this library loads it, but
-;; only when the library itself loads) -- and the failure costs the command
-;; its autoload.  Register a plain command autoload instead, so package.el
-;; defers the whole library, `transient' with it, until the dispatcher runs.
+;; We can't put the autoload cookie on the `transient-define-prefix'
+;; form itself, as that would make `loaddefs-generate' copy that form
+;; verbatim into the package's autoloads file, where it will error out
+;; if `transient' isn't loaded yet.
+
 ;;;###autoload (autoload 'dsh-bridge "dsh-bridge" "Dispatch actions for the DeepSeek Harness (DSH) bridge." t)
 (transient-define-prefix dsh-bridge (&optional arg)
   "Dispatch actions for the DeepSeek Harness (DSH) bridge.
@@ -9037,11 +9035,10 @@ keys that open another buffer (RET, r, f, D, l), and q, leave the menu.
 
 With a prefix argument, re-fetch the session roster before painting,
 instead of trusting the cached one."
-  ;; We draw the focus header by making it the first group's
-  ;; `:description'.  A bare `[:description ...]'  group doesn't work
-  ;; since Transient Menu drops any group whose suffix list is empty.
-  ;; We could also use `:info' and `:info*' rows, but Emacs 29 does
-  ;; not support these; revisit this issue later.
+  ;; A bare `[:description ...]'  group doesn't work since Transient
+  ;; Menu drops any group with empty suffix list.  We could also use
+  ;; `:info' and `:info*' rows, but Emacs 29 does not support these;
+  ;; revisit later.
   [:description (lambda ()
 		  (concat (dsh-bridge--dispatcher-header)
 			  "\n\n"
