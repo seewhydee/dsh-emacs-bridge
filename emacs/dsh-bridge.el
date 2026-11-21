@@ -3078,11 +3078,12 @@ In `gfm-view-mode', the Markdown divider \"---\" is rendered as a
 full-width line followed by a newline.")
 
 (defun dsh-bridge--view-turn-open-p (turn)
-  "Whether TURN is still open (running): no end facts recorded yet.
-A completed turn carries `endedAt' (and a `reason'), so an open turn is
-recognized by their absence."
-  (not (or (alist-get 'endedAt turn)
-	   (alist-get 'reason turn))))
+  "Whether TURN describes an open (running) turn.
+Return non-nil if TURN is a turn-record alist without `endedAt' or
+`reason' cells."
+  (and (consp turn)
+       (not (or (alist-get 'endedAt turn)
+		(alist-get 'reason turn)))))
 
 ;; Indicator text inserted into DSH-View buffers is given both `face'
 ;; and `font-lock-face' text properties.  The former works when Font
@@ -3166,7 +3167,7 @@ If SESSION-ID is nil, or no answer note is recorded for it, return nil."
 	  (if (eq baseline :unknown)
 	      (setq text (plist-get note :text))))
 	 ;; Otherwise, check the turn identity.
-	 ((and (consp turn) (dsh-bridge--view-turn-open-p turn))
+	 ((dsh-bridge--view-turn-open-p turn)
 	  (when (or (eq baseline :unknown)
 		    (let* ((segments (alist-get 'segments turn))
 			   (last (car (last segments))))
@@ -3724,8 +3725,7 @@ available, return its elapsed run time.
 In all other circumstances, return nil.  This function only reads the
 turns cache and status tracker, and does no I/O."
   (let* ((record (dsh-bridge--view-turn-record session-id))
-	 (turn-open (and record
-			 (dsh-bridge--view-turn-open-p record))))
+	 (turn-open (dsh-bridge--view-turn-open-p record)))
     (cond
      ((and record (not turn-open))
       (let ((end (dsh-bridge--view-turn-end-time record)))
@@ -3832,8 +3832,7 @@ to pop to the buffer using the same window.  Return the buffer."
 	   (running (eq (cdr-safe running-pair) t))
 	   (turns-pair (assq 'turns session-alist))
 	   (turns (cdr-safe turns-pair))
-	   (follow (or (and turns
-			    (dsh-bridge--view-turn-open-p (car-safe turns)))
+	   (follow (or (dsh-bridge--view-turn-open-p (car-safe turns))
 		       running))
 	   (cwd (alist-get 'cwd session-alist))
 	   (buffer (or (dsh-bridge--session-view id)
@@ -3936,7 +3935,7 @@ to consult; otherwise, one is fetched."
 	  (dsh-bridge--view-waiting-fill session-id nil (alist-get 'cwd alist))
 	(dsh-bridge--view-fill session-id (car-safe turns)
 			       (alist-get 'cwd alist) t t)
-	(when (or running (and turns (dsh-bridge--view-turn-open-p (car-safe turns))))
+	(when (or running (dsh-bridge--view-turn-open-p (car-safe turns)))
 	  (setq-local dsh-bridge--view-follow t))
 	(setq header-line-format dsh-bridge--view-header-line-format)
 	(dsh-bridge--view-ticker-ensure)))
@@ -3998,7 +3997,7 @@ SESSION-ID defaults to the buffer's content session.  An open turn record
 counts, as does a waiting view that has no cached record yet (a new turn
 whose first reply has not arrived)."
   (let ((record (dsh-bridge--view-turn-record session-id)))
-    (or (and record (dsh-bridge--view-turn-open-p record))
+    (or (dsh-bridge--view-turn-open-p record)
 	(and dsh-bridge--view-waiting (null record)))))
 
 (defun dsh-bridge--view-running-duration-p (&optional buffer)
@@ -5386,7 +5385,7 @@ line to a query message)."
 					(equal (alist-get 'turn r)
 					       dsh-bridge--view-turn))
 				      turns))))
-	  (when (and record (dsh-bridge--view-turn-open-p record))
+	  (when (dsh-bridge--view-turn-open-p record)
 	    (dsh-bridge--view-fill session-id record nil t t))))))))
 
 ;;; Queries
@@ -6086,7 +6085,7 @@ The note carries the `(STEP . TIME)' baseline of the session's newest open
 turn at record time, so `dsh-bridge--view-answer-note' shows it only while
 that wait is still the current one (see `dsh-bridge--view-answer-notes')."
   (let* ((newest (car-safe (dsh-bridge--turns-cache-turns session-id)))
-	 (last (and newest (dsh-bridge--view-turn-open-p newest)
+	 (last (and (dsh-bridge--view-turn-open-p newest)
 		    (car (last (alist-get 'segments newest)))))
 	 (baseline (if last (dsh-bridge--view-segment-key last) :unknown)))
     (setq dsh-bridge--view-answer-notes
@@ -7923,7 +7922,7 @@ the user must manually unarchive the session first."
 	  (cond
 	   ((null alist)) ; the request already echoed the error
 	   ((or running
-		(and turns (dsh-bridge--view-turn-open-p (car-safe turns))))
+		(dsh-bridge--view-turn-open-p (car-safe turns)))
 	    (dsh-bridge--show-session-view
 	     (dsh-bridge--view-for-session session-id alist)))
 	   ((null turns)
