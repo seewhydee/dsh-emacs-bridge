@@ -701,14 +701,14 @@ be numbers, and WINDOW must be positive."
 Return the `N%' form (clamped to 100) shared by the prompt and view
 headers.  A caller inserting it into a header line must escape the
 percent sign with `dsh-bridge--header-text'."
-  (let ((entry (and session-id (assoc session-id dsh-bridge--session-context))))
-    (when entry
-      (let ((used (cadr entry))
-	    (window (cddr entry)))
-	(when (and (numberp used) (numberp window) (> window 0))
-	  ;; Same formula as DSH's web UI.
-	  (format "%d%%"
-		  (min 100 (round (* 100.0 (/ used (float window)))))))))))
+  (when-let* ((entry (and session-id
+			  (assoc session-id dsh-bridge--session-context))))
+    (let ((used (cadr entry))
+	  (window (cddr entry)))
+      (when (and (numberp used) (numberp window) (> window 0))
+	;; Same formula as DSH's web UI.
+	(format "%d%%"
+		(min 100 (round (* 100.0 (/ used (float window))))))))))
 
 (defvar dsh-bridge--sessions-compacting nil
   "List of session ids currently being compacted.")
@@ -1194,9 +1194,8 @@ Currently supported events are:
 	(dsh-bridge--session-update-last-active id (alist-get 'time event))
 	;; If host says the turn is complete, take their word for it,
 	;; and clear out any pending questions and approval requests.
-	(let ((query (assoc id dsh-bridge--pending-questions)))
-	  (when query
-	    (dsh-bridge--question-mark-resolved (cadr query) 'stale)))
+	(when-let* ((query (assoc id dsh-bridge--pending-questions)))
+	  (dsh-bridge--question-mark-resolved (cadr query) 'stale))
 	(setq dsh-bridge--pending-questions
 	      (assoc-delete-all id dsh-bridge--pending-questions))
 	(setq dsh-bridge--pending-approvals
@@ -1253,30 +1252,28 @@ Currently supported events are:
 	    (force-mode-line-update t)
 	    (dsh-bridge--describe-maybe-refresh id))))
        ((equal kind "ask-user")
-	(let ((request-id (alist-get 'questionId event))
-	      (questions (alist-get 'questions event)))
-	  (when (and request-id questions)
-	    ;; A fresh question owns the terminal slot; drop any answered
-	    ;; note so it cannot resurface behind the awaiting note.
-	    (dsh-bridge--view-answer-note-clear id)
-	    (dsh-bridge--ask-user-arrive id request-id questions))))
+	(when-let* ((request-id (alist-get 'questionId event))
+		    (questions (alist-get 'questions event)))
+	  ;; A fresh question owns the terminal slot; drop any answered
+	  ;; note so it cannot resurface behind the awaiting note.
+	  (dsh-bridge--view-answer-note-clear id)
+	  (dsh-bridge--ask-user-arrive id request-id questions)))
        ((equal kind "ask-user-resolved")
 	(when (alist-get 'questionId event)
 	  (dsh-bridge--ask-user-resolved id (alist-get 'questionId event)
 					 (alist-get 'outcome event))))
        ((equal kind "approval")
-	(let ((approval-id (alist-get 'approvalId event))
-	      (tool-name (alist-get 'toolName event)))
-	  (when (and approval-id tool-name)
-	    ;; A fresh approval owns the terminal slot; drop any answered
-	    ;; note so it cannot resurface behind the awaiting note.
-	    (dsh-bridge--view-answer-note-clear id)
-	    (dsh-bridge--approval-arrive
-	     id approval-id
-	     (list :tool-name tool-name
-		   :call-id (alist-get 'callId event)
-		   :reason (alist-get 'reason event)
-		   :detail (alist-get 'detail event))))))
+	(when-let* ((approval-id (alist-get 'approvalId event))
+		    (tool-name (alist-get 'toolName event)))
+	  ;; A fresh approval owns the terminal slot; drop any answered
+	  ;; note so it cannot resurface behind the awaiting note.
+	  (dsh-bridge--view-answer-note-clear id)
+	  (dsh-bridge--approval-arrive
+	   id approval-id
+	   (list :tool-name tool-name
+		 :call-id (alist-get 'callId event)
+		 :reason (alist-get 'reason event)
+		 :detail (alist-get 'detail event)))))
        ((equal kind "approval-resolved")
 	(when (alist-get 'approvalId event)
 	  (dsh-bridge--approval-resolved id (alist-get 'approvalId event)
@@ -1343,10 +1340,9 @@ burst of frames (e.g., a rename) into one refresh."
   (when (timerp dsh-bridge--sessions-changed-timer)
     (cancel-timer dsh-bridge--sessions-changed-timer)
     (setq dsh-bridge--sessions-changed-timer nil))
-  (let ((sessions-buffer (dsh-bridge--sessions-buffer)))
-    (when sessions-buffer
-      (setq dsh-bridge--sessions-changed-timer
-	    (run-at-time 0.5 nil #'dsh-bridge--refresh-sessions-buffer)))))
+  (when-let* ((sessions-buffer (dsh-bridge--sessions-buffer)))
+    (setq dsh-bridge--sessions-changed-timer
+	  (run-at-time 0.5 nil #'dsh-bridge--refresh-sessions-buffer))))
 
 (defun dsh-bridge--notification-receive ()
   "Receive a pending DSH push notification."
@@ -1358,11 +1354,11 @@ burst of frames (e.g., a rename) into one refresh."
   (setq dsh-bridge--notifications-raw
 	(concat dsh-bridge--notifications-raw string))
   (unless dsh-bridge--notifications-headers-done
-    (let ((pos (string-match "\r\n\r\n" dsh-bridge--notifications-raw)))
-      (when pos
-	(setq dsh-bridge--notifications-raw
-	      (substring dsh-bridge--notifications-raw (+ pos 4)))
-	(setq dsh-bridge--notifications-headers-done t))))
+    (when-let* ((pos (string-match "\r\n\r\n"
+				   dsh-bridge--notifications-raw)))
+      (setq dsh-bridge--notifications-raw
+	    (substring dsh-bridge--notifications-raw (+ pos 4)))
+      (setq dsh-bridge--notifications-headers-done t)))
   (when dsh-bridge--notifications-headers-done
     (let* ((decoded (dsh-bridge--chunked-decode dsh-bridge--notifications-raw))
 	   (body (car decoded)))
@@ -1686,18 +1682,16 @@ skipped even if still live."
 TIME is a ms-epoch for the turn frame's `time' field, or nil to leave
 the value unchanged.  If SESSION-ID is not in the cache, do nothing."
   (when time
-    (let ((session (dsh-bridge--session-for-id session-id)))
-      (when session
-	(setf (alist-get 'lastActive session) time)))))
+    (when-let* ((session (dsh-bridge--session-for-id session-id)))
+      (setf (alist-get 'lastActive session) time))))
 
 (defun dsh-bridge--record-last-resolved (alist)
   "Record the session ALIST the host resolved for a nil-target request.
 Advisory display cache only (see `dsh-bridge--last-resolved-active')."
-  (let ((id (alist-get 'sessionId alist)))
-    (when id
-      (setq dsh-bridge--last-resolved-active
-	    (cons id (or (alist-get 'title alist)
-			 (dsh-bridge--session-label id)))))))
+  (when-let* ((id (alist-get 'sessionId alist)))
+    (setq dsh-bridge--last-resolved-active
+	  (cons id (or (alist-get 'title alist)
+		       (dsh-bridge--session-label id))))))
 
 (defun dsh-bridge--apply-session-directory (session-id cwd &optional buffer)
   "Set BUFFER's `default-directory' to SESSION-ID's workspace.
@@ -2405,10 +2399,9 @@ to insert; if this is nil, insert `dsh-bridge--prompt-draft' instead."
   (erase-buffer)
   (cond
    (dsh-bridge--prompt-history-index
-    (let ((text (nth dsh-bridge--prompt-history-index prompts)))
-      (when text
-	(insert text)
-	(set-buffer-modified-p nil))))
+    (when-let* ((text (nth dsh-bridge--prompt-history-index prompts)))
+      (insert text)
+      (set-buffer-modified-p nil)))
    (dsh-bridge--prompt-draft
     (insert dsh-bridge--prompt-draft))) ; sets the modified flag
   (goto-char (point-max)))
@@ -2500,12 +2493,11 @@ addressed even when another prompt has identical text."
 
 (defun dsh-bridge--prompt-pending-remove (session-id item-id)
   "Remove ITEM-ID from SESSION-ID's cached pending list."
-  (let ((cell (assoc session-id dsh-bridge--prompt-pending)))
-    (when cell
-      (setcdr cell
-	      (seq-remove (lambda (entry)
-			    (equal (alist-get 'id entry) item-id))
-			  (cdr cell))))))
+  (when-let* ((cell (assoc session-id dsh-bridge--prompt-pending)))
+    (setcdr cell
+	    (seq-remove (lambda (entry)
+			  (equal (alist-get 'id entry) item-id))
+			(cdr cell)))))
 
 (defun dsh-bridge--prompt-pending-renumber (pending)
   "Restore one-based FIFO positions in the queued entries of PENDING."
@@ -2636,9 +2628,9 @@ buffer and its text untouched."
   "Read SESSION-ID's pending prompt counts into the header cache.
 One small request on prompt open; a failure leaves the last known value."
   (when session-id
-    (let ((counts (dsh-bridge--pending-prompt-counts session-id)))
-      (when counts
-	(dsh-bridge--queue-counts-store session-id (car counts) (cdr counts))))))
+    (when-let* ((counts (dsh-bridge--pending-prompt-counts session-id)))
+      (dsh-bridge--queue-counts-store session-id
+				      (car counts) (cdr counts)))))
 
 (defun dsh-bridge--prompt-pending-buffer-for (session-id)
   "Return a live DSH-Prompt buffer for SESSION-ID at a draft, or nil."
@@ -2653,12 +2645,11 @@ One small request on prompt open; a failure leaves the last known value."
   "Refetch SESSION-ID's history and pending caches without touching text."
   (setq dsh-bridge--prompt-pending-timers
 	(assoc-delete-all session-id dsh-bridge--prompt-pending-timers))
-  (let ((buffer (dsh-bridge--prompt-pending-buffer-for session-id)))
-    (when buffer
-      (with-current-buffer buffer
-	(condition-case nil
-	    (dsh-bridge--prompt-history-refresh session-id)
-	  (error nil))))))
+  (when-let* ((buf (dsh-bridge--prompt-pending-buffer-for session-id)))
+    (with-current-buffer buf
+      (condition-case nil
+	  (dsh-bridge--prompt-history-refresh session-id)
+	(error nil)))))
 
 (defun dsh-bridge--prompt-pending-schedule (session-id)
   "Schedule a debounced pending-cache refetch for SESSION-ID.
@@ -2970,12 +2961,10 @@ the visited file (not the buffer text) is attached."
 ;; suffix, so an incremental splice replaces it with the grown turn's
 ;; fresh list.
 ;;
-;; Arriving segments are spliced in place, so that the user can tail
-;; the buffer by parking the cursor on the run-status line.  A reader
-;; parked anywhere in the body is left where it is, in every window
-;; displaying the buffer.  An update that cannot splice (for instance,
-;; a changed in-flight reasoning summary, which must replace its line)
-;; rebuilds the body but follows the same point rule.
+;; Arriving segments are spliced in place.  If point is placed on the
+;; run-status line, it tails the buffer contents; if it is placed
+;; anywhere else, it is left in place.  The same behavior is applied
+;; to every non-selected window displaying the buffer.
 
 (defvar-local dsh-bridge--view-content-session nil
   "Session the DSH-View buffer's content came from, or nil.")
@@ -3116,19 +3105,18 @@ turn has just been started, but the first reply has not yet arrived.")
 This is the string to show at the end of the DSH-View buffer for a turn
 parked on a user query.  If SESSION-ID is nil, or there is no pending
 query, return nil."
-  (let ((entry (and session-id
-		    (assoc session-id dsh-bridge--pending-questions))))
-    (when entry
-      (let* ((questions (cddr entry))
-	     (count (length questions))
-	     (key (substitute-command-keys "\\[dsh-bridge-answer]"))
-	     (body (if (> count 1)
-		       (format "(Awaiting response [%d questions]: \
+  (when-let* ((entry (and session-id
+			  (assoc session-id dsh-bridge--pending-questions))))
+    (let* ((questions (cddr entry))
+	   (count (length questions))
+	   (key (substitute-command-keys "\\[dsh-bridge-answer]"))
+	   (body (if (> count 1)
+		     (format "(Awaiting response [%d questions]: \
 press %s to view and answer" count key)
-		     (format "(Awaiting response: press %s to view and answer)"
-			     key))))
-	(propertize (dsh-bridge--fontify body 'dsh-bridge-view-awaiting-face)
-			 'dsh-bridge-view-answer t)))))
+		   (format "(Awaiting response: press %s to view and answer)"
+			   key))))
+      (propertize (dsh-bridge--fontify body 'dsh-bridge-view-awaiting-face)
+		  'dsh-bridge-view-answer t))))
 
 (defun dsh-bridge--view-approval-note (session-id)
   "DSH-View marker line for a pending approval for SESSION-ID, or nil.
@@ -3160,29 +3148,29 @@ when the question was answered) matches any open turn and relies on the
 notification handlers to retire it.
 
 If SESSION-ID is nil, or no answer note is recorded for it, return nil."
-  (let ((note (and dsh-bridge-view-answer-echo session-id
-		   (cdr (assoc session-id dsh-bridge--view-answer-notes)))))
-    (when note
-      (let ((baseline (plist-get note :baseline))
-	    text)
-	(cond
-	 ;; If waiting for the first committed reply: only a note
-	 ;; recorded before any segment existed can still be current.
-	 ((eq turn 'new)
-	  (if (eq baseline :unknown)
-	      (setq text (plist-get note :text))))
-	 ;; Otherwise, check the turn identity.
-	 ((dsh-bridge--view-turn-open-p turn)
-	  (when (or (eq baseline :unknown)
-		    (let* ((segments (alist-get 'segments turn))
-			   (last (car (last segments))))
-		      (and last
-			   (equal baseline
-				  (dsh-bridge--view-segment-key last)))))
-	    (setq text (plist-get note :text)))))
-	(when text
-	  (dsh-bridge--fontify (concat "(" text " \u2014 continuing\u2026)")
-			       'dsh-bridge-view-answered-face))))))
+  (when-let* ((note (and dsh-bridge-view-answer-echo session-id
+			 (cdr (assoc session-id
+				     dsh-bridge--view-answer-notes)))))
+    (let ((baseline (plist-get note :baseline))
+	  text)
+      (cond
+       ;; If waiting for the first committed reply: only a note
+       ;; recorded before any segment existed can still be current.
+       ((eq turn 'new)
+	(if (eq baseline :unknown)
+	    (setq text (plist-get note :text))))
+       ;; Otherwise, check the turn identity.
+       ((dsh-bridge--view-turn-open-p turn)
+	(when (or (eq baseline :unknown)
+		  (let* ((segments (alist-get 'segments turn))
+			 (last (car (last segments))))
+		    (and last
+			 (equal baseline
+				(dsh-bridge--view-segment-key last)))))
+	  (setq text (plist-get note :text)))))
+      (when text
+	(dsh-bridge--fontify (concat "(" text " \u2014 continuing\u2026)")
+			     'dsh-bridge-view-answered-face)))))
 
 (defun dsh-bridge--view-fill-suffix-only (session-id turn &optional cwd)
   "Reset the current view to an empty body plus TURN's terminal suffix.
@@ -3224,8 +3212,8 @@ turn-following state for the new turn."
 
 (defun dsh-bridge--button-visit (button)
   "Visit the filename specified by BUTTON's `path' property."
-  (let ((path (button-get button 'path)))
-    (when path (find-file (expand-file-name path)))))
+  (when-let* ((path (button-get button 'path)))
+    (find-file (expand-file-name path))))
 
 (defun dsh-bridge--view-changed-files (turn)
   "The changed-files footer string for TURN, or nil when it changed nothing.
@@ -3233,19 +3221,18 @@ TURN is a turn record carrying the host fold's `files' field (a list of
 `(path . op)' alists).	Each file name in the result is a text button that
 visits the file."
   (when (and dsh-bridge-view-changed-files (consp turn))
-    (let ((files (alist-get 'files turn)))
-      (when files
-	(with-temp-buffer
-	  (insert (dsh-bridge--fontify "Changed files:"
-				       'dsh-bridge-view-changed-label-face))
-	  (dolist (file files)
-	    (let ((path (alist-get 'path file)))
-	      (insert " ")
-	      (insert-text-button (file-name-nondirectory path)
-				  'path path
-				  'action #'dsh-bridge--button-visit
-				  'follow-link t)))
-	  (buffer-string))))))
+    (when-let* ((files (alist-get 'files turn)))
+      (with-temp-buffer
+	(insert (dsh-bridge--fontify "Changed files:"
+				     'dsh-bridge-view-changed-label-face))
+	(dolist (file files)
+	  (let ((path (alist-get 'path file)))
+	    (insert " ")
+	    (insert-text-button (file-name-nondirectory path)
+				'path path
+				'action #'dsh-bridge--button-visit
+				'follow-link t)))
+	(buffer-string)))))
 
 ;;; Turn activity (the DSH-View process stream)
 
@@ -3545,11 +3532,10 @@ TURN is a turn record carrying a `failure' alist entry (code . message).
 A known code maps to a display string (see `dsh-bridge--failure-text');
 the note is parenthesized and propertized as furniture, so it is never
 mistaken for model text and satisfies the terminal-marker conventions."
-  (let ((failure (and (consp turn) (alist-get 'failure turn))))
-    (when failure
-      (dsh-bridge--fontify (format "(failed \u2014 %s)"
-				   (dsh-bridge--failure-text failure))
-			   'dsh-bridge-view-marker-face))))
+  (when-let* ((failure (and (consp turn) (alist-get 'failure turn))))
+    (dsh-bridge--fontify (format "(failed \u2014 %s)"
+				 (dsh-bridge--failure-text failure))
+			 'dsh-bridge-view-marker-face)))
 
 (defun dsh-bridge--view-blocked-note (session-id)
   "The terminal DSH-View furniture line for a rejected (`blocked') turn.
@@ -3690,15 +3676,13 @@ list (a fetched turn is normally 1).  In turn-following state, the
 segment is \"(latest/n)\" instead.
 
 This function uses the turns cache only, and does no synchronous I/O."
-  (let* ((session dsh-bridge--view-content-session)
-	 (turns (dsh-bridge--turns-cache-turns session))
-	 total)
-    (when turns
-      (setq total (length turns))
-      (cond (dsh-bridge--view-follow (format " (latest/%d)" total))
-	    (dsh-bridge--view-turn
-	     (let ((k (dsh-bridge--view-turn-index turns)))
-	       (if k (format " (%d/%d)" (1+ k) total))))))))
+  (let ((session dsh-bridge--view-content-session))
+    (when-let* ((turns (dsh-bridge--turns-cache-turns session)))
+      (let ((total (length turns)))
+	(cond (dsh-bridge--view-follow (format " (latest/%d)" total))
+	      (dsh-bridge--view-turn
+	       (let ((k (dsh-bridge--view-turn-index turns)))
+		 (if k (format " (%d/%d)" (1+ k) total)))))))))
 
 (defun dsh-bridge--view-turn-record (&optional session-id)
   "The turn record the current DSH-View buffer displays, or nil.
@@ -4198,9 +4182,8 @@ context occupancy as `ctx N%'.  Return nil when neither applies."
   (and session-id
        (or (dsh-bridge--header-compacting-cell session-id)
 	   (when (dsh-bridge--view-turn-running-p session-id)
-	     (let ((label (dsh-bridge--context-label session-id)))
-	       (when label
-		 (list (dsh-bridge--header-text (concat "ctx " label)))))))))
+	     (when-let* ((label (dsh-bridge--context-label session-id)))
+	       (list (dsh-bridge--header-text (concat "ctx " label))))))))
 
 (defun dsh-bridge--header-refresh ()
   "Force the DSH bridge header lines to recompute.
@@ -4225,22 +4208,21 @@ when the live read names the wanted direction; `plan (change queued)'
 when only a direction-less pending change is known.  The cell is a
 clickable `dsh-bridge-plan-face' indicator: mouse-1 turns plan mode
 off (see `dsh-bridge--header-plan-at-mouse')."
-  (let ((plan (cdr (assoc session-id dsh-bridge--session-plan))))
-    (when (consp plan)
-      (let* ((pending-pair (assq 'pending plan))
-	     (queued (eq (alist-get 'queued plan) t))
-	     (active (eq (alist-get 'active plan) t))
-	     (text (cond
-		    ((and pending-pair
-			  (not (dsh-bridge--json-false-p (cdr pending-pair))))
-		     "plan (queued on)")
-		    (pending-pair "plan (queued off)")
-		    (queued "plan (change queued)")
-		    (active "plan"))))
-	(when text
-	  (list (dsh-bridge--header-indicator-string
-		 text 'dsh-bridge-plan-face dsh-bridge--header-plan-map
-		 "mouse-1: turn plan mode off" session-id)))))))
+  (when-let* ((plan (cdr (assoc session-id dsh-bridge--session-plan))))
+    (let* ((pending-pair (assq 'pending plan))
+	   (queued (eq (alist-get 'queued plan) t))
+	   (active (eq (alist-get 'active plan) t))
+	   (text (cond
+		  ((and pending-pair
+			(not (dsh-bridge--json-false-p (cdr pending-pair))))
+		   "plan (queued on)")
+		  (pending-pair "plan (queued off)")
+		  (queued "plan (change queued)")
+		  (active "plan"))))
+      (when text
+	(list (dsh-bridge--header-indicator-string
+	       text 'dsh-bridge-plan-face dsh-bridge--header-plan-map
+	       "mouse-1: turn plan mode off" session-id))))))
 
 (defun dsh-bridge--header-goal-cell (session-id)
   "The header goal cell for SESSION-ID, or nil.
@@ -4250,30 +4232,29 @@ when there is no goal or the goal is complete.	The cell is a
 clickable `dsh-bridge-goal-face' indicator: mouse-1 pauses an armed
 goal, or resumes and rearms a stopped one (see
 `dsh-bridge--header-goal-at-mouse')."
-  (let ((goal (cdr (assoc session-id dsh-bridge--session-goal))))
-    (when (consp goal)
-      (let* ((snapshot (alist-get 'goal goal))
-	     (phase (alist-get 'phase snapshot))
-	     (objective (alist-get 'objective snapshot)))
-	(when (and (member phase '("active" "paused" "blocked"))
-		   (stringp objective))
-	  (let* ((activation (alist-get 'activation goal))
-		 (disarmed (equal activation "disarmed"))
-		 ;; The hover text names the direction toggle-goal will
-		 ;; take, so a click never acts opposite to its label.
-		 (help (if (and (equal phase "active") (equal activation "armed"))
-			   "mouse-1: pause the goal"
-			 "mouse-1: resume and rearm the goal"))
-		 (text (dsh-bridge--header-indicator-string
-			(concat phase ": " (dsh-bridge--header-text objective))
-			'dsh-bridge-goal-face dsh-bridge--header-goal-map
-			help session-id)))
-	    (if (and disarmed (equal phase "active"))
-		(list text t
-		      (dsh-bridge--header-indicator-string
-		       " (disarmed)" 'dsh-bridge-goal-face
-		       dsh-bridge--header-goal-map help session-id))
-	      (list text t))))))))
+  (when-let* ((goal (cdr (assoc session-id dsh-bridge--session-goal))))
+    (let* ((snapshot (alist-get 'goal goal))
+	   (phase (alist-get 'phase snapshot))
+	   (objective (alist-get 'objective snapshot)))
+      (when (and (member phase '("active" "paused" "blocked"))
+		 (stringp objective))
+	(let* ((activation (alist-get 'activation goal))
+	       (disarmed (equal activation "disarmed"))
+	       ;; The hover text names the direction toggle-goal will
+	       ;; take, so a click never acts opposite to its label.
+	       (help (if (and (equal phase "active") (equal activation "armed"))
+			 "mouse-1: pause the goal"
+		       "mouse-1: resume and rearm the goal"))
+	       (text (dsh-bridge--header-indicator-string
+		      (concat phase ": " (dsh-bridge--header-text objective))
+		      'dsh-bridge-goal-face dsh-bridge--header-goal-map
+		      help session-id)))
+	  (if (and disarmed (equal phase "active"))
+	      (list text t
+		    (dsh-bridge--header-indicator-string
+		     " (disarmed)" 'dsh-bridge-goal-face
+		     dsh-bridge--header-goal-map help session-id))
+	    (list text t)))))))
 
 (defun dsh-bridge--header-queue-cell (text)
   "Return the pending-prompt count cell TEXT.
@@ -4394,11 +4375,10 @@ markdown-mode's own handling."
 Registered buffer-locally in `markdown-follow-link-functions', so it runs
 before markdown-mode strips the anchor and visits the file's top; returns nil
 for any URL it does not claim."
-  (let ((target (dsh-bridge--view-link-target url)))
-    (when target
-      (find-file (car target))
-      (goto-line (cdr target))
-      t)))
+  (when-let* ((target (dsh-bridge--view-link-target url)))
+    (find-file (car target))
+    (goto-line (cdr target))
+    t))
 
 (defun dsh-bridge--view-property-at-line (property)
   "Return text PROPERTY at point or at the start of the current line."
@@ -4756,11 +4736,10 @@ Fetches `GET /dsh-bridge/turns' (via `dsh-bridge--turns-cache-fetch') when
 FORCE is non-nil or the session has no cache entry.  FORCE keeps the position
 count current after a fill or a turn-complete refetch; a known-empty entry is
 authoritative until such a forced refresh."
-  (let ((session dsh-bridge--view-content-session))
-    (when session
-      (when (or force (null (dsh-bridge--turns-cache-entry session)))
-	(dsh-bridge--turns-cache-fetch session))
-      (dsh-bridge--turns-cache-turns session))))
+  (when-let* ((session dsh-bridge--view-content-session))
+    (when (or force (null (dsh-bridge--turns-cache-entry session)))
+      (dsh-bridge--turns-cache-fetch session))
+    (dsh-bridge--turns-cache-turns session)))
 
 (defun dsh-bridge--view-turns-cache-refresh (session-id)
   "Force-refresh the cached turn list for the DSH bridge's SESSION-ID.
@@ -5092,20 +5071,12 @@ Turn activity includes tool calls and one-line thinking summaries."
     (unless (or record waiting)
       (user-error "dsh-bridge: no turn displayed"))
     (setq-local dsh-bridge--view-activity (not dsh-bridge--view-activity))
-    ;; Refresh before rebuilding: activity frames that arrived while the
-    ;; toggle was off were ignored, so the cached record may predate the
-    ;; lines about to be shown — and for a waiting view the refresh is what
-    ;; folds in the awaited turn's activity-only record.
     (dsh-bridge--view-turns-cache-refresh dsh-bridge--view-content-session)
-    ;; Clearing the provenance forces a full rebuild; the fill carries each
-    ;; reader's place across it (a tail reader follows to the new end).
+    ;; Clearing the provenance forces a full rebuild.
     (setq-local dsh-bridge--view-provenance nil)
-    (let ((displayed (or (dsh-bridge--view-turn-record) record)))
-      ;; A waiting view whose turn still has no record keeps its placeholder:
-      ;; the toggle has taken effect, and the next activity frame fills it.
-      (when displayed
-	(dsh-bridge--view-fill dsh-bridge--view-content-session
-			       displayed nil t t)))
+    (when-let* ((displayed (or (dsh-bridge--view-turn-record) record)))
+      (dsh-bridge--view-fill dsh-bridge--view-content-session
+			     displayed nil t t))
     (message "Turn activity %s."
 	     (if dsh-bridge--view-activity "shown" "hidden"))))
 
@@ -5477,28 +5448,27 @@ buffer did not settle the question.
 This function does nothing if the buffer was already resolved. It also
 performs no window management; the caller is responsible for displaying
 the result on-screen."
-  (let ((buffer (dsh-bridge--question-find-buffer request-id)))
-    (when buffer
-      (with-current-buffer buffer
-	(unless dsh-bridge--question-resolution
-	  ;; Only a settling outcome consults this buffer's own
-	  ;; record: a rejected POST leaves it set although this
-	  ;; buffer did not settle the question.
-	  (let* ((msgs '((sent . "Your answer was sent.")
-			 (declined . "You declined to answer.")
-			 (cancelled . "Query cancelled.")
-			 (elsewhere . "Query answered elsewhere \
+  (when-let* ((buffer (dsh-bridge--question-find-buffer request-id)))
+    (with-current-buffer buffer
+      (unless dsh-bridge--question-resolution
+	;; Only a settling outcome consults this buffer's own
+	;; record: a rejected POST leaves it set although this
+	;; buffer did not settle the question.
+	(let* ((msgs '((sent . "Your answer was sent.")
+		       (declined . "You declined to answer.")
+		       (cancelled . "Query cancelled.")
+		       (elsewhere . "Query answered elsewhere \
 (not in this buffer).")
-			 (not-pending . "Query already resolved.")
-			 (stale . "Query no longer pending.")))
-		 (settled (memq outcome '(sent declined cancelled elsewhere)))
-		 (record (or (and settled
-				  (alist-get dsh-bridge--question-sent msgs))
-			     (alist-get outcome msgs))))
-	    (if record
-		(setq-local dsh-bridge--question-resolution record)
-	      (error "dsh-bridge: unknown query resolution %S" outcome)))
-	  (dsh-bridge--question-patch-header))))))
+		       (not-pending . "Query already resolved.")
+		       (stale . "Query no longer pending.")))
+	       (settled (memq outcome '(sent declined cancelled elsewhere)))
+	       (record (or (and settled
+				(alist-get dsh-bridge--question-sent msgs))
+			   (alist-get outcome msgs))))
+	  (if record
+	      (setq-local dsh-bridge--question-resolution record)
+	    (error "dsh-bridge: unknown query resolution %S" outcome)))
+	(dsh-bridge--question-patch-header)))))
 
 (defun dsh-bridge--ask-user-arrive (session-id request-id questions)
   "Process a newly-arrived query from the DSH bridge.
@@ -5533,8 +5503,8 @@ demand by `\\[dsh-bridge-answer]'."
 Only the stored request id retires the entry: a frame naming an ask this
 session has already moved past leaves the live one alone.  Update the
 DSH-Question buffer's banner accordingly."
-  (let ((entry (assoc session-id dsh-bridge--pending-questions)))
-    (when (and entry (equal (cadr entry) request-id))
+  (when-let* ((entry (assoc session-id dsh-bridge--pending-questions)))
+    (when (equal (cadr entry) request-id)
       (setq dsh-bridge--pending-questions
 	    (assoc-delete-all session-id dsh-bridge--pending-questions))))
   (dsh-bridge--status-event-render session-id)
@@ -5664,15 +5634,14 @@ block that follows it, and the last block ends at `point-max'."
 (defun dsh-bridge--question-span (prop qid)
   "Return the (START . END) of question QID's PROP span, or nil.
 The span lies inside QID's block and carries QID as its PROP value."
-  (let ((block (dsh-bridge--question-block-bounds qid)))
-    (when block
-      (let* ((limit (cdr block))
-	     (start (next-single-property-change (car block) prop nil limit)))
-	(when (and start (< start limit)
-		   (equal (get-text-property start prop) qid))
-	  (cons start
-		(or (next-single-property-change start prop nil limit)
-		    limit)))))))
+  (when-let* ((block (dsh-bridge--question-block-bounds qid)))
+    (let* ((limit (cdr block))
+	   (start (next-single-property-change (car block) prop nil limit)))
+      (when (and start (< start limit)
+		 (equal (get-text-property start prop) qid))
+	(cons start
+	      (or (next-single-property-change start prop nil limit)
+		  limit))))))
 
 (defun dsh-bridge--question-header-bounds ()
   "Return the (START . END) of the buffer's header/banner line, or nil.
@@ -6324,17 +6293,16 @@ the minibuffer instead.")
   "Drop APPROVAL-ID from SESSION-ID's pending approvals and refresh displays.
 Idempotent: a decision POST and the host's `approval-resolved' frame for the
 same approval both call this, in either order."
-  (let ((entry (assoc session-id dsh-bridge--pending-approvals)))
-    (when entry
-      ;; Remove all approval entries with id `equal' to APPROVAL-ID
-      (let ((remaining nil))
-	(dolist (pair (cdr entry))
-	  (unless (equal (car pair) approval-id)
-	    (push pair remaining)))
-	(if remaining
-	    (setcdr entry (nreverse remaining))
-	  (setq dsh-bridge--pending-approvals
-		(delq entry dsh-bridge--pending-approvals))))))
+  (when-let* ((entry (assoc session-id dsh-bridge--pending-approvals)))
+    ;; Remove all approval entries with id `equal' to APPROVAL-ID
+    (let ((remaining nil))
+      (dolist (pair (cdr entry))
+	(unless (equal (car pair) approval-id)
+	  (push pair remaining)))
+      (if remaining
+	  (setcdr entry (nreverse remaining))
+	(setq dsh-bridge--pending-approvals
+	      (delq entry dsh-bridge--pending-approvals)))))
   (dsh-bridge--status-event-render session-id)
   (dsh-bridge--view-await-refresh session-id))
 
@@ -6536,43 +6504,39 @@ nil when unknown."
 (defun dsh-bridge--model-display-name (data provider model)
   "The catalog display name of PROVIDER/MODEL in DATA, or nil.
 Searches the `groups' list for the provider, then its models for the id."
-  (let ((group (seq-find (lambda (g) (equal (alist-get 'id g) provider))
-			 (alist-get 'groups data))))
-    (when group
-      (let ((entry (seq-find (lambda (m) (equal (alist-get 'id m) model))
-			     (alist-get 'models group))))
-	(and entry (alist-get 'name entry))))))
+  (when-let* ((group (seq-find (lambda (g)
+				 (equal (alist-get 'id g) provider))
+			       (alist-get 'groups data))))
+    (let ((entry (seq-find (lambda (m) (equal (alist-get 'id m) model))
+			   (alist-get 'models group))))
+      (and entry (alist-get 'name entry)))))
 
 (defun dsh-bridge--prompt-model-label (session-id)
   "The prompt header's model segment for SESSION-ID, or nil when unknown.
 The catalog's display name, falling back to the raw model id; nil until the
 first GET /models succeeds for the session."
-  (let ((data (and session-id (cdr (assoc session-id dsh-bridge--session-models)))))
-    (when data
-      (let* ((current (alist-get 'current data))
-	     (provider (alist-get 'provider current))
-	     (model (alist-get 'model current)))
-	(when model
-	  (or (dsh-bridge--model-display-name data provider model) model))))))
-
-(defun dsh-bridge--prompt-context-label (session-id)
-  "The prompt header's context-occupancy segment for SESSION-ID, or nil."
-  (dsh-bridge--context-label session-id))
+  (when-let* ((data (and session-id
+			 (cdr (assoc session-id
+				     dsh-bridge--session-models)))))
+    (let* ((current (alist-get 'current data))
+	   (provider (alist-get 'provider current))
+	   (model (alist-get 'model current)))
+      (when model
+	(or (dsh-bridge--model-display-name data provider model) model)))))
 
 (defun dsh-bridge--refresh-prompt-metadata ()
   "Fetch model/context metadata for the prompt buffer's effective session.
 One request each, only when the session's entry is not already cached.	The
 requests are synchronous loopback (like the other prompt-open requests); a
 failure leaves the header segment empty until the next trigger."
-  (let ((session (or dsh-bridge--prompt-session
-		     dsh-bridge-pinned-target
-		     (car-safe dsh-bridge--last-resolved-active)
-		     (dsh-bridge--cache-last-active))))
-    (when session
-      (dsh-bridge--fetch-models session)
-      (dsh-bridge--fetch-context session)
-      (dsh-bridge--plan-goal-refresh session t)
-      (dsh-bridge--queue-counts-refresh session))))
+  (when-let* ((session (or dsh-bridge--prompt-session
+			   dsh-bridge-pinned-target
+			   (car-safe dsh-bridge--last-resolved-active)
+			   (dsh-bridge--cache-last-active))))
+    (dsh-bridge--fetch-models session)
+    (dsh-bridge--fetch-context session)
+    (dsh-bridge--plan-goal-refresh session t)
+    (dsh-bridge--queue-counts-refresh session)))
 
 (defun dsh-bridge--select-model-apply (session-id provider model effort)
   "POST /model for SESSION-ID and refresh the model cache on success."
@@ -6785,17 +6749,16 @@ refused.  Only meaningful in a DSH-View buffer."
 	   (end-seq (and record (alist-get 'endSeq record))))
       (unless end-seq
 	(user-error "dsh-bridge: the shown turn is not completed; branch a completed turn"))
-      (let ((child (dsh-bridge--fork-turn id end-seq)))
-	(when child
-	  ;; Open the child's conversation: its view in this window, then its
-	  ;; prompt below (the `dsh-bridge-reply' window shape).  The child's
-	  ;; newest inherited turn is complete, so `dsh-bridge-fetch' fills the
-	  ;; view with it rather than the waiting placeholder.
-	  (dsh-bridge-fetch child t)
-	  (pop-to-buffer (dsh-bridge--prompt-buffer child)
-			 dsh-bridge-prompt-display-action)
-	  (message "dsh-bridge: branched into %s (preset inherited; default model; untitled)"
-		   (dsh-bridge--id-tail child)))))))
+      (when-let* ((child (dsh-bridge--fork-turn id end-seq)))
+	;; Open the child's conversation: its view in this window, then its
+	;; prompt below (the `dsh-bridge-reply' window shape).  The child's
+	;; newest inherited turn is complete, so `dsh-bridge-fetch' fills the
+	;; view with it rather than the waiting placeholder.
+	(dsh-bridge-fetch child t)
+	(pop-to-buffer (dsh-bridge--prompt-buffer child)
+		       dsh-bridge-prompt-display-action)
+	(message "dsh-bridge: branched into %s (preset inherited; default model; untitled)"
+		 (dsh-bridge--id-tail child))))))
 
 ;;; Plan mode and goals
 
@@ -7095,10 +7058,9 @@ and refusal rules match the command, its `A' binding, and its menu item."
 Seeds the cache through the read-through fetch first: a DSH-Sessions
 buffer has no other seed path, so without this the menu items stay
 shaded until some other buffer seeds the session."
-  (let ((session (dsh-bridge--effective-session)))
-    (when session
-      (dsh-bridge--plan-goal-refresh session t)
-      (cdr (assoc session dsh-bridge--session-plan)))))
+  (when-let* ((session (dsh-bridge--effective-session)))
+    (dsh-bridge--plan-goal-refresh session t)
+    (cdr (assoc session dsh-bridge--session-plan))))
 
 (defun dsh-bridge--menu-plan-available ()
   "Whether the Plan Mode menu item can act.
@@ -7119,10 +7081,9 @@ mutation route resumes it on demand (501 if its preset has none)."
   "The cached goal section for the menu's session, or nil.
 Seeds the cache through the read-through fetch first (the fetch fills
 both the plan and goal caches in one request)."
-  (let ((session (dsh-bridge--effective-session)))
-    (when session
-      (dsh-bridge--plan-goal-refresh session t)
-      (cdr (assoc session dsh-bridge--session-goal)))))
+  (when-let* ((session (dsh-bridge--effective-session)))
+    (dsh-bridge--plan-goal-refresh session t)
+    (cdr (assoc session dsh-bridge--session-goal))))
 
 (defun dsh-bridge--menu-goal-available ()
   "Whether the Goal Active menu item can act.
@@ -7223,7 +7184,7 @@ buffer itself."
 	   (model (dsh-bridge--header-text
 		   (dsh-bridge--prompt-model-label session)))
 	   (context (dsh-bridge--header-text
-		     (dsh-bridge--prompt-context-label session)))
+		     (dsh-bridge--context-label session)))
 	   (plan (and session (dsh-bridge--header-plan-cell session)))
 	   (goal (and session (dsh-bridge--header-goal-cell session)))
 	   (queue (and session (dsh-bridge--header-queue-cells session)))
@@ -7644,7 +7605,7 @@ compaction in progress) is reported with the host-supplied text."
      ((let ((counts (dsh-bridge--pending-prompt-counts id)))
 	(and (consp counts) (> (car counts) 0)))
       (user-error "Session has queued input; stop or send it first"))
-     ((let ((context (dsh-bridge--prompt-context-label id)))
+     ((let ((context (dsh-bridge--context-label id)))
 	(not (y-or-n-p
 	      (concat "Compact session"
 		      (if context (format " (%s of context used)" context) "")
@@ -8157,10 +8118,9 @@ this command with SET-TITLE and then pins what it created."
     ;; it even when no list is on screen.  A list that is on screen
     ;; has no row for the new session until it is re-filled: fill it,
     ;; then move point to that row.
-    (let ((sessions-buffer (dsh-bridge--sessions-fill-live)))
-      (when sessions-buffer
-	(with-current-buffer sessions-buffer
-	  (dsh-bridge--sessions-goto-id session-id))))
+    (when-let* ((sessions-buffer (dsh-bridge--sessions-fill-live)))
+      (with-current-buffer sessions-buffer
+	(dsh-bridge--sessions-goto-id session-id)))
     (message "Session created.")
     session-id))
 
@@ -8564,12 +8524,11 @@ failure reason, never a fake zero."
 		    current "—"))))
     (insert "\n")
     ;; Parent session
-    (let ((parent (dsh-bridge--normalized-string
-		   (alist-get 'parentSession report))))
-      (when parent
-	(dsh-bridge--describe-label "Forked from")
-	(help-insert-xref-button parent 'dsh-bridge-describe-session-xref
-				 parent)))
+    (when-let* ((parent (dsh-bridge--normalized-string
+			 (alist-get 'parentSession report))))
+      (dsh-bridge--describe-label "Forked from")
+      (help-insert-xref-button parent 'dsh-bridge-describe-session-xref
+			       parent))
     (when (eq (alist-get 'isSeeded report) t)
       (dsh-bridge--describe-label "Seeded")
       (insert "yes\n"))
@@ -8744,18 +8703,17 @@ would cover the glyph with an ellipsis `display' property."
   "Re-render the session status indicators in all open DSH Bridge buffers.
 This function reads the sessions cache, without fetching from the host."
   (force-mode-line-update t)
-  (let ((buffer (dsh-bridge--sessions-buffer)))
-    (when buffer
-      (with-current-buffer buffer
-	;; The status column's width depends on the indicator style, so the
-	;; format (and its rendered header) must be recomputed too.
-	(setq tabulated-list-format (dsh-bridge--sessions-format))
-	(tabulated-list-init-header)
-	(setq tabulated-list-entries
-	      (mapcar #'dsh-bridge--session-entry
-		      (seq-filter #'dsh-bridge--session-visible-p
-				  dsh-bridge--sessions-cache)))
-	(tabulated-list-print t)))))
+  (when-let* ((buffer (dsh-bridge--sessions-buffer)))
+    (with-current-buffer buffer
+      ;; The status column's width depends on the indicator style, so the
+      ;; format (and its rendered header) must be recomputed too.
+      (setq tabulated-list-format (dsh-bridge--sessions-format))
+      (tabulated-list-init-header)
+      (setq tabulated-list-entries
+	    (mapcar #'dsh-bridge--session-entry
+		    (seq-filter #'dsh-bridge--session-visible-p
+				dsh-bridge--sessions-cache)))
+      (tabulated-list-print t))))
 
 ;;; Turn events and status re-rendering
 
@@ -8768,21 +8726,20 @@ This function reads the sessions cache, without fetching from the host."
   ;; The DSH-Prompt header is a shared `(:eval)' form, so it has to be
   ;; refreshed via a global `force-mode-line-update'.
   (force-mode-line-update t)
-  (let ((buffer (dsh-bridge--sessions-buffer)))
-    (when buffer
-      (with-current-buffer buffer
-	(dsh-bridge--status-reprint-row session-id)))))
+  (when-let* ((buffer (dsh-bridge--sessions-buffer)))
+    (with-current-buffer buffer
+      (dsh-bridge--status-reprint-row session-id))))
 
 (defun dsh-bridge--status-reprint-row (session-id)
   "Reprint the DSH-Sessions row corresponding to SESSION-ID.
 This update uses local session data, without fetching from the host."
-  (let* ((session (dsh-bridge--session-for-id session-id))
-	 (idx (seq-position tabulated-list-entries session-id
-			    (lambda (entry id) (equal (car entry) id)))))
-    (when (and session idx)
-      (setf (nth idx tabulated-list-entries)
-	    (dsh-bridge--session-entry session))
-      (tabulated-list-print t))))
+  (when-let* ((session (dsh-bridge--session-for-id session-id))
+	      (idx (seq-position tabulated-list-entries session-id
+				 (lambda (entry id)
+				   (equal (car entry) id)))))
+    (setf (nth idx tabulated-list-entries)
+	  (dsh-bridge--session-entry session))
+    (tabulated-list-print t)))
 
 (defun dsh-bridge--view-browsing-p (&optional buffer)
   "Whether BUFFER is a DSH-View buffer that is browsing the turn history.
@@ -9071,24 +9028,22 @@ without a re-invocation."
 The tracked session stays the focus with explicit provenance: it was
 user-confirmed, so the mutators may still act on it."
   (interactive)
-  (let ((session (car dsh-bridge--focus)))
-    (dsh-bridge-unpin-target)
-    (when session
-      ;; The user pinned that session, so it is confirmed -- but it is not
-      ;; a buffer binding, and must not claim to be.
-      (unless (eq (cdr dsh-bridge--focus) 'advisory)
-	(setq dsh-bridge--focus (cons session 'cycled))))))
+  (dsh-bridge-unpin-target)
+  (when-let* ((session (car dsh-bridge--focus)))
+    ;; The user pinned that session, so it is confirmed -- but it is not
+    ;; a buffer binding, and must not claim to be.
+    (unless (eq (cdr dsh-bridge--focus) 'advisory)
+      (setq dsh-bridge--focus (cons session 'cycled)))))
 
 (defun dsh-bridge--dispatcher-create ()
   "Create a titled session, pin it, and re-point the focus at it."
   (interactive)
-  (let ((session (dsh-bridge-create-session t)))
-    (when session
-      ;; The cycle set was snapshotted when the menu opened, so the new
-      ;; session is not in it: rebuild and re-point the focus.
-      (dsh-bridge-pin-target session)
-      (dsh-bridge--dispatcher-cycle-init)
-      (setq dsh-bridge--focus (cons session 'pinned)))))
+  (when-let* ((session (dsh-bridge-create-session t)))
+    ;; The cycle set was snapshotted when the menu opened, so the new
+    ;; session is not in it: rebuild and re-point the focus.
+    (dsh-bridge-pin-target session)
+    (dsh-bridge--dispatcher-cycle-init)
+    (setq dsh-bridge--focus (cons session 'pinned))))
 
 ;; Define the item inspector's entry point without loading the optional
 ;; library.  DSH-View invokes it only for an activity line at point.

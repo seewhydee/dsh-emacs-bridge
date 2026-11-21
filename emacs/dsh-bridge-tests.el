@@ -8233,13 +8233,13 @@ commits any text.  Resolving the question restores the placeholder."
 (ert-deftest dsh-bridge-prompt-context-label ()
   "The context segment applies the DSH percent formula, clamps, and rounds."
   (let ((dsh-bridge--session-context '(("s1" . (45000 . 100000)))))
-    (should (equal (dsh-bridge--prompt-context-label "s1") "45%")))
+    (should (equal (dsh-bridge--context-label "s1") "45%")))
   (let ((dsh-bridge--session-context '(("s1" . (150000 . 100000)))))
-    (should (equal (dsh-bridge--prompt-context-label "s1") "100%")))
+    (should (equal (dsh-bridge--context-label "s1") "100%")))
   (let ((dsh-bridge--session-context '(("s1" . (1 . 3)))))
-    (should (equal (dsh-bridge--prompt-context-label "s1") "33%")))
+    (should (equal (dsh-bridge--context-label "s1") "33%")))
   (let ((dsh-bridge--session-context nil))
-    (should (null (dsh-bridge--prompt-context-label "s1")))))
+    (should (null (dsh-bridge--context-label "s1")))))
 
 (ert-deftest dsh-bridge-prompt-header-model-context ()
   "The header appends model and context segments when cached, and omits them
