@@ -116,6 +116,9 @@ Consider giving either or both a global keybinding, e.g.,
 (keymap-global-set "C-c d" #'dsh-bridge)
 ```
 
+User options and hooks live in the `dsh-bridge` customization group;
+run `M-x customize-group RET dsh-bridge` to browse them.
+
 ### Transient menu
 
 The `M-x dsh-bridge` command opens a transient menu that prompts for

@@ -260,6 +260,26 @@ the DSH-View buffer untouched, apart from updating the status glyph."
 		 (const :tag "Status glyph only" nil))
   :group 'dsh-bridge)
 
+(defcustom dsh-bridge-turn-complete-functions nil
+  "Abnormal hook run after a turn completes on the DeepSeek Harness.
+Each function is called with three arguments:
+
+- SESSION-ID (a string): the id of the DSH session whose turn ended.
+  This is the same identifier accepted by commands such as
+  `dsh-bridge-fetch' and `dsh-bridge-describe-session'.
+
+- REASON (a string): how the turn ended (nil if unavailable), e.g.,
+  \"completed\", \"aborted\", \"blocked\", \"error\", or \"max-tokens\".
+  Other values may also be possible, depending on the harness.
+
+- MESSAGE (a string): a brief outcome message, e.g., a statement that
+  the session finished, or a failure message.
+
+The hook runs asynchronously, after the `turn-complete' notification and
+outside the notification listener's process filter."
+  :type 'hook
+  :group 'dsh-bridge)
+
 (defcustom dsh-bridge-view-elapsed-ticker t
   "Whether the DSH-View header shows a live elapsed time for a running turn.
 If non-nil, the run duration of the turn a DSH-View buffer displays is
@@ -334,6 +354,23 @@ option says; if the session is idle, it is an ordinary send either way."
   :type '(choice (const :tag "Ask" ask)
 		 (const :tag "Queue" queue)
 		 (const :tag "Steer" steer))
+  :group 'dsh-bridge)
+
+(defcustom dsh-bridge-prompt-send-hook nil
+  "Normal hook run in a DSH-Prompt buffer before sending a prompt.
+When this hook runs, the DSH-Prompt buffer is current, and the prompt
+text and attachment tags are processed only after the hook returns.
+Any function that signals an error (e.g., `user-error') aborts the send,
+leaving the buffer intact."
+  :type 'hook
+  :group 'dsh-bridge)
+
+(defcustom dsh-bridge-prompt-sent-hook nil
+  "Normal hook run in a DSH-Prompt buffer after sending a prompt.
+When this hook runs, the DSH-Prompt buffer is current, and any
+attachment tag will have already been processed and removed, but the
+prompt buffer has not yet been buried."
+  :type 'hook
   :group 'dsh-bridge)
 
 (defcustom dsh-bridge-describe-timeout 15
@@ -4893,6 +4930,11 @@ without asking, or steer the running turn without asking.  With a
 prefix argument STEER, always steer.  An idle session is sent to
 normally, and the prefix argument is then silently ignored.
 
+The normal hook `dsh-bridge-prompt-send-hook' runs before the text and
+attachments are read, so it may edit the prompt or signal an error to
+abort the send.  On success, `dsh-bridge-prompt-sent-hook' runs before
+the prompt buffer is buried.
+
 After a successful send, pop to a DSH-View buffer following the session
 and bury the buffer (see `dsh-bridge--prompt-exit').
 
@@ -4906,6 +4948,8 @@ draft."
     (user-error "Not in a DSH-Prompt buffer"))
   (when (dsh-bridge--prompt-current-pending)
     (user-error "Prompt is still queued; use C-c C-t to steer or C-c C-w to withdraw"))
+  ;; Let the hook adjust or veto the prompt before it is captured.
+  (run-hooks 'dsh-bridge-prompt-send-hook)
   (let* ((parsed (dsh-bridge--parse-attachments ; strip attachments
 		  (substring-no-properties (buffer-string))))
 	 (text (car parsed))
@@ -4950,6 +4994,7 @@ draft."
 	   ;; text, so an immediate resend cannot re-upload them.
 	   (when attachments
 	     (dsh-bridge--remove-attachment-tags))
+	   (run-hooks 'dsh-bridge-prompt-sent-hook)
 	   (dsh-bridge--prompt-exit sent-id window sent-at))
 	 attachments
 	 (unless (eq choice 'send) choice)))))))
@@ -8750,6 +8795,39 @@ If BUFFER is omitted or nil, it defaults to the current buffer."
 	   (and (derived-mode-p 'dsh-bridge-view-mode)
 		dsh-bridge--view-browsing)))))
 
+(defun dsh-bridge--turn-complete-text (session-id reason failure)
+  "Return a display-ready one-line description of the ended turn.
+SESSION-ID names the session; REASON is the host's completion reason
+string; FAILURE is the frame's sanitized failure alist `(code . message)',
+or nil.  The result names the session's label and describes the outcome,
+e.g. session \"Docs\" completed.
+
+This is shared by the echo-area notice and by the MESSAGE argument of
+`dsh-bridge-turn-complete-functions'."
+  (format "session \"%s\" %s"
+	  (dsh-bridge--session-label session-id nil nil t)
+	  (pcase reason
+	    ("completed" "completed")
+	    ("aborted" "aborted")
+	    ("blocked" "blocked")
+	    ("error"
+	     (if failure
+		 (format "failed \u2014 %s"
+			 (dsh-bridge--failure-text failure))
+	       "failed"))
+	    ("max-tokens" "stopped at token limit")
+	    (_ "ended"))))
+
+(defun dsh-bridge--turn-complete-notify (session-id reason text)
+  "Run `dsh-bridge-turn-complete-functions' for an ended turn.
+SESSION-ID, REASON and TEXT are the hook's three arguments; see
+`dsh-bridge-turn-complete-functions'.  This function is called from a
+timer by `dsh-bridge--turn-complete-act', so that a hook function may
+make a synchronous bridge request without re-entering the notification
+listener's process filter."
+  (run-hook-with-args 'dsh-bridge-turn-complete-functions
+		      session-id reason text))
+
 (defun dsh-bridge--turn-complete-act (session-id reason &optional turn failure)
   "Update cache and inform the user after a turn ends.
 SESSION-ID is the session id for the ended session, REASON is a string
@@ -8760,7 +8838,9 @@ failure alist `(code . message)'.
 This function runs the actions prescribed by `dsh-bridge-turn-complete',
 then emits a message if `dsh-bridge-turn-boundary-echo' is non-nil and no
 visible window is showing SESSION-ID's DSH-View (the view itself shows the
-boundary; see `dsh-bridge--view-displayed-p').
+boundary; see `dsh-bridge--view-displayed-p').  It also schedules
+`dsh-bridge-turn-complete-functions' from a timer, outside the
+notification filter.
 
 The refetch runs whenever a view shows SESSION-ID, browsing or not:
 `dsh-bridge--turn-complete-refetch' leaves a browse on an untouched turn
@@ -8769,23 +8849,15 @@ terminal marker is now stale.  Only a session no view shows falls back to
 the cache-only refresh."
   (if (and (eq dsh-bridge-turn-complete 'refetch)
 	   (dsh-bridge--session-view session-id))
-      (run-at-time 0 nil #'dsh-bridge--turn-complete-refetch session-id reason turn failure)
+      (run-at-time 0 nil #'dsh-bridge--turn-complete-refetch
+		   session-id reason turn failure)
     (run-at-time 0 nil #'dsh-bridge--view-turns-cache-refresh session-id))
-  (when (and dsh-bridge-turn-boundary-echo
-	     (not (dsh-bridge--view-displayed-p session-id)))
-    (message "dsh-bridge: session \"%s\" %s"
-	     (dsh-bridge--session-label session-id nil nil t)
-	     (pcase reason
-	       ("completed" "completed")
-	       ("aborted" "aborted")
-	       ("blocked" "blocked")
-	       ("error"
-		(if failure
-		    (format "failed \u2014 %s"
-			    (dsh-bridge--failure-text failure))
-		  "failed"))
-	       ("max-tokens" "stopped at token limit")
-	       (_ "ended")))))
+  (let ((text (dsh-bridge--turn-complete-text session-id reason failure)))
+    (run-at-time 0 nil #'dsh-bridge--turn-complete-notify
+		 session-id reason text)
+    (when (and dsh-bridge-turn-boundary-echo
+	       (not (dsh-bridge--view-displayed-p session-id)))
+      (message "dsh-bridge: %s" text))))
 
 (defun dsh-bridge--view-blocked-fill (session-id &optional turn)
   "Render SESSION-ID's rejected (`blocked') turn as a terminal note.

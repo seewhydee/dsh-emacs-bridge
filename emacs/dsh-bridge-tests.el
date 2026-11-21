@@ -7559,6 +7559,70 @@ decide whether the identical-text confirmation fires."
         (should-not asked)
         (should (equal sent "hello"))))))
 
+(ert-deftest dsh-bridge-prompt-send-hook-edits-and-aborts ()
+  "The send hook runs before the prompt is captured: edits are sent, and a
+hook error aborts the send before the POST."
+  (let ((dsh-bridge-prompt-resend-confirm nil)
+        (dsh-bridge--session-status nil)
+        (dsh-bridge--sessions-cache nil)
+        (sent nil))
+    (with-temp-buffer
+      (dsh-bridge-prompt-mode)
+      (setq-local dsh-bridge--prompt-session "s1")
+      (insert "hello")
+      (cl-letf (((symbol-function 'dsh-bridge-send-text)
+                 (lambda (text &rest _) (setq sent text))))
+        (let ((dsh-bridge-prompt-send-hook
+               (list (lambda ()
+                       (goto-char (point-max))
+                       (insert " and goodbye")))))
+          (dsh-bridge-send-and-exit))
+        (should (equal sent "hello and goodbye"))
+        ;; A `user-error' from the hook stops the send before it starts.
+        (setq sent nil)
+        (let ((dsh-bridge-prompt-send-hook
+               (list (lambda () (user-error "Not now")))))
+          (should-error (dsh-bridge-send-and-exit) :type 'user-error))
+        (should (null sent))))))
+
+(ert-deftest dsh-bridge-prompt-sent-hook-runs-before-exit ()
+  "The sent hook runs once in the bound prompt buffer, before the prompt exit,
+and is skipped when the send fails."
+  (let ((dsh-bridge-prompt-resend-confirm nil)
+        (dsh-bridge-send-while-running 'queue)
+        (dsh-bridge--session-status nil)
+        (dsh-bridge--sessions-cache nil)
+        (dsh-bridge--last-sent nil)
+        (events nil))
+    (let ((dsh-bridge-prompt-sent-hook
+           (list (lambda ()
+                   (push (list 'sent (current-buffer)
+                               dsh-bridge--prompt-session
+                               (buffer-string))
+                         events)))))
+      (with-temp-buffer
+        (dsh-bridge-prompt-mode)
+        (setq-local dsh-bridge--prompt-session "s1")
+        (insert "hello")
+        (let ((buf (current-buffer)))
+          (cl-letf (((symbol-function 'dsh-bridge--http)
+                     (lambda (&rest _)
+                       (list nil "{\"sessionId\":\"s1\"}" 200)))
+                    ((symbol-function 'dsh-bridge--prompt-exit)
+                     (lambda (&rest _)
+                       (push (list 'exit (current-buffer)) events))))
+            (dsh-bridge-send-and-exit))
+          (should (equal events
+                         (list (list 'exit buf)
+                               (list 'sent buf "s1" "hello"))))
+          ;; A failed send reports the error and never reaches the hook.
+          (setq events nil)
+          (cl-letf (((symbol-function 'dsh-bridge--http)
+                     (lambda (&rest _)
+                       (list nil "{\"error\":\"boom\"}" 500))))
+            (dsh-bridge-send-and-exit))
+          (should (null events)))))))
+
 (defun dsh-bridge-test--lazy-send (prompt-session default-session sent-id)
   "Send \"hello\" from a fresh prompt buffer and return (SESSION . MESSAGES).
 PROMPT-SESSION is the buffer's binding and DEFAULT-SESSION the global
@@ -10318,14 +10382,54 @@ ended turn, and it leaves an unparked browse alone per view."
       (setq-local dsh-bridge--view-content-session "s1")
       (setq-local dsh-bridge--view-browsing t)
       (cl-letf (((symbol-function 'run-at-time)
-                 (lambda (_secs _repeat function &rest _)
-                   (setq scheduled function)))
+                 (lambda (_secs _repeat function &rest args)
+                   (push (cons function args) scheduled)))
                 ((symbol-function 'dsh-bridge--view-displayed-p)
                  (lambda (&rest _) t)))
         (dsh-bridge--turn-complete-act "s1" "aborted"))
-      (should (eq scheduled #'dsh-bridge--turn-complete-refetch)))
+      (should (memq #'dsh-bridge--turn-complete-refetch
+                    (mapcar #'car scheduled)))
+      ;; The user hook runs from its own timer, not in the SSE filter.
+      (should (memq #'dsh-bridge--turn-complete-notify
+                    (mapcar #'car scheduled))))
     (when (buffer-live-p (get-buffer "*dsh-bridge-output*"))
       (kill-buffer "*dsh-bridge-output*"))))
+
+(ert-deftest dsh-bridge-turn-complete-functions-receive-the-turn-facts ()
+  "The completion hook is scheduled with the frame's facts, whatever the
+refill policy says.  Each function is called with the session id, the
+host's reason string, and a display-ready message naming the session and
+outcome."
+  (let ((dsh-bridge-turn-complete nil)
+        (dsh-bridge-turn-boundary-echo nil)
+        (dsh-bridge--sessions-cache nil)
+        (scheduled nil)
+        (calls nil)
+        (failure '((code . "AUTH") (message . "bad key"))))
+    (let ((dsh-bridge-turn-complete-functions
+           (list (lambda (session-id reason message)
+                   (push (list session-id reason message) calls)))))
+      (cl-labels ((run (reason turn failure)
+                    (setq scheduled nil)
+                    (cl-letf (((symbol-function 'run-at-time)
+                               (lambda (_secs _repeat function &rest args)
+                                 (push (cons function args) scheduled))))
+                      (dsh-bridge--turn-complete-act "s1" reason turn failure))
+                    (let ((entry
+                           (seq-find
+                            (lambda (candidate)
+                              (eq (car candidate)
+                                  #'dsh-bridge--turn-complete-notify))
+                            scheduled)))
+                      (should entry)
+                      (apply (car entry) (cdr entry)))))
+        (run "error" 7 failure)
+        (run "completed" 7 nil)))
+    (should (equal calls
+                   (list (list "s1" "completed" "session \"s1\" completed")
+                         (list "s1" "error"
+                               (concat "session \"s1\" failed "
+                                       "\u2014 API key is invalid")))))))
 
 
 (ert-deftest dsh-bridge-view-follow-refill-waiting-gate ()
