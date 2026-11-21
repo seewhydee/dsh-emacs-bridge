@@ -4579,8 +4579,9 @@ waiting placeholder clears it."
       (should-not dsh-bridge--view-provenance))))
 
 (ert-deftest dsh-bridge-view-fill-follow-flip-tails ()
-  "A followed view flipping to a newer turn rebuilds and lands at the tail,
-not the top: the flip is a provenance-mismatch rebuild under follow."
+  "A followed view flipping to a newer turn rebuilds in place.
+A reader parked on the tail chases the new turn's tail; one parked in the
+previous turn's body keeps that position, since only the tail follows."
   (let* ((one (dsh-bridge-test--view-turn 7 7000000
                (list (dsh-bridge-test--view-segment "first" 7001000 1))))
          (newer (dsh-bridge-test--view-turn 8 8000000
@@ -4590,10 +4591,15 @@ not the top: the flip is a provenance-mismatch rebuild under follow."
       (dsh-bridge-view-mode)
       (dsh-bridge--view-fill "s1" one nil t t)
       (setq-local dsh-bridge--view-follow t)
-      (goto-char (point-min))
+      (goto-char (point-max))
       (dsh-bridge--view-fill "s1" newer nil t t)
       (should (equal (buffer-string) (dsh-bridge-test--view-turn-render newer "s1")))
-      (should (equal (point) (point-max))))))
+      (should (equal (point) (point-max)))
+      ;; A flip with point in the old body leaves that position alone.
+      (goto-char (point-min))
+      (dsh-bridge--view-fill "s1" one nil t t)
+      (should (equal (buffer-string) (dsh-bridge-test--view-turn-render one "s1")))
+      (should (equal (point) (point-min))))))
 
 ;;; The sessions list
 
@@ -14071,6 +14077,19 @@ It deliberately carries no `seq', matching `GET /turns'."
         (cons 'step (or step 1))
         (cons 'time (or time 1000))))
 
+(defun dsh-bridge-test--view-install-inflight-turn (revision &optional turn-number)
+  "Cache and return a turn whose live thinking summary carries REVISION.
+Each call changes the transient item's identity, so an incremental fill
+must rebuild rather than splice."
+  (let* ((live (dsh-bridge-test--view-inflight-thinking
+                (format "line %d" revision) "live-1" 0 1 7000100 revision))
+         (turn (dsh-bridge-test--view-turn
+                (or turn-number 7) 7000000
+                (list (dsh-bridge-test--view-segment "reply" 7000050 1))
+                nil nil nil (list live))))
+    (dsh-bridge--turns-cache-store "s1" (list turn) 0)
+    turn))
+
 (ert-deftest dsh-bridge-view-inflight-thinking-render ()
   "A live summary renders as an in-progress line with its own identity.
 The committed rendering is unchanged, and a transient line's text property
@@ -14150,6 +14169,73 @@ recorded provenance, so the old line is replaced rather than left stale."
                       (dsh-bridge-test--view-turn-render two "s1"))))
       (should-not (string-match-p "thinking (in progress): first\n"
                                   (buffer-string))))))
+
+(ert-deftest dsh-bridge-view-fill-rebuild-preserves-a-body-reader ()
+  "An incremental rebuild leaves a reader in the body in place.
+`--view-follow-refill' is the live path; a changed in-flight summary
+forces the rebuild.  Only a reader on the tail (including the terminal
+furniture) chases the new tail."
+  (let* ((dsh-bridge--turns-cache nil)
+         (dsh-bridge-view-activity t))
+    (with-temp-buffer
+      (dsh-bridge-view-mode)
+      (dsh-bridge--view-fill
+       "s1" (dsh-bridge-test--view-install-inflight-turn 1) nil t)
+      (setq-local dsh-bridge--view-follow t)
+      (goto-char 3)
+      (dsh-bridge-test--view-install-inflight-turn 2)
+      (dsh-bridge--view-follow-refill "s1")
+      (should (equal (point) 3))
+      (should (string-match-p "line 2" (buffer-string)))
+      ;; Point on the terminal furniture chases the rebuilt tail.
+      (let ((furniture (dsh-bridge--view-suffix-start)))
+        (should furniture)
+        (goto-char furniture)
+        (dsh-bridge-test--view-install-inflight-turn 3)
+        (dsh-bridge--view-follow-refill "s1")
+        (should (equal (point) (point-max)))))))
+
+(ert-deftest dsh-bridge-view-fill-rebuild-preserves-a-non-selected-body-reader ()
+  "A rebuild restores each displaying window's own point.
+`erase-buffer' collapses those points to `point-min'; only a window
+parked on the tail chases the rebuilt tail."
+  (let* ((dsh-bridge--turns-cache nil)
+         (dsh-bridge-view-activity t)
+         (view (generate-new-buffer " *dsh-bridge-view-window*"))
+         (other (generate-new-buffer " *dsh-bridge-other-window*"))
+         (config (current-window-configuration))
+         (view-window nil))
+    (unwind-protect
+        (progn
+          (delete-other-windows)
+          (set-window-buffer (selected-window) view)
+          (with-current-buffer view
+            (dsh-bridge-view-mode)
+            (dsh-bridge--view-fill
+             "s1" (dsh-bridge-test--view-install-inflight-turn 1) nil t)
+            (setq-local dsh-bridge--view-follow t)
+            (goto-char (point-max)))
+          (setq view-window (selected-window))
+          (select-window (split-window))
+          (set-window-buffer (selected-window) other)
+          ;; A reader in the body keeps its place across the rebuild.
+          (set-window-point view-window 3)
+          (with-current-buffer view
+            (dsh-bridge-test--view-install-inflight-turn 2)
+            (dsh-bridge--view-follow-refill "s1"))
+          (should (equal (window-point view-window) 3))
+          ;; A window on the terminal furniture chases the tail.
+          (set-window-point
+           view-window
+           (with-current-buffer view (dsh-bridge--view-suffix-start)))
+          (with-current-buffer view
+            (dsh-bridge-test--view-install-inflight-turn 3)
+            (dsh-bridge--view-follow-refill "s1"))
+          (should (equal (window-point view-window)
+                         (with-current-buffer view (point-max)))))
+      (set-window-configuration config)
+      (kill-buffer view)
+      (kill-buffer other))))
 
 (ert-deftest dsh-bridge-turns-newest-seq-skips-trailing-live-entry ()
   "The newest committed seq ignores a trailing seq-less live entry."

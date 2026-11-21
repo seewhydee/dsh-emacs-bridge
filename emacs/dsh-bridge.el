@@ -2971,7 +2971,11 @@ the visited file (not the buffer text) is attached."
 ;; fresh list.
 ;;
 ;; Arriving segments are spliced in place, so that the user can tail
-;; the buffer by parking the cursor on the run-status line.
+;; the buffer by parking the cursor on the run-status line.  A reader
+;; parked anywhere in the body is left where it is, in every window
+;; displaying the buffer.  An update that cannot splice (for instance,
+;; a changed in-flight reasoning summary, which must replace its line)
+;; rebuilds the body but follows the same point rule.
 
 (defvar-local dsh-bridge--view-content-session nil
   "Session the DSH-View buffer's content came from, or nil.")
@@ -5093,23 +5097,15 @@ Turn activity includes tool calls and one-line thinking summaries."
     ;; lines about to be shown — and for a waiting view the refresh is what
     ;; folds in the awaited turn's activity-only record.
     (dsh-bridge--view-turns-cache-refresh dsh-bridge--view-content-session)
-    ;; Clearing the provenance forces a full rebuild; where point lands is
-    ;; decided below.
+    ;; Clearing the provenance forces a full rebuild; the fill carries each
+    ;; reader's place across it (a tail reader follows to the new end).
     (setq-local dsh-bridge--view-provenance nil)
     (let ((displayed (or (dsh-bridge--view-turn-record) record)))
       ;; A waiting view whose turn still has no record keeps its placeholder:
       ;; the toggle has taken effect, and the next activity frame fills it.
       (when displayed
-	(let ((pos (point))
-	      (at-tail (= (point) (point-max))))
-	  (dsh-bridge--view-fill dsh-bridge--view-content-session
-				 displayed nil t t)
-	  ;; Carry the reader's place across the rebuild (the browse-refill
-	  ;; approach): a following view parked on the tail lands on the new
-	  ;; tail, a browsing point keeps its approximate position.
-	  (goto-char (if (and dsh-bridge--view-follow at-tail)
-			 (point-max)
-		       (min pos (point-max)))))))
+	(dsh-bridge--view-fill dsh-bridge--view-content-session
+			       displayed nil t t)))
     (message "Turn activity %s."
 	     (if dsh-bridge--view-activity "shown" "hidden"))))
 
@@ -5170,21 +5166,28 @@ property; any text after may be deleted when the buffer updates."
 				   'dsh-bridge-turn-marker))
 	   (point-min)))))
 
-(defun dsh-bridge--view-tail-windows (&optional suffix-start)
+(defun dsh-bridge--view-tail-windows (suffix-start)
   "Return non-selected windows tailing the current DSH-View buffer.
-A window is considered to be tailing the buffer if it is at `point-max',
-or anywhere on a terminal suffix like \"(continuing...)\".
-
-SUFFIX-START, if non-nil, should be a number (the precomputed start of
-the suffix) or t (meaning to search for the start of the suffix)."
-  (if (eq suffix-start t)
-      (setq suffix-start (dsh-bridge--view-suffix-start)))
+A window tails the buffer when it is at `point-max' or anywhere on the
+terminal suffix that starts at SUFFIX-START, or nil when there is none."
   (let ((threshold (or suffix-start (point-max))))
     (seq-filter
      (lambda (window)
        (and (not (eq window (selected-window)))
 	    (>= (window-point window) threshold)))
      (get-buffer-window-list (current-buffer) nil t))))
+
+(defun dsh-bridge--view-window-points ()
+  "Return (WINDOW . POINT) for non-selected windows showing this buffer.
+`erase-buffer' collapses these points to `point-min', and the buffer's
+`goto-char' cannot restore them.  The selected window is omitted: its
+point is the buffer's own."
+  (let ((selected (selected-window)))
+    (delq nil
+	  (mapcar (lambda (window)
+		    (unless (eq window selected)
+		      (cons window (window-point window))))
+		  (get-buffer-window-list (current-buffer) nil t)))))
 
 (defun dsh-bridge--view-splice-turn (session-id turn epoch items)
   "Try to splice new content into the current DSH-View buffer.
@@ -5251,7 +5254,8 @@ call line to settle."
 (defun dsh-bridge--view-fill (session-id turn &optional cwd no-turns-refresh splice)
   "Fill the current buffer with TURN as the shown content of SESSION-ID.
 The current buffer is put into `dsh-bridge-view-mode' if it is not
-already.  This function does no window-management.
+already.  This function never displays or selects a window; it only
+moves the points of windows already showing the buffer.
 
 TURN is either a turn record (see `dsh-bridge--turns-cache') or nil
 (empty content).
@@ -5260,10 +5264,12 @@ CWD is the session's current working directory.
 
 NO-TURNS-REFRESH, if non-nil, means not to refresh the turn list.
 
-SPLICE, if non-nil, means to attempt to splice a turn update in place,
-leaving point alone (or at the end of the buffer if there).  However, if
-the turn's provenance record (`dsh-bridge--view-provenance') does not
-match the cached turn data, do a full re-render instead."
+SPLICE, if non-nil, means to attempt to splice a turn update in place.
+Each reader of the buffer keeps its place, except that one parked on the
+tail (at `point-max' or on the terminal furniture) follows it to the new
+end.  However, if the turn's provenance record
+(`dsh-bridge--view-provenance') does not match the cached turn data, do
+a full re-render instead; the same point rule then applies."
   (unless (derived-mode-p 'dsh-bridge-view-mode)
     (dsh-bridge-view-mode))
   (add-hook 'kill-buffer-hook #'dsh-bridge--view-ticker-ensure nil t)
@@ -5291,12 +5297,19 @@ match the cached turn data, do a full re-render instead."
     (unless (and splice
 		 (dsh-bridge--view-splice-turn session-id turn
 					       epoch items))
-      ;; ... or fill from scratch.  Record the windows parked on the
-      ;; tail first, since erasing the buffer collapses their point
-      ;; markers to `point-min', and a window that is not selected has
-      ;; a point of its own that `goto-char' does not reach.
-      (let ((tail-windows (and dsh-bridge--view-follow splice
-			       (dsh-bridge--view-tail-windows t))))
+      ;; ... or fill from scratch.  An incremental refill must put every
+      ;; reader back where it was: erasing the buffer collapses window
+      ;; points to `point-min', and a window that is not selected has a
+      ;; point of its own that `goto-char' does not reach.  A reader on the
+      ;; tail (at `point-max' or on the terminal furniture) chases the new
+      ;; tail; a reader in the body keeps its place.  An explicit
+      ;; replacement, by contrast, starts at the top, or at the tail for a
+      ;; following view.
+      (let* ((tail-start (and splice (or (dsh-bridge--view-suffix-start)
+					 (point-max))))
+	     (tail-p (and tail-start (>= (point) tail-start)))
+	     (saved-point (point))
+	     (window-points (and splice (dsh-bridge--view-window-points))))
 	(let ((inhibit-read-only t))
 	  (erase-buffer)
 	  (if (null turn)
@@ -5306,12 +5319,19 @@ match the cached turn data, do a full re-render instead."
 	    (setq-local dsh-bridge--view-provenance
 			(dsh-bridge--view-provenance-make
 			 session-id epoch turn items))))
-	(if (and dsh-bridge--view-follow splice)
-	    (progn
-	      (goto-char (point-max))
-	      (dolist (window tail-windows)
-		(set-window-point window (point-max))))
-	  (goto-char (point-min))))))
+	(cond
+	 ((not splice)
+	  (goto-char (if dsh-bridge--view-follow (point-max) (point-min))))
+	 (tail-p
+	  (goto-char (point-max)))
+	 (t
+	  (goto-char (min saved-point (point-max)))))
+	(dolist (entry window-points)
+	  (set-window-point
+	   (car entry)
+	   (if (>= (cdr entry) tail-start)
+	       (point-max)
+	     (min (cdr entry) (point-max))))))))
   (setq header-line-format dsh-bridge--view-header-line-format)
   (dsh-bridge--view-ticker-ensure))
 
