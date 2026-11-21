@@ -3616,7 +3616,6 @@ if there is nothing additional to report."
 	  (put-text-property old-point (point)
 			     'dsh-bridge-turn-marker t))))))
 
-
 (defun dsh-bridge--view-turn-renders-empty-p (turn)
   "Whether TURN would render an empty DSH-View body and suffix.
 A turn may have nothing to render, e.g. if it only has activity
@@ -4396,26 +4395,12 @@ for any URL it does not claim."
       (goto-line (cdr target))
       t)))
 
-(defun dsh-bridge--view-link-at-point-p ()
-  "Whether a Markdown link, wiki link, or bare URL at point can be followed.
-Uses markdown-mode's own predicates, so RET follows exactly what mouse-1
-follows."
-  (and (fboundp 'markdown-follow-thing-at-point)
-       (or (and (fboundp 'markdown-link-p) (markdown-link-p))
-           (and (fboundp 'markdown-wiki-link-p) (markdown-wiki-link-p))
-           (and (fboundp 'markdown-link-at-pos)
-                (nth 3 (markdown-link-at-pos (point)))))))
-
 (defun dsh-bridge--view-property-at-line (property)
   "Return text PROPERTY at point or at the start of the current line."
   (or (get-text-property (point) property)
       (save-excursion
 	(beginning-of-line)
 	(get-text-property (point) property))))
-
-(defun dsh-bridge--view-activity-at-point-p ()
-  "Whether point is on a DSH-View activity line."
-  (dsh-bridge--view-property-at-line 'dsh-bridge-activity))
 
 (defun dsh-bridge-view-enter ()
   "Perform RET's context-sensitive action in a DSH-View buffer.
@@ -4430,13 +4415,18 @@ point.  Ordinary reply text has no inspector fallback."
     (push-button (point)))
    ((dsh-bridge--view-property-at-line 'dsh-bridge-view-answer)
     (dsh-bridge-answer))
-   ((dsh-bridge--view-link-at-point-p)
+   ;; Check for link at point
+   ((and (fboundp 'markdown-follow-thing-at-point)
+	 (or (and (fboundp 'markdown-link-p) (markdown-link-p))
+             (and (fboundp 'markdown-wiki-link-p) (markdown-wiki-link-p))
+             (and (fboundp 'markdown-link-at-pos)
+                  (nth 3 (markdown-link-at-pos (point))))))
     (markdown-follow-thing-at-point nil))
    ((and (fboundp 'markdown-table-at-point-p)
 	 (markdown-table-at-point-p)
 	 (fboundp 'markdown-enter-key))
     (markdown-enter-key))
-   ((dsh-bridge--view-activity-at-point-p)
+   ((dsh-bridge--view-property-at-line 'dsh-bridge-activity)
     (dsh-bridge-extras-inspect-item))
    (t
     (user-error "No RET action at point"))))
