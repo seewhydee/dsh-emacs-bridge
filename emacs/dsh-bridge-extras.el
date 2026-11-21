@@ -755,11 +755,23 @@ result.  Refuse when the current DSH-View line names no activity item."
     (dsh-bridge-extras--render)
     (dsh-bridge-extras--request dsh-bridge-extras--full-loaded))))
 
+(defun dsh-bridge-extras--menu-show-in-view-p ()
+  "Whether the inspected item's session has a DSH-View buffer.
+Reads the view buffers' bindings only; it does not open or refresh one."
+  (and dsh-bridge-extras--session
+       (dsh-bridge--session-views dsh-bridge-extras--session)))
+
+(defun dsh-bridge-extras--menu-refresh-p ()
+  "Whether the Refresh menu item can re-fetch the current item."
+  (and dsh-bridge-extras--selector
+       (not dsh-bridge-extras--inflight)))
+
 (easy-menu-define dsh-bridge-extras-menu dsh-bridge-extras-mode-map
   "Menu bar menu for DSH-Inspector buffers."
   '("DSH Bridge"
     ["Show in DSH-View" dsh-bridge-extras-show-in-view
      :keys "f"
+     :enable (dsh-bridge-extras--menu-show-in-view-p)
      :help "Move to this item's line in its DSH-View buffer"]
     ["Describe Session" dsh-bridge-extras-describe-session
      :keys "D"
@@ -770,6 +782,7 @@ result.  Refuse when the current DSH-View line names no activity item."
     "---"
     ["Refresh" dsh-bridge-extras-refresh
      :keys "g"
+     :enable (dsh-bridge-extras--menu-refresh-p)
      :help "Re-fetch this item"]
     "---"
     ["List Sessions" dsh-bridge-list-sessions

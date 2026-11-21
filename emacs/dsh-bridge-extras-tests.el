@@ -232,6 +232,29 @@ list of requests in invocation order."
                   menu)
       (should found))))
 
+(ert-deftest dsh-bridge-extras-menu-enable-states ()
+  "Show-in-view shades without a view; Refresh shades while in flight."
+  (with-temp-buffer
+    (dsh-bridge-extras-mode)
+    (setq-local dsh-bridge-extras--session "s1")
+    ;; No item and no view: neither item can act.
+    (should-not (dsh-bridge-extras--menu-refresh-p))
+    (should-not (dsh-bridge-extras--menu-show-in-view-p))
+    (setq-local dsh-bridge-extras--selector (list :kind "thinking"))
+    (should (dsh-bridge-extras--menu-refresh-p))
+    (setq-local dsh-bridge-extras--inflight t)
+    (should-not (dsh-bridge-extras--menu-refresh-p))
+    ;; A DSH-View showing the session enables Show in DSH-View.
+    (setq-local dsh-bridge-extras--inflight nil)
+    (let ((view (get-buffer-create " *dsh-bridge-test-view*")))
+      (unwind-protect
+          (progn
+            (with-current-buffer view
+              (dsh-bridge-view-mode)
+              (setq-local dsh-bridge--view-content-session "s1"))
+            (should (dsh-bridge-extras--menu-show-in-view-p)))
+        (kill-buffer view)))))
+
 (ert-deftest dsh-bridge-extras-show-in-view-finds-activity-kinds ()
   "Show-in-view reaches thinking, tool, and orphan lines in the view."
   (let ((view (dsh-bridge-extras-tests--view

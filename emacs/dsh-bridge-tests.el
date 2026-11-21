@@ -2545,7 +2545,8 @@ the header totals come from the counts cache with no HTTP."
       (should (string-match-p "attachment will be discarded" confirmation)))))
 
 (ert-deftest dsh-bridge-prompt-menu-enable-states ()
-  "The prompt menu enables Send, navigation, and queue actions by walk state."
+  "The prompt menu enables Send, navigation, and queue actions by walk state.
+Send's enable form is simply `(not (dsh-bridge--menu-prompt-pending))'."
   (let ((dsh-bridge--prompt-history '(("s1" "committed")))
 	(dsh-bridge--prompt-pending
 	 (list (cons "s1"
@@ -2557,21 +2558,24 @@ the header totals come from the counts cache with no HTTP."
       (dsh-bridge-prompt-mode)
       (setq-local dsh-bridge--prompt-session "s1")
       (setq-local dsh-bridge--prompt-history-session "s1")
-      ;; A draft: Send and Previous can act; there is no newer prompt and
-      ;; no pending queue entry under the cursor.
-      (should (dsh-bridge--menu-prompt-send-enabled))
+      (insert "draft")
+      ;; A draft: nothing is pending, so Send can act; there is no newer
+      ;; prompt and no pending queue entry under the cursor.
+      (should-not (dsh-bridge--menu-prompt-pending))
       (should (dsh-bridge--menu-prompt-previous-enabled))
       (should-not (dsh-bridge--menu-prompt-next-enabled))
       (should-not (dsh-bridge--menu-prompt-steer-enabled))
       (should-not (dsh-bridge--menu-prompt-withdraw-enabled))
-      ;; Walking the queued entry: both navigation directions and both queue
-      ;; actions can act; Send would duplicate the pending prompt.
+      ;; Walking the queued entry: Send is shaded (it would duplicate the
+      ;; pending prompt), while both navigation directions and both queue
+      ;; actions can act.
       (setq-local dsh-bridge--prompt-pending-snapshot
 		  (copy-tree (dsh-bridge--buffer-prompt-pending)))
       (setq-local dsh-bridge--prompt-history-index 0)
+      (erase-buffer)
       (insert "queued text")
       (set-buffer-modified-p nil)
-      (should-not (dsh-bridge--menu-prompt-send-enabled))
+      (should (dsh-bridge--menu-prompt-pending))
       (should (dsh-bridge--menu-prompt-next-enabled))
       (should (dsh-bridge--menu-prompt-previous-enabled))
       (should (dsh-bridge--menu-prompt-steer-enabled))
@@ -2588,7 +2592,7 @@ the header totals come from the counts cache with no HTTP."
       (insert "committed")
       (set-buffer-modified-p nil)
       (setq-local dsh-bridge--prompt-history-index 2)
-      (should (dsh-bridge--menu-prompt-send-enabled))
+      (should-not (dsh-bridge--menu-prompt-pending))
       (should-not (dsh-bridge--menu-prompt-steer-enabled))
       (should-not (dsh-bridge--menu-prompt-withdraw-enabled))
       ;; A modified walk blocks navigation, as M-p/M-n do.
@@ -12314,6 +12318,75 @@ shaded until another buffer seeds the session."
               ((symbol-function 'dsh-bridge--request)
                (lambda (_method _path _payload) (cons 500 nil))))
       (should-not (dsh-bridge--menu-plan-available)))))
+
+(ert-deftest dsh-bridge-tools-menu-installed ()
+  "The Tools menu carries the DSH Bridge submenu built by `easy-menu-define'."
+  (should (keymapp dsh-bridge-menu))
+  (should (easy-menu-item-present-p nil '("Tools") "DSH Bridge"))
+  (should (easy-menu-item-present-p dsh-bridge-menu nil "Stop Running Session")))
+
+(ert-deftest dsh-bridge-menu-target-enable-states ()
+  "Stop and compact shade by the confirmed target's cached status."
+  (let ((dsh-bridge--sessions-cache '(((id . "s1") (live . t))))
+        (dsh-bridge--session-status nil)
+        (dsh-bridge-pinned-target nil)
+        (dsh-bridge--focus nil)
+        (dsh-bridge--dispatcher-roster nil))
+    (with-temp-buffer
+      ;; No target: neither verb can act.
+      (should-not (dsh-bridge--menu-target-running-p))
+      (should-not (dsh-bridge--menu-target-idle-p))
+      ;; A pinned idle target: compact can act, stop cannot.
+      (setq dsh-bridge-pinned-target "s1")
+      (should-not (dsh-bridge--menu-target-running-p))
+      (should (dsh-bridge--menu-target-idle-p))
+      ;; A running target: stop can act, compact cannot.
+      (setq dsh-bridge--session-status '(("s1" running . 1000)))
+      (should (dsh-bridge--menu-target-running-p))
+      (should-not (dsh-bridge--menu-target-idle-p))
+      ;; The check is just the status: an archived session that still reads
+      ;; idle keeps compact enabled, and the command reports the host's error.
+      (setq dsh-bridge--session-status '(("s1" idle))
+            dsh-bridge--sessions-cache
+            '(((id . "s1") (live . t) (archived . t))))
+      (should (dsh-bridge--menu-target-idle-p))
+      ;; An advisory dispatcher focus is not a confirmed target.
+      (setq dsh-bridge--sessions-cache '(((id . "s1") (live . t)))
+            dsh-bridge--focus (cons "s1" 'advisory))
+      (should-not (dsh-bridge--confirmed-session t))
+      (should-error (dsh-bridge--confirmed-session) :type 'user-error)
+      (should-not (dsh-bridge--menu-target-idle-p)))))
+
+(ert-deftest dsh-bridge-menu-session-row-enable-states ()
+  "Row verbs shade by the session at point, not by its details."
+  (let ((dsh-bridge--sessions-cache
+         '(((id . "s1") (live . t) (workspaceId . "w1"))
+           ((id . "s2") (live . t) (archived . t))
+           ((id . "s3") (live . t)))))
+    (with-temp-buffer
+      (dsh-bridge-sessions-mode)
+      ;; No row in an empty list.
+      (should-not (dsh-bridge--menu-row))
+      (should-not (dsh-bridge--menu-row-usable-p))
+      (let ((inhibit-read-only t))
+        (insert (propertize "s1 row" 'tabulated-list-id "s1") "\n")
+        (insert (propertize "s2 row" 'tabulated-list-id "s2") "\n")
+        (insert (propertize "s3 row" 'tabulated-list-id "s3")))
+      (goto-char (point-min))
+      (should (equal (alist-get 'id (dsh-bridge--menu-row)) "s1"))
+      (should (dsh-bridge--menu-row-usable-p))
+      ;; An archived row still exists (View Latest, Rename) but is not
+      ;; usable (Visit, Open, Pin, Archive).
+      (forward-line 1)
+      (should (equal (alist-get 'id (dsh-bridge--menu-row)) "s2"))
+      (should-not (dsh-bridge--menu-row-usable-p))
+      ;; A row whose id has no cache entry counts as absent.
+      (forward-line 1)
+      (let ((inhibit-read-only t))
+        (delete-region (line-beginning-position) (point-max))
+        (insert (propertize "gone row" 'tabulated-list-id "gone")))
+      (goto-char (line-beginning-position))
+      (should-not (dsh-bridge--menu-row)))))
 
 (ert-deftest dsh-bridge-describe-session-id-is-plain ()
   "The Id row prints the raw id, with no copy button and no help echo."

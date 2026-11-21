@@ -1877,7 +1877,7 @@ sessions (guesses based on which session was last active) are allowed."
   (or (car dsh-bridge--focus)
       (dsh-bridge--effective-session)))
 
-(defun dsh-bridge--confirmed-session ()
+(defun dsh-bridge--confirmed-session (&optional noerror)
   "Return the session a session-mutating command may act on.
 This is the open dispatcher's focus when its provenance is `pinned',
 `buffer', or `cycled'.  A focus that is only an `advisory' last-active
@@ -1885,17 +1885,18 @@ guess, or a menu whose focus is nil (naming no session at all), signals
 a `user-error'.  With no menu open, fall back on the REQUIRE form of
 `dsh-bridge--effective-session'.
 
-This function is used by commands that alter the properties of sessions
-and must not target the wrong session accidentally."
+If NOERROR is non-nil, return nil instead of signaling."
   (let ((focus (car-safe dsh-bridge--focus)))
     (cond
      ((null focus)
       (if dsh-bridge--dispatcher-roster
-	  (user-error "dsh-bridge: no sessions available")
-	(dsh-bridge--effective-session nil nil t)))
+	  (unless noerror
+	    (user-error "dsh-bridge: no sessions available"))
+	(dsh-bridge--effective-session nil nil (not noerror))))
      ((eq (cdr dsh-bridge--focus) 'advisory)
-      (user-error "dsh-bridge: target session is an unconfirmed guess; \
-confirm or pin it first"))
+      (unless noerror
+	(user-error "dsh-bridge: target session is an unconfirmed guess; \
+confirm or pin it first")))
      (t focus))))
 
 (defun dsh-bridge--session-for-command (prompt)
@@ -4535,12 +4536,16 @@ inspects the activity item at point.
   "Menu bar menu for DSH-View buffers."
   `("DSH Bridge"
     ["Reply" dsh-bridge-reply
+     :enable dsh-bridge--view-content-session
      :help "Bind the prompt buffer to the shown session"]
     ["Branch Turn" dsh-bridge-fork-turn
+     :enable (dsh-bridge--menu-target-idle-p)
      :help "Branch the shown turn into a new session"]
     ["Stop Session" dsh-bridge-stop-session
+     :enable (dsh-bridge--menu-target-running-p)
      :help "Stop the shown session's running turn"]
     ["Compact Context" dsh-bridge-compact-session
+     :enable (dsh-bridge--menu-target-idle-p)
      :help "Ask the host to compact the shown session's context history"]
     ["Receive Message…" dsh-bridge-receive
      :help "Receive the latest message DSH sent to Emacs"]
@@ -4549,6 +4554,7 @@ inspects the activity item at point.
     ["Show Turn Activity" dsh-bridge-view-toggle-activity
      :style toggle
      :selected dsh-bridge--view-activity
+     :enable dsh-bridge--view-content-session
      :help "Interleave tool calls, results, and thinking summaries"]
     ,@dsh-bridge--plan-goal-menu
     "---"
@@ -7115,6 +7121,17 @@ session, and when the activation is unknown (never asserted as disarmed)."
   "Whether the Goal Active menu checkbox is checked (the goal is armed)."
   (equal (alist-get 'activation (dsh-bridge--menu-goal-state)) "armed"))
 
+(defun dsh-bridge--menu-target-running-p ()
+  "Whether the confirmed target session exists and is running."
+  (let ((session (dsh-bridge--confirmed-session t)))
+    (and session (eq (dsh-bridge--status-state session) 'running))))
+
+(defun dsh-bridge--menu-target-idle-p ()
+  "Whether the confirmed target session exists and is idle.
+A cold session reports `unknown', so it does not count as idle."
+  (let ((session (dsh-bridge--confirmed-session t)))
+    (and session (eq (dsh-bridge--status-state session) 'idle))))
+
 ;;; The DSH-Prompt buffer
 
 (defconst dsh-bridge--prompt-header-line-format
@@ -7325,11 +7342,6 @@ FORCE argument of `dsh-bridge-stop-session'."
   (and (derived-mode-p 'dsh-bridge-prompt-mode)
        (dsh-bridge--prompt-current-pending)))
 
-(defun dsh-bridge--menu-prompt-send-enabled ()
-  "Whether the Send menu item can act.
-A pending queue entry is refused by `dsh-bridge-send-and-exit'."
-  (not (dsh-bridge--menu-prompt-pending)))
-
 (defun dsh-bridge--menu-prompt-previous-enabled ()
   "Whether the Previous Prompt menu item can act.
 A modified history entry blocks the walk, as `M-p' does."
@@ -7355,15 +7367,14 @@ Only a queued (not already steering) pending entry is steerable."
   "Menu bar menu for the DSH-Prompt buffer."
   `("DSH Bridge"
     ["Send" dsh-bridge-send-and-exit
-     :enable (dsh-bridge--menu-prompt-send-enabled)
+     :enable (not (dsh-bridge--menu-prompt-pending))
      :help "Send the whole buffer to DSH and bury the prompt buffer"]
     ["Erase Prompt" dsh-bridge-erase-prompt
+     :enable (> (buffer-size) 0)
      :help "Clear the prompt buffer"]
     "---"
     ["Attach File…" dsh-bridge-attach-file
      :help "Insert an attachment tag for a file (MML-style)"]
-    ["Attach Buffer File" dsh-bridge-attach-buffer-file
-     :help "Attach the file visited by the buffer that invoked this"]
     ["Clear Attachments" dsh-bridge-clear-attachments
      :active (> (dsh-bridge--attachment-count) 0)
      :help "Remove every attachment tag from this prompt"]
@@ -7373,10 +7384,13 @@ Only a queued (not already steering) pending entry is steerable."
     ["Describe Session" dsh-bridge-describe-session
      :help "Show the effective session's read-only report"]
     ["Stop Session" dsh-bridge-stop-session
+     :enable (dsh-bridge--menu-target-running-p)
      :help "Stop the effective session's running turn"]
     ["Compact Context" dsh-bridge-compact-session
+     :enable (dsh-bridge--menu-target-idle-p)
      :help "Ask the host to compact the effective session's context history"]
     ["Select Model…" dsh-bridge-select-model
+     :enable (dsh-bridge--effective-session)
      :help "Change the session's model and reasoning effort"]
     ,@dsh-bridge--plan-goal-menu
     ["Set Prompt Session…" dsh-bridge-set-prompt-session
@@ -7751,34 +7765,62 @@ Archived sessions are hidden unless `dsh-bridge--sessions-archived-p' (or
   ;; the session list from the host.
   (setq-local revert-buffer-function 'dsh-bridge--list-sessions-in-buffer))
 
+(defun dsh-bridge--menu-row ()
+  "The cached session row at point in a DSH-Sessions buffer, or nil.
+A row whose id has no cache entry counts as absent."
+  (let ((id (and (derived-mode-p 'dsh-bridge-sessions-mode)
+		 (tabulated-list-get-id))))
+    (and id (dsh-bridge--session-for-id id))))
+
+(defun dsh-bridge--menu-row-usable-p ()
+  "Whether the session at point is a current, non-archived session.
+Used to shade the row verbs that refuse an archived session: Visit,
+Open, Pin, and Archive (Unarchive enables on its negation)."
+  (let ((row (dsh-bridge--menu-row)))
+    (and row (not (eq t (alist-get 'archived row))))))
+
 (easy-menu-define dsh-bridge-sessions-menu dsh-bridge-sessions-mode-map
   "Menu bar menu for the `*dsh-bridge-sessions*' buffer."
   `("DSH Bridge"
     ["Visit Session" dsh-bridge-visit-session
+     :enable (dsh-bridge--menu-row-usable-p)
      :help "Answer the pending question, watch the running turn, or open the view/prompt"]
     ["Open Prompt" dsh-bridge-open-session
+     :enable (dsh-bridge--menu-row-usable-p)
      :help "Bind the prompt buffer to the session under point and open it"]
     ["Pin Target" dsh-bridge-pin-target-at-point
+     :enable (dsh-bridge--menu-row-usable-p)
      :help "Set the pinned target to the session under point"]
     ["Unpin Target" dsh-bridge-unpin-target
+     :enable dsh-bridge-pinned-target
      :help "Clear the pinned target (use last-active)"]
     ["View Latest Turn" dsh-bridge-peek-session
+     :enable (dsh-bridge--menu-row)
      :help "Fetch the session's latest turn without changing anything"]
     ["Show/Hide Archived" dsh-bridge-toggle-archived-sessions
+     :style toggle
+     :selected dsh-bridge--sessions-archived-p
      :help "Toggle whether archived sessions are shown"]
     ["Rename Session…" dsh-bridge-rename-session
+     :enable (dsh-bridge--menu-row)
      :help "Rename the session under point"]
     ["Stop Session" dsh-bridge-stop-session
+     :enable (dsh-bridge--menu-target-running-p)
      :help "Stop the session under point if it is running"]
     ["Compact Context" dsh-bridge-compact-session
+     :enable (dsh-bridge--menu-target-idle-p)
      :help "Ask the host to compact the session under point's context history"]
     ["Archive Session" dsh-bridge-archive-session
+     :enable (dsh-bridge--menu-row-usable-p)
      :help "Archive the session under point (reversible with Unarchive)"]
     ["Unarchive Session" dsh-bridge-unarchive-session
+     :enable (and (dsh-bridge--menu-row)
+		  (not (dsh-bridge--menu-row-usable-p)))
      :help "Unarchive the session under point and make it runnable again"]
     ["Create Session…" dsh-bridge-create-session
      :help "Create a new untitled session, optionally in a new workspace"]
     ["Rename Workspace…" dsh-bridge-rename-workspace
+     :enable (dsh-bridge--menu-row)
      :help "Rename the workspace of the session under point"]
     ["Describe Session" dsh-bridge-describe-session
      :help "Show the session's read-only report"]
@@ -8160,8 +8202,10 @@ title, defaulting to the current workspace title."
   "Menu bar menu for the `*dsh-bridge-describe*' buffer."
   `("DSH Bridge"
     ["Open Prompt Buffer" dsh-bridge--describe-open-prompt
+     :enable dsh-bridge--describe-session
      :help "Open a DSH-Prompt buffer for the described session"]
     ["Latest Turn" dsh-bridge--describe-open-view
+     :enable dsh-bridge--describe-session
      :help "Fetch the described session's latest turn into DSH-View"]
     ,@dsh-bridge--plan-goal-menu
     "---"
@@ -9124,30 +9168,35 @@ the state while a suspended `dsh-bridge' sits on `transient--stack'."
 
 ;;; Menu bar (under Tools)
 
-(defvar dsh-bridge-menu
-  (easy-menu-create-menu
-   "DSH Bridge"
-   '(["DSH Bridge Dispatcher" dsh-bridge
-      :help "Open the DSH bridge dispatcher"]
-     ["List Sessions" dsh-bridge-list-sessions
-      :help "Browse DSH sessions in a tabulated list"]
-     "---"
-     ["Edit Prompt Buffer" dsh-bridge-prompt
-      :help "Pop to the DSH prompt buffer"]
-     "---"
-     ["Fetch Latest Turn" dsh-bridge-fetch
-      :help "Fetch the latest assistant turn into a DSH-View buffer"]
-     ["Describe Session" dsh-bridge-describe-session
-      :help "Show a read-only report for a session"]
-     ["Stop Running Session" dsh-bridge-stop-session
-      :help "Stop the effective session's running turn"]
-     ["Compact Context" dsh-bridge-compact-session
-      :help "Ask the host to compact the effective session's context history"]
-     ["Receive Message…" dsh-bridge-receive
-      :help "Receive the latest message sent from DSH to Emacs"]
-     ["Pin Target Session" dsh-bridge-pin-target
-      :help "Set or clear the default DSH target session"]))
-  "DSH Bridge menu, installed under Tools.")
+;; `easy-menu-define' can only install a menu as a top-level menu bar item,
+;; so MAPS is nil here: the menu keymap is defined by the macro and then
+;; inserted under Tools with `easy-menu-add-item'.  Unlike a bare `defvar',
+;; the macro rebuilds the keymap on reload.
+(easy-menu-define dsh-bridge-menu nil
+  "DSH Bridge menu, installed under Tools."
+  '("DSH Bridge"
+    ["DSH Bridge Dispatcher" dsh-bridge
+     :help "Open the DSH bridge dispatcher"]
+    ["List Sessions" dsh-bridge-list-sessions
+     :help "Browse DSH sessions in a tabulated list"]
+    "---"
+    ["Edit Prompt Buffer" dsh-bridge-prompt
+     :help "Pop to the DSH prompt buffer"]
+    "---"
+    ["Fetch Latest Turn" dsh-bridge-fetch
+     :help "Fetch the latest assistant turn into a DSH-View buffer"]
+    ["Describe Session" dsh-bridge-describe-session
+     :help "Show a read-only report for a session"]
+    ["Stop Running Session" dsh-bridge-stop-session
+     :enable (dsh-bridge--menu-target-running-p)
+     :help "Stop the effective session's running turn"]
+    ["Compact Context" dsh-bridge-compact-session
+     :enable (dsh-bridge--menu-target-idle-p)
+     :help "Ask the host to compact the effective session's context history"]
+    ["Receive Message…" dsh-bridge-receive
+     :help "Receive the latest message sent from DSH to Emacs"]
+    ["Pin Target Session" dsh-bridge-pin-target
+     :help "Set or clear the default DSH target session"]))
 
 (easy-menu-add-item nil '("Tools") dsh-bridge-menu)
 
