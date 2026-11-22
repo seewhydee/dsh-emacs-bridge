@@ -4549,6 +4549,335 @@ into the real variable instead."
                                               (current-buffer))))))
       (unless was-bound (makunbound 'markdown-follow-link-functions)))))
 
+;;; Tags (TAB/S-TAB)
+
+(ert-deftest dsh-bridge-view-segment-property-marks-reply-text ()
+  "Only a reply segment's text carries the segment property.
+Its value is the segment's (STEP . TIME) identity."
+  (let* ((first (dsh-bridge-test--view-segment "first" 2001000 1))
+         (second (dsh-bridge-test--view-segment "second" 2002000 2))
+         (turn (dsh-bridge-test--view-turn 2 2000000 (list first second))))
+    (with-temp-buffer
+      (dsh-bridge-view-mode)
+      (let ((inhibit-read-only t))
+        (dsh-bridge--view-render (dsh-bridge--view-turn-items turn)))
+      (goto-char (point-min))
+      (should (looking-at "first"))
+      (should (equal (get-text-property (point) 'dsh-bridge-view-segment)
+                     '(1 . 2001000)))
+      (goto-char (point-min))
+      (should (search-forward "---" nil t))
+      (should-not (get-text-property (match-beginning 0)
+                                     'dsh-bridge-view-segment))
+      (goto-char (point-min))
+      (should (search-forward "second" nil t))
+      (should (equal (get-text-property (match-beginning 0)
+                                        'dsh-bridge-view-segment)
+                     '(2 . 2002000))))))
+
+(ert-deftest dsh-bridge-view-scan-link-tags-forms ()
+  "The textual fallback recognizes every common visible-link form."
+  (with-temp-buffer
+    (insert "A [inline](x.el#L1) ![img](i.png) [ref][id] "
+            "https://e.com/plain <https://e.com/angle> <a@b.c> mailto:x@y\n")
+    (let ((tags (dsh-bridge--view-scan-link-tags (point-min) (point-max))))
+      (should (= (length tags) 7))
+      (dolist (needle '("inline" "img" "ref" "https://e.com/plain"
+                        "https://e.com/angle" "a@b.c" "mailto:x@y"))
+        (goto-char (point-min))
+        (should (search-forward needle nil t))
+        (should (memq (match-beginning 0) tags))))))
+
+(ert-deftest dsh-bridge-view-scan-link-tags-skips-fences-and-definitions ()
+  "Fenced code and reference definitions contribute no tags."
+  (with-temp-buffer
+    (insert "```\n[hidden](x.el)\n```\n[shown](y.el)\n"
+            "\n[id]: https://e.com/definition\n")
+    (let ((tags (dsh-bridge--view-scan-link-tags (point-min) (point-max))))
+      (should (= (length tags) 1))
+      (goto-char (point-min))
+      (should (search-forward "shown" nil t))
+      (should (equal (car tags) (match-beginning 0))))))
+
+(ert-deftest dsh-bridge-view-tags-navigate-segments-and-links ()
+  "TAB and S-TAB walk segment starts and link text in buffer order."
+  (let* ((first (dsh-bridge-test--view-segment
+                 "first [label](x.el#L1)" 2001000 1))
+         (second (dsh-bridge-test--view-segment
+                  "second https://e.com" 2002000 2))
+         (turn (dsh-bridge-test--view-turn 2 2000000 (list first second))))
+    (with-temp-buffer
+      (dsh-bridge-view-mode)
+      (let ((inhibit-read-only t))
+        (dsh-bridge--view-render (dsh-bridge--view-turn-items turn)))
+      (goto-char (point-min))
+      (should (looking-at "first"))
+      (dsh-bridge-view-next-tag)
+      (should (looking-at "label"))
+      (dsh-bridge-view-next-tag)
+      (should (looking-at "second"))
+      (dsh-bridge-view-next-tag)
+      (should (looking-at "https://e.com"))
+      (should-error (dsh-bridge-view-next-tag) :type 'user-error)
+      (dsh-bridge-view-previous-tag)
+      (should (looking-at "second"))
+      (dsh-bridge-view-previous-tag)
+      (should (looking-at "label"))
+      (dsh-bridge-view-previous-tag)
+      (should (equal (point) (point-min)))
+      (should-error (dsh-bridge-view-previous-tag) :type 'user-error))))
+
+(ert-deftest dsh-bridge-view-tags-numeric-prefix ()
+  "A numeric prefix moves by several tags, in either direction."
+  (let* ((first (dsh-bridge-test--view-segment
+                 "first [a](a.el)" 2001000 1))
+         (second (dsh-bridge-test--view-segment
+                  "second https://e.com" 2002000 2))
+         (turn (dsh-bridge-test--view-turn 2 2000000 (list first second))))
+    (with-temp-buffer
+      (dsh-bridge-view-mode)
+      (let ((inhibit-read-only t))
+        (dsh-bridge--view-render (dsh-bridge--view-turn-items turn)))
+      (goto-char (point-min))
+      (dsh-bridge-view-next-tag 2)
+      (should (looking-at "second"))
+      (dsh-bridge-view-next-tag -2)
+      (should (equal (point) (point-min)))
+      (dsh-bridge-view-next-tag 0)
+      (should (equal (point) (point-min)))
+      (dsh-bridge-view-next-tag 3)
+      (should (looking-at "https://e.com"))
+      (dsh-bridge-view-previous-tag 2)
+      (should (looking-at "a"))
+      (dsh-bridge-view-previous-tag -1)
+      (should (looking-at "second"))
+      (goto-char (point-min))
+      (should-error (dsh-bridge-view-next-tag 99) :type 'user-error)
+      (should (looking-at "https://e.com"))
+      (goto-char (point-min))
+      (should-error (dsh-bridge-view-previous-tag 2) :type 'user-error)
+      (should (equal (point) (point-min)))
+      (goto-char (point-min))
+      (let ((current-prefix-arg 2))
+        (call-interactively #'dsh-bridge-view-next-tag))
+      (should (looking-at "second")))))
+
+(ert-deftest dsh-bridge-view-tags-include-changed-files ()
+  "TAB and S-TAB visit the changed-files footer buttons."
+  (let* ((files (list (dsh-bridge-test--view-file "src/a.ts")
+                      (dsh-bridge-test--view-file "src/b.ts")))
+         (turn (dsh-bridge-test--view-turn
+                7 7000000
+                (list (dsh-bridge-test--view-segment "done [link](x.el)"
+                                                     7001000 1))
+                7002000 nil files)))
+    (with-temp-buffer
+      (dsh-bridge-view-mode)
+      (dsh-bridge--view-fill "s1" turn nil t)
+      (goto-char (point-min))
+      (dsh-bridge-view-next-tag)
+      (should (looking-at "link"))
+      (dsh-bridge-view-next-tag)
+      (should (looking-at "a.ts"))
+      (should (button-at (point)))
+      (dsh-bridge-view-next-tag)
+      (should (looking-at "b.ts"))
+      (should (button-at (point)))
+      (should-error (dsh-bridge-view-next-tag) :type 'user-error)
+      (dsh-bridge-view-previous-tag)
+      (should (looking-at "a.ts"))
+      (dsh-bridge-view-previous-tag)
+      (should (looking-at "link"))
+      ;; Point inside a button keeps that button's start as the previous tag.
+      (goto-char (point-min))
+      (should (search-forward "a.ts" nil t))
+      (goto-char (1+ (match-beginning 0)))
+      (dsh-bridge-view-previous-tag)
+      (should (looking-at "a.ts"))
+      (dsh-bridge-view-next-tag)
+      (should (looking-at "b.ts"))
+      ;; The button's own keymap routes its TAB/S-TAB to the tag commands.
+      (goto-char (point-min))
+      (should (search-forward "a.ts" nil t))
+      (goto-char (match-beginning 0))
+      (should (eq (key-binding (kbd "TAB")) #'dsh-bridge-view-next-tag))
+      (should (eq (key-binding (kbd "<backtab>"))
+                  #'dsh-bridge-view-previous-tag))
+      (dsh-bridge-view-next-tag)
+      (should (looking-at "b.ts"))
+      ;; A footer button rendered before the custom button keymap existed
+      ;; still remaps the stock button-navigation commands.
+      (goto-char (point-min))
+      (should (search-forward "b.ts" nil t))
+      (let ((start (match-beginning 0))
+            (end (match-end 0)))
+        (let ((inhibit-read-only t))
+          (put-text-property start end 'keymap button-map))
+        (goto-char start)
+        (should (eq (key-binding (kbd "TAB")) #'dsh-bridge-view-next-tag))
+        (dsh-bridge-view-previous-tag)
+        (should (looking-at "a.ts"))
+        (dsh-bridge-view-previous-tag)
+        (should (looking-at "link"))))))
+
+(ert-deftest dsh-bridge-view-tags-remap-stock-button-keys ()
+  "A stock text button routes TAB/S-TAB to tag navigation."
+  (with-temp-buffer
+    (dsh-bridge-view-mode)
+    (let ((inhibit-read-only t))
+      (insert "body ")
+      (insert-text-button "legacy.ts" 'path "legacy.ts" 'action #'ignore))
+    (goto-char (point-min))
+    (should (search-forward "legacy.ts" nil t))
+    (goto-char (match-beginning 0))
+    (should (eq (key-binding (kbd "TAB")) #'dsh-bridge-view-next-tag))
+    (should (eq (key-binding (kbd "<backtab>"))
+                #'dsh-bridge-view-previous-tag))))
+
+(ert-deftest dsh-bridge-view-tags-skip-activity ()
+  "An activity line is not a tag, even when it carries a URL."
+  (let* ((activity (list (dsh-bridge-test--view-thinking
+                          "see https://e.com" 1 1 2 2002500)))
+         (turn (dsh-bridge-test--view-turn
+                2 2000000
+                (list (dsh-bridge-test--view-segment "before" 2001000 1)
+                      (dsh-bridge-test--view-segment "after" 2003000 2))
+                2004000 "completed" nil activity)))
+    (with-temp-buffer
+      (dsh-bridge-view-mode)
+      (setq-local dsh-bridge--view-activity t)
+      (let ((inhibit-read-only t))
+        (dsh-bridge--view-render (dsh-bridge--view-turn-items turn)))
+      (goto-char (point-min))
+      (should (looking-at "before"))
+      (dsh-bridge-view-next-tag)
+      (should (looking-at "after"))
+      (should-error (dsh-bridge-view-next-tag) :type 'user-error)
+      (dsh-bridge-view-previous-tag)
+      (should (looking-at "before")))))
+
+(ert-deftest dsh-bridge-view-tag-commands-refuse-outside-view ()
+  "The tag commands are DSH-View verbs."
+  (with-temp-buffer
+    (should-error (dsh-bridge-view-next-tag) :type 'user-error)
+    (should-error (dsh-bridge-view-previous-tag) :type 'user-error)))
+
+(ert-deftest dsh-bridge-view-tag-keys ()
+  "TAB and backtab run the tag commands in a DSH-View buffer."
+  (with-temp-buffer
+    (dsh-bridge-view-mode)
+    (should (eq (key-binding (kbd "TAB")) #'dsh-bridge-view-next-tag))
+    (should (eq (key-binding (kbd "<backtab>"))
+                #'dsh-bridge-view-previous-tag))))
+
+(ert-deftest dsh-bridge-view-gfm-link-tags-use-faces ()
+  "GFM link tags follow link faces, merging face changes.
+Hidden markup maps to visible text, code is skipped, and links outside a
+reply segment are not tags."
+  (let* ((text (concat "[**bold** link](x.el) and https://e.com "
+                       "`[code](y.el)`\n\nsuffix https://e.com/suffix\n"))
+         (url-index (string-match "https://e.com" text))
+         (suffix-index (string-match "https://e.com/suffix" text))
+         (segment-end (1+ (string-match "\n" text)))
+         (bold (1+ (string-match "bold" text)))
+         (url (1+ url-index)))
+    (with-temp-buffer
+      (dsh-bridge-view-mode)
+      (let ((inhibit-read-only t))
+        (insert text)
+        (add-text-properties (point-min) segment-end
+                             (list 'dsh-bridge-view-segment (cons 1 100)))
+        (setq-local buffer-invisibility-spec '((markdown-markup . t)))
+        (add-text-properties 1 2 '(invisible markdown-markup))
+        (add-text-properties 2 15 '(face markdown-link-face))
+        (add-text-properties 2 4
+                             '(face (markdown-bold-face markdown-link-face)
+                                    invisible markdown-markup))
+        (add-text-properties 8 10
+                             '(face (markdown-bold-face markdown-link-face)
+                                    invisible markdown-markup))
+        (add-text-properties 15 22 '(invisible markdown-markup))
+        (put-text-property (1+ url-index)
+                           (+ 1 url-index (length "https://e.com"))
+                           'face 'markdown-plain-url-face)
+        (put-text-property (1+ suffix-index)
+                           (+ 1 suffix-index (length "https://e.com/suffix"))
+                           'face 'markdown-plain-url-face))
+      (should (equal (dsh-bridge--view-next-gfm-link-tag (point-min))
+                     bold))
+      (should (equal (dsh-bridge--view-next-gfm-link-tag bold) url))
+      (should-not (dsh-bridge--view-next-gfm-link-tag url))
+      (should (equal (dsh-bridge--view-previous-gfm-link-tag url) bold))
+      (should-not (dsh-bridge--view-previous-gfm-link-tag bold)))))
+
+(ert-deftest dsh-bridge-view-tags-use-marked-links ()
+  "Without GFM link faces, navigation uses the recorded link tags."
+  (with-temp-buffer
+    (dsh-bridge-view-mode)
+    (let ((inhibit-read-only t))
+      (insert "see [x](y.el) and https://e.com\n")
+      (add-text-properties (point-min) (point-max)
+                           '(dsh-bridge-view-segment t))
+      (dolist (position (dsh-bridge--view-scan-link-tags
+                         (point-min) (point-max)))
+        (put-text-property position (1+ position)
+                           'dsh-bridge-view-link t)))
+    (goto-char (point-min))
+    (dsh-bridge-view-next-tag)
+    (should (looking-at "x"))
+    (dsh-bridge-view-next-tag)
+    (should (looking-at "https://e.com"))
+    (should-error (dsh-bridge-view-next-tag) :type 'user-error)
+    (dsh-bridge-view-previous-tag)
+    (should (looking-at "x"))))
+
+(ert-deftest dsh-bridge-view-tags-refresh-on-splice ()
+  "A spliced segment gets its property and its link tags."
+  (let* ((seg1 (dsh-bridge-test--view-segment "first [a](a.el)" 7001000 1))
+         (seg2 (dsh-bridge-test--view-segment "second https://e.com" 7002000 2))
+         (one (dsh-bridge-test--view-turn 7 7000000 (list seg1)))
+         (two (dsh-bridge-test--view-turn 7 7000000 (list seg1 seg2)))
+         (dsh-bridge--turns-cache (dsh-bridge-test--view-cache (list two one))))
+    (with-temp-buffer
+      (dsh-bridge-view-mode)
+      (dsh-bridge--view-fill "s1" one nil t)
+      (dsh-bridge--view-fill "s1" two nil t t)
+      (goto-char (point-min))
+      (should (equal (get-text-property (point) 'dsh-bridge-view-segment)
+                     '(1 . 7001000)))
+      (goto-char (point-min))
+      (should (search-forward "second" nil t))
+      (should (equal (get-text-property (match-beginning 0)
+                                        'dsh-bridge-view-segment)
+                     '(2 . 7002000)))
+      (goto-char (point-min))
+      (dsh-bridge-view-next-tag)
+      (should (looking-at "a"))
+      (dsh-bridge-view-next-tag)
+      (should (looking-at "second"))
+      (dsh-bridge-view-next-tag)
+      (should (looking-at "https://e.com")))))
+
+(ert-deftest dsh-bridge-view-gfm-tag-faces-real-markdown ()
+  "With Markdown mode, GFM link faces drive tag navigation."
+  (when (require 'markdown-mode nil t)
+    (with-temp-buffer
+      (dsh-bridge-view-mode)
+      (let ((inhibit-read-only t))
+        (insert "A [link](x.el) and https://e.com and `[code](y.el)`.\n")
+        (add-text-properties (point-min) (point-max)
+                             '(dsh-bridge-view-segment t)))
+      (font-lock-ensure)
+      (let ((font-lock-mode t))
+        (goto-char (point-min))
+        (dsh-bridge-view-next-tag)
+        (should (looking-at "link"))
+        (dsh-bridge-view-next-tag)
+        (should (looking-at "https://e.com"))
+        (should-error (dsh-bridge-view-next-tag) :type 'user-error)
+        (dsh-bridge-view-previous-tag)
+        (should (looking-at "link"))))))
+
 (ert-deftest dsh-bridge-view-fill-provenance ()
   "A record fill records the render provenance, a splice extends it, and the
 waiting placeholder clears it."

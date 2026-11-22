@@ -67,6 +67,7 @@
 (require 'url-parse)
 (require 'subr-x)
 (require 'seq)
+(require 'text-property-search)
 (require 'json)
 (require 'transient)
 (require 'button)
@@ -3254,6 +3255,12 @@ turn-following state for the new turn."
 ;; it as text; text properties (including the button objects) survive
 ;; `buffer-string'.
 
+(defvar-keymap dsh-bridge--view-file-button-map
+  :doc "Keymap for the changed-files footer buttons."
+  :parent button-map
+  "TAB" #'dsh-bridge-view-next-tag
+  "<backtab>" #'dsh-bridge-view-previous-tag)
+
 (defun dsh-bridge--button-visit (button)
   "Visit the filename specified by BUTTON's `path' property."
   (when-let* ((path (button-get button 'path)))
@@ -3275,7 +3282,8 @@ visits the file."
 	    (insert-text-button (file-name-nondirectory path)
 				'path path
 				'action #'dsh-bridge--button-visit
-				'follow-link t)))
+				'follow-link t
+				'keymap dsh-bridge--view-file-button-map)))
 	(buffer-string)))))
 
 ;;; Turn activity (the DSH-View process stream)
@@ -3374,7 +3382,23 @@ then the trimmed text, followed by two newlines (i.e., a blank line)."
 	     (insert "\n"))
 	    (t
 	     (insert dsh-bridge--view-segment-divider)))
-      (insert text "\n\n"))))
+      (let ((start (point)))
+	(insert text "\n\n")
+	;; The `dsh-bridge-view-segment' property holds the segment's
+	;; (STEP . TIME) key.  Currently, this is only used for tag
+	;; navigation (tabbing between segments).
+	(add-text-properties start (+ start (length text))
+			     (list 'dsh-bridge-view-segment
+				   (dsh-bridge--view-segment-key segment)))
+	;; The `dsh-bridge-view-link' property marks links for
+	;; navigation.  If using GFM View mode (the default), we use
+	;; link fontification faces for navigation instead.  But we
+	;; apply the property nonetheless, so that tag navigation
+	;; still works if GFM View is disabled on the fly.
+	(dolist (position (dsh-bridge--view-scan-link-tags
+			   start (+ start (length text))))
+	  (put-text-property position (1+ position)
+			     'dsh-bridge-view-link t))))))
 
 (defun dsh-bridge--view-insert-thinking (activity)
   "Insert thinking ACTIVITY in the DSH-View buffer.
@@ -4461,6 +4485,296 @@ point.  Ordinary reply text has no inspector fallback."
    (t
     (user-error "No RET action at point"))))
 
+;;; Tag navigation in DSH-View buffers
+
+;; A tag is the first visible character of a reply segment, of link
+;; text, or of a changed-file button in the footer.  Activity lines are
+;; not tags.  Reply segments are identified via the
+;; `dsh-bridge-view-segment' property applied during insertion.  Links
+;; are identified via the faces applied by GFM View mode's font-lock
+;; (if using GFM View mode), or our own scan (if not using GFM View
+;; mode).  The footer's file buttons carry a `path' property.
+
+(defconst dsh-bridge--view-link-faces
+  '(markdown-link-face markdown-plain-url-face markdown-missing-link-face)
+  "Faces applied by Markdown mode to link text.")
+
+(defun dsh-bridge--view-link-face-value-p (value)
+  "Whether face property VALUE names one of the Markdown link faces."
+  (if (listp value)
+      (seq-some (lambda (face) (memq face dsh-bridge--view-link-faces))
+		value)
+    (memq value dsh-bridge--view-link-faces)))
+
+(defun dsh-bridge--view-link-face-p (position)
+  "Whether POSITION carries a Markdown link face.
+Check `font-lock-face' as well as `face': wiki-link highlighting sets
+the former."
+  (or (dsh-bridge--view-link-face-value-p
+       (get-text-property position 'face))
+      (dsh-bridge--view-link-face-value-p
+       (get-text-property position 'font-lock-face))))
+
+(defun dsh-bridge--view-first-visible (beg end)
+  "Return the first visible non-whitespace position between BEG and END.
+If the range contains no such position, return nil."
+  (while (and (< beg end)
+	      (or (invisible-p beg)
+		  (memq (char-after beg) '(?\s ?\t ?\n ?\r))))
+    (setq beg (1+ beg)))
+  (and (< beg end) beg))
+
+(defconst dsh-bridge--view-link-tag-re
+  (concat
+   ;; Inline link or image: the label is the tag.
+   "!?\\[\\(?1:[^][\n]+\\)\\]([^()\n]*)"
+   ;; Reference link or image: the label is the tag.
+   "\\|!?\\[\\(?2:[^][\n]+\\)\\]\\[[^][\n]*\\]"
+   ;; Angle-bracketed URL: the URL is the tag.
+   "\\|<\\(?3:[a-zA-Z][a-zA-Z0-9+.-]+:[^][ \t\n\r<>,;()]+\\)>"
+   ;; E-mail address in angle brackets.
+   "\\|<\\(?4:[^][ \t\n\r<>]+@[^][ \t\n\r<>]+\\)>"
+   ;; Bare URL with an authority.
+   "\\|\\(?5:[a-zA-Z][a-zA-Z0-9+.-]+://[^][ \t\n\r<>;]+\\)"
+   ;; Bare mailto: URL.
+   "\\|\\(?6:mailto:[^][ \t\n\r<>;]+\\)")
+  "Regexp matching link, URL, and e-mail text in a Markdown reply.
+Group 1 is an inline link's (or image's) label, group 2 a reference
+link's label, group 3 an angle-bracketed URL, group 4 an e-mail
+address, and groups 5 and 6 a bare URL.  The first non-nil group
+starts at the construct's visible text.")
+
+(defun dsh-bridge--view-scan-link-tags (beg end)
+  "Return tag positions for links in the reply text between BEG and END.
+These positions are used for tag navigation in the DSH-View buffer if
+link faces applied by GFM View mode are unavailable, and they are found
+using `dsh-bridge--view-link-tag-re'."
+  (let (positions)
+    (save-excursion
+      (goto-char beg)
+      (let ((in-fence nil))
+	(while (< (point) end)
+	  (let ((line-end (min end (line-end-position))))
+	    (if (looking-at "[ \t]*\\(?:```\\|~~~\\)")
+		(setq in-fence (not in-fence))
+	      (unless (or in-fence
+			  (looking-at "^ \\{0,3\\}\\[[^]\n]+\\]:"))
+		(while (re-search-forward dsh-bridge--view-link-tag-re
+					  line-end t)
+		  (when-let* ((position
+			       (seq-some (lambda (group)
+					   (match-beginning group))
+					 '(1 2 3 4 5 6))))
+		    (push position positions)))))
+	    (goto-char (min end (1+ line-end)))))))
+    (nreverse positions)))
+
+(defun dsh-bridge--view-link-run-at (position)
+  "Return the (BEG . END) range of the link-face run containing POSITION.
+Return nil when POSITION does not carry a link face.  A link can change
+face values inside its label (bold or inline code), so the run is the
+maximal stretch where a link face is present, not one face-value region."
+  (when (dsh-bridge--view-link-face-p position)
+    (let ((beg position)
+	  (end position))
+      (while (and (> beg (point-min))
+		  (dsh-bridge--view-link-face-p (1- beg)))
+	(setq beg (1- beg)))
+      (while (and (< end (point-max))
+		  (dsh-bridge--view-link-face-p end))
+	(setq end (1+ end)))
+      (cons beg end))))
+
+(defun dsh-bridge--view-next-gfm-link-tag (position)
+  "Return the next GFM-highlighted link tag after POSITION, or nil.
+Only links inside a reply segment count; activity and terminal links
+are skipped."
+  (let ((pos position)
+	tag)
+    (while (and (not tag) (< pos (point-max)))
+      (if (dsh-bridge--view-link-face-p pos)
+	  (let* ((run (dsh-bridge--view-link-run-at pos))
+		 (candidate (dsh-bridge--view-first-visible
+			     (car run) (cdr run))))
+	    (if (and candidate
+		     (> candidate position)
+		     (get-text-property candidate 'dsh-bridge-view-segment))
+		(setq tag candidate)
+	      (setq pos (cdr run))))
+	(setq pos (min (next-single-property-change
+			pos 'face nil (point-max))
+		       (next-single-property-change
+			pos 'font-lock-face nil (point-max))))))
+    tag))
+
+(defun dsh-bridge--view-previous-gfm-link-tag (position)
+  "Return the previous GFM-highlighted link tag before POSITION, or nil.
+Only links inside a reply segment count; activity and terminal links
+are skipped."
+  (let ((pos position)
+	tag)
+    (while (and (not tag) (> pos (point-min)))
+      (let ((before (1- pos)))
+	(if (dsh-bridge--view-link-face-p before)
+	    (let* ((run (dsh-bridge--view-link-run-at before))
+		   (candidate (dsh-bridge--view-first-visible
+			       (car run) (cdr run))))
+	      (if (and candidate
+		       (< candidate position)
+		       (get-text-property candidate 'dsh-bridge-view-segment))
+		  (setq tag candidate)
+		(setq pos (car run))))
+	  (setq pos (max (previous-single-property-change
+			  pos 'face nil (point-min))
+			 (previous-single-property-change
+			  pos 'font-lock-face nil (point-min)))))))
+    tag))
+
+(defun dsh-bridge--view-next-link-tag (position)
+  "Return the next textually recognized link tag after POSITION, or nil."
+  (save-excursion
+    (goto-char position)
+    (let (match tag)
+      (while (and (not tag)
+		  (setq match (text-property-search-forward
+			       'dsh-bridge-view-link)))
+	(let ((candidate (prop-match-beginning match)))
+	  (when (> candidate position)
+	    (setq tag candidate))))
+      tag)))
+
+(defun dsh-bridge--view-previous-link-tag (position)
+  "Return the previous textually recognized link tag before POSITION, or nil."
+  (save-excursion
+    (goto-char position)
+    (let (match tag)
+      (while (and (not tag)
+		  (setq match (text-property-search-backward
+			       'dsh-bridge-view-link)))
+	(let ((candidate (prop-match-beginning match)))
+	  (when (< candidate position)
+	    (setq tag candidate))))
+      tag)))
+
+(defun dsh-bridge--view-next-segment-tag (position)
+  "Return the tag position of the next reply segment after POSITION, or nil."
+  (save-excursion
+    (goto-char position)
+    (let (match tag)
+      (while (and (not tag)
+		  (setq match (text-property-search-forward
+			       'dsh-bridge-view-segment)))
+	(let ((candidate (dsh-bridge--view-first-visible
+			  (prop-match-beginning match)
+			  (prop-match-end match))))
+	  (when (and candidate (> candidate position))
+	    (setq tag candidate))))
+      tag)))
+
+(defun dsh-bridge--view-previous-segment-tag (position)
+  "Return the tag position of the previous reply segment before POSITION.
+Return nil when there is none."
+  (save-excursion
+    (goto-char position)
+    (let (match tag)
+      (while (and (not tag)
+		  (setq match (text-property-search-backward
+			       'dsh-bridge-view-segment)))
+	(let ((candidate (dsh-bridge--view-first-visible
+			  (prop-match-beginning match)
+			  (prop-match-end match))))
+	  (when (and candidate (< candidate position))
+	    (setq tag candidate))))
+      tag)))
+
+(defun dsh-bridge--view-next-file-button-tag (position)
+  "Return the start of the next changed-file button after POSITION, or nil.
+Only buttons carrying a `path' property count, so other buttons a view
+might add are ignored."
+  (let ((button (next-button position)))
+    (while (and button (not (button-get button 'path)))
+      (setq button (next-button (button-start button))))
+    (and button (button-start button))))
+
+(defun dsh-bridge--view-previous-file-button-tag (position)
+  "Return the start of the previous changed-file button before POSITION.
+A button containing POSITION counts when its start is before POSITION.
+Return nil when there is none."
+  (let ((button (previous-button position t)))
+    (while (and button
+		(or (not (button-get button 'path))
+		    (>= (button-start button) position)))
+      (setq button (previous-button (button-start button))))
+    (and button (button-start button))))
+
+(defun dsh-bridge--view-next-tag-position (position gfm)
+  "Return the position of the next tag after POSITION, or nil.
+GFM non-nil means link tags come from GFM's link faces; the caller
+ensures the buffer is fontified in that case."
+  (let ((link (if gfm
+		  (dsh-bridge--view-next-gfm-link-tag position)
+		(dsh-bridge--view-next-link-tag position)))
+	(segment (dsh-bridge--view-next-segment-tag position))
+	(file (dsh-bridge--view-next-file-button-tag position)))
+    (let ((targets (delq nil (list link segment file))))
+      (and targets (apply #'min targets)))))
+
+(defun dsh-bridge--view-previous-tag-position (position gfm)
+  "Return the position of the previous tag before POSITION, or nil.
+GFM non-nil means link tags come from GFM's link faces; the caller
+ensures the buffer is fontified in that case."
+  (let ((link (if gfm
+		  (dsh-bridge--view-previous-gfm-link-tag position)
+		(dsh-bridge--view-previous-link-tag position)))
+	(segment (dsh-bridge--view-previous-segment-tag position))
+	(file (dsh-bridge--view-previous-file-button-tag position)))
+    (let ((targets (delq nil (list link segment file))))
+      (and targets (apply #'max targets)))))
+
+(defun dsh-bridge--view-goto-tag (count)
+  "Move COUNT tags in this DSH-View buffer.
+A positive COUNT moves forward and a negative COUNT backward; 0 does not
+move.  Signal a `user-error' when there is no tag in that direction."
+  (unless (derived-mode-p 'dsh-bridge-view-mode)
+    (user-error "Not in a DSH-View buffer"))
+  (unless (zerop count)
+    (let ((gfm (and (derived-mode-p 'gfm-view-mode)
+		    (bound-and-true-p font-lock-mode)))
+	  (step (if (< count 0) -1 1)))
+      (when gfm
+	(font-lock-ensure))
+      (dotimes (_ (abs count))
+	(let ((target (if (> step 0)
+			  (dsh-bridge--view-next-tag-position (point) gfm)
+			(dsh-bridge--view-previous-tag-position (point) gfm))))
+	  (unless target
+	    (user-error (if (> step 0)
+			    "No next tag"
+			  "No previous tag")))
+	  (goto-char target))))))
+
+(defun dsh-bridge-view-next-tag (&optional count)
+  "Move to the next tag in this DSH-View buffer.
+A tag is the first visible character of a reply segment, of text
+recognized as a link (including a bare URL or an e-mail address), or of
+a changed-file button in the footer.  Activity lines are not tags.
+
+With prefix COUNT, move that many tags; a negative COUNT moves backwards.
+Signal a `user-error' when there is no tag in that direction."
+  (interactive "p")
+  (dsh-bridge--view-goto-tag (or count 1)))
+
+(defun dsh-bridge-view-previous-tag (&optional count)
+  "Move to the previous tag in this DSH-View buffer.
+A tag is the first visible character of a reply segment, of text
+recognized as a link (including a bare URL or an e-mail address), or of
+a changed-file button in the footer.  Activity lines are not tags.
+
+With prefix COUNT, move that many tags; a negative COUNT moves forwards.
+Signal a `user-error' when there is no tag in that direction."
+  (interactive "p")
+  (dsh-bridge--view-goto-tag (- (or count 1))))
+
 ;; A conditional expression cannot go directly in the parent slot of
 ;; `define-derived-mode', since the macro quotes it into the mode
 ;; metadata and the docstring generation calls `symbol-name' on it.
@@ -4516,6 +4830,9 @@ compose a reply (prompt) for the session, etc.
   :doc "Keymap for `dsh-bridge-view-mode'."
   ;; Act on the item at point; the command preserves link/table behavior.
   "RET" #'dsh-bridge-view-enter
+  ;; Walk the reply's tags instead of Markdown's heading cycle.
+  "TAB" #'dsh-bridge-view-next-tag
+  "<backtab>" #'dsh-bridge-view-previous-tag
   "r"	#'dsh-bridge-reply
   "M-p" #'dsh-bridge-view-previous-reply
   "M-n" #'dsh-bridge-view-next-reply
@@ -4529,6 +4846,15 @@ compose a reply (prompt) for the session, etc.
   "D" #'dsh-bridge-describe-session
   "v" #'dsh-bridge-view-toggle-activity
   "l" #'dsh-bridge-list-sessions)
+
+;; A changed-file footer button carries its own keymap, but buttons
+;; created before that map existed (or any button using the stock button
+;; map) bind TAB and backtab to the stock navigation commands.  Remap
+;; those commands so tag navigation wins in this buffer either way.
+(define-key dsh-bridge-view-mode-map [remap forward-button]
+  #'dsh-bridge-view-next-tag)
+(define-key dsh-bridge-view-mode-map [remap backward-button]
+  #'dsh-bridge-view-previous-tag)
 
 ;; The parent is a load-time choice, so set it here rather than naming it
 ;; through `:parent'; `define-derived-mode' (below) sees an existing parent and

@@ -202,6 +202,7 @@ The following commands are available in a DSH-View buffer:
 * `D` — describe the current session.
 * `RET` — visit a changed file, answer a pending query or approval, follow a
   link, navigate a table, or inspect the activity item at point.
+* `TAB`/`S-TAB` — move to the next/previous reply segment or link.
 * `M-p`/`M-n` — cycle the current session's turns.
 * `l` — open the DSH-Sessions buffer.
 * `q` — quit the window and bury the buffer.
