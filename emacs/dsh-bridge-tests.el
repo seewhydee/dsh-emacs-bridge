@@ -1498,7 +1498,7 @@ current buffer has no session of its own."
     (should (equal captured "/turns?sessionId=s1"))))
 
 (ert-deftest dsh-bridge-fetch-populates-output ()
-  "Fetch writes the newest turn into *dsh-bridge-output* in `dsh-bridge-view-mode'."
+  "Fetch writes the newest turn into the DSH-View buffer in `dsh-bridge-view-mode'."
   (let ((dsh-bridge-pinned-target "s1"))
     (cl-letf (((symbol-function 'dsh-bridge--http)
                (lambda (_method _path _payload)
@@ -1508,7 +1508,7 @@ current buffer has no session of its own."
                                   "{\"text\":\"reply text\",\"time\":1000000,\"step\":1}]}]}")
                           200))))
       (dsh-bridge-fetch))
-    (let ((buf (get-buffer "*dsh-bridge-output*")))
+    (let ((buf (get-buffer dsh-bridge-view-buffer-name)))
       (should buf)
       (with-current-buffer buf
         (should (equal (buffer-string) "reply text\n\n"))
@@ -1518,7 +1518,7 @@ current buffer has no session of its own."
         (should (equal dsh-bridge--view-turn 2))
         (should (string-match-p " s1" (dsh-bridge--view-header-line)))
         (should (string-match-p "· " (dsh-bridge--view-header-line)))))
-    (kill-buffer "*dsh-bridge-output*")))
+    (kill-buffer dsh-bridge-view-buffer-name)))
 
 (ert-deftest dsh-bridge-fetch-peek-labels-content-session ()
   "A peek/override fetch labels the output buffer with the content's session,
@@ -1532,13 +1532,13 @@ not the pinned target."
                                   "{\"text\":\"other reply\",\"time\":1000000,\"step\":1}]}]}")
                           200))))
       (dsh-bridge-fetch "s2"))
-    (with-current-buffer "*dsh-bridge-output*"
+    (with-current-buffer dsh-bridge-view-buffer-name
       (should (equal (buffer-string) "other reply\n\n"))
       (should (equal dsh-bridge--view-content-session "s2"))
       (should (string-match-p " s2" (dsh-bridge--view-header-line)))
       (should-not (string-match-p " s1" (dsh-bridge--view-header-line)))
       (should-not (string-match-p "target:" (dsh-bridge--view-header-line))))
-    (kill-buffer "*dsh-bridge-output*")))
+    (kill-buffer dsh-bridge-view-buffer-name)))
 
 (ert-deftest dsh-bridge-fetch-seeds-status ()
   "Fetch seeds the tracker from /turns' running flag: true -> running,
@@ -1558,7 +1558,7 @@ so the check must compare against t, not truthiness (a regression: a
                    (list nil (car case) 200))))
         (dsh-bridge-fetch "s1"))
       (should (eq (dsh-bridge--status-state "s1") (cdr case)))
-      (kill-buffer "*dsh-bridge-output*"))))
+      (kill-buffer dsh-bridge-view-buffer-name))))
 
 (ert-deftest dsh-bridge-fetch-running-turn-follows ()
   "A fetch whose newest turn is still running turns on following: the view
@@ -1572,7 +1572,7 @@ then grows in place as further segments commit."
                                   "{\"text\":\"partial reply\",\"time\":1000000,\"step\":1}]}]}")
                           200))))
       (dsh-bridge-fetch))
-    (let ((buf (get-buffer "*dsh-bridge-output*")))
+    (let ((buf (get-buffer dsh-bridge-view-buffer-name)))
       (should buf)
       (with-current-buffer buf
         (should (equal dsh-bridge--view-content-session "s1"))
@@ -1581,7 +1581,7 @@ then grows in place as further segments commit."
         (should (null dsh-bridge--view-browsing))
         (should (string-prefix-p "partial reply" (buffer-string)))
         (should (string-match-p "latest" (dsh-bridge--view-header-line)))))
-    (kill-buffer "*dsh-bridge-output*")))
+    (kill-buffer dsh-bridge-view-buffer-name)))
 
 (ert-deftest dsh-bridge-fetch-idle-turn-stays-snapshot ()
   "A fetch of a completed (idle) newest turn does not turn on following."
@@ -1594,10 +1594,10 @@ then grows in place as further segments commit."
                                   "{\"text\":\"final reply\",\"time\":1000000,\"step\":1}]}]}")
                           200))))
       (dsh-bridge-fetch))
-    (with-current-buffer "*dsh-bridge-output*"
+    (with-current-buffer dsh-bridge-view-buffer-name
       (should (equal (buffer-string) "final reply\n\n"))
       (should (null dsh-bridge--view-follow)))
-    (kill-buffer "*dsh-bridge-output*")))
+    (kill-buffer dsh-bridge-view-buffer-name)))
 
 (ert-deftest dsh-bridge-fetch-caches-whole-turn-list ()
   "A fetch records the response's whole `turns' array (newest first) as the
@@ -1619,7 +1619,7 @@ later incremental requests see every turn."
       (should (= (length cached) 2))
       (should (equal (alist-get 'turn (car cached)) 3))
       (should (equal (alist-get 'turn (cadr cached)) 2)))
-    (kill-buffer "*dsh-bridge-output*")))
+    (kill-buffer dsh-bridge-view-buffer-name)))
 
 (ert-deftest dsh-bridge-fetch-last-resolved-recording ()
   "A nil-target fetch records the host-resolved session for display; an
@@ -1636,7 +1636,7 @@ explicit target is not the host's resolution, so nothing is recorded."
       (if (cdr case)
           (should (equal dsh-bridge--last-resolved-active '("s1" . "T")))
         (should (null dsh-bridge--last-resolved-active)))
-      (kill-buffer "*dsh-bridge-output*"))))
+      (kill-buffer dsh-bridge-view-buffer-name))))
 
 (ert-deftest dsh-bridge-fetch-missing-session-id-signals ()
   "A `/turns' response without a sessionId is a protocol error: the view is
@@ -1672,25 +1672,25 @@ not opened and no guessed target is used."
                                   "\"segments\":[{\"text\":\"reply\",\"time\":1000000,\"step\":1}]}]}")
                           200))))
       (dsh-bridge-fetch))
-    (with-current-buffer "*dsh-bridge-output*"
+    (with-current-buffer dsh-bridge-view-buffer-name
       (should (equal default-directory "/w/sess1/"))
       (should (equal (buffer-string) "reply\n\n")))
-    (kill-buffer "*dsh-bridge-output*")))
+    (kill-buffer dsh-bridge-view-buffer-name)))
 
 ;;; The prompt buffer: session binding, header, history
 
 (ert-deftest dsh-bridge-set-prompt-session-sets-directory ()
   "Binding the prompt buffer sets its default-directory from the cache."
-  (when (get-buffer "*dsh-bridge-prompt*")
-    (kill-buffer "*dsh-bridge-prompt*"))
+  (when (get-buffer dsh-bridge-prompt-buffer-name)
+    (kill-buffer dsh-bridge-prompt-buffer-name))
   (let ((dsh-bridge--sessions-cache '(((id . "s1") (cwd . "/w/sess1") (live . t)))))
-    (with-current-buffer (get-buffer-create "*dsh-bridge-prompt*")
+    (with-current-buffer (get-buffer-create dsh-bridge-prompt-buffer-name)
       (dsh-bridge-prompt-mode)
       (cl-letf (((symbol-function 'dsh-bridge--refresh-prompt-metadata)
                  #'ignore))
         (dsh-bridge-set-prompt-session "s1")
         (should (equal default-directory "/w/sess1/")))))
-  (kill-buffer "*dsh-bridge-prompt*"))
+  (kill-buffer dsh-bridge-prompt-buffer-name))
 
 (ert-deftest dsh-bridge-set-prompt-session-requires-prompt-mode ()
   "`dsh-bridge-set-prompt-session' refuses to run outside DSH-Prompt buffers."
@@ -1699,17 +1699,17 @@ not opened and no guessed target is used."
 
 (ert-deftest dsh-bridge-pin-target-sets-prompt-directory ()
   "Setting the pinned target re-points an unbound prompt buffer's directory."
-  (when (get-buffer "*dsh-bridge-prompt*")
-    (kill-buffer "*dsh-bridge-prompt*"))
+  (when (get-buffer dsh-bridge-prompt-buffer-name)
+    (kill-buffer dsh-bridge-prompt-buffer-name))
   (let ((dsh-bridge--sessions-cache '(((id . "s1") (cwd . "/w/sess1") (live . t))))
         (dsh-bridge-pinned-target nil))
     (cl-letf (((symbol-function 'dsh-bridge--fetch-sessions) (lambda () nil)))
-      (with-current-buffer (get-buffer-create "*dsh-bridge-prompt*")
+      (with-current-buffer (get-buffer-create dsh-bridge-prompt-buffer-name)
         (dsh-bridge-prompt-mode))
       (dsh-bridge-pin-target "s1")
-      (with-current-buffer "*dsh-bridge-prompt*"
+      (with-current-buffer dsh-bridge-prompt-buffer-name
         (should (equal default-directory "/w/sess1/")))))
-  (kill-buffer "*dsh-bridge-prompt*"))
+  (kill-buffer dsh-bridge-prompt-buffer-name))
 
 (ert-deftest dsh-bridge-prompt-mode-basics ()
   "The prompt mode derives from text-mode in a markdown-less environment and
@@ -2033,9 +2033,9 @@ empty roster errors instead of yielding a follow-the-default binding."
   "A recorded send prepends the text and returns the buffer to the draft slot."
   (let ((dsh-bridge--prompt-history (list (list "s1" "old")))
         (dsh-bridge--last-sent nil))
-    (when (get-buffer "*dsh-bridge-prompt*")
-      (kill-buffer "*dsh-bridge-prompt*"))
-    (let ((buf (get-buffer-create "*dsh-bridge-prompt*")))
+    (when (get-buffer dsh-bridge-prompt-buffer-name)
+      (kill-buffer dsh-bridge-prompt-buffer-name))
+    (let ((buf (get-buffer-create dsh-bridge-prompt-buffer-name)))
       (with-current-buffer buf
         (dsh-bridge-prompt-mode)
         (setq-local dsh-bridge--prompt-session "s1")
@@ -2673,13 +2673,13 @@ session and never touches the pinned target."
       (setq-local dsh-bridge--view-content-session "shown")
       (cl-letf (((symbol-function 'dsh-bridge--prompt-buffer)
                  (lambda (id) (setq bound id)
-                         (get-buffer-create "*dsh-bridge-prompt*")))
+                         (get-buffer-create dsh-bridge-prompt-buffer-name)))
                 ((symbol-function 'pop-to-buffer)
                  (lambda (buf action) (setq popped (list buf action)))))
         (dsh-bridge-reply))
       (should (equal bound "shown"))
       (should (equal dsh-bridge-pinned-target "target"))
-      (should (equal (car popped) (get-buffer-create "*dsh-bridge-prompt*")))
+      (should (equal (car popped) (get-buffer-create dsh-bridge-prompt-buffer-name)))
       (should (equal (cadr popped) dsh-bridge-prompt-display-action)))))
 
 (ert-deftest dsh-bridge-reply-not-live-errors ()
@@ -2750,7 +2750,7 @@ POST /fork, then opens the child's view and prompt."
                  (lambda (id same-window) (setq fetched (list id same-window))))
                 ((symbol-function 'dsh-bridge--prompt-buffer)
                  (lambda (id) (setq prompted id)
-                         (get-buffer-create "*dsh-bridge-prompt*")))
+                         (get-buffer-create dsh-bridge-prompt-buffer-name)))
                 ((symbol-function 'pop-to-buffer)
                  (lambda (buf &optional action) (setq popped (list buf action)))))
         (dsh-bridge-fork-turn))
@@ -2760,7 +2760,7 @@ POST /fork, then opens the child's view and prompt."
       (should (equal (alist-get 'atSeq (caddr seen)) 42))
       (should (equal fetched '("child" t)))
       (should (equal prompted "child"))
-      (should (equal (car popped) (get-buffer-create "*dsh-bridge-prompt*")))
+      (should (equal (car popped) (get-buffer-create dsh-bridge-prompt-buffer-name)))
       (should (equal (cadr popped) dsh-bridge-prompt-display-action)))))
 
 (ert-deftest dsh-bridge-fork-turn-refuses-open-turn ()
@@ -2875,21 +2875,21 @@ No request is issued."
   `(let ((dsh-bridge--turns-cache nil)
          (dsh-bridge--sessions-cache nil)
          (dsh-bridge-test--receive-acked nil))
-     (when (get-buffer "*dsh-bridge-output*")
-       (kill-buffer "*dsh-bridge-output*"))
+     (when (get-buffer dsh-bridge-view-buffer-name)
+       (kill-buffer dsh-bridge-view-buffer-name))
      (unwind-protect
          (cl-letf (((symbol-function 'dsh-bridge--request)
                     #'dsh-bridge-test--receive-request))
            ,@body)
-       (when (get-buffer "*dsh-bridge-output*")
-         (kill-buffer "*dsh-bridge-output*")))))
+       (when (get-buffer dsh-bridge-view-buffer-name)
+         (kill-buffer dsh-bridge-view-buffer-name)))))
 
 (ert-deftest dsh-bridge-receive-shows-newest-and-acks-all ()
   "Receive renders the newest pushed turn and acks every collected id."
   (dsh-bridge-test--with-receive
     (dsh-bridge-receive)
     (should (equal dsh-bridge-test--receive-acked '((ids . ("e1" "e2")))))
-    (with-current-buffer "*dsh-bridge-output*"
+    (with-current-buffer dsh-bridge-view-buffer-name
       (let ((text (buffer-string))
             (header (dsh-bridge--view-header-line)))
         (should (string-match-p "first" text))
@@ -2985,13 +2985,13 @@ selecting it."
                  (lambda (&rest args) (setq msg (apply #'format args)))))
         (dsh-bridge-receive))
       (should (string-match-p "No messages from the DSH bridge." msg))
-      (should-not (get-buffer "*dsh-bridge-output*")))))
+      (should-not (get-buffer dsh-bridge-view-buffer-name)))))
 
 (ert-deftest dsh-bridge-receive-sets-workspace-best-effort ()
   "Receive points the output buffer at the workspace returned by `/turns'."
   (dsh-bridge-test--with-receive
     (dsh-bridge-receive)
-    (with-current-buffer "*dsh-bridge-output*"
+    (with-current-buffer dsh-bridge-view-buffer-name
       (should (equal default-directory "/w/sess2/")))))
 
 (ert-deftest dsh-bridge-receive-open-turn-follows ()
@@ -3003,7 +3003,7 @@ selecting it."
            (dsh-bridge-test--receive-turns-response
             (dsh-bridge-test--receive-turns-response-for open-turn)))
       (dsh-bridge-receive))
-    (with-current-buffer "*dsh-bridge-output*"
+    (with-current-buffer dsh-bridge-view-buffer-name
       (should (eq dsh-bridge--view-follow t))
       (should-not dsh-bridge--view-browsing)
       (should (string-match-p "continuing" (buffer-string))))))
@@ -3022,7 +3022,7 @@ selecting it."
         (dsh-bridge-receive))
       (should-not dsh-bridge-test--receive-acked)
       (should-not popped)
-      (should-not (get-buffer "*dsh-bridge-output*"))
+      (should-not (get-buffer dsh-bridge-view-buffer-name))
       (should (seq-some (lambda (m) (string-match-p "turn 2 is not in" m)) msgs))
       (should-not (seq-some (lambda (m) (string-match-p "messages received" m)) msgs)))))
 
@@ -3039,7 +3039,7 @@ selecting it."
         (dsh-bridge-receive))
       (should-not dsh-bridge-test--receive-acked)
       (should-not popped)
-      (should-not (get-buffer "*dsh-bridge-output*"))
+      (should-not (get-buffer dsh-bridge-view-buffer-name))
       (should (seq-some (lambda (m) (string-match-p "failed to fetch turns" m)) msgs))
       (should-not (seq-some (lambda (m) (string-match-p "messages received" m)) msgs)))))
 
@@ -3055,7 +3055,7 @@ selecting it."
                    (lambda (&rest args) (push (apply #'format args) msgs))))
           (dsh-bridge-receive))
         (should-not dsh-bridge-test--receive-acked)
-        (should-not (get-buffer "*dsh-bridge-output*"))
+        (should-not (get-buffer dsh-bridge-view-buffer-name))
         (should (seq-some
                  (lambda (m) (string-match-p "without a session id or turn number" m))
                  msgs))
@@ -3377,15 +3377,15 @@ and the view is bound to the fetched turn's number."
                                   "{\"turn\":2,\"startedAt\":1000,\"endedAt\":2000,\"reason\":\"completed\",\"segments\":["
                                   "{\"text\":\"fresh\",\"time\":1000000,\"step\":1}]}]}")
                           200))))
-      (with-current-buffer (get-buffer-create "*dsh-bridge-output*")
+      (with-current-buffer (get-buffer-create dsh-bridge-view-buffer-name)
         (dsh-bridge-view-mode)
         (setq-local dsh-bridge--view-browsing t))
       (dsh-bridge-fetch)
-      (with-current-buffer "*dsh-bridge-output*"
+      (with-current-buffer dsh-bridge-view-buffer-name
         (should (equal (buffer-string) "fresh\n\n"))
         (should (null dsh-bridge--view-browsing))
         (should (equal dsh-bridge--view-turn 2)))
-      (kill-buffer "*dsh-bridge-output*"))))
+      (kill-buffer dsh-bridge-view-buffer-name))))
 
 (ert-deftest dsh-bridge-view-turn-render-dividers ()
   "A turn renders its segments joined by GFM horizontal-rule dividers.  A
@@ -4390,7 +4390,7 @@ must fill it (rather than blank to idle), showing the failure note where the
                           "\"endedAt\":3009000,\"reason\":\"error\","
                           "\"segments\":[],"
                           "\"failure\":{\"code\":\"AUTH\",\"message\":\"\"}}]}")))
-    (with-current-buffer (get-buffer-create "*dsh-bridge-output*")
+    (with-current-buffer (get-buffer-create dsh-bridge-view-buffer-name)
       (dsh-bridge-view-mode)
       (setq-local dsh-bridge--view-content-session "s1")
       (dsh-bridge--view-waiting-fill "s1" 2)
@@ -4401,12 +4401,12 @@ must fill it (rather than blank to idle), showing the failure note where the
               ((symbol-function 'dsh-bridge--apply-session-directory) #'ignore))
       (dsh-bridge--turn-complete-refetch "s1" "error" 3
                                           (list (cons 'code "AUTH") (cons 'message "")))
-      (with-current-buffer "*dsh-bridge-output*"
+      (with-current-buffer dsh-bridge-view-buffer-name
         (should (string-match-p "API key is invalid" (buffer-string)))
         (should (null dsh-bridge--view-waiting))
         (should (equal dsh-bridge--view-turn 3))))
-    (when (buffer-live-p (get-buffer "*dsh-bridge-output*"))
-      (kill-buffer "*dsh-bridge-output*"))))
+    (when (buffer-live-p (get-buffer dsh-bridge-view-buffer-name))
+      (kill-buffer dsh-bridge-view-buffer-name))))
 
 (ert-deftest dsh-bridge-turn-complete-refetch-error-partial ()
   "A turn that emitted partial text then failed keeps that text and adds the
@@ -4420,7 +4420,7 @@ failure note, rather than one replacing the other."
                           "\"time\":3001000,\"step\":1}],"
                           "\"failure\":{\"code\":\"RATE_LIMIT\","
                           "\"message\":\"rate limited\"}}]}")))
-    (with-current-buffer (get-buffer-create "*dsh-bridge-output*")
+    (with-current-buffer (get-buffer-create dsh-bridge-view-buffer-name)
       (dsh-bridge-view-mode)
       (setq-local dsh-bridge--view-content-session "s1")
       (dsh-bridge--view-waiting-fill "s1" 2))
@@ -4429,13 +4429,13 @@ failure note, rather than one replacing the other."
               ((symbol-function 'dsh-bridge--status-set) #'ignore)
               ((symbol-function 'dsh-bridge--apply-session-directory) #'ignore))
       (dsh-bridge--turn-complete-refetch "s1" "error" 3)
-      (with-current-buffer "*dsh-bridge-output*"
+      (with-current-buffer dsh-bridge-view-buffer-name
         (should (string-match-p "partial reply" (buffer-string)))
         (should (string-match-p "rate limited" (buffer-string)))
         (should (null dsh-bridge--view-waiting))
         (should (equal dsh-bridge--view-turn 3))))
-    (when (buffer-live-p (get-buffer "*dsh-bridge-output*"))
-      (kill-buffer "*dsh-bridge-output*"))))
+    (when (buffer-live-p (get-buffer dsh-bridge-view-buffer-name))
+      (kill-buffer dsh-bridge-view-buffer-name))))
 
 (ert-deftest dsh-bridge-view-link-target ()
   "A local file link's line is parsed from its anchor or a :LINE suffix.
@@ -4648,7 +4648,7 @@ untouched."
     ;; text property instead.
     (cl-letf (((symbol-function 'dsh-bridge--prompt-buffer)
                (lambda (id) (setq bound id)
-                       (get-buffer-create "*dsh-bridge-prompt*")))
+                       (get-buffer-create dsh-bridge-prompt-buffer-name)))
               ((symbol-function 'pop-to-buffer) (lambda (&rest _) (setq popped t))))
       (with-temp-buffer
         (dsh-bridge-sessions-mode)
@@ -4710,7 +4710,7 @@ The host's reason is what the user sees first."
                (lambda (id) (setq resumed id) t))
               ((symbol-function 'dsh-bridge--prompt-buffer)
                (lambda (id) (setq bound id)
-                       (get-buffer-create "*dsh-bridge-prompt*")))
+                       (get-buffer-create dsh-bridge-prompt-buffer-name)))
               ((symbol-function 'pop-to-buffer) (lambda (&rest _) (setq popped t))))
       (with-temp-buffer
         (dsh-bridge-sessions-mode)
@@ -4841,8 +4841,8 @@ the view in another window (else below the prompt), selecting the prompt."
   "`both' gives the prompt the launcher's window and the view the one the
 launcher left behind, so the frame keeps two usable windows."
   (let ((config (current-window-configuration))
-        (view (get-buffer-create "*dsh-bridge-output*"))
-        (prompt (get-buffer-create "*dsh-bridge-prompt*"))
+        (view (get-buffer-create dsh-bridge-view-buffer-name))
+        (prompt (get-buffer-create dsh-bridge-prompt-buffer-name))
         (sessions (get-buffer-create "*dsh-bridge-test-sessions*"))
         (work (get-buffer-create "*dsh-bridge-test-work*"))
         (dsh-bridge-session-default-visit-action 'both)
@@ -5001,8 +5001,8 @@ not a request, so no resume is attempted."
 
 (ert-deftest dsh-bridge-list-sessions-columns-and-marker ()
   "The session list shows marker/S/Session/Age/Workspace columns."
-  (when (get-buffer "*dsh-bridge-sessions*")
-    (kill-buffer "*dsh-bridge-sessions*"))
+  (when (get-buffer dsh-bridge-sessions-buffer-name)
+    (kill-buffer dsh-bridge-sessions-buffer-name))
   (let ((dsh-bridge-pinned-target "live-1")
         (dsh-bridge-status-indicator 'geometric))
     (cl-letf (((symbol-function 'dsh-bridge--fetch-sessions)
@@ -5017,7 +5017,7 @@ not a request, so no resume is attempted."
                    (cons 200 sessions))))
               ((symbol-function 'pop-to-buffer) (lambda (&rest _) nil)))
       (dsh-bridge-list-sessions))
-    (let ((buf (get-buffer "*dsh-bridge-sessions*")))
+    (let ((buf (get-buffer dsh-bridge-sessions-buffer-name)))
       (should buf)
       (should (= (length (buffer-local-value 'tabulated-list-format buf)) 5))
       (should (equal (buffer-local-value 'tabulated-list-sort-key buf)
@@ -5062,8 +5062,8 @@ not a request, so no resume is attempted."
 Emoji glyphs are double-width; in a one-column cell
 `tabulated-list-print-col' would cover the glyph with an ellipsis
 `display' property, so the row must print it unelided."
-  (when (get-buffer "*dsh-bridge-sessions*")
-    (kill-buffer "*dsh-bridge-sessions*"))
+  (when (get-buffer dsh-bridge-sessions-buffer-name)
+    (kill-buffer dsh-bridge-sessions-buffer-name))
   (let ((dsh-bridge-pinned-target nil)
         (dsh-bridge-status-indicator 'emoji))
     (cl-letf (((symbol-function 'dsh-bridge--fetch-sessions)
@@ -5075,7 +5075,7 @@ Emoji glyphs are double-width; in a one-column cell
                    (cons 200 sessions))))
               ((symbol-function 'pop-to-buffer) (lambda (&rest _) nil)))
       (dsh-bridge-list-sessions))
-    (let ((buf (get-buffer "*dsh-bridge-sessions*")))
+    (let ((buf (get-buffer dsh-bridge-sessions-buffer-name)))
       (should buf)
       (should (= (nth 1 (aref (buffer-local-value 'tabulated-list-format buf) 1))
                  2))
@@ -5105,15 +5105,15 @@ An untitled row falls back on the placeholder with
 
 (ert-deftest dsh-bridge-list-sessions-shows-ids-when-enabled ()
   "With `dsh-bridge-show-session-ids' non-nil, an Id column appears."
-  (when (get-buffer "*dsh-bridge-sessions*")
-    (kill-buffer "*dsh-bridge-sessions*"))
+  (when (get-buffer dsh-bridge-sessions-buffer-name)
+    (kill-buffer dsh-bridge-sessions-buffer-name))
   (let ((dsh-bridge-pinned-target nil)
         (dsh-bridge-show-session-ids t))
     (cl-letf (((symbol-function 'dsh-bridge--fetch-sessions)
                (lambda () (cons 200 '(((id . "live-1") (live . t) (cwd . "/a"))))))
               ((symbol-function 'pop-to-buffer) (lambda (&rest _) nil)))
       (dsh-bridge-list-sessions))
-    (let ((buf (get-buffer "*dsh-bridge-sessions*")))
+    (let ((buf (get-buffer dsh-bridge-sessions-buffer-name)))
       (should (= (length (buffer-local-value 'tabulated-list-format buf)) 6))
       (let* ((entries (buffer-local-value 'tabulated-list-entries buf))
              (cells (cadr (assoc "live-1" entries))))
@@ -5121,8 +5121,8 @@ An untitled row falls back on the placeholder with
 
 (ert-deftest dsh-bridge-sessions-archived-toggle ()
   "The `v' toggle shows/hides archived sessions; live and cold rows stay visible."
-  (when (get-buffer "*dsh-bridge-sessions*")
-    (kill-buffer "*dsh-bridge-sessions*"))
+  (when (get-buffer dsh-bridge-sessions-buffer-name)
+    (kill-buffer dsh-bridge-sessions-buffer-name))
   (let ((dsh-bridge-pinned-target nil))
     (cl-letf (((symbol-function 'dsh-bridge--fetch-sessions)
                (lambda ()
@@ -5132,7 +5132,7 @@ An untitled row falls back on the placeholder with
                          ((id . "arch-1") (live . nil) (archived . t) (cwd . "/c"))))))
               ((symbol-function 'pop-to-buffer) (lambda (&rest _) nil)))
       (dsh-bridge-list-sessions)
-      (let ((buf (get-buffer "*dsh-bridge-sessions*")))
+      (let ((buf (get-buffer dsh-bridge-sessions-buffer-name)))
         ;; Default: archived hidden.
         (let ((entries (buffer-local-value 'tabulated-list-entries buf)))
           (should (assoc "live-1" entries))
@@ -5341,8 +5341,8 @@ An unknown descriptor, or a cold one whose resume fails, signals a
   "Resuming fetches the roster once and re-fills an open sessions list.
 The fetch backs both the cache lookup and the list refresh, so it must not
 be repeated for the two."
-  (when (get-buffer "*dsh-bridge-sessions*")
-    (kill-buffer "*dsh-bridge-sessions*"))
+  (when (get-buffer dsh-bridge-sessions-buffer-name)
+    (kill-buffer dsh-bridge-sessions-buffer-name))
   (let* ((fetches 0)
          (fetch-stub (lambda ()
                        (setq fetches (1+ fetches))
@@ -5359,13 +5359,13 @@ be repeated for the two."
               ((symbol-function 'dsh-bridge--fetch-sessions) fetch-stub)
               ((symbol-function 'message) #'ignore))
       (unwind-protect
-          (with-current-buffer (get-buffer-create "*dsh-bridge-sessions*")
+          (with-current-buffer (get-buffer-create dsh-bridge-sessions-buffer-name)
             (dsh-bridge-sessions-mode)
             (should (dsh-bridge--resume-session "s1"))
             (should (= fetches 1))
             (should (assoc "s1" tabulated-list-entries)))
-        (when (buffer-live-p (get-buffer "*dsh-bridge-sessions*"))
-          (kill-buffer "*dsh-bridge-sessions*"))))))
+        (when (buffer-live-p (get-buffer dsh-bridge-sessions-buffer-name))
+          (kill-buffer dsh-bridge-sessions-buffer-name))))))
 
 (ert-deftest dsh-bridge-session-entry-marks-archived ()
   "An archived row is greyed and its status cell shows the archived glyph.
@@ -5583,13 +5583,13 @@ must reach the host rather than refusing the session as not running."
                  (push (list method path payload) calls)
                  (cons 200 (list (cons 'accepted t) (cons 'running t))))))
       (unwind-protect
-          (with-current-buffer (get-buffer-create "*dsh-bridge-sessions*")
+          (with-current-buffer (get-buffer-create dsh-bridge-sessions-buffer-name)
             (dsh-bridge-sessions-mode)
             (dsh-bridge--list-sessions-in-buffer)
             (should (dsh-bridge--sessions-goto-id "s1"))
             (dsh-bridge-stop-session))
-        (when (buffer-live-p (get-buffer "*dsh-bridge-sessions*"))
-          (kill-buffer "*dsh-bridge-sessions*"))))
+        (when (buffer-live-p (get-buffer dsh-bridge-sessions-buffer-name))
+          (kill-buffer dsh-bridge-sessions-buffer-name))))
     (let ((stop (cadr (assoc "/sessions/stop"
                              (mapcar (lambda (c) (list (cadr c) c)) calls)))))
       (should (equal (cdr (assoc 'sessionId (caddr stop))) "s1")))))
@@ -5889,8 +5889,8 @@ The host's workspace registry rejects a path that is not fully qualified."
   "After `+' creates a session, point is on the new session's row.
 The new row sorts to the top, where `tabulated-list-print''s REMEMBER-POS
 would otherwise leave point on the row that held the line before."
-  (when (get-buffer "*dsh-bridge-sessions*")
-    (kill-buffer "*dsh-bridge-sessions*"))
+  (when (get-buffer dsh-bridge-sessions-buffer-name)
+    (kill-buffer dsh-bridge-sessions-buffer-name))
   (let* ((created nil)
          (dsh-bridge-pinned-target nil)
          (old '((id . "s-old") (title . "Old") (live . t) (lastActive . 1000)
@@ -5907,23 +5907,23 @@ would otherwise leave point on the row that held the line before."
               ((symbol-function 'dsh-bridge--fetch-sessions)
                (lambda () (cons 200 (if created (list new old) (list old))))))
       ;; Point starts on the only existing row.
-      (with-current-buffer (get-buffer-create "*dsh-bridge-sessions*")
+      (with-current-buffer (get-buffer-create dsh-bridge-sessions-buffer-name)
         (dsh-bridge-sessions-mode)
         (dsh-bridge--list-sessions-in-buffer)
         (should (dsh-bridge--sessions-goto-id "s-old"))
         (should (equal (tabulated-list-get-id) "s-old")))
       (setq created t)
       (dsh-bridge-create-session)
-      (with-current-buffer "*dsh-bridge-sessions*"
+      (with-current-buffer dsh-bridge-sessions-buffer-name
         (should (equal (tabulated-list-get-id) "s-new"))))
-    (kill-buffer "*dsh-bridge-sessions*")))
+    (kill-buffer dsh-bridge-sessions-buffer-name)))
 
 (ert-deftest dsh-bridge-create-session-goto-only-in-sessions-list ()
   "Creating from another buffer never moves point in that buffer.
 The new session's row is selected in the sessions list; with no list open
 there is nothing to select, and the invoking buffer is left alone."
-  (when (get-buffer "*dsh-bridge-sessions*")
-    (kill-buffer "*dsh-bridge-sessions*"))
+  (when (get-buffer dsh-bridge-sessions-buffer-name)
+    (kill-buffer dsh-bridge-sessions-buffer-name))
   (let ((dsh-bridge-pinned-target nil))
     (cl-letf (((symbol-function 'dsh-bridge--read-workspace)
                (lambda (_prompt _session-id) "w1"))
@@ -6035,8 +6035,8 @@ of the session the header names rather than no default at all."
   "In the DSH-Sessions buffer, the row at point supplies the default.
 With no menu open, the pinned target is only the fallback for a buffer that
 names no session at point; a visible row is the user's choice."
-  (when (get-buffer "*dsh-bridge-sessions*")
-    (kill-buffer "*dsh-bridge-sessions*"))
+  (when (get-buffer dsh-bridge-sessions-buffer-name)
+    (kill-buffer dsh-bridge-sessions-buffer-name))
   (let* ((called nil) (seen-prompt nil)
          (cache '(((id . "s1") (title . "One") (live . t) (lastActive . 10)
                    (cwd . "/a") (workspace . "WS A") (workspaceId . "w1"))
@@ -6059,7 +6059,7 @@ names no session at point; a visible row is the user's choice."
                (lambda (prompt &rest _rest)
                  (setq seen-prompt prompt)
                  "")))
-      (with-current-buffer (get-buffer-create "*dsh-bridge-sessions*")
+      (with-current-buffer (get-buffer-create dsh-bridge-sessions-buffer-name)
         (dsh-bridge-sessions-mode)
         (dsh-bridge--sessions-fill cache)
         (should (dsh-bridge--sessions-goto-id "s2"))
@@ -6067,8 +6067,8 @@ names no session at point; a visible row is the user's choice."
               (dsh-bridge--focus nil)
               (dsh-bridge-pinned-target "s1"))
           (dsh-bridge-create-session))))
-    (when (get-buffer "*dsh-bridge-sessions*")
-      (kill-buffer "*dsh-bridge-sessions*"))
+    (when (get-buffer dsh-bridge-sessions-buffer-name)
+      (kill-buffer dsh-bridge-sessions-buffer-name))
     (should (string-match-p "WS B" seen-prompt))
     (let ((create (cadr (assoc "/sessions/create"
                                (mapcar (lambda (c) (list (cadr c) c)) called)))))
@@ -6232,10 +6232,10 @@ A pending ask still outranks it: the question needs an answer."
     (cl-letf (((symbol-function 'dsh-bridge--fetch-sessions)
                (lambda () (cons 200 '(((id . "live-2") (live . t) (cwd . "/b"))))))
               ((symbol-function 'pop-to-buffer) (lambda (&rest _) nil)))
-      (with-current-buffer (get-buffer "*dsh-bridge-sessions*")
+      (with-current-buffer (get-buffer dsh-bridge-sessions-buffer-name)
         (revert-buffer t t)))
     (let ((entries (buffer-local-value 'tabulated-list-entries
-                                       (get-buffer "*dsh-bridge-sessions*"))))
+                                       (get-buffer dsh-bridge-sessions-buffer-name))))
       (should (assoc "live-2" entries))
       (should-not (assoc "live-1" entries)))))
 
@@ -6385,14 +6385,14 @@ the cached roster and tracker untouched."
   "An empty roster still opens the session list: an empty tabulated buffer,
 so the list's actions (`+' create, `g' re-fetch, `v' archived visibility)
 stay available instead of a bare error message."
-  (when (get-buffer "*dsh-bridge-sessions*")
-    (kill-buffer "*dsh-bridge-sessions*"))
+  (when (get-buffer dsh-bridge-sessions-buffer-name)
+    (kill-buffer dsh-bridge-sessions-buffer-name))
   (let ((dsh-bridge-pinned-target nil))
     (cl-letf (((symbol-function 'dsh-bridge--fetch-sessions)
                (lambda () (cons 200 nil)))
               ((symbol-function 'pop-to-buffer) (lambda (&rest _) nil)))
       (dsh-bridge-list-sessions))
-    (let ((buf (get-buffer "*dsh-bridge-sessions*")))
+    (let ((buf (get-buffer dsh-bridge-sessions-buffer-name)))
       (should buf)
       (should (eq (buffer-local-value 'major-mode buf)
                   'dsh-bridge-sessions-mode))
@@ -6402,8 +6402,8 @@ stay available instead of a bare error message."
 
 (ert-deftest dsh-bridge-list-sessions-failed-fetch-no-buffer ()
   "A failed roster fetch reports an error and opens no sessions buffer."
-  (when (get-buffer "*dsh-bridge-sessions*")
-    (kill-buffer "*dsh-bridge-sessions*"))
+  (when (get-buffer dsh-bridge-sessions-buffer-name)
+    (kill-buffer dsh-bridge-sessions-buffer-name))
   (let ((msg nil)
         (dsh-bridge-pinned-target nil))
     (cl-letf (((symbol-function 'dsh-bridge--fetch-sessions)
@@ -6412,14 +6412,14 @@ stay available instead of a bare error message."
                (lambda (&rest args) (setq msg (apply #'format args)))))
       (dsh-bridge-list-sessions))
     (should (string-match-p "failed to fetch sessions" msg))
-    (should-not (get-buffer "*dsh-bridge-sessions*"))))
+    (should-not (get-buffer dsh-bridge-sessions-buffer-name))))
 
 (ert-deftest dsh-bridge-list-sessions-refreshes-open-list ()
   "Invoking the list command again re-fetches the roster.
 The command is the list's entry point, not merely a window switch: a list
 already on screen is re-populated (in-buffer `g' stays the other refresh)."
-  (when (get-buffer "*dsh-bridge-sessions*")
-    (kill-buffer "*dsh-bridge-sessions*"))
+  (when (get-buffer dsh-bridge-sessions-buffer-name)
+    (kill-buffer dsh-bridge-sessions-buffer-name))
   (let ((fetches 0)
         (roster '(((id . "s1") (live . t) (title . "One")
                    (lastActive . 1000))))
@@ -6437,9 +6437,9 @@ already on screen is re-populated (in-buffer `g' stays the other refresh)."
       (dsh-bridge-list-sessions))
     ;; One fetch per invocation: the second must not reuse the first roster.
     (should (= fetches 2))
-    (let ((buf (get-buffer "*dsh-bridge-sessions*")))
+    (let ((buf (get-buffer dsh-bridge-sessions-buffer-name)))
       (should (assoc "s2" (buffer-local-value 'tabulated-list-entries buf))))
-    (kill-buffer "*dsh-bridge-sessions*")))
+    (kill-buffer dsh-bridge-sessions-buffer-name)))
 
 (ert-deftest dsh-bridge-list-sessions-in-buffer-refuses-foreign-buffer ()
   "The populate primitive refuses a buffer that is not a DSH-Sessions buffer."
@@ -6451,10 +6451,10 @@ already on screen is re-populated (in-buffer `g' stays the other refresh)."
 Background paths (the notification debounce, the status repaint) must skip
 a same-named buffer in another mode rather than turn event handling into an
 error; only the painter entry points refuse such a buffer."
-  (when (get-buffer "*dsh-bridge-sessions*")
-    (kill-buffer "*dsh-bridge-sessions*"))
+  (when (get-buffer dsh-bridge-sessions-buffer-name)
+    (kill-buffer dsh-bridge-sessions-buffer-name))
   (should (null (dsh-bridge--sessions-buffer)))
-  (let ((buf (get-buffer-create "*dsh-bridge-sessions*")))
+  (let ((buf (get-buffer-create dsh-bridge-sessions-buffer-name)))
     (unwind-protect
         (progn
           (with-current-buffer buf
@@ -6462,7 +6462,7 @@ error; only the painter entry points refuse such a buffer."
             (insert "user notes"))
           (should (null (dsh-bridge--sessions-buffer))))
       (kill-buffer buf)))
-  (let ((buf (get-buffer-create "*dsh-bridge-sessions*")))
+  (let ((buf (get-buffer-create dsh-bridge-sessions-buffer-name)))
     (unwind-protect
         (progn
           (with-current-buffer buf (dsh-bridge-sessions-mode))
@@ -6473,10 +6473,10 @@ error; only the painter entry points refuse such a buffer."
   "Refresh refuses a same-named buffer that is not a DSH-Sessions buffer.
 The strict list primitive signals before it fetches, so the roster is not
 even requested."
-  (when (get-buffer "*dsh-bridge-sessions*")
-    (kill-buffer "*dsh-bridge-sessions*"))
+  (when (get-buffer dsh-bridge-sessions-buffer-name)
+    (kill-buffer dsh-bridge-sessions-buffer-name))
   (let ((fetched nil)
-        (buf (get-buffer-create "*dsh-bridge-sessions*")))
+        (buf (get-buffer-create dsh-bridge-sessions-buffer-name)))
     (unwind-protect
         (progn
           (with-current-buffer buf
@@ -6494,9 +6494,9 @@ even requested."
   "Filling refuses a same-named buffer in another mode without touching it.
 `tabulated-list-print' does not check the mode, so the painter's own guard
 is what keeps a repurposed buffer's contents from being overwritten."
-  (when (get-buffer "*dsh-bridge-sessions*")
-    (kill-buffer "*dsh-bridge-sessions*"))
-  (let ((buf (get-buffer-create "*dsh-bridge-sessions*")))
+  (when (get-buffer dsh-bridge-sessions-buffer-name)
+    (kill-buffer dsh-bridge-sessions-buffer-name))
+  (let ((buf (get-buffer-create dsh-bridge-sessions-buffer-name)))
     (unwind-protect
         (progn
           (with-current-buffer buf
@@ -7140,8 +7140,8 @@ a tracked `idle' keeps the cold row's `unknown'."
 
 (ert-deftest dsh-bridge-notification-turn-events ()
   "The notification dispatch updates the tracker for start/complete frames."
-  (when (get-buffer "*dsh-bridge-sessions*")
-    (kill-buffer "*dsh-bridge-sessions*"))
+  (when (get-buffer dsh-bridge-sessions-buffer-name)
+    (kill-buffer dsh-bridge-sessions-buffer-name))
   (let ((dsh-bridge--session-status nil)
         (dsh-bridge--sessions-cache nil))
     (dsh-bridge--notification-handle-events
@@ -7202,8 +7202,8 @@ roster fetch, the view-opening `/turns' read, and the turn-complete refetch."
                        200))))
       (dsh-bridge-fetch "s1"))
     (should (eq (dsh-bridge--status-state "s1") 'running))
-    (when (buffer-live-p (get-buffer "*dsh-bridge-output*"))
-      (kill-buffer "*dsh-bridge-output*")))
+    (when (buffer-live-p (get-buffer dsh-bridge-view-buffer-name))
+      (kill-buffer dsh-bridge-view-buffer-name)))
   ;; The turn-complete refetch of a superseded turn.
   (let ((dsh-bridge--session-status nil)
         (dsh-bridge--status-revision nil)
@@ -7646,7 +7646,7 @@ strings it saw."
               ((symbol-function 'message)
                (lambda (fmt &rest args)
                  (push (apply #'format fmt args) messages))))
-      (with-current-buffer (get-buffer-create "*dsh-bridge-prompt*")
+      (with-current-buffer (get-buffer-create dsh-bridge-prompt-buffer-name)
         (dsh-bridge-prompt-mode)
         (setq-local dsh-bridge--prompt-session prompt-session)
         (insert "hello")
@@ -7695,7 +7695,7 @@ nothing was sent."
         (dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t))))
         (dsh-bridge--bridge-status-cache 'running))
     (unwind-protect
-        (with-current-buffer (get-buffer-create "*dsh-bridge-prompt*")
+        (with-current-buffer (get-buffer-create dsh-bridge-prompt-buffer-name)
           (dsh-bridge-prompt-mode)
           (setq-local dsh-bridge--prompt-session "s1")
           (insert "hello")
@@ -7727,7 +7727,7 @@ the prompt untouched."
         (dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t))))
         (dsh-bridge--bridge-status-cache 'running))
     (unwind-protect
-        (with-current-buffer (get-buffer-create "*dsh-bridge-prompt*")
+        (with-current-buffer (get-buffer-create dsh-bridge-prompt-buffer-name)
           (dsh-bridge-prompt-mode)
           (setq-local dsh-bridge--prompt-session "s1")
           (insert "hello")
@@ -7754,7 +7754,7 @@ the prompt untouched."
         (dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t))))
         (dsh-bridge--bridge-status-cache 'running))
     (unwind-protect
-        (with-current-buffer (get-buffer-create "*dsh-bridge-prompt*")
+        (with-current-buffer (get-buffer-create dsh-bridge-prompt-buffer-name)
           (dsh-bridge-prompt-mode)
           (setq-local dsh-bridge--prompt-session "s1")
           (insert "hello")
@@ -7843,8 +7843,8 @@ state (rather than burying): the user lands on the live view after sending.
 The just-sent prompt has not committed any content yet, so the view is erased
 to the `(running...)' placeholder and remembers the pre-send (previous
 newest) turn, so only a genuinely newer turn's content replaces it."
-  (when (buffer-live-p (get-buffer "*dsh-bridge-output*"))
-    (kill-buffer "*dsh-bridge-output*"))
+  (when (buffer-live-p (get-buffer dsh-bridge-view-buffer-name))
+    (kill-buffer dsh-bridge-view-buffer-name))
   (with-temp-buffer
     (dsh-bridge-prompt-mode)
     (setq-local dsh-bridge--prompt-session "s1")
@@ -7861,21 +7861,21 @@ newest) turn, so only a genuinely newer turn's content replaces it."
                                                        2000))))))))
         (dsh-bridge--prompt-exit "s1"))
       (should shown)
-      (with-current-buffer (get-buffer "*dsh-bridge-output*")
+      (with-current-buffer (get-buffer dsh-bridge-view-buffer-name)
         (should (equal dsh-bridge--view-content-session "s1"))
         (should (eq dsh-bridge--view-follow t))
         (should (eq dsh-bridge--view-waiting t))
         (should (equal dsh-bridge--view-turn 3))
         (should (equal (buffer-string) dsh-bridge--view-running-placeholder)))))
-  (when (buffer-live-p (get-buffer "*dsh-bridge-output*"))
-    (kill-buffer "*dsh-bridge-output*")))
+  (when (buffer-live-p (get-buffer dsh-bridge-view-buffer-name))
+    (kill-buffer dsh-bridge-view-buffer-name)))
 
 (ert-deftest dsh-bridge-send-exit-shows-already-running-turn ()
   "When the session was already running at send time (a queued second send),
 prompt-exit shows the open turn live instead of erasing to the placeholder:
 its committed content is what the user should be watching."
-  (when (buffer-live-p (get-buffer "*dsh-bridge-output*"))
-    (kill-buffer "*dsh-bridge-output*"))
+  (when (buffer-live-p (get-buffer dsh-bridge-view-buffer-name))
+    (kill-buffer dsh-bridge-view-buffer-name))
   (with-temp-buffer
     (dsh-bridge-prompt-mode)
     (setq-local dsh-bridge--prompt-session "s1")
@@ -7892,23 +7892,23 @@ its committed content is what the user should be watching."
                                    (cons 'turns (list running)))))))
         (dsh-bridge--prompt-exit "s1"))
       (should shown)
-      (with-current-buffer (get-buffer "*dsh-bridge-output*")
+      (with-current-buffer (get-buffer dsh-bridge-view-buffer-name)
         (should (equal dsh-bridge--view-content-session "s1"))
         (should (eq dsh-bridge--view-follow t))
         (should (null dsh-bridge--view-waiting))
         (should (equal dsh-bridge--view-turn 2))
         (should (equal (buffer-string)
                        (dsh-bridge-test--view-turn-render running))))))
-  (when (buffer-live-p (get-buffer "*dsh-bridge-output*"))
-    (kill-buffer "*dsh-bridge-output*")))
+  (when (buffer-live-p (get-buffer dsh-bridge-view-buffer-name))
+    (kill-buffer dsh-bridge-view-buffer-name)))
 
 (ert-deftest dsh-bridge-send-exit-shows-turn-finished-during-send ()
   "A turn that commits (or finishes) while the blocking send is on the wire is
 shown rather than hidden behind a `(running...)' placeholder the waiting gate
 could never replace.  `--after-prompt-view' recognizes it as this send's turn
 by its `startedAt'."
-  (when (buffer-live-p (get-buffer "*dsh-bridge-output*"))
-    (kill-buffer "*dsh-bridge-output*"))
+  (when (buffer-live-p (get-buffer dsh-bridge-view-buffer-name))
+    (kill-buffer dsh-bridge-view-buffer-name))
   (with-temp-buffer
     (dsh-bridge-prompt-mode)
     (setq-local dsh-bridge--prompt-session "s1")
@@ -7927,7 +7927,7 @@ by its `startedAt'."
                                    (cons 'turns (list finished)))))))
         (dsh-bridge--prompt-exit "s1" nil sent-at))
       (should shown)
-      (with-current-buffer (get-buffer "*dsh-bridge-output*")
+      (with-current-buffer (get-buffer dsh-bridge-view-buffer-name)
         (should (equal dsh-bridge--view-content-session "s1"))
         (should (eq dsh-bridge--view-follow t))
         (should (null dsh-bridge--view-waiting))
@@ -7935,15 +7935,15 @@ by its `startedAt'."
         (should (equal (buffer-string)
                        (dsh-bridge-test--view-turn-render finished "s1")))
         (should (equal (point) (point-max))))))
-  (when (buffer-live-p (get-buffer "*dsh-bridge-output*"))
-    (kill-buffer "*dsh-bridge-output*")))
+  (when (buffer-live-p (get-buffer dsh-bridge-view-buffer-name))
+    (kill-buffer dsh-bridge-view-buffer-name)))
 
 (ert-deftest dsh-bridge-send-exit-waits-when-newest-turn-precedes-send ()
   "A completed turn that began before the send is the pre-send turn: the view
 still gets the `(running...)' placeholder, and only a strictly newer turn may
 replace it (the regression guard for the fix above)."
-  (when (buffer-live-p (get-buffer "*dsh-bridge-output*"))
-    (kill-buffer "*dsh-bridge-output*"))
+  (when (buffer-live-p (get-buffer dsh-bridge-view-buffer-name))
+    (kill-buffer dsh-bridge-view-buffer-name))
   (with-temp-buffer
     (dsh-bridge-prompt-mode)
     (setq-local dsh-bridge--prompt-session "s1")
@@ -7962,13 +7962,13 @@ replace it (the regression guard for the fix above)."
                                    (cons 'turns (list previous)))))))
         (dsh-bridge--prompt-exit "s1" nil sent-at))
       (should shown)
-      (with-current-buffer (get-buffer "*dsh-bridge-output*")
+      (with-current-buffer (get-buffer dsh-bridge-view-buffer-name)
         (should (eq dsh-bridge--view-follow t))
         (should (eq dsh-bridge--view-waiting t))
         (should (equal dsh-bridge--view-turn 3))
         (should (equal (buffer-string) dsh-bridge--view-running-placeholder)))))
-  (when (buffer-live-p (get-buffer "*dsh-bridge-output*"))
-    (kill-buffer "*dsh-bridge-output*")))
+  (when (buffer-live-p (get-buffer dsh-bridge-view-buffer-name))
+    (kill-buffer dsh-bridge-view-buffer-name)))
 
 (ert-deftest dsh-bridge-send-exit-replays-a-replies-changed-race ()
   "A `replies-changed' frame can arrive while the blocking send is on the wire,
@@ -7976,8 +7976,8 @@ before the view and its turns-cache entry exist; the deferred refresh then
 drops the frame.  `--after-prompt-view' leaves the waiting placeholder and
 replays one refresh, so a turn parked on a question does not strand the reply
 it announced.  A view that already holds content needs no replay."
-  (when (buffer-live-p (get-buffer "*dsh-bridge-output*"))
-    (kill-buffer "*dsh-bridge-output*"))
+  (when (buffer-live-p (get-buffer dsh-bridge-view-buffer-name))
+    (kill-buffer dsh-bridge-view-buffer-name))
   (with-temp-buffer
     (dsh-bridge-prompt-mode)
     (setq-local dsh-bridge--prompt-session "s1")
@@ -7997,7 +7997,7 @@ it announced.  A view that already holds content needs no replay."
                 ((symbol-function 'dsh-bridge--turns-changed)
                  (lambda (id) (push id replayed))))
         (dsh-bridge--prompt-exit "s1" nil sent-at))
-      (with-current-buffer (get-buffer "*dsh-bridge-output*")
+      (with-current-buffer (get-buffer dsh-bridge-view-buffer-name)
         (should (eq dsh-bridge--view-waiting t)))
       (should (equal replayed '("s1"))))
     ;; A response that already carries the turn fills it; no replay is due.
@@ -8019,11 +8019,11 @@ it announced.  A view that already holds content needs no replay."
                 ((symbol-function 'dsh-bridge--turns-changed)
                  (lambda (id) (push id replayed))))
         (dsh-bridge--prompt-exit "s1" nil sent-at))
-      (with-current-buffer (get-buffer "*dsh-bridge-output*")
+      (with-current-buffer (get-buffer dsh-bridge-view-buffer-name)
         (should-not dsh-bridge--view-waiting))
       (should-not replayed)))
-  (when (buffer-live-p (get-buffer "*dsh-bridge-output*"))
-    (kill-buffer "*dsh-bridge-output*")))
+  (when (buffer-live-p (get-buffer dsh-bridge-view-buffer-name))
+    (kill-buffer dsh-bridge-view-buffer-name)))
 
 (ert-deftest dsh-bridge-send-and-exit-passes-send-instant ()
   "The success callback carries the send instant to `--prompt-exit', so
@@ -8034,7 +8034,7 @@ it announced.  A view that already holds content needs no replay."
         (dsh-bridge--sessions-cache nil)
         (dsh-bridge--session-status nil)
         (dsh-bridge--prompt-session "s1"))
-    (with-current-buffer (get-buffer-create "*dsh-bridge-prompt*")
+    (with-current-buffer (get-buffer-create dsh-bridge-prompt-buffer-name)
       (dsh-bridge-prompt-mode)
       (insert "hello")
       (cl-letf (((symbol-function 'dsh-bridge-send-text)
@@ -8056,8 +8056,8 @@ moves window selection during the synchronous send.  HINT, when non-nil, passes
 the invoking window to `dsh-bridge--prompt-exit'; otherwise it is omitted so
 the prompt's window must be found by buffer.  Returns the prompt buffer and the
 view buffer; the caller must unwind the window configuration."
-  (let ((view (get-buffer-create "*dsh-bridge-output*"))
-        (prompt (get-buffer-create "*dsh-bridge-prompt*"))
+  (let ((view (get-buffer-create dsh-bridge-view-buffer-name))
+        (prompt (get-buffer-create dsh-bridge-prompt-buffer-name))
         w1 w2)
     (with-current-buffer view
       (dsh-bridge-view-mode)
@@ -8092,7 +8092,8 @@ view buffer; the caller must unwind the window configuration."
           (should-not (get-buffer-window (nth 0 pair)))
           (should (eq (window-buffer) (nth 1 pair))))
       (set-window-configuration config)
-      (dolist (b '("*dsh-bridge-output*" "*dsh-bridge-prompt*"))
+      (dolist (b (list dsh-bridge-view-buffer-name
+                       dsh-bridge-prompt-buffer-name))
         (when (buffer-live-p (get-buffer b)) (kill-buffer b))))))
 
 (ert-deftest dsh-bridge-prompt-exit-quits-prompt-window-when-selection-moves ()
@@ -8116,8 +8117,8 @@ shown and selection never moves."
   "The invoking window is captured before the synchronous POST, so window
 selection moving during the send cannot strand the prompt on screen."
   (let ((config (current-window-configuration))
-        (view (get-buffer-create "*dsh-bridge-output*"))
-        (prompt (get-buffer-create "*dsh-bridge-prompt*"))
+        (view (get-buffer-create dsh-bridge-view-buffer-name))
+        (prompt (get-buffer-create dsh-bridge-prompt-buffer-name))
         (dsh-bridge-pinned-target nil)
         (dsh-bridge--last-resolved-active nil)
         (dsh-bridge--last-sent nil)
@@ -8150,7 +8151,8 @@ selection moving during the send cannot strand the prompt on screen."
           (should-not (get-buffer-window prompt))
           (should (eq (window-buffer) view)))
       (set-window-configuration config)
-      (dolist (b '("*dsh-bridge-output*" "*dsh-bridge-prompt*"))
+      (dolist (b (list dsh-bridge-view-buffer-name
+                       dsh-bridge-prompt-buffer-name))
         (when (buffer-live-p (get-buffer b)) (kill-buffer b))))))
 
 (ert-deftest dsh-bridge-exit-to-view-same-window ()
@@ -8158,7 +8160,7 @@ selection moving during the send cannot strand the prompt on screen."
 selected window (no split) and leaves point at the view's end, so following
 replies splice in above it."
   (let ((config (current-window-configuration))
-        (view (get-buffer-create "*dsh-bridge-output*"))
+        (view (get-buffer-create dsh-bridge-view-buffer-name))
         (old (get-buffer-create "*dsh-bridge-exit-old*")))
     (unwind-protect
         (progn
@@ -8183,7 +8185,7 @@ replies splice in above it."
   "With the view already shown in another window, that window is selected and
 the window the action came from is quit, so the old buffer does not linger."
   (let ((config (current-window-configuration))
-        (view (get-buffer-create "*dsh-bridge-output*"))
+        (view (get-buffer-create dsh-bridge-view-buffer-name))
         (old (get-buffer-create "*dsh-bridge-exit-old*"))
         w1 w2)
     (unwind-protect
@@ -8256,12 +8258,12 @@ caller level by `dsh-bridge-view-follow-refill-waiting-gate' and
   "A waiting view with a pending ask-user question shows the awaiting note
 instead of the `(running...)' placeholder: the fresh turn may ask before it
 commits any text.  Resolving the question restores the placeholder."
-  (when (buffer-live-p (get-buffer "*dsh-bridge-output*"))
-    (kill-buffer "*dsh-bridge-output*"))
+  (when (buffer-live-p (get-buffer dsh-bridge-view-buffer-name))
+    (kill-buffer dsh-bridge-view-buffer-name))
   (let ((dsh-bridge--session-status nil)
         (dsh-bridge--pending-questions
          (dsh-bridge-test--pending-ask "s1" "Approve this plan?")))
-    (with-current-buffer (get-buffer-create "*dsh-bridge-output*")
+    (with-current-buffer (get-buffer-create dsh-bridge-view-buffer-name)
       (dsh-bridge-view-mode)
       (setq-local dsh-bridge--view-content-session "s1")
       (dsh-bridge--view-waiting-fill "s1" 2)
@@ -8272,11 +8274,11 @@ commits any text.  Resolving the question restores the placeholder."
     ;; No pending question: back to the plain placeholder.
     (let ((dsh-bridge--pending-questions nil))
       (dsh-bridge--view-await-refresh "s1"))
-    (with-current-buffer "*dsh-bridge-output*"
+    (with-current-buffer dsh-bridge-view-buffer-name
       (should (string-match-p "(running\\.\\.\\.)" (buffer-string)))
       (should-not (string-match-p "Awaiting response:" (buffer-string)))))
-  (when (buffer-live-p (get-buffer "*dsh-bridge-output*"))
-    (kill-buffer "*dsh-bridge-output*")))
+  (when (buffer-live-p (get-buffer dsh-bridge-view-buffer-name))
+    (kill-buffer dsh-bridge-view-buffer-name)))
 
 ;;; Prompt-buffer model selection and context occupancy
 
@@ -9075,13 +9077,13 @@ the refetch can settle a blocked turn that `/turns' cannot name."
 
 (ert-deftest dsh-bridge-status-reprint-row-repaints-cell ()
   "Reprinting a sessions-list row repaints a changed status cell in place."
-  (when (get-buffer "*dsh-bridge-sessions*")
-    (kill-buffer "*dsh-bridge-sessions*"))
+  (when (get-buffer dsh-bridge-sessions-buffer-name)
+    (kill-buffer dsh-bridge-sessions-buffer-name))
   (let ((dsh-bridge-status-indicator 'geometric)
         (dsh-bridge--sessions-cache
          '(((id . "s1") (live . t) (running . nil) (lastActive . 0))))
         (dsh-bridge--session-status nil))
-    (with-current-buffer (get-buffer-create "*dsh-bridge-sessions*")
+    (with-current-buffer (get-buffer-create dsh-bridge-sessions-buffer-name)
       (dsh-bridge-sessions-mode)
       (setq tabulated-list-format (dsh-bridge--sessions-format))
       (setq tabulated-list-sort-key '("Age" . t))
@@ -9096,7 +9098,7 @@ the refetch can settle a blocked turn that `/turns' cannot name."
       (dsh-bridge--status-reprint-row "s1")
       (should (string-match-p "■" (buffer-string)))
       (should-not (string-match-p "●" (buffer-string))))
-    (kill-buffer "*dsh-bridge-sessions*")))
+    (kill-buffer dsh-bridge-sessions-buffer-name)))
 
 (ert-deftest dsh-bridge-view-next-reply-at-newest-enters-follow ()
   "M-n at the newest turn enters turn-following state (acting like \"turn 0\"),
@@ -9137,7 +9139,7 @@ newer turns arrive."
                (lambda (_method _path _payload)
                  (cons 200 (list (cons 'sessionId "s1")
                                  (cons 'turns new-turns))))))
-      (with-current-buffer (get-buffer-create "*dsh-bridge-output*")
+      (with-current-buffer (get-buffer-create dsh-bridge-view-buffer-name)
         (dsh-bridge-view-mode)
         (setq-local dsh-bridge--view-content-session "s1")
         ;; Browsing turn 20, at index 1 of the 3-turn list.
@@ -9148,7 +9150,7 @@ newer turns arrive."
         ;; Turn 20 now sits at index 2 in the refreshed list: (3/4).
         (should (eq dsh-bridge--view-browsing t))
         (should (string-match-p " (3/4)" (dsh-bridge--view-header-line))))
-      (kill-buffer "*dsh-bridge-output*"))))
+      (kill-buffer dsh-bridge-view-buffer-name))))
 
 (ert-deftest dsh-bridge-view-turns-cache-refresh-vanished-turn-rests ()
   "When the shown turn vanished from the refreshed list (a compaction replaced
@@ -9161,7 +9163,7 @@ an unrelated turn; the buffer text is untouched."
                (lambda (_method _path _payload)
                  (cons 200 (list (cons 'sessionId "s1")
                                  (cons 'turns new-turns))))))
-      (with-current-buffer (get-buffer-create "*dsh-bridge-output*")
+      (with-current-buffer (get-buffer-create dsh-bridge-view-buffer-name)
         (dsh-bridge-view-mode)
         (setq-local dsh-bridge--view-content-session "s1")
         (let ((inhibit-read-only t)) (insert "browsing turn 20"))
@@ -9171,7 +9173,7 @@ an unrelated turn; the buffer text is untouched."
         (should (equal (dsh-bridge--turns-cache-turns "s1") new-turns))
         (should (null dsh-bridge--view-browsing))
         (should (equal (buffer-string) "browsing turn 20")))
-      (kill-buffer "*dsh-bridge-output*"))))
+      (kill-buffer dsh-bridge-view-buffer-name))))
 
 (ert-deftest dsh-bridge-view-turns-cache-refresh-empty-list-clears ()
   "A `/turns' response with an explicit empty turn list replaces the cached
@@ -9181,7 +9183,7 @@ response without a `turns' field (an error body) leaves the cache alone."
     (cl-letf (((symbol-function 'dsh-bridge--request)
                (lambda (_method _path _payload)
                  (cons 200 (list (cons 'sessionId "s1") (cons 'turns nil))))))
-      (with-current-buffer (get-buffer-create "*dsh-bridge-output*")
+      (with-current-buffer (get-buffer-create dsh-bridge-view-buffer-name)
         (dsh-bridge-view-mode)
         (setq-local dsh-bridge--view-content-session "s1")
         (setq-local dsh-bridge--view-turn 20)
@@ -9191,7 +9193,7 @@ response without a `turns' field (an error body) leaves the cache alone."
         (should (assoc "s1" dsh-bridge--turns-cache))
         (should (null (dsh-bridge--turns-cache-turns "s1")))
         (should (null dsh-bridge--view-browsing)))
-      (kill-buffer "*dsh-bridge-output*")))
+      (kill-buffer dsh-bridge-view-buffer-name)))
   (let ((dsh-bridge--turns-cache (dsh-bridge-test--view-cache dsh-bridge-test--view-turns)))
     (cl-letf (((symbol-function 'dsh-bridge--request)
                (lambda (_method _path _payload)
@@ -9324,7 +9326,7 @@ from the shown turn's number."
                (lambda (_method _path _payload)
                  (cons 200 (dsh-bridge-test--turns-response-alist
                             (list new-8 grown-7) 3 t)))))
-      (with-current-buffer (get-buffer-create "*dsh-bridge-output*")
+      (with-current-buffer (get-buffer-create dsh-bridge-view-buffer-name)
         (dsh-bridge-view-mode)
         (setq-local dsh-bridge--view-content-session "s1")
         ;; Browsing turn 5, at index 1 of the 2-turn cache.
@@ -9334,7 +9336,7 @@ from the shown turn's number."
         ;; The merged list is [8, 7, 5]; turn 5 derives index 2.
         (should (eq dsh-bridge--view-browsing t))
         (should (string-match-p " (3/3)" (dsh-bridge--view-header-line))))
-      (kill-buffer "*dsh-bridge-output*"))))
+      (kill-buffer dsh-bridge-view-buffer-name))))
 
 (ert-deftest dsh-bridge-turns-cache-fetch-stale-since-replaces-fully ()
   "An incremental response whose oldest turn is not the `since' sent (a
@@ -9398,7 +9400,7 @@ refresh returns content again — the epoch is kept and then updated."
                    ;; Forced refresh with content again, epoch 5.
                    (cons 200 (dsh-bridge-test--turns-response-alist
                               (list fresh-8) 5 nil))))))
-      (with-current-buffer (get-buffer-create "*dsh-bridge-output*")
+      (with-current-buffer (get-buffer-create dsh-bridge-view-buffer-name)
         (dsh-bridge-view-mode)
         (setq-local dsh-bridge--view-content-session "s1")
         ;; First refresh: the entry survives as known-empty at epoch 4.
@@ -9412,7 +9414,7 @@ refresh returns content again — the epoch is kept and then updated."
         (dsh-bridge--view-turns-cache-refresh "s1")
         (should (equal (dsh-bridge--turns-cache-turns "s1") (list fresh-8)))
         (should (equal (car (dsh-bridge--turns-cache-entry "s1")) 5)))
-      (kill-buffer "*dsh-bridge-output*"))))
+      (kill-buffer dsh-bridge-view-buffer-name))))
 
 (ert-deftest dsh-bridge-view-next-reply-from-rest-steps-to-newer ()
   "M-n at rest refreshes the turn list and steps to a newer turn when one has
@@ -9424,7 +9426,7 @@ arrived (new turns land at the head); landing on the newest resumes following."
                             (nth 1 dsh-bridge-test--view-turns)))
          (shown (nth 0 dsh-bridge-test--view-turns))
          (dsh-bridge--turns-cache (dsh-bridge-test--view-cache stale-turns)))
-    (with-current-buffer (get-buffer-create "*dsh-bridge-output*")
+    (with-current-buffer (get-buffer-create dsh-bridge-view-buffer-name)
       (dsh-bridge-view-mode)
       (setq-local dsh-bridge--view-content-session "s1")
       (let ((inhibit-read-only t))
@@ -9441,7 +9443,7 @@ arrived (new turns land at the head); landing on the newest resumes following."
       ;; Reaching the new newest resumes following rather than pinning it.
       (should (eq dsh-bridge--view-follow t))
       (should (null dsh-bridge--view-browsing)))
-    (kill-buffer "*dsh-bridge-output*")))
+    (kill-buffer dsh-bridge-view-buffer-name)))
 
 (ert-deftest dsh-bridge-view-next-reply-from-rest-at-newest ()
   "M-n at rest when the shown turn is still the newest enters turn-following
@@ -9456,7 +9458,7 @@ state (\"turn 0\") and announces it."
                                  (cons 'turns dsh-bridge-test--view-turns)))))
               ((symbol-function 'message)
                (lambda (&rest args) (setq msg (apply #'format args)))))
-      (with-current-buffer (get-buffer-create "*dsh-bridge-output*")
+      (with-current-buffer (get-buffer-create dsh-bridge-view-buffer-name)
         (dsh-bridge-view-mode)
         (setq-local dsh-bridge--view-content-session "s1")
         (let ((inhibit-read-only t))
@@ -9469,7 +9471,7 @@ state (\"turn 0\") and announces it."
         (should (eq dsh-bridge--view-follow t))
         (should (null dsh-bridge--view-browsing))
         (should (string-match-p "Following the newest turn" msg)))
-      (kill-buffer "*dsh-bridge-output*"))))
+      (kill-buffer dsh-bridge-view-buffer-name))))
 
 (ert-deftest dsh-bridge-view-next-reply-from-empty-view ()
   "M-n on an empty view reports no newer turns and leaves the buffer alone."
@@ -9502,7 +9504,7 @@ second-newest turn needs no extra M-n (the pinned `(1/X)' stop is gone)."
                (lambda (_m _p _pl)
                  (cons 200 (list (cons 'sessionId "s1")
                                  (cons 'turns dsh-bridge-test--view-turns))))))
-      (with-current-buffer (get-buffer-create "*dsh-bridge-output*")
+      (with-current-buffer (get-buffer-create dsh-bridge-view-buffer-name)
         (dsh-bridge-view-mode)
         (setq-local dsh-bridge--view-content-session "s1")
         (let ((inhibit-read-only t))
@@ -9515,7 +9517,7 @@ second-newest turn needs no extra M-n (the pinned `(1/X)' stop is gone)."
         (should (equal (buffer-string) dsh-bridge-test--view-newest-rendered))
         (should (eq dsh-bridge--view-follow t))
         (should (null dsh-bridge--view-browsing)))
-      (kill-buffer "*dsh-bridge-output*"))))
+      (kill-buffer dsh-bridge-view-buffer-name))))
 
 (ert-deftest dsh-bridge-view-next-reply-follow-at-newest-off-pins ()
   "With `dsh-bridge-view-follow-at-newest' nil, M-n onto the newest turn pins
@@ -9528,7 +9530,7 @@ following on."
                (lambda (_m _p _pl)
                  (cons 200 (list (cons 'sessionId "s1")
                                  (cons 'turns dsh-bridge-test--view-turns))))))
-      (with-current-buffer (get-buffer-create "*dsh-bridge-output*")
+      (with-current-buffer (get-buffer-create dsh-bridge-view-buffer-name)
         (dsh-bridge-view-mode)
         (setq-local dsh-bridge--view-content-session "s1")
         (let ((inhibit-read-only t))
@@ -9546,7 +9548,7 @@ following on."
         (dsh-bridge-view-next-reply)
         (should (eq dsh-bridge--view-follow t))
         (should (null dsh-bridge--view-browsing)))
-      (kill-buffer "*dsh-bridge-output*"))))
+      (kill-buffer dsh-bridge-view-buffer-name))))
 
 (ert-deftest dsh-bridge-prompt-history-position ()
   "The prompt-history position is newest-first (k/n), absent at rest."
@@ -9576,27 +9578,27 @@ time is a no-op and an unknown id is ignored."
   "Point on a row in the DSH-Sessions list is NOT \"looking\": a tabulated-list
 buffer is a navigation surface, and cursor position must not redirect the
 turn-boundary messages."
-  (when (get-buffer "*dsh-bridge-output*") (kill-buffer "*dsh-bridge-output*"))
-  (when (get-buffer "*dsh-bridge-prompt*") (kill-buffer "*dsh-bridge-prompt*"))
-  (with-current-buffer (get-buffer-create "*dsh-bridge-sessions*")
+  (when (get-buffer dsh-bridge-view-buffer-name) (kill-buffer dsh-bridge-view-buffer-name))
+  (when (get-buffer dsh-bridge-prompt-buffer-name) (kill-buffer dsh-bridge-prompt-buffer-name))
+  (with-current-buffer (get-buffer-create dsh-bridge-sessions-buffer-name)
     (dsh-bridge-sessions-mode)
     (let ((inhibit-read-only t))
       (insert (propertize "s1 row" 'tabulated-list-id "s1")))
     (goto-char (point-min))
     (should-not (dsh-bridge--view-displayed-p "s1"))
     (should-not (dsh-bridge--view-displayed-p "s2")))
-  (kill-buffer "*dsh-bridge-sessions*"))
+  (kill-buffer dsh-bridge-sessions-buffer-name))
 
 (ert-deftest dsh-bridge-view-displayed-p-visible-window ()
   "A DSH-View shows a session on-screen only when the buffer is displayed in a
 window; a hidden view showing the session does not count as \"looking\"."
-  (when (get-buffer "*dsh-bridge-output*") (kill-buffer "*dsh-bridge-output*"))
-  (when (get-buffer "*dsh-bridge-prompt*") (kill-buffer "*dsh-bridge-prompt*"))
-  (when (get-buffer "*dsh-bridge-sessions*") (kill-buffer "*dsh-bridge-sessions*"))
+  (when (get-buffer dsh-bridge-view-buffer-name) (kill-buffer dsh-bridge-view-buffer-name))
+  (when (get-buffer dsh-bridge-prompt-buffer-name) (kill-buffer dsh-bridge-prompt-buffer-name))
+  (when (get-buffer dsh-bridge-sessions-buffer-name) (kill-buffer dsh-bridge-sessions-buffer-name))
   (let ((window (selected-window))
         (previous (window-buffer (selected-window))))
     (unwind-protect
-        (with-current-buffer (get-buffer-create "*dsh-bridge-output*")
+        (with-current-buffer (get-buffer-create dsh-bridge-view-buffer-name)
           (dsh-bridge-view-mode)
           (setq-local dsh-bridge--view-content-session "s1")
           ;; Hidden (not in a window): not looking.
@@ -9606,7 +9608,7 @@ window; a hidden view showing the session does not count as \"looking\"."
           (should (dsh-bridge--view-displayed-p "s1"))
           (should-not (dsh-bridge--view-displayed-p "s2")))
       (set-window-buffer window previous)
-      (kill-buffer "*dsh-bridge-output*"))))
+      (kill-buffer dsh-bridge-view-buffer-name))))
 
 ;;; Live turn feedback: turn-following state, elapsed ticker, boundary echo,
 ;;; blank-on-send, and the follow auto-refill.
@@ -9621,7 +9623,7 @@ declares itself following (so the follow helper sees it)."
                (lambda (_m _p _pl)
                  (cons 200 (list (cons 'sessionId "s1")
                                  (cons 'turns dsh-bridge-test--view-turns))))))
-      (with-current-buffer (get-buffer-create "*dsh-bridge-output*")
+      (with-current-buffer (get-buffer-create dsh-bridge-view-buffer-name)
         (dsh-bridge-view-mode)
         (setq-local dsh-bridge--view-content-session "s1")
         (setq-local dsh-bridge--view-browsing t)
@@ -9629,8 +9631,8 @@ declares itself following (so the follow helper sees it)."
         (should (eq dsh-bridge--view-follow t))
         (should (null dsh-bridge--view-browsing))
         (should (equal (buffer-string) (dsh-bridge-test--view-turn-render newest)))))
-    (when (buffer-live-p (get-buffer "*dsh-bridge-output*"))
-      (kill-buffer "*dsh-bridge-output*"))))
+    (when (buffer-live-p (get-buffer dsh-bridge-view-buffer-name))
+      (kill-buffer dsh-bridge-view-buffer-name))))
 
 (ert-deftest dsh-bridge-view-follow-navigation-interactions ()
   "M-p leaves turn-following (stepping older); M-n while following is a no-op."
@@ -9645,7 +9647,7 @@ declares itself following (so the follow helper sees it)."
                                  (cons 'turns dsh-bridge-test--view-turns)))))
               ((symbol-function 'message)
                (lambda (&rest args) (setq msg (apply #'format args)))))
-      (with-current-buffer (get-buffer-create "*dsh-bridge-output*")
+      (with-current-buffer (get-buffer-create dsh-bridge-view-buffer-name)
         (dsh-bridge-view-mode)
         (setq-local dsh-bridge--view-content-session "s1")
         (setq-local dsh-bridge--view-follow t)
@@ -9661,8 +9663,8 @@ declares itself following (so the follow helper sees it)."
         (dsh-bridge-view-previous-reply)
         (should-not dsh-bridge--view-follow)
         (should (equal (buffer-string) (dsh-bridge-test--view-turn-render middle)))))
-    (when (buffer-live-p (get-buffer "*dsh-bridge-output*"))
-      (kill-buffer "*dsh-bridge-output*"))))
+    (when (buffer-live-p (get-buffer dsh-bridge-view-buffer-name))
+      (kill-buffer dsh-bridge-view-buffer-name))))
 
 (ert-deftest dsh-bridge-view-turn-time-label ()
   "The time segment describes the displayed turn, not the session.
@@ -9747,7 +9749,7 @@ disabled, a running turn has no time segment."
 running...' on turn-start, the reason phrase on turn-complete), are suppressed
 while a visible window shows that session's DSH-View (the view itself shows the
 boundary), and never echo when `dsh-bridge-turn-boundary-echo' is nil."
-  (when (get-buffer "*dsh-bridge-output*") (kill-buffer "*dsh-bridge-output*"))
+  (when (get-buffer dsh-bridge-view-buffer-name) (kill-buffer dsh-bridge-view-buffer-name))
   (let ((dsh-bridge--session-status nil)
         (dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t))))
         (dsh-bridge-turn-boundary-echo t)
@@ -9775,10 +9777,10 @@ boundary), and never echo when `dsh-bridge-turn-boundary-echo' is nil."
             (should (string-match-p "completed" msg))
             ;; A visible DSH-View of s1 suppresses the echo as redundant.
             (setq msg nil)
-            (with-current-buffer (get-buffer-create "*dsh-bridge-output*")
+            (with-current-buffer (get-buffer-create dsh-bridge-view-buffer-name)
               (dsh-bridge-view-mode)
               (setq-local dsh-bridge--view-content-session "s1"))
-            (set-window-buffer window (get-buffer "*dsh-bridge-output*"))
+            (set-window-buffer window (get-buffer dsh-bridge-view-buffer-name))
             (dsh-bridge--notification-handle-events
              '(((kind . "turn-start") (sessionId . "s1") (time . 2))))
             (should-not msg)
@@ -9787,7 +9789,7 @@ boundary), and never echo when `dsh-bridge-turn-boundary-echo' is nil."
             (should-not msg)
             ;; Hidden again, the echo returns; the option off wins either way.
             (set-window-buffer window (get-buffer " *dsh-bridge-echo-test*"))
-            (kill-buffer "*dsh-bridge-output*")
+            (kill-buffer dsh-bridge-view-buffer-name)
             (dsh-bridge--notification-handle-events
              '(((kind . "turn-start") (sessionId . "s1") (time . 3))))
             (should (string-match-p "is running..." msg))
@@ -9799,8 +9801,8 @@ boundary), and never echo when `dsh-bridge-turn-boundary-echo' is nil."
         (set-window-buffer window previous)
         (when (get-buffer " *dsh-bridge-echo-test*")
           (kill-buffer " *dsh-bridge-echo-test*"))
-        (when (get-buffer "*dsh-bridge-output*")
-          (kill-buffer "*dsh-bridge-output*"))))))
+        (when (get-buffer dsh-bridge-view-buffer-name)
+          (kill-buffer dsh-bridge-view-buffer-name))))))
 
 (ert-deftest dsh-bridge-send-text-optimistic-running ()
   "A successful send marks the session running before any SSE turn-start frame,
@@ -9827,23 +9829,23 @@ re-renders the surfaces, and announces it."
 keeps an unsent draft (modified text) without asking, but silently
 erases text kept from a previous send (unmodified, already processed),
 so a fresh composition starts empty."
-  (when (get-buffer "*dsh-bridge-prompt*")
-    (kill-buffer "*dsh-bridge-prompt*"))
+  (when (get-buffer dsh-bridge-prompt-buffer-name)
+    (kill-buffer dsh-bridge-prompt-buffer-name))
   (cl-letf (((symbol-function 'dsh-bridge--refresh-prompt-metadata) #'ignore)
             ((symbol-function 'y-or-n-p) (lambda (_) (error "should not ask"))))
     (with-current-buffer (dsh-bridge--prompt-buffer "s1")
       (insert "unsent text"))
     ;; An unsent (modified) draft is kept.
     (should (eq (dsh-bridge--prompt-buffer "s1")
-                (get-buffer "*dsh-bridge-prompt*")))
-    (with-current-buffer "*dsh-bridge-prompt*"
+                (get-buffer dsh-bridge-prompt-buffer-name)))
+    (with-current-buffer dsh-bridge-prompt-buffer-name
       (should (equal (buffer-string) "unsent text"))
       (set-buffer-modified-p nil))
     ;; Text kept from a previous send (unmodified) is erased.
     (dsh-bridge--prompt-buffer "s1")
-    (with-current-buffer "*dsh-bridge-prompt*"
+    (with-current-buffer dsh-bridge-prompt-buffer-name
       (should (equal (buffer-string) ""))))
-  (kill-buffer "*dsh-bridge-prompt*"))
+  (kill-buffer dsh-bridge-prompt-buffer-name))
 
 (ert-deftest dsh-bridge-prompt-buffer-other-session-erase-rules ()
   "Preparing the shared prompt buffer for another session erases its
@@ -9851,8 +9853,8 @@ text: silently when unmodified (kept from a previous send, so it cannot
 be resent to the wrong session), and only after confirmation when it is
 an unsent draft; declining signals a `user-error' and leaves the buffer
 untouched."
-  (when (get-buffer "*dsh-bridge-prompt*")
-    (kill-buffer "*dsh-bridge-prompt*"))
+  (when (get-buffer dsh-bridge-prompt-buffer-name)
+    (kill-buffer dsh-bridge-prompt-buffer-name))
   (cl-letf (((symbol-function 'dsh-bridge--refresh-prompt-metadata) #'ignore))
     (with-current-buffer (dsh-bridge--prompt-buffer "s1")
       (insert "kept from a previous send")
@@ -9861,7 +9863,7 @@ untouched."
     (cl-letf (((symbol-function 'y-or-n-p)
                (lambda (_) (error "should not ask"))))
       (dsh-bridge--prompt-buffer "s2"))
-    (with-current-buffer "*dsh-bridge-prompt*"
+    (with-current-buffer dsh-bridge-prompt-buffer-name
       (should (equal (buffer-string) ""))
       (should (equal dsh-bridge--prompt-session "s2"))
       (insert "unsent text for s2"))
@@ -9869,22 +9871,22 @@ untouched."
     ;; keeps the text and the binding.
     (cl-letf (((symbol-function 'y-or-n-p) (lambda (_) nil)))
       (should-error (dsh-bridge--prompt-buffer "s1") :type 'user-error))
-    (with-current-buffer "*dsh-bridge-prompt*"
+    (with-current-buffer dsh-bridge-prompt-buffer-name
       (should (equal (buffer-string) "unsent text for s2"))
       (should (equal dsh-bridge--prompt-session "s2")))
     ;; Answering "yes" erases and rebinds.
     (cl-letf (((symbol-function 'y-or-n-p) (lambda (_) t)))
       (dsh-bridge--prompt-buffer "s1"))
-    (with-current-buffer "*dsh-bridge-prompt*"
+    (with-current-buffer dsh-bridge-prompt-buffer-name
       (should (equal (buffer-string) ""))
       (should (equal dsh-bridge--prompt-session "s1"))))
-  (kill-buffer "*dsh-bridge-prompt*"))
+  (kill-buffer dsh-bridge-prompt-buffer-name))
 
 (ert-deftest dsh-bridge-prompt-buffer-reuses-renamed-buffer ()
   "A renamed DSH-Prompt buffer bound to the session is reused, not replaced."
-  (when (get-buffer "*dsh-bridge-prompt*")
-    (kill-buffer "*dsh-bridge-prompt*"))
-  (with-current-buffer (get-buffer-create "*dsh-bridge-prompt*")
+  (when (get-buffer dsh-bridge-prompt-buffer-name)
+    (kill-buffer dsh-bridge-prompt-buffer-name))
+  (with-current-buffer (get-buffer-create dsh-bridge-prompt-buffer-name)
     (dsh-bridge-prompt-mode)
     (setq-local dsh-bridge--prompt-session "s1")
     (rename-buffer "prompt-s1" t))
@@ -9892,9 +9894,9 @@ untouched."
     (should (eq (dsh-bridge--prompt-buffer "s1") (get-buffer "prompt-s1")))
     ;; A different session does not reuse it; it gets the canonical buffer.
     (should (eq (dsh-bridge--prompt-buffer "s2")
-                (get-buffer "*dsh-bridge-prompt*"))))
+                (get-buffer dsh-bridge-prompt-buffer-name))))
   (kill-buffer "prompt-s1")
-  (kill-buffer "*dsh-bridge-prompt*"))
+  (kill-buffer dsh-bridge-prompt-buffer-name))
 
 (ert-deftest dsh-bridge-prompt-binds-effective-session ()
   "`dsh-bridge-prompt' prepares the prompt buffer for the current buffer's
@@ -9906,11 +9908,11 @@ effective session (the dispatcher's `r' continues the shown conversation)."
       (setq-local dsh-bridge--view-content-session "shown")
       (cl-letf (((symbol-function 'dsh-bridge--prompt-buffer)
                  (lambda (id) (setq got id)
-                         (get-buffer-create "*dsh-bridge-prompt*")))
+                         (get-buffer-create dsh-bridge-prompt-buffer-name)))
                 ((symbol-function 'pop-to-buffer) #'ignore))
         (dsh-bridge-prompt)))
     (should (equal got "shown"))
-    (kill-buffer "*dsh-bridge-prompt*")))
+    (kill-buffer dsh-bridge-prompt-buffer-name)))
 
 (ert-deftest dsh-bridge-replies-changed-refills-following ()
   "A replies-changed frame appends the new segment to the shown turn of every
@@ -9923,7 +9925,7 @@ round-trip) and no per-view request."
                  (list (dsh-bridge-test--view-segment "old" 7001000 1)
                        (dsh-bridge-test--view-segment "new" 7002000 2))))
          (requests 0))
-    (with-current-buffer (get-buffer-create "*dsh-bridge-output*")
+    (with-current-buffer (get-buffer-create dsh-bridge-view-buffer-name)
       (dsh-bridge-view-mode)
       (setq-local dsh-bridge--view-content-session "s1")
       (setq-local dsh-bridge--view-follow t)
@@ -9940,7 +9942,7 @@ round-trip) and no per-view request."
       (dsh-bridge--notification-handle-events
        '(((kind . "replies-changed") (sessionId . "s1"))))
       (should (= requests 1))
-      (with-current-buffer "*dsh-bridge-output*"
+      (with-current-buffer dsh-bridge-view-buffer-name
         (should (equal (buffer-string) (dsh-bridge-test--view-turn-render after)))))))
 
 (ert-deftest dsh-bridge-replies-changed-refills-all-following-views ()
@@ -9955,7 +9957,7 @@ following view."
                  (list (dsh-bridge-test--view-segment "old" 7001000 1)
                        (dsh-bridge-test--view-segment "new" 7002000 2))))
          (requests 0))
-    (dolist (buf (list "*dsh-bridge-output*" "*dsh-bridge-output-2*"))
+    (dolist (buf (list dsh-bridge-view-buffer-name "*dsh-bridge-output-2*"))
       (with-current-buffer (get-buffer-create buf)
         (dsh-bridge-view-mode)
         (setq-local dsh-bridge--view-content-session "s1")
@@ -9975,14 +9977,14 @@ following view."
       (dsh-bridge--notification-handle-events
        '(((kind . "replies-changed") (sessionId . "s1"))))
       (should (= requests 1))
-      (with-current-buffer "*dsh-bridge-output*"
+      (with-current-buffer dsh-bridge-view-buffer-name
         (should (equal (buffer-string) (dsh-bridge-test--view-turn-render after))))
       (with-current-buffer "*dsh-bridge-output-2*"
         (should (equal (buffer-string) (dsh-bridge-test--view-turn-render after))))
       (with-current-buffer "*dsh-bridge-output-3*"
         (should (equal (buffer-string) "browsing"))))
-    (dolist (b '("*dsh-bridge-output*" "*dsh-bridge-output-2*"
-                 "*dsh-bridge-output-3*"))
+    (dolist (b (list dsh-bridge-view-buffer-name "*dsh-bridge-output-2*"
+                     "*dsh-bridge-output-3*"))
       (when (buffer-live-p (get-buffer b))
         (kill-buffer b)))))
 
@@ -9993,7 +9995,7 @@ once for all of them."
   (let ((dsh-bridge--session-status nil)
         (dsh-bridge--turns-cache nil)
         (fetches 0))
-    (with-current-buffer (get-buffer-create "*dsh-bridge-output*")
+    (with-current-buffer (get-buffer-create dsh-bridge-view-buffer-name)
       (dsh-bridge-view-mode)
       (setq-local dsh-bridge--view-content-session "s1")
       (let ((inhibit-read-only t)) (erase-buffer) (insert "old-1")))
@@ -10016,11 +10018,11 @@ once for all of them."
               ((symbol-function 'dsh-bridge--apply-session-directory) #'ignore))
       (dsh-bridge--turn-complete-refetch "s1")
       (should (= fetches 1))
-      (dolist (b '("*dsh-bridge-output*" "*dsh-bridge-output-2*"))
+      (dolist (b (list dsh-bridge-view-buffer-name "*dsh-bridge-output-2*"))
         (with-current-buffer b
           ;; The completed turn renders with its closing elapsed divider.
           (should (equal (buffer-string) "new\n\n")))))
-    (dolist (b '("*dsh-bridge-output*" "*dsh-bridge-output-2*"))
+    (dolist (b (list dsh-bridge-view-buffer-name "*dsh-bridge-output-2*"))
       (when (buffer-live-p (get-buffer b))
         (kill-buffer b)))))
 
@@ -10031,7 +10033,7 @@ the reply replaces the `(running...)' placeholder and the waiting state ends."
   (let ((dsh-bridge--session-status nil)
         (dsh-bridge--turns-cache nil)
         (calls 0))
-    (with-current-buffer (get-buffer-create "*dsh-bridge-output*")
+    (with-current-buffer (get-buffer-create dsh-bridge-view-buffer-name)
       (dsh-bridge-view-mode)
       (setq-local dsh-bridge--view-content-session "s1")
       (dsh-bridge--view-waiting-fill "s1" 2)
@@ -10050,13 +10052,13 @@ the reply replaces the `(running...)' placeholder and the waiting state ends."
               ((symbol-function 'dsh-bridge--apply-session-directory) #'ignore))
       (dsh-bridge--turn-complete-refetch "s1")
       (should (= calls 1))
-      (with-current-buffer "*dsh-bridge-output*"
+      (with-current-buffer dsh-bridge-view-buffer-name
         ;; Turn 3 is newer than the pre-send turn 2: accepted.
         (should (equal (buffer-string) "the reply\n\n"))
         (should (equal dsh-bridge--view-turn 3))
         (should (null dsh-bridge--view-waiting))))
-    (when (buffer-live-p (get-buffer "*dsh-bridge-output*"))
-      (kill-buffer "*dsh-bridge-output*"))))
+    (when (buffer-live-p (get-buffer dsh-bridge-view-buffer-name))
+      (kill-buffer dsh-bridge-view-buffer-name))))
 
 (ert-deftest dsh-bridge-turn-complete-refetch-waiting-textless-blanks ()
   "When the sent turn completes without producing any newer content, the
@@ -10064,7 +10066,7 @@ completion refetch clears the waiting view to blank (idle) rather than
 resurrecting the pre-send turn: `(running...)' gives way to nothing."
   (let ((dsh-bridge--session-status nil)
         (dsh-bridge--turns-cache nil))
-    (with-current-buffer (get-buffer-create "*dsh-bridge-output*")
+    (with-current-buffer (get-buffer-create dsh-bridge-view-buffer-name)
       (dsh-bridge-view-mode)
       (setq-local dsh-bridge--view-content-session "s1")
       (dsh-bridge--view-waiting-fill "s1" 2))
@@ -10082,12 +10084,12 @@ resurrecting the pre-send turn: `(running...)' gives way to nothing."
               ((symbol-function 'dsh-bridge--status-set) #'ignore)
               ((symbol-function 'dsh-bridge--apply-session-directory) #'ignore))
       (dsh-bridge--turn-complete-refetch "s1"))
-    (with-current-buffer "*dsh-bridge-output*"
+    (with-current-buffer dsh-bridge-view-buffer-name
       (should (equal (buffer-string) ""))
       (should (null dsh-bridge--view-turn))
       (should (null dsh-bridge--view-waiting)))
-    (when (buffer-live-p (get-buffer "*dsh-bridge-output*"))
-      (kill-buffer "*dsh-bridge-output*"))))
+    (when (buffer-live-p (get-buffer dsh-bridge-view-buffer-name))
+      (kill-buffer dsh-bridge-view-buffer-name))))
 
 (ert-deftest dsh-bridge-turn-complete-refetch-blocked-note ()
   "A `blocked' turn, absent from `/turns', becomes an explicit terminal note.
@@ -10095,7 +10097,7 @@ Without it the waiting view would keep its placeholder while the status glyph
 already reads idle."
   (let ((dsh-bridge--session-status nil)
         (dsh-bridge--turns-cache nil))
-    (with-current-buffer (get-buffer-create "*dsh-bridge-output*")
+    (with-current-buffer (get-buffer-create dsh-bridge-view-buffer-name)
       (dsh-bridge-view-mode)
       (setq-local dsh-bridge--view-content-session "s1")
       (dsh-bridge--view-waiting-fill "s1" 2)
@@ -10113,7 +10115,7 @@ already reads idle."
               ((symbol-function 'dsh-bridge--status-set) #'ignore)
               ((symbol-function 'dsh-bridge--apply-session-directory) #'ignore))
       (dsh-bridge--turn-complete-refetch "s1" "blocked" 3))
-    (with-current-buffer "*dsh-bridge-output*"
+    (with-current-buffer dsh-bridge-view-buffer-name
       (should (string-match-p "blocked" (buffer-string)))
       (should (null dsh-bridge--view-waiting))
       ;; The rejected turn stays the display anchor even though `/turns'
@@ -10122,8 +10124,8 @@ already reads idle."
       (should-not dsh-bridge--view-provenance)
       (should (text-property-any (point-min) (point-max)
                                  'dsh-bridge-turn-marker t)))
-    (when (buffer-live-p (get-buffer "*dsh-bridge-output*"))
-      (kill-buffer "*dsh-bridge-output*"))))
+    (when (buffer-live-p (get-buffer dsh-bridge-view-buffer-name))
+      (kill-buffer dsh-bridge-view-buffer-name))))
 
 (ert-deftest dsh-bridge-turn-complete-refetch-blocked-activity-note ()
   "A `blocked' turn synthesized into `/turns' still yields the terminal note.
@@ -10142,7 +10144,7 @@ its activity lines."
                  "\"activity\":[{\"kind\":\"thinking\","
                  "\"summary\":\"checking the gate\",\"seq\":10,"
                  "\"ord\":0,\"step\":1,\"time\":3000100}]}]}")))
-    (with-current-buffer (get-buffer-create "*dsh-bridge-output*")
+    (with-current-buffer (get-buffer-create dsh-bridge-view-buffer-name)
       (dsh-bridge-view-mode)
       (setq-local dsh-bridge--view-content-session "s1")
       (dsh-bridge--view-waiting-fill "s1" 2)
@@ -10153,27 +10155,27 @@ its activity lines."
               ((symbol-function 'dsh-bridge--apply-session-directory) #'ignore))
       ;; Toggle off: the synthetic record renders nothing, so the waiting
       ;; view falls through to the explicit blocked note.
-      (with-current-buffer "*dsh-bridge-output*"
+      (with-current-buffer dsh-bridge-view-buffer-name
         (setq-local dsh-bridge--view-activity nil))
       (dsh-bridge--turn-complete-refetch "s1" "blocked" 3)
-      (with-current-buffer "*dsh-bridge-output*"
+      (with-current-buffer dsh-bridge-view-buffer-name
         (should (string-match-p "blocked" (buffer-string)))
         (should-not (string-match-p "checking the gate" (buffer-string)))
         (should (null dsh-bridge--view-waiting))
         (should (equal dsh-bridge--view-turn 3))
         (should-not dsh-bridge--view-provenance))
       ;; Toggle on: the same record fills and shows its activity lines.
-      (with-current-buffer "*dsh-bridge-output*"
+      (with-current-buffer dsh-bridge-view-buffer-name
         (dsh-bridge--view-waiting-fill "s1" 2)
         (setq-local dsh-bridge--view-activity t))
       (dsh-bridge--turn-complete-refetch "s1" "blocked" 3)
-      (with-current-buffer "*dsh-bridge-output*"
+      (with-current-buffer dsh-bridge-view-buffer-name
         (should (string-match-p "checking the gate" (buffer-string)))
         (should-not (string-match-p "(blocked" (buffer-string)))
         (should (equal dsh-bridge--view-turn 3))
         (should (null dsh-bridge--view-waiting))))
-    (when (buffer-live-p (get-buffer "*dsh-bridge-output*"))
-      (kill-buffer "*dsh-bridge-output*"))))
+    (when (buffer-live-p (get-buffer dsh-bridge-view-buffer-name))
+      (kill-buffer dsh-bridge-view-buffer-name))))
 
 (ert-deftest dsh-bridge-turn-complete-keeps-following-view-content ()
   "A settled record that renders nothing does not blank a following view.
@@ -10196,7 +10198,7 @@ activity."
                  "\"endedAt\":1000900,\"reason\":\"completed\","
                  "\"segments\":[{\"text\":\"first reply\","
                  "\"time\":1000100,\"step\":1}]}]}")))
-    (with-current-buffer (get-buffer-create "*dsh-bridge-output*")
+    (with-current-buffer (get-buffer-create dsh-bridge-view-buffer-name)
       (dsh-bridge-view-mode)
       (setq-local dsh-bridge--view-content-session "s1")
       (setq-local dsh-bridge--view-activity nil)
@@ -10213,18 +10215,18 @@ activity."
               ((symbol-function 'dsh-bridge--apply-session-directory) #'ignore))
       ;; Toggle off: the empty record must not replace the shown turn.
       (dsh-bridge--turn-complete-refetch "s1" "completed" 2)
-      (with-current-buffer "*dsh-bridge-output*"
+      (with-current-buffer dsh-bridge-view-buffer-name
         (should (equal dsh-bridge--view-turn 1))
         (should (string-match-p "first reply" (buffer-string))))
       ;; Toggle on: the same record renders its activity and fills.
-      (with-current-buffer "*dsh-bridge-output*"
+      (with-current-buffer dsh-bridge-view-buffer-name
         (setq-local dsh-bridge--view-activity t))
       (dsh-bridge--turn-complete-refetch "s1" "completed" 2)
-      (with-current-buffer "*dsh-bridge-output*"
+      (with-current-buffer dsh-bridge-view-buffer-name
         (should (equal dsh-bridge--view-turn 2))
         (should (string-match-p "read" (buffer-string)))))
-    (when (buffer-live-p (get-buffer "*dsh-bridge-output*"))
-      (kill-buffer "*dsh-bridge-output*"))))
+    (when (buffer-live-p (get-buffer dsh-bridge-view-buffer-name))
+      (kill-buffer dsh-bridge-view-buffer-name))))
 
 (ert-deftest dsh-bridge-view-follow-refill-keeps-content-on-empty-record ()
   "A following view is not blanked by a newest record that renders nothing."
@@ -10254,7 +10256,7 @@ activity."
   "The blocked note names the archived cause when the session is archived."
   (let ((dsh-bridge--sessions-cache
          '(((id . "s1") (live . t) (archived . t) (title . "Arch")))))
-    (with-current-buffer (get-buffer-create "*dsh-bridge-output*")
+    (with-current-buffer (get-buffer-create dsh-bridge-view-buffer-name)
       (dsh-bridge-view-mode)
       (setq-local dsh-bridge--view-content-session "s1")
       (dsh-bridge--view-waiting-fill "s1" nil)
@@ -10265,8 +10267,8 @@ activity."
       (should-not dsh-bridge--view-provenance)
       (should (text-property-any (point-min) (point-max)
                                  'dsh-bridge-turn-marker t)))
-    (when (buffer-live-p (get-buffer "*dsh-bridge-output*"))
-      (kill-buffer "*dsh-bridge-output*"))))
+    (when (buffer-live-p (get-buffer dsh-bridge-view-buffer-name))
+      (kill-buffer dsh-bridge-view-buffer-name))))
 
 (ert-deftest dsh-bridge-view-blocked-fill-anchors-navigation ()
   "M-p from a blocked note starts from the rejected turn, not an empty view.
@@ -10283,7 +10285,7 @@ displayed turn would instead take the empty-view position and skip it."
                        1009000)))
          (dsh-bridge--turns-cache (dsh-bridge-test--view-cache turns))
          (dsh-bridge--session-status nil))
-    (with-current-buffer (get-buffer-create "*dsh-bridge-output*")
+    (with-current-buffer (get-buffer-create dsh-bridge-view-buffer-name)
       (dsh-bridge-view-mode)
       (setq-local dsh-bridge--view-content-session "s1")
       ;; The waiting view has sent turn 3; the rejected turn consumes it.
@@ -10303,7 +10305,7 @@ The refresh re-fills the displayed record in place, so the content, the
 browse state and point are all preserved."
   (let ((dsh-bridge--session-status nil)
         (dsh-bridge--turns-cache nil))
-    (with-current-buffer (get-buffer-create "*dsh-bridge-output*")
+    (with-current-buffer (get-buffer-create dsh-bridge-view-buffer-name)
       (dsh-bridge-view-mode)
       (setq-local dsh-bridge--view-content-session "s1")
       (dsh-bridge--view-fill
@@ -10328,20 +10330,20 @@ browse state and point are all preserved."
               ((symbol-function 'dsh-bridge--status-set) #'ignore)
               ((symbol-function 'dsh-bridge--apply-session-directory) #'ignore))
       (dsh-bridge--turn-complete-refetch "s1"))
-    (with-current-buffer "*dsh-bridge-output*"
+    (with-current-buffer dsh-bridge-view-buffer-name
       (should (equal (buffer-string) "the reply\n\n"))
       (should dsh-bridge--view-browsing)
       (should (null dsh-bridge--view-follow))
       (should (= (point) 4)))
-    (when (buffer-live-p (get-buffer "*dsh-bridge-output*"))
-      (kill-buffer "*dsh-bridge-output*"))))
+    (when (buffer-live-p (get-buffer dsh-bridge-view-buffer-name))
+      (kill-buffer dsh-bridge-view-buffer-name))))
 
 (ert-deftest dsh-bridge-turn-complete-refetch-browsing-other-turn ()
   "A browse parked on a different turn is left untouched by a completion.
 Refreshing it would yank the reader to the completing turn."
   (let ((dsh-bridge--session-status nil)
         (dsh-bridge--turns-cache nil))
-    (with-current-buffer (get-buffer-create "*dsh-bridge-output*")
+    (with-current-buffer (get-buffer-create dsh-bridge-view-buffer-name)
       (dsh-bridge-view-mode)
       (setq-local dsh-bridge--view-content-session "s1")
       (dsh-bridge--view-fill
@@ -10364,12 +10366,12 @@ Refreshing it would yank the reader to the completing turn."
               ((symbol-function 'dsh-bridge--status-set) #'ignore)
               ((symbol-function 'dsh-bridge--apply-session-directory) #'ignore))
       (dsh-bridge--turn-complete-refetch "s1"))
-    (with-current-buffer "*dsh-bridge-output*"
+    (with-current-buffer dsh-bridge-view-buffer-name
       (should (equal (buffer-string) "older\n\n"))
       (should dsh-bridge--view-browsing)
       (should (equal dsh-bridge--view-turn 2)))
-    (when (buffer-live-p (get-buffer "*dsh-bridge-output*"))
-      (kill-buffer "*dsh-bridge-output*"))))
+    (when (buffer-live-p (get-buffer dsh-bridge-view-buffer-name))
+      (kill-buffer dsh-bridge-view-buffer-name))))
 
 (ert-deftest dsh-bridge-turn-complete-act-refetches-browsing-view ()
   "A browsing view still routes through the completion refetch, not the
@@ -10377,7 +10379,7 @@ cache-only refresh: the refetch is what drops a stale marker from the
 ended turn, and it leaves an unparked browse alone per view."
   (let ((dsh-bridge-turn-complete 'refetch)
         (scheduled nil))
-    (with-current-buffer (get-buffer-create "*dsh-bridge-output*")
+    (with-current-buffer (get-buffer-create dsh-bridge-view-buffer-name)
       (dsh-bridge-view-mode)
       (setq-local dsh-bridge--view-content-session "s1")
       (setq-local dsh-bridge--view-browsing t)
@@ -10392,8 +10394,8 @@ ended turn, and it leaves an unparked browse alone per view."
       ;; The user hook runs from its own timer, not in the SSE filter.
       (should (memq #'dsh-bridge--turn-complete-notify
                     (mapcar #'car scheduled))))
-    (when (buffer-live-p (get-buffer "*dsh-bridge-output*"))
-      (kill-buffer "*dsh-bridge-output*"))))
+    (when (buffer-live-p (get-buffer dsh-bridge-view-buffer-name))
+      (kill-buffer dsh-bridge-view-buffer-name))))
 
 (ert-deftest dsh-bridge-turn-complete-functions-receive-the-turn-facts ()
   "The completion hook is scheduled with the frame's facts, whatever the
@@ -10442,7 +10444,7 @@ the placeholder when the cache holds none."
         (dsh-bridge--turns-cache nil))
     ;; Case 1: the cache's newest is still the pre-send turn 2 (open, no new
     ;; content committed): the placeholder survives the refill.
-    (with-current-buffer (get-buffer-create "*dsh-bridge-output*")
+    (with-current-buffer (get-buffer-create dsh-bridge-view-buffer-name)
       (dsh-bridge-view-mode)
       (setq-local dsh-bridge--view-content-session "s1")
       (dsh-bridge--view-waiting-fill "s1" 2))
@@ -10451,7 +10453,7 @@ the placeholder when the cache holds none."
             (list (dsh-bridge-test--view-turn 2 2000000
                     (list (dsh-bridge-test--view-segment "old" 2001000 1)))))))
       (dsh-bridge--view-follow-refill "s1"))
-    (with-current-buffer "*dsh-bridge-output*"
+    (with-current-buffer dsh-bridge-view-buffer-name
       (should (equal (buffer-string) dsh-bridge--view-running-placeholder))
       (should (eq dsh-bridge--view-waiting t))
       (should (equal dsh-bridge--view-turn 3)))
@@ -10464,13 +10466,13 @@ the placeholder when the cache holds none."
             (list (dsh-bridge-test--view-turn 3 3000000
                     (list (dsh-bridge-test--view-segment "fresh" 3001000 1)))))))
       (dsh-bridge--view-follow-refill "s1")
-      (with-current-buffer "*dsh-bridge-output*"
+      (with-current-buffer dsh-bridge-view-buffer-name
         (should (equal (buffer-string) "fresh\n\n(continuing...)"))
         (should (null dsh-bridge--view-waiting))
         (should (string-match-p "latest/1" (dsh-bridge--view-header-line)))))
     ;; Case 3: a fresh session (waiting for turn 1, no pre-send turn) accepts
     ;; the first committed turn — there is no earlier turn to reject.
-    (with-current-buffer "*dsh-bridge-output*"
+    (with-current-buffer dsh-bridge-view-buffer-name
       (dsh-bridge--view-waiting-fill "s1" nil)
       (should (eq dsh-bridge--view-waiting t))
       (should (equal dsh-bridge--view-turn 1)))
@@ -10479,21 +10481,21 @@ the placeholder when the cache holds none."
             (list (dsh-bridge-test--view-turn 1 1000000
                     (list (dsh-bridge-test--view-segment "first" 1001000 1)))))))
       (dsh-bridge--view-follow-refill "s1"))
-    (with-current-buffer "*dsh-bridge-output*"
+    (with-current-buffer dsh-bridge-view-buffer-name
       (should (equal (buffer-string) "first\n\n(continuing...)"))
       (should (null dsh-bridge--view-waiting)))
     ;; Case 4: a fresh session with no committed turn has nothing to accept:
     ;; the placeholder survives (the guard requires a turn record).
-    (with-current-buffer "*dsh-bridge-output*"
+    (with-current-buffer dsh-bridge-view-buffer-name
       (dsh-bridge--view-waiting-fill "s1" nil))
     (let ((dsh-bridge--turns-cache (dsh-bridge-test--view-cache nil)))
       (dsh-bridge--view-follow-refill "s1"))
-    (with-current-buffer "*dsh-bridge-output*"
+    (with-current-buffer dsh-bridge-view-buffer-name
       (should (equal (buffer-string) dsh-bridge--view-running-placeholder))
       (should (eq dsh-bridge--view-waiting t))
       (should (equal dsh-bridge--view-turn 1)))
-    (when (buffer-live-p (get-buffer "*dsh-bridge-output*"))
-      (kill-buffer "*dsh-bridge-output*"))))
+    (when (buffer-live-p (get-buffer dsh-bridge-view-buffer-name))
+      (kill-buffer dsh-bridge-view-buffer-name))))
 
 (ert-deftest dsh-bridge-view-ticker-survives-view-kill ()
   "Killing one ticking DSH-View keeps the shared elapsed ticker for the
@@ -10514,7 +10516,7 @@ cancels it."
       ;; Real `dsh-bridge--view-fill' wiring: mode, state, and the local
       ;; kill hook that re-evaluates the shared ticker.  The displayed turn
       ;; is open, which is what makes the header tick.
-      (with-current-buffer (get-buffer-create "*dsh-bridge-output*")
+      (with-current-buffer (get-buffer-create dsh-bridge-view-buffer-name)
         (dsh-bridge--view-fill "s1" record)
         (set-window-buffer w1 (current-buffer)))
       (with-current-buffer (get-buffer-create "*dsh-bridge-output-2*")
@@ -10533,13 +10535,13 @@ cancels it."
           ;; Kill the last ticking view: the hook's scan sees only the dying
           ;; buffer, so the timer outlives the kill until the next tick
           ;; finds nothing ticking and cancels it.
-          (kill-buffer "*dsh-bridge-output*")
+          (kill-buffer dsh-bridge-view-buffer-name)
           (should (timerp dsh-bridge--view-ticker-timer))
           (dsh-bridge--view-ticker-tick)
           (should-not (timerp dsh-bridge--view-ticker-timer)))
       (when (timerp dsh-bridge--view-ticker-timer)
         (cancel-timer dsh-bridge--view-ticker-timer))
-      (dolist (b '("*dsh-bridge-output*" "*dsh-bridge-output-2*"))
+      (dolist (b (list dsh-bridge-view-buffer-name "*dsh-bridge-output-2*"))
         (when (buffer-live-p (get-buffer b))
           (kill-buffer b)))
       (when (window-live-p w2)
@@ -10571,7 +10573,7 @@ copy silently instead of duplicating the registry entry."
     (should-not (dsh-bridge--question-find-buffer "q1"))
     (let ((dsh-bridge-status-indicator 'emoji))
       (should (string= (dsh-bridge--status-glyph "s1") "💬")))
-    (with-current-buffer (get-buffer-create "*dsh-bridge-output*")
+    (with-current-buffer (get-buffer-create dsh-bridge-view-buffer-name)
       (dsh-bridge-view-mode)
       (setq-local dsh-bridge--view-content-session "s1")
       (should (string-match-p "awaiting answer" (dsh-bridge--view-header-line))))
@@ -10584,8 +10586,8 @@ copy silently instead of duplicating the registry entry."
     (with-current-buffer (dsh-bridge--question-find-buffer "q1")
       (should dsh-bridge--question-resolution)
       (should (string-match-p "no longer pending" (buffer-string))))
-    (when (buffer-live-p (get-buffer "*dsh-bridge-output*"))
-      (kill-buffer "*dsh-bridge-output*"))
+    (when (buffer-live-p (get-buffer dsh-bridge-view-buffer-name))
+      (kill-buffer dsh-bridge-view-buffer-name))
     (when (dsh-bridge--question-find-buffer "q1")
       (kill-buffer (dsh-bridge--question-find-buffer "q1")))))
 
@@ -11034,16 +11036,16 @@ Nothing pending anywhere does not make any session an answer target."
 (ert-deftest dsh-bridge-view-awaiting-ask-frames-refresh-tail ()
   "An ask-user frame flips a following view's running marker to the awaiting
 note; its resolution flips it back to `(continuing...)'."
-  (when (get-buffer "*dsh-bridge-sessions*")
-    (kill-buffer "*dsh-bridge-sessions*"))
-  (when (get-buffer "*dsh-bridge-output*")
-    (kill-buffer "*dsh-bridge-output*"))
+  (when (get-buffer dsh-bridge-sessions-buffer-name)
+    (kill-buffer dsh-bridge-sessions-buffer-name))
+  (when (get-buffer dsh-bridge-view-buffer-name)
+    (kill-buffer dsh-bridge-view-buffer-name))
   (let* ((open (dsh-bridge-test--view-turn 7 7000000
                 (list (dsh-bridge-test--view-segment "progress" 7001000 1))))
          (dsh-bridge--turns-cache (dsh-bridge-test--view-cache (list open)))
          (dsh-bridge--pending-questions nil)
          (dsh-bridge--session-status nil))
-    (with-current-buffer (get-buffer-create "*dsh-bridge-output*")
+    (with-current-buffer (get-buffer-create dsh-bridge-view-buffer-name)
       (dsh-bridge-view-mode)
       (setq-local dsh-bridge--view-content-session "s1")
       (setq-local dsh-bridge--view-follow t)
@@ -11053,15 +11055,15 @@ note; its resolution flips it back to `(continuing...)'."
       (dsh-bridge--notification-handle-events
        '(((kind . "ask-user") (sessionId . "s1") (questionId . "q1")
           (questions . (((id . "q1") (question . "Approve this plan?")))))))
-      (with-current-buffer "*dsh-bridge-output*"
+      (with-current-buffer dsh-bridge-view-buffer-name
         (should (string-match-p "Awaiting response:" (buffer-string)))
         (should-not (string-match-p "(continuing\\.\\.\\.)" (buffer-string))))
       (dsh-bridge--notification-handle-events
        '(((kind . "ask-user-resolved") (sessionId . "s1") (questionId . "q1")
           (outcome . "answered"))))
-      (with-current-buffer "*dsh-bridge-output*"
+      (with-current-buffer dsh-bridge-view-buffer-name
         (should (string-match-p "(continuing\\.\\.\\.)" (buffer-string)))))
-    (kill-buffer "*dsh-bridge-output*")
+    (kill-buffer dsh-bridge-view-buffer-name)
     (when (buffer-live-p (get-buffer "*dsh-bridge-question: s1*"))
       (kill-buffer "*dsh-bridge-question: s1*"))))
 
@@ -12338,14 +12340,14 @@ fallback; a DSH-Sessions buffer's binding is the row at point."
     (cl-letf (((symbol-function 'dsh-bridge--fetch-sessions)
                (lambda () (cons 200 dsh-bridge--sessions-cache))))
       (unwind-protect
-          (with-current-buffer (get-buffer-create "*dsh-bridge-sessions*")
+          (with-current-buffer (get-buffer-create dsh-bridge-sessions-buffer-name)
             (dsh-bridge-sessions-mode)
             (dsh-bridge--list-sessions-in-buffer)
             (should (dsh-bridge--sessions-goto-id "s2"))
             (should (equal (dsh-bridge--effective-session) "s2"))
             (should (equal (dsh-bridge--effective-session nil nil t) "s2")))
-        (when (buffer-live-p (get-buffer "*dsh-bridge-sessions*"))
-          (kill-buffer "*dsh-bridge-sessions*"))))))
+        (when (buffer-live-p (get-buffer dsh-bridge-sessions-buffer-name))
+          (kill-buffer dsh-bridge-sessions-buffer-name))))))
 
 (ert-deftest dsh-bridge-describe-goal-no-action-buttons ()
   "The Goal section renders its facts without in-buffer action buttons.
@@ -12641,7 +12643,7 @@ Another session, an invisible report, or the option off does not."
 
 (defun dsh-bridge-test--kill-prompt-buffer ()
   "Kill the shared DSH-Prompt buffer when it is live."
-  (let ((buffer (get-buffer "*dsh-bridge-prompt*")))
+  (let ((buffer (get-buffer dsh-bridge-prompt-buffer-name)))
     (when (buffer-live-p buffer) (kill-buffer buffer))))
 
 (ert-deftest dsh-bridge-insert-attachment-tag-roundtrip ()
@@ -12780,7 +12782,7 @@ inherit the face, and editing the tag out of shape (or a relative
           (with-temp-buffer
             (setq major-mode 'dired-mode)
             (call-interactively #'dsh-bridge-attach-file))
-          (with-current-buffer "*dsh-bridge-prompt*"
+          (with-current-buffer dsh-bridge-prompt-buffer-name
             (should (= (dsh-bridge--attachment-count) 2))))
       (delete-file first)
       (delete-file second)
@@ -12795,7 +12797,7 @@ inherit the face, and editing the tag out of shape (or a relative
           (with-temp-buffer
             (setq buffer-file-name file)
             (dsh-bridge-attach-buffer-file))
-          (with-current-buffer "*dsh-bridge-prompt*"
+          (with-current-buffer dsh-bridge-prompt-buffer-name
             (should (= (dsh-bridge--attachment-count) 1))
             (should (string-match-p (regexp-quote file) (buffer-string)))))
       (delete-file file)
@@ -12811,7 +12813,7 @@ inherit the face, and editing the tag out of shape (or a relative
   (dsh-bridge-test--kill-prompt-buffer)
   (let ((file (dsh-bridge-test--temp-file "clear.txt" "x")))
     (unwind-protect
-        (with-current-buffer (get-buffer-create "*dsh-bridge-prompt*")
+        (with-current-buffer (get-buffer-create dsh-bridge-prompt-buffer-name)
           (dsh-bridge-prompt-mode)
           (insert "keep me\n")
           (dsh-bridge--insert-attachment-tag file)
@@ -12833,7 +12835,7 @@ removes them from the kept text."
         (dsh-bridge--prompt-session "s1")
         (dsh-bridge--last-sent nil))
     (unwind-protect
-        (with-current-buffer (get-buffer-create "*dsh-bridge-prompt*")
+        (with-current-buffer (get-buffer-create dsh-bridge-prompt-buffer-name)
           (dsh-bridge-prompt-mode)
           (insert "look at this\n")
           (dsh-bridge--insert-attachment-tag file)
@@ -12861,7 +12863,7 @@ removes them from the kept text."
         (dsh-bridge--session-status nil)
         (dsh-bridge--prompt-session "s1"))
     (unwind-protect
-        (with-current-buffer (get-buffer-create "*dsh-bridge-prompt*")
+        (with-current-buffer (get-buffer-create dsh-bridge-prompt-buffer-name)
           (dsh-bridge-prompt-mode)
           (dsh-bridge--insert-attachment-tag file)
           (cl-letf (((symbol-function 'dsh-bridge-send-text)
@@ -12894,7 +12896,7 @@ removes them from the kept text."
         (dsh-bridge--session-status nil)
         (dsh-bridge--prompt-session "s1"))
     (unwind-protect
-        (with-current-buffer (get-buffer-create "*dsh-bridge-prompt*")
+        (with-current-buffer (get-buffer-create dsh-bridge-prompt-buffer-name)
           (dsh-bridge-prompt-mode)
           (insert "text\n")
           (dsh-bridge--insert-attachment-tag file)
@@ -12917,7 +12919,7 @@ bound to the invoking buffer's effective session, not to the default."
             (setq major-mode 'dsh-bridge-view-mode)
             (setq dsh-bridge--view-content-session "view-session-42")
             (dsh-bridge-attach-file (list file)))
-          (with-current-buffer "*dsh-bridge-prompt*"
+          (with-current-buffer dsh-bridge-prompt-buffer-name
             (should (equal dsh-bridge--prompt-session "view-session-42"))))
       (delete-file file)
       (dsh-bridge-test--kill-prompt-buffer))))
@@ -12971,8 +12973,8 @@ bound to the invoking buffer's effective session, not to the default."
 
 (defun dsh-bridge-test--kill-approval-display ()
   "Kill the shared read-only approval display buffer, if any."
-  (when (get-buffer dsh-bridge--approval-buffer-name)
-    (kill-buffer (get-buffer dsh-bridge--approval-buffer-name))))
+  (when (get-buffer dsh-bridge-approval-buffer-name)
+    (kill-buffer (get-buffer dsh-bridge-approval-buffer-name))))
 
 (ert-deftest dsh-bridge-approval-arrive-and-glyph ()
   "An approval frame records a pending approval, lights the awaiting glyph, and
@@ -12999,13 +13001,13 @@ silently; the defensive turn-complete clear drops the registry."
     ;; approval glyph, so a parked approval lights the same indicator.
     (let ((dsh-bridge-status-indicator 'emoji))
       (should (string= (dsh-bridge--status-glyph "s1") "💬")))
-    (with-current-buffer (get-buffer-create "*dsh-bridge-output*")
+    (with-current-buffer (get-buffer-create dsh-bridge-view-buffer-name)
       (dsh-bridge-view-mode)
       (setq-local dsh-bridge--view-content-session "s1")
       (should (string-match-p "awaiting approval" (dsh-bridge--view-header-line))))
     (dsh-bridge-test--notification-turn-complete "s1")
     (should-not dsh-bridge--pending-approvals)
-    (kill-buffer "*dsh-bridge-output*")))
+    (kill-buffer dsh-bridge-view-buffer-name)))
 
 (ert-deftest dsh-bridge-approval-body-renders-tool-reason-and-detail ()
   "The approval body names the tool, the asker's reason, and the pending tool
@@ -13063,7 +13065,7 @@ leaves it read-only, and displays it from the top."
         (save-window-excursion
           (dsh-bridge--approval-show
            "s1" (list :tool-name "bash" :reason "need /etc/shadow" :detail nil))
-          (with-current-buffer dsh-bridge--approval-buffer-name
+          (with-current-buffer dsh-bridge-approval-buffer-name
             (should (eq major-mode 'special-mode))
             (should buffer-read-only)
             (should (= (point) (point-min)))
@@ -13137,7 +13139,7 @@ The approval prompt reads the minibuffer without switching buffers, so the
 exit after the decision runs with the view itself as the old buffer; it must
 not quit that window or bury the view."
   (let ((config (current-window-configuration))
-        (view (get-buffer-create "*dsh-bridge-output*"))
+        (view (get-buffer-create dsh-bridge-view-buffer-name))
         (dsh-bridge-approval-answer 'all)
         (dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t))))
         (dsh-bridge--pending-approvals
@@ -13339,8 +13341,8 @@ binding; completion drops the tail."
 (ert-deftest dsh-bridge-view-awaiting-approval-frames-refresh-tail ()
   "An `approval' frame flips a following view's running marker to the approval
 awaiting note; an `approval-resolved' frame flips it back."
-  (when (get-buffer "*dsh-bridge-output*")
-    (kill-buffer "*dsh-bridge-output*"))
+  (when (get-buffer dsh-bridge-view-buffer-name)
+    (kill-buffer dsh-bridge-view-buffer-name))
   (let* ((open (dsh-bridge-test--view-turn 7 7000000
                 (list (dsh-bridge-test--view-segment "progress" 7001000 1))))
          (dsh-bridge--turns-cache (dsh-bridge-test--view-cache (list open)))
@@ -13349,7 +13351,7 @@ awaiting note; an `approval-resolved' frame flips it back."
          (dsh-bridge--view-answer-notes nil)
          (dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t))))
          (dsh-bridge--session-status nil))
-    (with-current-buffer (get-buffer-create "*dsh-bridge-output*")
+    (with-current-buffer (get-buffer-create dsh-bridge-view-buffer-name)
       (dsh-bridge-view-mode)
       (setq-local dsh-bridge--view-content-session "s1")
       (setq-local dsh-bridge--view-follow t)
@@ -13359,15 +13361,15 @@ awaiting note; an `approval-resolved' frame flips it back."
       (dsh-bridge--notification-handle-events
        '(((kind . "approval") (sessionId . "s1") (approvalId . "a1")
           (toolName . "bash") (reason . "escalate"))))
-      (with-current-buffer "*dsh-bridge-output*"
+      (with-current-buffer dsh-bridge-view-buffer-name
         (should (string-match-p "Awaiting approval for bash" (buffer-string)))
         (should-not (string-match-p "(continuing\\.\\.\\.)" (buffer-string))))
       (dsh-bridge--notification-handle-events
        '(((kind . "approval-resolved") (sessionId . "s1") (approvalId . "a1")
           (outcome . "allowed-once"))))
-      (with-current-buffer "*dsh-bridge-output*"
+      (with-current-buffer dsh-bridge-view-buffer-name
         (should (string-match-p "(continuing\\.\\.\\.)" (buffer-string)))))
-    (kill-buffer "*dsh-bridge-output*")))
+    (kill-buffer dsh-bridge-view-buffer-name)))
 
 (ert-deftest dsh-bridge-notifications-answer-posture ()
   "The SSE notification request marks `answer=0' exactly when
@@ -13954,13 +13956,13 @@ always acts on the session at hand."
                  (push (list method path payload) calls)))
               ((symbol-function 'message) #'ignore))
       (unwind-protect
-          (with-current-buffer (get-buffer-create "*dsh-bridge-sessions*")
+          (with-current-buffer (get-buffer-create dsh-bridge-sessions-buffer-name)
             (dsh-bridge-sessions-mode)
             (dsh-bridge--list-sessions-in-buffer)
             (should (dsh-bridge--sessions-goto-id "s1"))
             (dsh-bridge-compact-session))
-        (when (buffer-live-p (get-buffer "*dsh-bridge-sessions*"))
-          (kill-buffer "*dsh-bridge-sessions*"))))
+        (when (buffer-live-p (get-buffer dsh-bridge-sessions-buffer-name))
+          (kill-buffer dsh-bridge-sessions-buffer-name))))
     (let ((compact (cadr (assoc "/sessions/compact"
                                 (mapcar (lambda (c) (list (cadr c) c)) calls)))))
       (should compact)

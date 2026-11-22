@@ -475,12 +475,12 @@ In that case, the approval must be handled via the DSH web interface."
 
 (defface dsh-bridge-describe-heading-face
   '((t :inherit bold))
-  "Face for section headings in the DSH-Describe-Session buffer."
+  "Face for section headings in the DSH-Describe buffer."
   :group 'dsh-bridge)
 
 (defface dsh-bridge-describe-label-face
   '((t :inherit font-lock-function-name-face))
-  "Face for field labels in the DSH-Describe-Session buffer."
+  "Face for field labels in the DSH-Describe buffer."
   :group 'dsh-bridge)
 
 (defface dsh-bridge-view-marker-face
@@ -651,12 +651,19 @@ answered with no sessions, or nil if the seeding was not done yet.")
 (defvar dsh-bridge--describe-session) ; forward declaration
 
 (defconst dsh-bridge-describe-buffer-name "*dsh-bridge-describe*"
-  "Buffer name of the read-only DSH session report.")
+  "Buffer name for the DSH-Describe buffer.")
 
 (defconst dsh-bridge-prompt-buffer-name "*dsh-bridge-prompt*"
-  "The name of the shared DSH-Prompt buffer.
-This name is used whenever we need to create a new DSH-Prompt buffer;
-see the function `dsh-bridge--prompt-buffer'.")
+  "Buffer name for the DSH-Prompt buffer.")
+
+(defconst dsh-bridge-view-buffer-name "*dsh-bridge-output*"
+  "Default buffer name for the DSH-View buffer.")
+
+(defconst dsh-bridge-approval-buffer-name "*dsh-bridge-approval*"
+  "Buffer name for the buffer showing DSH approval requests.")
+
+(defconst dsh-bridge-sessions-buffer-name "*dsh-bridge-sessions*"
+  "Buffer name for the DSH-Sessions buffer.")
 
 (defvar dsh-bridge--sessions-cache nil
   "Cache of DSH session data.
@@ -3788,6 +3795,14 @@ A nil SESSION-ID matches view buffers not bound to a session."
 		(equal dsh-bridge--view-content-session session-id)))
 	    (dsh-bridge--view-buffers)))
 
+(defun dsh-bridge--view-buffer (session-id)
+  "Return a DSH-View buffer for SESSION-ID, creating one if necessary.
+Reuse a live DSH-View buffer already showing SESSION-ID, else create a
+buffer named by `dsh-bridge-view-buffer-name'.  The buffer is returned
+unfilled and undisplayed."
+  (or (dsh-bridge--session-view session-id)
+      (get-buffer-create dsh-bridge-view-buffer-name)))
+
 (defun dsh-bridge--session-activity-shown-p (session-id)
   "Whether any live DSH-View buffer showing SESSION-ID renders activity.
 Used to gate the `activity-changed' refetch: a session whose views all have
@@ -3847,9 +3862,9 @@ response, and has a different format from the session alists stored in
 REVISIONS is the `dsh-bridge--status-revision' snapshot taken before the
 request that produced SESSION-ALIST.
 
-This function reuses a live DSH-View buffer already showing the session,
-else a `*dsh-bridge-output*' buffer.  If SAME-WINDOW is non-nil, prefer
-to pop to the buffer using the same window.  Return the buffer."
+This function reuses a DSH-View buffer already showing the session, else
+one named by `dsh-bridge-view-buffer-name'.  If SAME-WINDOW is non-nil,
+try popping to the buffer in the same window.  Return the buffer."
   (let ((id (alist-get 'sessionId session-alist)))
     (unless id
       (error "dsh-bridge: /turns response has no sessionId"))
@@ -3860,8 +3875,7 @@ to pop to the buffer using the same window.  Return the buffer."
 	   (follow (or (dsh-bridge--view-turn-open-p (car-safe turns))
 		       running))
 	   (cwd (alist-get 'cwd session-alist))
-	   (buffer (or (dsh-bridge--session-view id)
-		       (get-buffer-create "*dsh-bridge-output*"))))
+	   (buffer (dsh-bridge--view-buffer id)))
       ;; Seed the status tracker when the field is present.
       ;; JSON `false' decodes to nil, so compare value against t.
       (when running-pair
@@ -3939,8 +3953,7 @@ host resumes a cold session as part of resolving the target."
 (defun dsh-bridge--view-for-session (session-id &optional alist)
   "Return SESSION-ID's DSH-View buffer, refreshed from its turn list.
 This function is called when an explicit user action resumes a session.
-Fill the DSH-View buffer (a pre-existing one for the session, or else
-`*dsh-bridge-output*') with the latest turn, and enter turn-following
+Fill the DSH-View buffer with the latest turn, and enter turn-following
 state if that turn is active.
 
 ALIST, if non-nil, should be an already-fetched \"GET /turns\" response
@@ -3949,8 +3962,7 @@ to consult; otherwise, one is fetched."
 	 (turns-pair (assq 'turns alist))
 	 (turns (cdr-safe turns-pair))
 	 (running (eq (alist-get 'running alist) t))
-	 (buf (or (dsh-bridge--session-view session-id)
-		  (get-buffer-create "*dsh-bridge-output*"))))
+	 (buf (dsh-bridge--view-buffer session-id)))
     (when turns-pair
       (dsh-bridge--turns-cache-store session-id turns (alist-get 'epoch alist)))
     (with-current-buffer buf
@@ -4372,13 +4384,9 @@ The await segment appears while a question or approval is pending."
 
 ;;; Links in reply bodies
 
-;; A reply is Markdown, and the model writes file references as links —
-;; `[dsh-bridge.el:4289](emacs/dsh-bridge.el#L4289)'.  Markdown mode
-;; fontifies those into links and wires mouse-1 to
-;; `markdown-follow-thing-at-point', which strips a `#Lnnn' anchor and opens
-;; the file's top; RET falls through to `markdown-enter-key' and its
-;; read-only error.  The functions below give a local file link with a line
-;; anchor the right behavior on both keys, through markdown-mode's own
+;; A reply is Markdown, and file references are links in the form
+;; [dsh-bridge.el:4289](emacs/dsh-bridge.el#L4289).  The functions
+;; below let mouse-1 and RET follow such a link via Markdown mode's
 ;; `markdown-follow-link-functions' hook.
 
 (defconst dsh-bridge--view-link-fragment-re
@@ -4463,16 +4471,14 @@ PARENT is `gfm-view-mode' if Markdown mode is installed, or
 `special-mode' otherwise."
   `(define-derived-mode dsh-bridge-view-mode ,parent "DSH-View"
      "Major mode to view replies from the DeepSeek Harness (DSH).
-The DSH-View buffer is read-only and displays one DSH agent turn: a
-sequence of replies starting from a user prompt and ending at an idle
-reply.  If Markdown mode is installed, the replies are formatted based
-on GitHub-Flavored Markdown (via `gfm-view-mode').
+The DSH-View buffer is read-only and displays one DSH agent turn,
+consisting of a sequence of messages starting from a user prompt and
+ending at an idle reply.  If Markdown mode is installed, the replies are
+formatted based on GitHub-Flavored Markdown via `gfm-view-mode'.
 
-When invoked, the DSH-View buffer is typically bound to a DSH session;
-the commands below let you cycle through the session's turn history,
-compose a reply (prompt) for the session, etc.  RET visits changed files,
-answers pending requests, follows Markdown links, navigates tables, or
-inspects the activity item at point.
+When invoked, the DSH-View buffer is typically bound to a DSH session.
+The commands below let you cycle through the session's turn history,
+compose a reply (prompt) for the session, etc.
 \\{dsh-bridge-view-mode-map}"
      (setq buffer-read-only t)
      (setq-local dsh-bridge--view-activity dsh-bridge-view-activity)
@@ -5014,8 +5020,7 @@ non-nil, is the ms-epoch at which the prompt was sent."
     (when turns-pair
       (dsh-bridge--turns-cache-store session-id turns
 				     (alist-get 'epoch alist)))
-    (let* ((buf (or (dsh-bridge--session-view session-id)
-		    (get-buffer-create "*dsh-bridge-output*")))
+    (let* ((buf (dsh-bridge--view-buffer session-id))
 	   (newest (car-safe turns))
 	   ;; A turn that began at or after the send is the turn this send
 	   ;; started.	It may already carry text — or have completed outright —
@@ -5353,10 +5358,9 @@ a full re-render instead; the same point rule then applies."
 
 (defun dsh-bridge--display-received (entries)
   "Display the turn addressed by the newest entry of ENTRIES, oldest-first.
-Reuses a DSH-View buffer already showing the entry's session, else a buffer
-named `*dsh-bridge-output*'.  Return the buffer, or nil when the entry is
-malformed, its turns cannot be fetched, or its turn is absent.  Each entry
-must contain a `sessionId' and a numeric `turn'."
+Reuses a DSH-View buffer already showing the entry's session, else a
+buffer named by `dsh-bridge-view-buffer-name'.  Return the buffer, or
+nil if the turn could not be displayed for some reason."
   (let* ((entry (car (last entries)))
 	 (session-id (alist-get 'sessionId entry))
 	 (turn-number (alist-get 'turn entry)))
@@ -5381,8 +5385,7 @@ must contain a `sessionId' and a numeric `turn'."
 		   turn-number session-id)
 	  nil)
 	 (t
-	  (let ((buf (or (dsh-bridge--session-view session-id)
-			 (get-buffer-create "*dsh-bridge-output*"))))
+	  (let ((buf (dsh-bridge--view-buffer session-id)))
 	    (with-current-buffer buf
 	      (dsh-bridge--view-fill session-id record (alist-get 'cwd alist) t)
 	      (if (dsh-bridge--view-turn-open-p record)
@@ -6322,15 +6325,8 @@ an option's number key.	 These commands are also available:
 ;; request's details and prompts for the three-way choice in the minibuffer
 ;; (`dsh-bridge--approval-prompt'), re-fetching the details on every
 ;; invocation instead of keeping a buffer to revisit.  The read-only buffer
-;; named by `dsh-bridge--approval-buffer-name' serves only the `notify-only'
+;; named by `dsh-bridge-approval-buffer-name' serves only the `notify-only'
 ;; display path, where the decision belongs to the web UI.
-
-;; Approval request state ----------------------------------------------------
-
-(defconst dsh-bridge--approval-buffer-name "*dsh-bridge-approval*"
-  "Name of the read-only buffer showing a pending approval's details.
-Used only by the `notify-only' display path; a decision is prompted in
-the minibuffer instead.")
 
 ;; Registry maintenance ------------------------------------------------------
 
@@ -6435,7 +6431,7 @@ resolve this request in the web UI."
 SESSION-ID names the asking session.  This is the `notify-only' display path;
 `dsh-bridge-answer' prompts for a decision with `dsh-bridge--approval-prompt'
 instead."
-  (let ((buffer (get-buffer-create dsh-bridge--approval-buffer-name)))
+  (let ((buffer (get-buffer-create dsh-bridge-approval-buffer-name)))
     (with-current-buffer buffer
       (unless (derived-mode-p 'special-mode)
 	(special-mode))
@@ -7706,10 +7702,10 @@ Signal a `user-error' if not in a DSH-Sessions buffer."
   (tabulated-list-get-id))
 
 (defun dsh-bridge--sessions-buffer ()
-  "Return a usable *dsh-bridge-sessions* buffer.
+  "Return a usable DSH-Sessions buffer.
 Return nil if there is no such live buffer (do not create it), or if
 that buffer is not in `dsh-bridge-sessions-mode'."
-  (let ((buffer (get-buffer "*dsh-bridge-sessions*")))
+  (let ((buffer (get-buffer dsh-bridge-sessions-buffer-name)))
     (when (buffer-live-p buffer)
       (with-current-buffer buffer
 	(when (eq major-mode 'dsh-bridge-sessions-mode)
@@ -7806,7 +7802,7 @@ Open, Pin, and Archive (Unarchive enables on its negation)."
     (and row (not (eq t (alist-get 'archived row))))))
 
 (easy-menu-define dsh-bridge-sessions-menu dsh-bridge-sessions-mode-map
-  "Menu bar menu for the `*dsh-bridge-sessions*' buffer."
+  "Menu bar menu for the DSH-Sessions buffer."
   `("DSH Bridge"
     ["Visit Session" dsh-bridge-visit-session
      :enable (dsh-bridge--menu-row-usable-p)
@@ -8224,7 +8220,7 @@ title, defaulting to the current workspace title."
   (setq-local tool-bar-map dsh-bridge--describe-tool-bar-map))
 
 (easy-menu-define dsh-bridge-describe-menu dsh-bridge-describe-mode-map
-  "Menu bar menu for the `*dsh-bridge-describe*' buffer."
+  "Menu bar menu for the DSH-Describe buffer."
   `("DSH Bridge"
     ["Open Prompt Buffer" dsh-bridge--describe-open-prompt
      :enable dsh-bridge--describe-session
@@ -8331,7 +8327,7 @@ its line is the single blank line between sections; the zero-width
   (dsh-bridge--insert title 'dsh-bridge-describe-heading-face t))
 
 (defun dsh-bridge--describe-label (label)
-  "Insert an aligned row header LABEL for a DSH-Describe-Session buffer."
+  "Insert an aligned row header LABEL for a DSH-Describe buffer."
   (dsh-bridge--insert (format "	 %-16s " label)
 		      'dsh-bridge-describe-label-face))
 
@@ -8704,7 +8700,7 @@ Return the buffer if it was filled, else nil; the fetch happens either way."
     (when (eq (car fetch) 200)
       ;; Don't use `dsh-bridge--sessions-buffer' here, since the mode
       ;; guard is handled by `dsh-bridge--sessions-fill'.
-      (let ((buffer (get-buffer "*dsh-bridge-sessions*")))
+      (let ((buffer (get-buffer dsh-bridge-sessions-buffer-name)))
 	(when (buffer-live-p buffer)
 	  (with-current-buffer buffer
 	    (dsh-bridge--sessions-fill (cdr fetch)))
@@ -8721,11 +8717,11 @@ the fetch fails, leave the buffer untouched."
       (dsh-bridge--sessions-fill (cdr fetch)))))
 
 (defun dsh-bridge--refresh-sessions-buffer ()
-  "Re-render `*dsh-bridge-sessions*' if it is a live DSH-Sessions buffer.
+  "Re-render the DSH-Sessions buffer if it is live.
 Do nothing when there is no such buffer."
   ;; As in `dsh-bridge--sessions-fill-live', the mode guard belongs to
   ;; `dsh-bridge--list-sessions-in-buffer', which refuses a foreign buffer.
-  (let ((buffer (get-buffer "*dsh-bridge-sessions*")))
+  (let ((buffer (get-buffer dsh-bridge-sessions-buffer-name)))
     (when (buffer-live-p buffer)
       (with-current-buffer buffer
 	(dsh-bridge--list-sessions-in-buffer)))))
@@ -8992,7 +8988,7 @@ preserving point.  A buffer showing an earlier turn is left alone."
   (let ((fetch (dsh-bridge--fetch-sessions)))
     (if (not (eq (car fetch) 200))
 	(message "dsh-bridge: failed to fetch sessions")
-      (let ((buffer (get-buffer-create "*dsh-bridge-sessions*")))
+      (let ((buffer (get-buffer-create dsh-bridge-sessions-buffer-name)))
 	(with-current-buffer buffer
 	  (unless (derived-mode-p 'dsh-bridge-sessions-mode)
 	    (dsh-bridge-sessions-mode))
