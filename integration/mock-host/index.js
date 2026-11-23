@@ -16,10 +16,11 @@
 //
 // Plain-ESM Cordis plugin (no build step) exposing the one Host operation the
 // web profile no longer reaches from a model turn: moving a Session's working
-// directory.  DSH records such a move as `working-directory/change` (through
-// 0.2.2-rc.4) or `workspace-root/change` (master), but only Host operations
-// perform it (SDK `setWorkingDirectory`, the worktree tools, the forge panel,
-// directory recovery); none of those is mounted in the plain web profile.
+// directory.  DSH records such a move as `working-directory/change` (on the
+// compatibility release) or `workspace-root/change` (master), but only Host
+// operations perform it (SDK `setWorkingDirectory`, the worktree tools, the
+// forge panel, directory recovery); none of those is mounted in the plain web
+// profile.
 // This fixture plays the Host: its loopback route calls the harness's own
 // `ctx.workingDirectory.set(agent, path)`, so the committed event is the real
 // one.

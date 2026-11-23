@@ -40,28 +40,35 @@ below names the condition that retires it. When the target moves, audit this
 list against the new release before adding anything (AGENTS.md records the
 protocol).
 
-**Target:** `dsh-v0.2.2-rc.4` (`3f321d32bfe382212a8ed8785c1d47a5a300aa23`,
-released 2026-11-17), checked out and built in `../deepseek-harness-release`.
-`master` is verified alongside it.
+**Target:** `dsh-v0.2.2-rc.5` (`9c2670d3bce5275e0d1610272958121af87787bb`,
+released 2026-11-18), checked out and built in `../deepseek-harness-release`.
+`master` is verified alongside it at `dsh-v0.2.3-alpha.2`
+(`4b399c39a6d1479cd84ca591b4d7c88e24d38a96`, 2026-11-22).
 
 | Accommodation | Why it exists | Retire when |
 |---|---|---|
-| `effectiveCwd` (the raw-log fallback in `logic.ts`) accepts both `workspace-root/change` and the deprecated `working-directory/change`, newest event winning. | rc.4 records only the legacy spelling; master records `workspace-root/change` and ignores the legacy one on read. The authoritative read is the host's own `workingDirectory` projection — live sessions read it from `sessionProjections.snapshot`, the session report from the observation's projections — so the fold is the fallback for a header/log-only caller. | The target release contains the host-owned directory change, so no supported host writes the legacy event. Keep the legacy arm in the historical folds (`changedFiles`, `foldTurnDetail`) until stored logs containing it are no longer read: those resolve recorded calls, not the current directory. |
+| `effectiveCwd` (the raw-log fallback in `logic.ts`) accepts both `workspace-root/change` and the deprecated `working-directory/change`, newest event winning. | rc.5 records only the legacy spelling; master records `workspace-root/change` and ignores the legacy one on read. The authoritative read is the host's own `workingDirectory` projection — live sessions read it from `sessionProjections.snapshot`, the session report from the observation's projections — so the fold is the fallback for a header/log-only caller. | The target release contains the host-owned directory change, so no supported host writes the legacy event. Keep the legacy arm in the historical folds (`changedFiles`, `foldTurnDetail`) until stored logs containing it are no longer read: those resolve recorded calls, not the current directory. |
+| The browser half resolves the pending-interaction status table through the `uiSession.sessionStatus` service when it exists, else through the `uiSession` field, and injects `uiSession.sessionStatus` so a newer profile waits for the status plugin. | rc.5 carries the table as a field on the `uiSession` service; master moved it to the separate `uiSession.sessionStatus` service (`@deepseek-ai/dsh-client-ui-session-status`), and a plugin reading it must inject the service. | The target release ships the separate service, so no supported host carries the table on `uiSession`. Then delete the field fallback and the `uiSession` injection. |
 
 No other release-specific accommodations are in the tree. The
-connection-auth route field, in-process RPC, client slot/session-status
-shape, settings op type, and client module-table wrapper were audited against
-rc.4: they use APIs that release already has, or fields it ignores. The
-`peerDependencies` range is the declared install floor, not a tested matrix;
-this section is what has been verified.
+connection-auth route field, in-process RPC, client slot shape, settings op
+type, and client module-table wrapper were audited against rc.5 and
+`0.2.3-alpha.2`: they use APIs both generations have, or fields they ignore.
+The `sessionQuery.inspectSession` removal does not touch the bridge (it reads
+through `observeSession`); the system-message section update and the
+compaction-summary view change likewise do not reach it (it consumes its own
+listed event types and the `compaction/summary` event's `shadowedTokenCount`,
+not the Chat marker). The `peerDependencies` range is the declared install
+floor, not a tested matrix; this section is what has been verified.
 
 **Verification** for the target and for master: `make build && make test`, then
 the integration suite against each checkout (`make integration-test` with
 `DSH_BRIDGE_DSH_COMMAND` and `DSH_BRIDGE_FIXTURE_CWD` pointing at it; see
 `integration/README.md`).
 
-Last verified 2026-11-18: rc.4 and master both green — Vitest 82/82 and the
-batch ERT 22/22 against each, plus `make build && make test`.
+Last verified 2026-11-23: rc.5 and `0.2.3-alpha.2` both green — Vitest 82/82
+and the batch ERT 22/22 against each, `make build && make test`, and a
+host/client typecheck against each tree's declarations.
 
 ## Single-item detail inspector (implemented, optional)
 

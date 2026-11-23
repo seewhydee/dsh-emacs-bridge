@@ -2101,8 +2101,8 @@ describe('effectiveCwd', () => {
   })
 
   it('accepts either directory-move spelling, newest winning', () => {
-    // The compatibility target (0.2.2-rc.4) records only the legacy spelling;
-    // master records workspace-root/change. The fallback serves both.
+    // The compatibility release records only the legacy spelling; master
+    // records workspace-root/change. The fallback serves both.
     expect(effectiveCwd({ cwd: '/w' }, [legacyCwdChange('/w/old')])).toBe('/w/old')
     expect(effectiveCwd({}, [legacyCwdChange('/w/old')])).toBe('/w/old')
     expect(effectiveCwd({ cwd: '/w' }, [legacyCwdChange('/w/old'), cwdChange('/w/new')])).toBe('/w/new')

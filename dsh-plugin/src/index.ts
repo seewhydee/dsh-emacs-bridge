@@ -1257,9 +1257,10 @@ export function apply(ctx: Context, config?: Config): void {
    *
    * The projection is the version-agnostic read face: the host applies
    * whichever directory event its release defines (`working-directory/change`
-   * through `0.2.2-rc.4`, `workspace-root/change` on master), so the bridge
-   * never has to guess the host generation. A key that is present but null is
-   * authoritative ("no directory recorded"), not a reason to fall back.
+   * on the compatibility release, `workspace-root/change` on master), so the
+   * bridge never has to guess the host generation. A key that is present but
+   * null is authoritative ("no directory recorded"), not a reason to fall
+   * back.
    */
   function sessionCwd(session: Session): string | null {
     const registry = ctx.get('sessionProjections') as SessionProjectionRegistryService | undefined

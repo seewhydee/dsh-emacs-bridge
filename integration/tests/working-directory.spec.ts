@@ -17,7 +17,7 @@
 // Pins the host-plane seam behind every reported session directory.  A
 // Session's directory moves only through a Host operation — the newer harness
 // removed the model's `working_directory` tool, and its releases record the
-// move as `working-directory/change` (through 0.2.2-rc.4) or
+// move as `working-directory/change` (on the compatibility release) or
 // `workspace-root/change` (master) — and the plain web profile mounts none of
 // those operations.  The fixture's mock-host plugin therefore plays the Host
 // and calls the harness's own `ctx.workingDirectory.set(agent, path)` — the

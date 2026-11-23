@@ -467,8 +467,8 @@ export function sessionPreset(
  * wherever the bridge has a live Session (see `sessionCwd` in `index.ts`) or an
  * observation (see `sessionReport`), and it applies whichever directory event
  * the running host applies. The two spellings are both honored here because
- * this fallback must serve the compatibility target (`0.2.2-rc.4`, which
- * records only `working-directory/change`) and master (which records
+ * this fallback must serve the compatibility release (which records only
+ * `working-directory/change`) and master (which records
  * `workspace-root/change`); newest event wins. On a host that ignores the
  * deprecated spelling, a stored log whose only moves are legacy reads as its
  * header project — the one divergence this fallback accepts, and only where no

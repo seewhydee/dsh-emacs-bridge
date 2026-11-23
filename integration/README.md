@@ -105,10 +105,10 @@ the plain web profile no longer reaches from a model turn: `POST
 /mock-host/working-directory` (`{sessionId, path}`) calls the harness's own
 `ctx.workingDirectory.set(agent, path)` — the SDK `setWorkingDirectory` seam —
 so the session log gains the real directory-move event that host generation
-records (`working-directory/change` through 0.2.2-rc.4, `workspace-root/change`
-on master). It is bearer-guarded
-like the mock-LLM routes and answers 404 when the session is not live and 501
-when the harness exposes no `workingDirectory` service.
+records (`working-directory/change` on the compatibility release,
+`workspace-root/change` on master). It is bearer-guarded like the mock-LLM
+routes and answers 404 when the session is not live and 501 when the harness
+exposes no `workingDirectory` service.
 
 ## Mock LLM
 

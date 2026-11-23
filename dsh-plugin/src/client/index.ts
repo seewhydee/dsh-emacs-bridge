@@ -99,6 +99,12 @@ interface UiSessionStatusLike {
   readonly pendingInteraction?: PendingInteractionLike
 }
 
+/** The pending-interaction status table both host generations expose. */
+interface SessionStatusLike {
+  getSnapshot(): ReadonlyMap<string, UiSessionStatusLike>
+  subscribe(listener: () => void): () => void
+}
+
 /**
  * Minimal face of the client UI-session service: the per-session status
  * registry. One status carries the session's highest-precedence pending
@@ -106,16 +112,13 @@ interface UiSessionStatusLike {
  *
  * `sessionStatus` is a nested service (`uiSession.sessionStatus`) that a
  * separate client plugin provides; a harness generation before that split
- * carried it on `uiSession` itself. Either way it stays optional here: a
- * profile that mounts `uiSession` without the status plugin must not fault
- * this plugin, it just leaves Emacs-side dismissals to the user closing the
- * panel.
+ * carried it as a field on `uiSession` itself. Either way it stays optional
+ * here: a profile that mounts `uiSession` without the status plugin must not
+ * fault this plugin, it just leaves Emacs-side dismissals to the user closing
+ * the panel.
  */
 interface UiSessionService {
-  readonly sessionStatus?: {
-    getSnapshot(): ReadonlyMap<string, UiSessionStatusLike>
-    subscribe(listener: () => void): () => void
-  }
+  readonly sessionStatus?: SessionStatusLike
 }
 
 /**
@@ -143,8 +146,12 @@ function dismissResolvedInteractions(ctx: ClientContext): void {
   const now = Date.now()
   expireDismissRecords(dismissRecords, now, DISMISS_RECORD_TTL_MS)
   expireDismissRecords(approvalDismissRecords, now, DISMISS_RECORD_TTL_MS)
-  const uiSession = ctx.get('uiSession') as UiSessionService | undefined
-  const sessionStatus = uiSession?.sessionStatus
+  // The current host provides the table as the separate `uiSession.sessionStatus`
+  // service; the compatibility release still carries it as a field on
+  // `uiSession`. Prefer the service so the split can retire the field without
+  // teaching every reader a generation check.
+  const sessionStatus = (ctx.get('uiSession.sessionStatus') as SessionStatusLike | undefined)
+    ?? (ctx.get('uiSession') as UiSessionService | undefined)?.sessionStatus
   if (sessionStatus === undefined) return
   for (const status of sessionStatus.getSnapshot().values()) {
     const pending = status.pendingInteraction
@@ -266,9 +273,22 @@ export function apply(ctx: ClientContext): void {
   // resolution frame can reach this SSE stream before the forwarded waterfall
   // reaches the browser's session-status registry. `uiSession` is an
   // optional collaborator here — without it, the web panel simply is not
-  // dismissed by Emacs (the user can still close it).
+  // dismissed by Emacs (the user can still close it). The compatibility
+  // release carries the table as a field on `uiSession`; the current host
+  // moved it to the separate `uiSession.sessionStatus` service, watched by the
+  // second injection below. The own-property test keeps the older field path
+  // from subscribing twice on the newer host.
   ctx.inject(['uiSession'], (scope: ClientContext) => {
-    const sessionStatus = (scope.get('uiSession') as UiSessionService | undefined)?.sessionStatus
+    const uiSession = scope.get('uiSession') as UiSessionService | undefined
+    if (uiSession === undefined || !Object.hasOwn(uiSession, 'sessionStatus')) return
+    const sessionStatus = uiSession.sessionStatus
+    if (sessionStatus === undefined) return
+    scope.effect(() => sessionStatus.subscribe(() => {
+      dismissResolvedInteractions(scope)
+    }))
+  })
+  ctx.inject(['uiSession.sessionStatus'], (scope: ClientContext) => {
+    const sessionStatus = scope.get('uiSession.sessionStatus') as SessionStatusLike | undefined
     if (sessionStatus === undefined) return
     scope.effect(() => sessionStatus.subscribe(() => {
       dismissResolvedInteractions(scope)
